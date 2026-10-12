@@ -420,6 +420,7 @@ json writeSettings(const SceneSettings& st) {
               {"script", st.script.empty() ? json(nullptr) : json(st.script)}};
     if (st.orderingTableSize) j["orderingTableSize"] = st.orderingTableSize;
     if (st.bumpAllocatorSize) j["bumpAllocatorSize"] = st.bumpAllocatorSize;
+    if (st.streamWorld) j["streamWorld"] = true;
     putExtras(j, st.extra);
     return j;
 }
@@ -736,6 +737,7 @@ Scene loadScene(const fs::path& file) {
         if (st.contains("script") && !st["script"].is_null()) s.settings.script = st["script"].get<std::string>();
         s.settings.orderingTableSize = st.value("orderingTableSize", 0);
         s.settings.bumpAllocatorSize = st.value("bumpAllocatorSize", 0);
+        s.settings.streamWorld = st.value("streamWorld", false);
         s.settings.extra = extrasOf(st, writeSettings(s.settings));
     }
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));

@@ -75,6 +75,7 @@ add_library(splashcore STATIC
     bvh.cpp
     navregion.cpp
     splashpack.cpp
+    worldstream.cpp
     luacompile.cpp
     import.cpp
     stb_impl.cpp)

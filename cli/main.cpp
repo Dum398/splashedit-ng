@@ -13,6 +13,7 @@
 
 #include "luacompile.hh"
 #include "audio.hh"
+#include "budget.hh"
 #include "disc.hh"
 #include "font.hh"
 #include "import.hh"
@@ -331,6 +332,15 @@ int main(int argc, char** argv) {
                         "vram=%zu spu_end=%zu triangles=%d\n",
                         st.splashpackBytes, st.vramFileBytes, st.spuFileBytes, st.framebufferBytes, st.atlasBytes,
                         st.clutBytes, st.fontBytes, st.vramBytes(), st.spuEnd, st.triangles);
+            std::printf("ram=%zu ordering_table=%u bump=%u\n", splash::ramBudget(st).used, st.orderingTableSize,
+                        st.bumpAllocatorSize);
+            if (st.streamRegions)
+                std::printf("stream regions=%d objects=%d split=%d slots=%d (wanted %d) slot_bytes=%u pool=%zu "
+                            "streamed_tri_bytes=%zu table=%zu geo=%zu ram_saved=%lld load_radius=%d region_size=%lld\n",
+                            st.streamRegions, st.streamedObjects, st.streamSplitObjects, st.streamSlots,
+                            st.streamSlotsWanted, st.streamSlotBytes, st.streamPoolBytes(), st.streamedTriBytes,
+                            st.streamTableBytes, st.geoFileBytes, st.streamRamSaved(), st.streamLoadRadius,
+                            (long long)st.streamRegionSize);
         }
         return r.ok() ? 0 : 1;
     } catch (const std::exception& e) {

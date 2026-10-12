@@ -2674,6 +2674,29 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
             }
     }
 
+    // World streaming regions, outlined on the ground while the scene's own
+    // settings are in the inspector (nothing selected).
+    if (!sel && doc.scene().settings.streamWorld) {
+        const std::optional<splash::ExportResult>& res = st.live.result();
+        if (res && res->ok()) {
+            const splash::ExportStats& s = res->stats;
+            const float gte = doc.scene().settings.gteScaling > 0 ? doc.scene().settings.gteScaling : 100.f;
+            dl->ChannelsSetCurrent(kScene);
+            for (size_t i = 0; i < s.streamRegionBounds.size(); i++) {
+                const auto& b = s.streamRegionBounds[i];
+                const float y = i < s.streamRegionFloor.size() ? s.streamRegionFloor[i] : 0.f;
+                const float x0 = b[0] * gte / 4096.f, z0 = b[1] * gte / 4096.f, x1 = b[2] * gte / 4096.f, z1 = b[3] * gte / 4096.f;
+                const splash::Vec3 c[4] = {{x0, y, z0}, {x1, y, z0}, {x1, y, z1}, {x0, y, z1}};
+                ImVec2 p[4];
+                bool ok = true;
+                for (int k = 0; k < 4 && ok; k++) ok = view.project(toGl(c[k]), mn, sz, &p[k]);
+                if (!ok) continue;
+                dl->AddQuadFilled(p[0], p[1], p[2], p[3], (color::accentHover & 0x00ffffffu) | (18u << IM_COL32_A_SHIFT));
+                dl->AddQuad(p[0], p[1], p[2], p[3], (color::accentHover & 0x00ffffffu) | (150u << IM_COL32_A_SHIFT), 1.2f);
+            }
+        }
+    }
+
     // Markers: a lightbulb for lights, a generic marker for objects with
     // neither mesh nor light (cameras, spawns, audio). Grouping nodes and
     // script-only objects get none. Clicking one selects its object.
@@ -2920,6 +2943,66 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
              "The estimate for this scene is " + std::to_string(buNeed) + " bytes: every triangle, plus a margin. With " +
                  std::to_string(buUsed) + ", a frame that draws more stops the game. Play the scene to see what a frame really uses.",
              &splash::SceneSettings::bumpAllocatorSize);
+
+    // World streaming: one switch, everything else is worked out by the export.
+    {
+        const float stop = y;
+        const bool open = section("s_stream", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::globe, color::textDim,
+                                  "World streaming", true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        ImRect v = row("lstream", "Stream world",
+                       "For worlds bigger than RAM. Scenery far from the camera stays on the disc and loads while the player "
+                       "moves; anything a script, animation or interaction can reach stays loaded. The world is split into "
+                       "regions automatically, and big meshes are cut at region edges.");
+        if (toggle("streamworld", ImRect(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8)),
+                   set.streamWorld))
+            doc.editSettings([](splash::SceneSettings& s) { s.streamWorld = !s.streamWorld; });
+        y += space::xs;
+        if (!set.streamWorld) {
+            caption("Off: the whole scene loads into RAM at once.", color::textFaint);
+        } else if (!stats) {
+            caption("Regions appear once the scene exports.", color::textFaint);
+        } else if (stats->streamRegions) {
+            caption(std::to_string(stats->streamRegions) + " regions of about " + metres(uint32_t(stats->streamRegionSize)) +
+                        ", " + std::to_string(stats->streamedObjects) + " objects stream" +
+                        (stats->streamSplitObjects ? " (" + std::to_string(stats->streamSplitObjects) + " cut pieces)" : std::string()),
+                    color::textFaint);
+            caption("Loads scenery within " + metres(uint32_t(stats->streamLoadRadius)) + " of the camera", color::textFaint);
+            caption(std::to_string(stats->streamSlots) + " slots of " + kb(stats->streamSlotBytes) + " KB = " +
+                        kb(stats->streamPoolBytes()) + " KB of RAM while playing",
+                    color::textFaint);
+            const long long saved = stats->streamRamSaved();
+            if (saved > 0) caption("Saves " + kb(size_t(saved)) + " KB of RAM", color::accentHover);
+        }
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+        if (set.streamWorld && stats)
+            for (size_t i = 0; i < stats->streamWarnings.size(); i++) {
+                const splash::StreamWarning& sw = stats->streamWarnings[i];
+                const bool shorter = sw.kind == splash::StreamProblem::LargeRegion || sw.kind == splash::StreamProblem::TooManyNear;
+                if (sw.kind == splash::StreamProblem::UnevenRegions) {
+                    caption(sw.title + ": " + sw.body, color::warn);
+                    continue;
+                }
+                bool fix = false;
+                std::string id = "streamwarn" + std::to_string(i);
+                float h = problemCard(id.c_str(), ImVec2(x0, y), x1 - x0, sw.title.c_str(), sw.body.c_str(),
+                                      shorter ? "Shorten draw distance" : "Turn streaming off", &fix);
+                y += h + space::sm;
+                if (fix && shorter) {
+                    const int now = int(otUsed ? otUsed : splash::kStreamDrawDistance);
+                    doc.editSettings([&](splash::SceneSettings& s) { s.orderingTableSize = std::max(int(splash::kOtMin), now * 3 / 4); });
+                } else if (fix) {
+                    doc.editSettings([](splash::SceneSettings& s) { s.streamWorld = false; });
+                }
+            }
+    }
 
     const char* hint = "Pick an object in the Scene panel to edit it.";
     ImVec2 hs = measure(f.regular, type::label, hint);
@@ -3504,8 +3587,8 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                    "Sound samples, placed the way psxsplash uploads them.") +
              space::xl;
         x += meter("m_ram", ImVec2(x, bar.Min.y), icon::hardDrive, "RAM", r.fraction(), rs.c_str(),
-                   "Scene data, the renderer's buffers and its visible-triangle list in psxsplash's heap, at "
-                   "the peak of loading. "
+                   "Scene data, the renderer's buffers, its visible-triangle list and the world streaming slots in "
+                   "psxsplash's heap, at the peak of loading. "
                    "Lua's own allocations are not counted.") +
              space::xl;
         x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,

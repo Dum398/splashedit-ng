@@ -2,6 +2,7 @@
 // writes them (splashpack v25). See docs/splashpack-format.md.
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -21,6 +22,13 @@ struct ExportOptions {
     bool luaBytecode = false;
     // Build everything but write no files; ExportResult::stats still fills in.
     bool dryRun = false;
+};
+
+// A world streaming problem, for the editor to show with its fix.
+enum class StreamProblem : uint8_t { NothingStreams, TooManyObjects, LargeRegion, UnevenRegions, TooManyNear, NoSaving, CdMusic };
+struct StreamWarning {
+    StreamProblem kind;
+    std::string title, body;
 };
 
 // What one export puts on the console, in bytes unless noted.
@@ -51,7 +59,33 @@ struct ExportStats {
     // (Renderer::ReserveVisibleTriangles).
     uint32_t bvhTriangleRefs = 0;
     size_t visibleListBytes() const { return 4 * size_t(bvhTriangleRefs); }
+
+    // World streaming (SceneSettings::streamWorld). All zero when the scene
+    // does not stream. Distances and bounds are PS1 fixed point (4096 = one
+    // GTE unit, gteScaling world units).
+    int streamRegions = 0;
+    int streamedObjects = 0;     // objects whose triangles live in the .geo file
+    int streamSplitObjects = 0;  // extra game objects made by cutting big meshes at region edges
+    int streamSlots = 0, streamSlotsWanted = 0;
+    uint32_t streamSlotBytes = 0;
+    int32_t streamLoadRadius = 0;
+    int64_t streamRegionSize = 0;
+    size_t streamedTriBytes = 0;  // what those triangles would take in RAM without streaming
+    uint64_t streamDrawTris = 0;  // most of them within the draw distance at once (render buffer sizing)
+    size_t streamTableBytes = 0, geoFileBytes = 0;
+    std::vector<std::array<int32_t, 4>> streamRegionBounds;  // minX, minZ, maxX, maxZ
+    std::vector<float> streamRegionFloor;  // per region, its lowest point in world units (Y up)
+    std::vector<StreamWarning> streamWarnings;  // also in ExportResult::warnings, as one line each
+    size_t streamPoolBytes() const { return size_t(streamSlots) * streamSlotBytes; }
+    // Negative when streaming costs more RAM than it frees.
+    long long streamRamSaved() const {
+        return (long long)streamedTriBytes - (long long)streamPoolBytes() - (long long)streamTableBytes;
+    }
 };
+
+// With streaming on and no fog, the automatic draw distance (ordering table
+// size), in GTE units: SplashEdit 2.4's default ordering table.
+constexpr uint32_t kStreamDrawDistance = 8192;
 
 struct ExportResult {
     std::vector<std::string> errors;

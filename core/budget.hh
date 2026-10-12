@@ -27,9 +27,11 @@ inline Budget spuBudget(const ExportStats& s) { return {s.spuEnd, kSpuRamCapacit
 // frustum culling output, one entry per BVH triangle reference. LoadScene
 // reads the .vram and .spu files into the heap one at a time and frees each
 // before the .splashpack, which stays resident, so the peak is the largest of
-// the three. Lua's own allocations are not counted.
+// the three. A streamed scene adds its slots (WorldStreamer::init). Lua's own
+// allocations are not counted.
 inline Budget ramBudget(const ExportStats& s) {
-    return {s.rendererBytes() + s.visibleListBytes() + std::max({s.splashpackBytes, s.vramFileBytes, s.spuFileBytes}),
+    return {s.rendererBytes() + s.visibleListBytes() + s.streamPoolBytes() +
+                std::max({s.splashpackBytes, s.vramFileBytes, s.spuFileBytes}),
             kEngineHeapBytes};
 }
 

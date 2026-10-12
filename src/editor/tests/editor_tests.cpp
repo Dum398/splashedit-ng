@@ -31,6 +31,7 @@
 #include "editor/unirom.hh"
 #include "budget.hh"
 #include "splashpack.hh"
+#include "worldstream.hh"
 
 namespace {
 
@@ -1677,6 +1678,93 @@ void testUnirom() {
     CHECK(!editor::openLink("tcp:nonsense", 115200, &linkErr) && linkErr.find("tcp:HOST:PORT") != std::string::npos);
 }
 
+// World streaming planner: a mesh wider than a region is cut so each region
+// holds one part, a small one lands whole, and the regions are laid out the
+// way psxsplash reads them.
+void testWorldStreamPlan() {
+    namespace st = splash::stream;
+    // A: a 40 x 40 grid of tiny triangles over 0..40960 fp12 (10 units square).
+    // B: one small prop near a corner.
+    std::vector<st::Candidate> in(2);
+    in[0].object = 0;
+    in[0].bounds = {0, 0, 40960, 40960};
+    for (int z = 0; z < 40; z++)
+        for (int x = 0; x < 40; x++) in[0].tris.push_back({x * 1024, z * 1024, x * 1024 + 1000, z * 1024 + 1000});
+    in[1].object = 1;
+    in[1].bounds = {100, 100, 300, 300};
+    for (int i = 0; i < 12; i++) in[1].tris.push_back({100, 100, 300, 300});
+
+    st::Plan p = st::plan(in, 4096);
+    CHECK(p.regions.size() > 1);
+    CHECK(p.loadRadius == 5120 && p.unloadRadius == 7680);
+    CHECK(p.slotCount >= 2 && p.slotCount <= st::kMaxSlots);
+    std::vector<int> seenA(in[0].tris.size(), 0);
+    int partsA = 0, partsB = 0;
+    uint32_t sector = 0;
+    uint32_t maxBytes = 0;
+    for (const st::Region& r : p.regions) {
+        CHECK(r.firstSector == sector);
+        CHECK(r.byteSize % st::kSector == 0 && r.byteSize >= r.triBytes && r.byteSize - r.triBytes < st::kSector);
+        sector += r.byteSize / st::kSector;
+        maxBytes = std::max(maxBytes, r.byteSize);
+        uint32_t bytes = 0;
+        for (const st::Piece& pc : r.pieces) {
+            (pc.candidate == 0 ? partsA : partsB)++;
+            for (int t : pc.tris) {
+                const st::Box& b = in[size_t(pc.candidate)].tris[size_t(t)];
+                CHECK(b.minX >= r.bounds.minX && b.maxX <= r.bounds.maxX && b.minZ >= r.bounds.minZ && b.maxZ <= r.bounds.maxZ);
+                if (pc.candidate == 0) seenA[size_t(t)]++;
+            }
+            bytes += uint32_t(pc.tris.size()) * st::kBytesPerTri;
+        }
+        CHECK(bytes == r.triBytes);
+    }
+    CHECK(p.slotBytes == maxBytes);
+    CHECK(partsA == int(p.regions.size()));  // the grid covers every region
+    CHECK(partsB == 1);
+    CHECK(std::all_of(seenA.begin(), seenA.end(), [](int n) { return n == 1; }));
+    CHECK(p.drawTris > 0 && p.drawTris < in[0].tris.size() + in[1].tris.size());
+
+    // A draw distance covering the whole world: every region is in reach, so
+    // the slot count is the region count plus the one being read.
+    st::Plan all = st::plan(in, 1 << 20);
+    CHECK(all.slotCount == std::min(int(all.regions.size()) + 1, st::kMaxSlots));
+    CHECK(st::plan({}, 4096).regions.empty());
+}
+
+// Streaming on the courtyard: the scenery streams, the scripted Game Logic
+// does not, a .geo file sits next to the pack, and turning it off removes it.
+void testWorldStreamExport() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    const fs::path dir = g_outDir / "stream";
+    fs::create_directories(dir);
+    scene.settings.streamWorld = true;
+    splash::ExportResult on = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(on.ok());
+    const splash::ExportStats& s = on.stats;
+    CHECK(s.streamRegions >= 1 && s.streamedObjects >= 1);
+    CHECK(fs::exists(dir / "scene.geo") && fs::file_size(dir / "scene.geo") == s.geoFileBytes);
+    CHECK(s.geoFileBytes % 2048 == 0 && s.geoFileBytes >= s.streamedTriBytes);
+    CHECK(s.orderingTableSize <= splash::kStreamDrawDistance);
+    // The courtyard is far smaller than the draw distance: streaming costs RAM.
+    CHECK(std::any_of(s.streamWarnings.begin(), s.streamWarnings.end(),
+                      [](const splash::StreamWarning& w) { return w.kind == splash::StreamProblem::NoSaving; }));
+    CHECK(splash::ramBudget(s).used >= s.streamPoolBytes());
+
+    scene.settings.streamWorld = false;
+    splash::ExportResult off = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(off.ok() && off.stats.streamRegions == 0 && off.stats.streamWarnings.empty());
+    CHECK(!fs::exists(dir / "scene.geo"));
+    CHECK(off.stats.splashpackBytes > on.stats.splashpackBytes);  // the triangles moved out
+
+    // Settings round-trip through the scene file.
+    scene.settings.streamWorld = true;
+    splash::saveScene(scene, dir / "s.scene");
+    CHECK(splash::loadScene(dir / "s.scene").settings.streamWorld);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -1695,6 +1783,8 @@ int main(int argc, char** argv) {
     testCatalog();
     testExportStats();
     testScriptWithoutMesh();
+    testWorldStreamPlan();
+    testWorldStreamExport();
     testLiveExport();
     testPlay();
     testProject();

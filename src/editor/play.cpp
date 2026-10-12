@@ -166,7 +166,7 @@ splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& p
         return r;
     }
     // Stale files from an earlier play must not be booted if this export fails.
-    for (const char* ext : {".splashpack", ".vram", ".spu"}) fs::remove(dir / (std::string("scene_0") + ext), ec);
+    for (const char* ext : {".splashpack", ".vram", ".spu", ".geo"}) fs::remove(dir / (std::string("scene_0") + ext), ec);
     fs::remove(dir / "reload.flag", ec);
     splash::ExportOptions opt;
     opt.luaBytecode = true;

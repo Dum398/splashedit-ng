@@ -5,6 +5,7 @@
 #include "editor/pick.hh"
 #include "scene.hh"
 
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -75,6 +76,9 @@ class Ps1View {
     // Unit right, up and forward vectors of the camera.
     void basis(Vec3* right, Vec3* up, Vec3* forward) const;
     float distance() const;
+    // 1 up to a 50-unit orbit, then the orbit distance over 50: scales the far
+    // plane and the preview fog so a large world (a streamed one) stays visible.
+    float viewScale() const { return std::max(1.0f, distance() / 50.0f); }
     // Where the view is rendered from: the eye, or in orthographic a point
     // backed away along the view so nothing near the pivot is clipped.
     Vec3 eye() const;

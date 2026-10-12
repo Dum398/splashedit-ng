@@ -113,12 +113,13 @@ in float vDepth;
 uniform sampler2D uTex;
 uniform int uClean;
 uniform vec3 uFog;
+uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
     vec2 uv = uClean == 0 ? vUvAffine : vUvPersp;
     vec3 c = texture(uTex, fract(uv)).rgb * vCol * 2.0;
-    float fog = clamp((vDepth - 10.0) / 22.0, 0.0, 1.0);
+    float fog = clamp((vDepth - 10.0 * uFogScale) / (22.0 * uFogScale), 0.0, 1.0);
     c = mix(c, uFog, fog * 0.85);
     if (uClean == 0) {
         ivec2 p = ivec2(gl_FragCoord.xy) & 3;
@@ -429,7 +430,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         float hh = distance() * std::tan(kFovY * 0.5f);
         m_viewProj = Mat4::ortho(hh * aspect, hh, 0.1f, 2 * kOrthoBack) * Mat4::lookAt(eye(), m_target, bUp);
     } else {
-        m_viewProj = Mat4::perspective(kFovY, aspect, 0.1f, 200.0f) * Mat4::lookAt(m_eye, m_target, bUp);
+        m_viewProj = Mat4::perspective(kFovY, aspect, 0.1f * viewScale(), 200.0f * viewScale()) * Mat4::lookAt(m_eye, m_target, bUp);
     }
 
     const float fog[3] = {0.10f, 0.11f, 0.17f};
@@ -465,6 +466,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform2f(glGetUniformLocation(m_prog, "uRes"), (float)w, (float)h);
     glUniform1i(glGetUniformLocation(m_prog, "uClean"), clean ? 1 : 0);
     glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
+    glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), viewScale());
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);

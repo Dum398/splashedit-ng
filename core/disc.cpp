@@ -431,6 +431,8 @@ DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs:
             files.push_back({"SCENE0/SCENE_0.SPK", readFile(tmp / "scene.splashpack")});
             files.push_back({"SCENE0/SCENE_0.VRM", readFile(tmp / "scene.vram")});
             files.push_back({"SCENE0/SCENE_0.SPU", readFile(tmp / "scene.spu")});
+            // World streaming reads its regions from here while the game runs.
+            if (fs::exists(tmp / "scene.geo")) files.push_back({"SCENE0/SCENE_0.GEO", readFile(tmp / "scene.geo")});
             std::string volume;
             for (char ch : title) {
                 char u = (ch >= 'a' && ch <= 'z') ? char(ch - 32) : ch;

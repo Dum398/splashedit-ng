@@ -9,6 +9,8 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
+#include <set>
 #include <sstream>
 
 #include "audio.hh"
@@ -20,6 +22,7 @@
 #include "skin.hh"
 #include "texture.hh"
 #include "vrampacker.hh"
+#include "worldstream.hh"
 
 namespace splash {
 
@@ -60,6 +63,7 @@ struct ExpObject {
     std::vector<Vec3> triPositions;          // mesh-space corners of each Tri, Tri order (BVH input)
     bool dynamicLit = false;                 // runtime point lights are applied on the console
     bool dynamicLitSmooth = false;           // per vertex instead of per triangle
+    std::optional<Bounds> pieceBounds{};     // streaming cut this object: mesh-space bounds of its part
 };
 
 // A runtime point light (light table, v24). Scene order is table order, which
@@ -478,6 +482,200 @@ uint32_t hashSceneId(const std::string& id) {
         h *= 16777619u;
     }
     return h == 0 ? 1 : h;
+}
+
+// One region of the stream table: (object index, triangle count) per part, in
+// .geo order.
+struct StreamRegionOut {
+    stream::Box bounds;
+    uint32_t byteSize, firstSector;
+    std::vector<std::pair<uint16_t, uint16_t>> objects;
+};
+
+// Picks the static scenery, plans the regions, and cuts objects that span
+// more than one region into one exporter per region. The first part keeps the
+// object's index; the others go at the end, so no other object's index moves.
+void planStreaming(const Scene& scene, std::vector<ExpObject>& exporters, std::vector<bool>& streamed,
+                   std::vector<StreamRegionOut>& regions, const std::vector<std::string>& luaSources,
+                   const std::vector<const FlatObject*>& interactables, float gte, ExportResult& res) {
+    ExportStats& st = res.stats;
+    const std::string pre = "World streaming: ";
+
+    // Anything a script, track or interaction can reach keeps its triangles in RAM.
+    std::set<std::string> trackTargets;
+    auto addTracks = [&](const std::vector<CutsceneTrack>& tracks) {
+        for (const CutsceneTrack& t : tracks)
+            if (t.type == TrackType::ObjectPosition || t.type == TrackType::ObjectRotation ||
+                t.type == TrackType::ObjectActive || t.type == TrackType::ObjectUVOffset)
+                trackTargets.insert(t.target);
+    };
+    for (const Cutscene& c : scene.cutscenes) addTracks(c.tracks);
+    for (const Animation& a : scene.animations) addTracks(a.tracks);
+    auto namedInLua = [&](const std::string& name) {
+        for (const std::string& src : luaSources)
+            if (src.find('"' + name + '"') != std::string::npos || src.find('\'' + name + '\'') != std::string::npos)
+                return true;
+        return false;
+    };
+
+    std::vector<stream::Candidate> cands;
+    std::vector<std::vector<float>> triLowY;  // per candidate, per tri: lowest world Y (scene view overlay)
+    for (size_t i = 0; i < exporters.size(); i++) {
+        const ExpObject& e = exporters[i];
+        if (e.tris.empty() || e.obj->script || e.obj->skin) continue;
+        if (e.obj->collider && e.obj->collider->kind == ColliderKind::Dynamic) continue;
+        if (std::any_of(interactables.begin(), interactables.end(), [&](const FlatObject* fo) { return fo->object == e.obj; }))
+            continue;
+        if (trackTargets.count(e.obj->name) || namedInLua(e.obj->name)) continue;
+        stream::Candidate c{int(i), {INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN}, {}};
+        std::vector<float> lowY;
+        for (size_t t = 0; t < e.tris.size(); t++) {
+            stream::Box b{INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN};
+            float low = FLT_MAX;
+            for (int k = 0; k < 3; k++) {
+                Vec3 p = e.flat->localToWorld.point(e.triPositions[t * 3 + size_t(k)]);
+                low = std::min(low, p.y);
+                int32_t x = toWorldFixed12(p.x / gte), z = toWorldFixed12(p.z / gte);
+                b = {std::min(b.minX, x), std::min(b.minZ, z), std::max(b.maxX, x), std::max(b.maxZ, z)};
+            }
+            c.bounds = {std::min(c.bounds.minX, b.minX), std::min(c.bounds.minZ, b.minZ), std::max(c.bounds.maxX, b.maxX),
+                        std::max(c.bounds.maxZ, b.maxZ)};
+            c.tris.push_back(b);
+            lowY.push_back(low);
+        }
+        cands.push_back(std::move(c));
+        triLowY.push_back(std::move(lowY));
+    }
+    auto warn = [&](StreamProblem kind, const std::string& title, const std::string& body) {
+        st.streamWarnings.push_back({kind, title, body});
+        res.warnings.push_back(pre + title + ". " + body);
+    };
+    if (cands.empty()) {
+        warn(StreamProblem::NothingStreams, "Nothing can stream",
+             "Objects with a script, a skin, an interaction, a dynamic collider or an animation track stay loaded, and so "
+             "do objects a script names. Take the script off scenery that does not need one, or turn streaming off.");
+        return;
+    }
+
+    // Nothing past the fog wall or the ordering table is drawn, so a region
+    // must be resident by then.
+    int64_t draw = st.orderingTableSize;
+    if (scene.settings.fog.enabled && scene.settings.fog.density > 0)
+        draw = std::min<int64_t>(draw, 20000 / std::clamp(scene.settings.fog.density, 1, 10));
+    stream::Plan plan = stream::plan(cands, draw);
+
+    size_t extra = 0;
+    std::map<int, int> firstPart;
+    for (const stream::Region& r : plan.regions)
+        for (const stream::Piece& p : r.pieces)
+            if (!firstPart.emplace(p.candidate, 0).second) extra++;
+    if (plan.regions.size() > 65535 || plan.pieceCount() > 65535 || exporters.size() + extra > 65535) {
+        warn(StreamProblem::TooManyObjects, "Too many pieces to stream",
+             "The world splits into " + std::to_string(plan.regions.size()) + " regions and " +
+                 std::to_string(exporters.size() + extra) +
+                 " objects, more than a scene holds (65535), so it exports without streaming. Merge small props into "
+                 "bigger meshes.");
+        return;
+    }
+
+    // Cut. Parts come out in region order, which is also .geo order.
+    firstPart.clear();
+    std::vector<std::pair<size_t, const stream::Piece*>> parts;  // exporter index, piece
+    const size_t original = exporters.size();
+    for (const stream::Region& r : plan.regions)
+        for (const stream::Piece& p : r.pieces) {
+            const size_t src = size_t(cands[size_t(p.candidate)].object);
+            size_t dst = src;
+            if (!firstPart.emplace(p.candidate, 0).second) {
+                dst = exporters.size();
+                exporters.push_back(exporters[src]);  // whole copy; trimmed below
+            }
+            parts.push_back({dst, &p});
+        }
+    streamed.assign(exporters.size(), false);
+    std::vector<std::vector<PsxTri>> srcTris(original);
+    std::vector<std::vector<Vec3>> srcPos(original);
+    for (const stream::Candidate& c : cands) {
+        srcTris[size_t(c.object)] = exporters[size_t(c.object)].tris;
+        srcPos[size_t(c.object)] = exporters[size_t(c.object)].triPositions;
+    }
+    for (auto& [dst, piece] : parts) {
+        const size_t src = size_t(cands[size_t(piece->candidate)].object);
+        ExpObject& e = exporters[dst];
+        const bool cut = piece->tris.size() != srcTris[src].size();
+        e.tris.clear();
+        e.triPositions.clear();
+        for (int t : piece->tris) {
+            e.tris.push_back(srcTris[src][size_t(t)]);
+            for (int k = 0; k < 3; k++) e.triPositions.push_back(srcPos[src][size_t(t) * 3 + size_t(k)]);
+        }
+        if (cut) {
+            Bounds b(e.triPositions[0], Vec3{0, 0, 0});
+            for (const Vec3& v : e.triPositions) b.encapsulate(v);
+            e.pieceBounds = b;
+        }
+        streamed[dst] = true;
+    }
+
+    size_t pi = 0;
+    for (const stream::Region& r : plan.regions) {
+        StreamRegionOut out{r.bounds, r.byteSize, r.firstSector, {}};
+        for (size_t k = 0; k < r.pieces.size(); k++, pi++)
+            out.objects.push_back({uint16_t(parts[pi].first), uint16_t(r.pieces[k].tris.size())});
+        regions.push_back(std::move(out));
+        st.streamRegionBounds.push_back({r.bounds.minX, r.bounds.minZ, r.bounds.maxX, r.bounds.maxZ});
+        float low = FLT_MAX;
+        for (const stream::Piece& pc : r.pieces)
+            for (int t : pc.tris) low = std::min(low, triLowY[size_t(pc.candidate)][size_t(t)]);
+        st.streamRegionFloor.push_back(low);
+    }
+
+    st.streamRegions = int(plan.regions.size());
+    st.streamedObjects = int(cands.size());
+    st.streamSplitObjects = int(extra);
+    st.streamSlots = plan.slotCount;
+    st.streamSlotsWanted = plan.slotsWanted;
+    st.streamSlotBytes = plan.slotBytes;
+    st.streamLoadRadius = plan.loadRadius;
+    st.streamRegionSize = plan.cell;
+    st.streamedTriBytes = plan.streamedTriBytes;
+    st.streamDrawTris = plan.drawTris;
+    st.streamTableBytes = plan.tableBytes();
+
+    // Problems, each with what to do about it.
+    std::vector<uint32_t> sizes;
+    for (const stream::Region& r : plan.regions) sizes.push_back(r.byteSize);
+    std::sort(sizes.begin(), sizes.end());
+    const uint32_t median = sizes[sizes.size() / 2];
+    // Shortening the draw distance is the fix the inspector offers for these.
+    if (sizes.back() > stream::kLargeRegionBytes)
+        warn(StreamProblem::LargeRegion, "A region is slow to load",
+             "The biggest region holds " + std::to_string(sizes.back() / 1024) +
+                 " KB of triangles, which takes long to read from the disc while the player moves. A shorter draw "
+                 "distance lets regions be smaller.");
+    else if (plan.regions.size() > 1 && sizes.back() > 2 * median)
+        warn(StreamProblem::UnevenRegions, "One area is much denser",
+             "The biggest region is " + std::to_string(sizes.back() / 1024) + " KB while most are " +
+                 std::to_string(median / 1024) +
+                 " KB, and every streaming slot is as big as the biggest region. Spread that area's detail out, or "
+                 "simplify its meshes.");
+    if (plan.slotsWanted > stream::kMaxSlots)
+        warn(StreamProblem::TooManyNear, "Far scenery may appear late",
+             "Up to " + std::to_string(plan.slotsWanted - 1) + " regions are near the camera at once, but psxsplash keeps " +
+                 std::to_string(stream::kMaxSlots) + ". A shorter draw distance needs fewer.");
+    if (st.streamRamSaved() <= 0)
+        warn(StreamProblem::NoSaving, "Streaming does not save RAM here",
+             "The scenery is " + std::to_string(st.streamedTriBytes / 1024) + " KB and streaming sets aside " +
+                 std::to_string(st.streamPoolBytes() / 1024) +
+                 " KB for the regions near the camera. Streaming pays off when the world is much bigger than the draw "
+                 "distance: shorten the draw distance, or turn streaming off for this scene.");
+    for (const std::string& src : luaSources)
+        if (src.find("PlayCDDA") != std::string::npos) {
+            warn(StreamProblem::CdMusic, "CD music will not play",
+                 "A script plays CD music (Audio.PlayCDDA), but a streamed scene keeps the disc drive busy with the "
+                 "world. Use SPU audio for this scene's music, or turn streaming off.");
+            break;
+        }
 }
 
 }  // namespace
@@ -1074,18 +1272,28 @@ static uint32_t orderingTableNeed(const Scene& scene, const std::vector<ExpObjec
     double far = std::sqrt(double(d.x) * d.x + double(d.y) * d.y + double(d.z) * d.z) * 4096.0 / gte;
     if (scene.settings.fog.enabled && scene.settings.fog.density > 0)
         far = std::min(far, 20000.0 / scene.settings.fog.density);
+    // A streamed world is bigger than what the camera should see: drawing all
+    // of it would need all of it loaded.
+    if (scene.settings.streamWorld) far = std::min(far, double(kStreamDrawDistance));
     return uint32_t(std::clamp(std::ceil(far) + 1, double(kOtMin), double(kOtMax)));
 }
 
 // Bump allocator: every triangle in the scene drawn in one frame (textured and
 // fogged ones take two fragments), the near-plane allowance, the dither TPage,
 // and the UI with every text at its longest.
-static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObject>& objs, const std::vector<UICanvas>& canvases) {
+// Streamed objects count as the most of their triangles within the draw
+// distance of one camera position (`streamTris`, whole regions, all around the
+// camera), each at the costliest fragment size.
+static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObject>& objs, const std::vector<bool>& streamed,
+                                  uint64_t streamTris, const std::vector<UICanvas>& canvases) {
     const bool fog = scene.settings.fog.enabled;
     uint64_t n = kFragTPage + kNearPlaneAllowance;
-    for (const ExpObject& e : objs)
-        for (const PsxTri& t : e.tris)
+    for (size_t i = 0; i < objs.size(); i++) {
+        if (streamed[i]) continue;
+        for (const PsxTri& t : objs[i].tris)
             n += t.textureIndex < 0 ? kFragGouraudTri : kFragTexturedTri + (fog ? kFragGouraudTri : 0);
+    }
+    n += streamTris * (kFragTexturedTri + (fog ? kFragGouraudTri : 0));
     for (const UICanvas& cv : canvases)
         for (const UIElement& el : cv.elements) switch (el.type) {
                 case UIElementType::Box: n += kFragRect; break;
@@ -1348,16 +1556,6 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             if (t.textureIndex >= 0) t.textureIndex = remap[size_t(t.textureIndex)];
     }
 
-    // BVH over active objects' exported triangles.
-    std::vector<BvhInputObject> bvhIn;
-    for (ExpObject& e : exporters) {
-        // Over the exported Tris, which the engine's TriangleRef indexes into.
-        BvhInputObject b{e.obj->active, e.flat->localToWorld, &e.triPositions, {}};
-        for (size_t i = 0; i < e.triPositions.size(); i++) b.triangles.push_back(int(i));
-        bvhIn.push_back(std::move(b));
-    }
-    Bvh bvh = buildBvh(bvhIn);
-
     // Lua files: object scripts in object order, then the scene script.
     std::vector<std::string> luaFiles;
     auto addLua = [&](const std::string& p) {
@@ -1392,10 +1590,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         if (e.obj->script) addLua(e.obj->script->lua);
     addLua(scene.settings.script);
     for (const FlatObject* t : triggers) addLua(t->object->trigger->lua);
-    std::vector<std::string> luaData;
+    std::vector<std::string> luaData, luaSources;
     for (const std::string& p : luaFiles) {
         try {
             std::string src = readFile(root / p);
+            luaSources.push_back(src);
             if (options.luaBytecode) {
                 std::vector<uint8_t> bc = compileLua(src, p);
                 src.assign(bc.begin(), bc.end());
@@ -1406,6 +1605,32 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
     }
     if (!res.ok()) return res;
+
+    // Render buffer sizes go first: with streaming on, the ordering table is
+    // the draw distance, which sets how near a region has to be loaded.
+    ExportStats& st = res.stats;
+    st.orderingTableNeed = orderingTableNeed(scene, exporters, gte);
+    st.orderingTableSize = scene.settings.orderingTableSize > 0
+                               ? uint32_t(std::clamp(scene.settings.orderingTableSize, int(kOtMin), int(kOtMax)))
+                               : st.orderingTableNeed;
+
+    // World streaming: splits exporters, so it runs before anything indexes them.
+    const size_t sceneObjects = exporters.size();  // streaming appends the cut parts after these
+    std::vector<bool> streamed(exporters.size(), false);
+    std::vector<StreamRegionOut> streamRegions;
+    if (scene.settings.streamWorld)
+        planStreaming(scene, exporters, streamed, streamRegions, luaSources, interactables, gte, res);
+
+    // BVH over active objects' exported triangles.
+    std::vector<BvhInputObject> bvhIn;
+    for (ExpObject& e : exporters) {
+        // Over the exported Tris, which the engine's TriangleRef indexes into.
+        BvhInputObject b{e.obj->active, e.flat->localToWorld, &e.triPositions, {}};
+        for (size_t i = 0; i < e.triPositions.size(); i++) b.triangles.push_back(int(i));
+        bvhIn.push_back(std::move(b));
+    }
+    Bvh bvh = buildBvh(bvhIn);
+
     auto luaIndex = [&](const std::string& p) -> int16_t {
         auto it = std::find(luaFiles.begin(), luaFiles.end(), p);
         return it == luaFiles.end() ? int16_t(-1) : int16_t(it - luaFiles.begin());
@@ -1490,7 +1715,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         np.maxPlaneError = bake->maxPlaneError;
     }
     std::vector<NavInputObject> navIn;
-    for (ExpObject& e : exporters) {
+    // Over the scene's objects; parts cut out for streaming share their mesh.
+    for (size_t oi = 0; oi < sceneObjects; oi++) {
+        const ExpObject& e = exporters[oi];
         NavInputObject n{e.obj->collider && e.obj->collider->kind == ColliderKind::Static,
                          e.obj->collider && e.obj->collider->platform,
                          e.flat->localToWorld,
@@ -1508,12 +1735,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
 
     BinWriter w;
-    ExportStats& st = res.stats;
-    st.orderingTableNeed = orderingTableNeed(scene, exporters, gte);
-    st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, canvases);
-    st.orderingTableSize = scene.settings.orderingTableSize > 0
-                               ? uint32_t(std::clamp(scene.settings.orderingTableSize, int(kOtMin), int(kOtMax)))
-                               : st.orderingTableNeed;
+    st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases);
     st.bumpAllocatorSize = scene.settings.bumpAllocatorSize > 0 ? (uint32_t(scene.settings.bumpAllocatorSize) + 3) & ~3u
                                                                  : st.bumpAllocatorNeed;
 
@@ -1594,7 +1816,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     size_t skinTableOffsetPos = w.pos();
     w.u32(0);
     w.u32(0);  // memcard table offset
-    w.u32(0);  // stream table offset
+    size_t streamTableOffsetPos = w.pos();
+    w.u32(0);
     w.u32(0);  // sprite table offset
     w.u16(0);  // sprite sheets
     w.u16(0);  // sprite anims
@@ -1615,7 +1838,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
 
     // ---- game objects (92 bytes)
     std::vector<size_t> meshOffsetPos;
-    for (ExpObject& e : exporters) {
+    for (size_t oi = 0; oi < exporters.size(); oi++) {
+        ExpObject& e = exporters[oi];
         meshOffsetPos.push_back(w.pos());
         w.u32(0);
         Vec3 pos = e.flat->localToWorld.position();
@@ -1623,7 +1847,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.i32(toWorldFixed12(-pos.y / gte));
         w.i32(toWorldFixed12(pos.z / gte));
         writeRotation(w, e.flat->worldRotation);
-        w.u16(uint16_t(e.tris.size()));
+        // A streamed object draws nothing until the stream table attaches its region.
+        w.u16(streamed[oi] ? 0 : uint16_t(e.tris.size()));
         w.i16(e.obj->script ? luaIndex(e.obj->script->lua) : int16_t(-1));
         w.u32((e.obj->startActive ? 1u : 0u) | (e.obj->skin ? 0x10u : 0u) | (hasLights && e.dynamicLit ? 0x10000u : 0u) |
               (hasLights && e.dynamicLitSmooth ? 0x20000u : 0u));
@@ -1634,7 +1859,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
         w.u16(0);       // uv offset (legacy)
         w.u32(0);       // event mask
-        writeWorldAabb(w, e.flat->localToWorld, e.mesh->bounds(), gte);
+        writeWorldAabb(w, e.flat->localToWorld, e.pieceBounds ? *e.pieceBounds : e.mesh->bounds(), gte);
     }
 
     // ---- colliders (32 bytes, dynamic only)
@@ -1744,50 +1969,52 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         w.bytes(luaData[i]);
     }
 
-    // ---- mesh data (52-byte Tri)
+    // ---- mesh data (52-byte Tri). Streamed objects' triangles go to the .geo
+    // file instead and their offset stays 0.
+    auto writeTri = [](BinWriter& w, const ExpObject& e, const PsxTri& t) {
+        for (const PsxVert& v : t.v) {
+            w.i16(v.vx);
+            w.i16(v.vy);
+            w.i16(v.vz);
+        }
+        w.i16(t.v[0].nx);
+        w.i16(t.v[0].ny);
+        w.i16(t.v[0].nz);
+        for (const PsxVert& v : t.v) {
+            w.u8(v.r);
+            w.u8(v.g);
+            w.u8(v.b);
+            w.u8(0);
+        }
+        uint16_t flags = e.mc->uvOffsetMaterial == t.textureIndex ? 1 : 0;
+        if (t.textureIndex < 0) {
+            for (int i = 0; i < 6; i++) w.u8(0);
+            w.u16(0);
+            w.u16(0xFFFF);
+            w.u16(0);
+            w.u16(0);
+            w.u16(flags);
+        } else {
+            const PsxTexture* tex = e.finalTextures[size_t(t.textureIndex)];
+            int expander = tex->bitDepth == BitDepth::Bpp4 ? 4 : tex->bitDepth == BitDepth::Bpp8 ? 2 : 1;
+            for (const PsxVert& v : t.v) {
+                w.u8(uint8_t(v.u + tex->packingX * expander));
+                w.u8(uint8_t(v.v + tex->packingY));
+            }
+            w.u16(0);
+            uint16_t mode = tex->bitDepth == BitDepth::Bpp4 ? 0 : tex->bitDepth == BitDepth::Bpp8 ? 1 : 2;
+            uint16_t tpage = uint16_t((tex->texpageX & 0xF) | ((tex->texpageY & 1) << 4) | (mode << 7) | 0x200);
+            w.u16(tpage);
+            w.u16(tex->clutPackingX);
+            w.u16(tex->clutPackingY);
+            w.u16(flags);
+        }
+    };
     for (size_t oi = 0; oi < exporters.size(); oi++) {
-        ExpObject& e = exporters[oi];
+        if (streamed[oi]) continue;
         w.align4();
         w.patchU32(meshOffsetPos[oi], uint32_t(w.pos()));
-        for (const PsxTri& t : e.tris) {
-            for (const PsxVert& v : t.v) {
-                w.i16(v.vx);
-                w.i16(v.vy);
-                w.i16(v.vz);
-            }
-            w.i16(t.v[0].nx);
-            w.i16(t.v[0].ny);
-            w.i16(t.v[0].nz);
-            for (const PsxVert& v : t.v) {
-                w.u8(v.r);
-                w.u8(v.g);
-                w.u8(v.b);
-                w.u8(0);
-            }
-            uint16_t flags = e.mc->uvOffsetMaterial == t.textureIndex ? 1 : 0;
-            if (t.textureIndex < 0) {
-                for (int i = 0; i < 6; i++) w.u8(0);
-                w.u16(0);
-                w.u16(0xFFFF);
-                w.u16(0);
-                w.u16(0);
-                w.u16(flags);
-            } else {
-                const PsxTexture* tex = e.finalTextures[size_t(t.textureIndex)];
-                int expander = tex->bitDepth == BitDepth::Bpp4 ? 4 : tex->bitDepth == BitDepth::Bpp8 ? 2 : 1;
-                for (const PsxVert& v : t.v) {
-                    w.u8(uint8_t(v.u + tex->packingX * expander));
-                    w.u8(uint8_t(v.v + tex->packingY));
-                }
-                w.u16(0);
-                uint16_t mode = tex->bitDepth == BitDepth::Bpp4 ? 0 : tex->bitDepth == BitDepth::Bpp8 ? 1 : 2;
-                uint16_t tpage = uint16_t((tex->texpageX & 0xF) | ((tex->texpageY & 1) << 4) | (mode << 7) | 0x200);
-                w.u16(tpage);
-                w.u16(tex->clutPackingX);
-                w.u16(tex->clutPackingY);
-                w.u16(flags);
-            }
-        }
+        for (const PsxTri& t : exporters[oi].tris) writeTri(w, exporters[oi], t);
     }
 
     // ---- object name table
@@ -1938,9 +2165,66 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
     }
 
+    // ---- stream table (psxsplash streamplanner.hh): header, regions, object refs
+    if (!streamRegions.empty()) {
+        w.align4();
+        w.patchU32(streamTableOffsetPos, uint32_t(w.pos()));
+        uint16_t refs = 0;
+        for (const StreamRegionOut& r : streamRegions) refs = uint16_t(refs + r.objects.size());
+        w.u16(uint16_t(streamRegions.size()));
+        w.u16(refs);
+        w.u16(uint16_t(st.streamSlots));
+        w.u16(0);
+        w.u32(st.streamSlotBytes);
+        w.i32(st.streamLoadRadius);
+        w.i32(int32_t(std::min<int64_t>(int64_t(st.streamLoadRadius) * 3 / 2, INT32_MAX)));
+        uint16_t first = 0;
+        for (const StreamRegionOut& r : streamRegions) {
+            w.i32(r.bounds.minX);
+            w.i32(r.bounds.minZ);
+            w.i32(r.bounds.maxX);
+            w.i32(r.bounds.maxZ);
+            w.u32(r.firstSector);
+            w.u32(r.byteSize);
+            w.u16(first);
+            w.u16(uint16_t(r.objects.size()));
+            w.u32(0);
+            first = uint16_t(first + r.objects.size());
+        }
+        for (const StreamRegionOut& r : streamRegions) {
+            uint32_t offset = 0;
+            for (auto [object, tris] : r.objects) {
+                w.u16(object);
+                w.u16(tris);
+                w.u32(offset);
+                offset += uint32_t(tris) * stream::kBytesPerTri;
+            }
+        }
+    }
+
     fs::path outPath = out;
     if (!options.dryRun) w.save(outPath);
     res.stats.splashpackBytes = w.pos();
+
+    // ---- .geo: each region's triangles back to back, padded to a sector. A
+    // scene that does not stream removes it, so a stale one is not shipped.
+    {
+        const fs::path geoPath = fs::path(outPath).replace_extension(".geo");
+        if (!streamRegions.empty()) {
+            BinWriter g;
+            for (const StreamRegionOut& r : streamRegions) {
+                const size_t start = g.pos();
+                for (auto [object, tris] : r.objects)
+                    for (const PsxTri& t : exporters[object].tris) writeTri(g, exporters[object], t);
+                while (g.pos() < start + r.byteSize) g.u8(0);
+            }
+            if (!options.dryRun) g.save(geoPath);
+            st.geoFileBytes = g.pos();
+        } else if (!options.dryRun) {
+            std::error_code ec;
+            fs::remove(geoPath, ec);
+        }
+    }
 
     // ---- .vram
     BinWriter v;

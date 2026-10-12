@@ -197,6 +197,9 @@ struct SceneSettings {
     // bytes per frame. 0 = computed by the exporter (ExportStats).
     int orderingTableSize = 0;
     int bumpAllocatorSize = 0;
+    // Stream static scenery off the disc by region while playing (psxsplash
+    // WorldStreamer), for worlds bigger than RAM. Regions are automatic.
+    bool streamWorld = false;
     ExtraKeys extra;
 };
 

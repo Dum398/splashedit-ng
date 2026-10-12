@@ -15,6 +15,7 @@
 
 #include "audio.hh"
 #include "binwriter.hh"
+#include "budget.hh"
 #include "bvh.hh"
 #include "font.hh"
 #include "luacompile.hh"
@@ -1746,6 +1747,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(27);
     w.u16(uint16_t(luaFiles.size()));
     w.u16(uint16_t(exporters.size()));
+    res.stats.gameObjects = int(exporters.size());
     w.u16(uint16_t(vram.atlases.size()));
     w.u16(uint16_t(clutCount));
     w.u16(uint16_t(colliderCount));
@@ -2294,6 +2296,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.spuEnd = kSpuStart;
     for (const std::vector<uint8_t>& d : audioData) st.spuEnd = ((st.spuEnd + 15) & ~size_t(15)) + ((d.size() + 15) & ~size_t(15));
     for (const ExpObject& e : exporters) st.triangles += int(e.tris.size());
+    if (objectsBindRam(st)) res.warnings.push_back(objectRamWarning(st));
     return res;
 }
 

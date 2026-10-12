@@ -576,7 +576,8 @@ void testExportStats() {
     }
     CHECK(splash::ramBudget(d.stats).used == d.stats.rendererBytes() + d.stats.visibleListBytes() +
                                                  std::max({d.stats.splashpackBytes, d.stats.vramFileBytes,
-                                                           d.stats.spuFileBytes}));
+                                                           d.stats.spuFileBytes}) +
+                                                 splash::objectLoadBytes(d.stats) + splash::kEngineLoadBytes);
 
     // Overrides replace the estimate in the pack and in the RAM meter; an
     // ordering table below the minimum is raised to it.
@@ -592,7 +593,37 @@ void testExportStats() {
     CHECK(o.stats.bvhTriangleRefs == d.stats.bvhTriangleRefs);
     CHECK(splash::ramBudget(o.stats).used == o.stats.rendererBytes() + o.stats.visibleListBytes() +
                                                  std::max({o.stats.splashpackBytes, o.stats.vramFileBytes,
-                                                           o.stats.spuFileBytes}));
+                                                           o.stats.spuFileBytes}) +
+                                                 splash::objectLoadBytes(o.stats) + splash::kEngineLoadBytes);
+}
+
+// RAM per game object: the engine's agent state and Lua's tables, measured on
+// psxsplash (budget.hh). A scene of many small props fails on the object count
+// and says so with its fix; the same geometry in few objects fits.
+void testObjectRamBudget() {
+    splash::ExportStats s;
+    s.gameObjects = 0;
+    CHECK(splash::objectLoadBytes(s) == splash::kAgentStateBytes + splash::luaRegistryPeakBytes(0));
+    s.gameObjects = 545;
+    // 1090 registry entries -> 2048 nodes.
+    CHECK(splash::luaRegistryPeakBytes(545) == 2048 * splash::kLuaRegistryNodeBytes * 3 / 2);
+    CHECK(splash::objectLoadBytes(s) == 546 * splash::kAgentStateBytes + 545 * splash::kLuaObjectBytes +
+                                            splash::luaRegistryPeakBytes(545));
+    // The measured heap after loading that 545-object scene was 1097504 bytes
+    // with 795328 from the other terms: the model must not undercount it.
+    s.splashpackBytes = 795328;
+    CHECK(splash::ramBudget(s).used >= 1097504);
+    CHECK(!splash::objectsBindRam(s));
+    // The 1257-object scene that ran Lua out of memory, 1078168 bytes before.
+    s.gameObjects = 1257;
+    s.splashpackBytes = 1078168;
+    CHECK(splash::ramBudget(s).used > splash::kEngineHeapBytes);
+    CHECK(splash::objectsBindRam(s));
+    const std::string w = splash::objectRamWarning(s);
+    CHECK(w.find("1257 objects") != std::string::npos && w.find("Merge props") != std::string::npos);
+    // Geometry alone over budget is not the object count's fault.
+    s.splashpackBytes = splash::kEngineHeapBytes;
+    CHECK(!splash::objectsBindRam(s));
 }
 
 // A script on an object with no mesh (the courtyard's Game Logic) ships as a
@@ -1782,6 +1813,7 @@ int main(int argc, char** argv) {
     testGizmoUndo();
     testCatalog();
     testExportStats();
+    testObjectRamBudget();
     testScriptWithoutMesh();
     testWorldStreamPlan();
     testWorldStreamExport();

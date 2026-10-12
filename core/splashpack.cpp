@@ -1734,6 +1734,14 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         res.errors.push_back("too many nav regions or portals");
         return res;
     }
+    st.navWanted = playerObj || navObj;
+    st.navRegions = int(nav.regions.size());
+    st.navCellSizeAsked = np.cellSize;
+    st.navCellSize = nav.cellSize;
+    st.navExtentX = nav.extentX;
+    st.navExtentZ = nav.extentZ;
+    if (st.navWanted && nav.regions.empty())
+        res.warnings.push_back(navEmptyWarning());
 
     BinWriter w;
     st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases);

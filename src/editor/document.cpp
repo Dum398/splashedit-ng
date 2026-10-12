@@ -259,6 +259,21 @@ private:
     std::string m_key;
 };
 
+// Several commands that undo and redo as one step.
+class GroupCommand : public Command {
+public:
+    explicit GroupCommand(std::vector<std::unique_ptr<Command>> parts) : m_parts(std::move(parts)) {}
+    void apply(Document& doc) override {
+        for (auto& c : m_parts) c->apply(doc);
+    }
+    void revert(Document& doc) override {
+        for (auto it = m_parts.rbegin(); it != m_parts.rend(); ++it) (*it)->revert(doc);
+    }
+
+private:
+    std::vector<std::unique_ptr<Command>> m_parts;
+};
+
 class SettingsCommand : public Command {
 public:
     SettingsCommand(splash::SceneSettings before, splash::SceneSettings after, std::string key)
@@ -434,6 +449,23 @@ bool Document::edit(const ObjectPath& path, const std::function<void(splash::Obj
     after.children.clear();
     execute(std::make_unique<EditCommand>(path, std::move(before), std::move(after), mergeKey), !mergeKey.empty());
     return true;
+}
+
+int Document::editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn) {
+    std::vector<std::unique_ptr<Command>> parts;
+    for (const ObjectPath& path : paths) {
+        splash::Object* o = objectMut(path);
+        if (!o) continue;
+        splash::Object before = shallowCopy(*o);
+        splash::Object after = before;
+        fn(after);
+        after.children.clear();
+        parts.push_back(std::make_unique<EditCommand>(path, std::move(before), std::move(after), std::string()));
+    }
+    if (parts.empty()) return 0;
+    const int n = int(parts.size());
+    execute(std::make_unique<GroupCommand>(std::move(parts)));
+    return n;
 }
 
 void Document::editSettings(const std::function<void(splash::SceneSettings&)>& fn, const std::string& mergeKey) {

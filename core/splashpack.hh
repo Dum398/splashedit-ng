@@ -63,6 +63,14 @@ struct ExportStats {
     // allocates per object when the scene loads (objectLoadBytes, budget.hh).
     int gameObjects = 0;
 
+    // Nav bake (Player or Navigation object). psxsplash only hands the camera
+    // to the player when the scene has nav regions; with none it is a free
+    // camera that ignores the pad.
+    bool navWanted = false;            // the scene has a Player or Navigation object
+    int navRegions = 0;
+    float navCellSize = 0, navCellSizeAsked = 0;  // metres
+    float navExtentX = 0, navExtentZ = 0;         // walkable geometry, metres
+
     // World streaming (SceneSettings::streamWorld). All zero when the scene
     // does not stream. Distances and bounds are PS1 fixed point (4096 = one
     // GTE unit, gteScaling world units).
@@ -96,6 +104,17 @@ struct ExportResult {
     ExportStats stats;
     bool ok() const { return errors.empty(); }
 };
+
+// The scene has a Player or Navigation object but the bake found nowhere to
+// stand, so psxsplash leaves the camera at the origin and ignores the pad.
+inline std::string navEmptyWarning() {
+    return "The player can't walk: the nav bake found no ground to stand on, so the game keeps the camera at the origin "
+           "and ignores the controller. Give the floor or terrain a Static collider, and make it flat enough and wider "
+           "than the player.";
+}
+
+// Set when the bake ran with bigger cells than the scene asks for.
+inline bool navCoarsened(const ExportStats& s) { return s.navCellSize > s.navCellSizeAsked * 1.001f; }
 
 // `projectRoot` resolves the project-relative asset paths in the scene.
 // `out` is the .splashpack path; .vram and .spu are written next to it.

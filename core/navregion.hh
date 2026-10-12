@@ -65,7 +65,22 @@ struct NavMesh {
     std::vector<NavRegion> regions;
     std::vector<NavPortal> portals;
     int startRegion = 0;
+    // The voxel size the bake used. Larger than NavBuildParams::cellSize when
+    // that one would have needed more spans than Recast can index.
+    float cellSize = 0;
+    // Width and depth of the walkable geometry, in world units.
+    float extentX = 0, extentZ = 0;
 };
+
+// Recast's compact heightfield indexes spans with 24 bits (rcCompactCell::index),
+// so a bake over more spans than this links the wrong spans together and
+// produces no regions without reporting an error.
+constexpr int kNavMaxSpans = (1 << 24) - 1;
+// The bake's cost grows with its span count, about 4 s per million on a
+// 241 m terrain, and the editor re-exports on every edit. Past this many the
+// cell size grows; the region count barely moves (80 regions at 0.3 m, 85 at
+// 0.06 m on that terrain).
+constexpr int kNavSpanBudget = 1000000;
 
 NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBuildParams& params, Vec3 spawn,
                         std::vector<std::string>& errors);

@@ -103,6 +103,20 @@ byte-equal to `export --lua-bytecode`. A PCdrv engine must be refused.
 
 Without nav regions psxsplash does not attach the camera to the player, so the camera stays at the
 origin facing +Z and the player start in the file has no effect. Put the objects at positive Z.
+A scene with a Player always gets nav regions when it has ground to stand on: on big worlds the
+nav bake uses larger cells (Recast indexes at most 2^24 spans and the bake is kept under a million),
+and `export --stats` prints the cell size it used.
+
+`boot/walk.sh` stretches the courtyard to 450 x 375 m, turns streaming on, and boots it three
+times: twice standing still (the shots must match) and once holding Up from frame 200 (`BOOT_HOLD`
+in `boot.lua`). Walking must change the shot and attach more streamed regions than standing still.
+The engine has to be a PCdrv build made with `make STREAMLOG=1`, which prints `WORLDSTREAM`
+attach/detach lines.
+
+    boot/walk.sh <splashpack-cli> <pcsx-redux> <openbios.bin> <psxsplash.ps-exe> [frame]
+
+Standing still attaches 1 region and walking 2. With the exporter from before the nav fix the
+camera never moves (zero nav regions on a world that size).
 
 `boot/palcheck.py` checks one textured quad on the screenshot against `texstats --out`: every pixel
 must be a palette colour, give or take the one 5-bit step the GPU dither adds.

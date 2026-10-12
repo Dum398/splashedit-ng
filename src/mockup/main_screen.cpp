@@ -3324,6 +3324,57 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         commit(numberField(id, row(lid.c_str(), label, tip), fmtShort(v).c_str(), unit, 0, nullptr, &nv), key,
                [&](splash::Object& ob) { set(ob, splash::clampv(nv, lo, hi)); });
     };
+    // What the last export's nav bake made of the scene: psxsplash only gives
+    // the player the camera and the controller when there are nav regions.
+    auto navNotes = [&]() {
+        const std::optional<splash::ExportResult>& res = st.live.result();
+        if (!res || !res->ok() || !res->stats.navWanted) return;
+        const splash::ExportStats& s = res->stats;
+        auto note = [&](const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y), col, t.c_str(), nullptr, w);
+            y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str()).y + space::sm;
+        };
+        if (s.navRegions == 0) {
+            // Mesh objects the bake skips: no collider, or a collider that is not Static.
+            std::vector<editor::ObjectPath> meshes;
+            editor::ObjectPath at;
+            std::function<void(const std::vector<splash::Object>&)> walk = [&](const std::vector<splash::Object>& objs) {
+                for (size_t i = 0; i < objs.size(); i++) {
+                    at.push_back(int(i));
+                    const splash::Object& ob = objs[i];
+                    if (ob.active && ob.mesh && !ob.skin && (!ob.collider || ob.collider->kind == splash::ColliderKind::None))
+                        meshes.push_back(at);
+                    walk(ob.children);
+                    at.pop_back();
+                }
+            };
+            walk(doc.scene().objects);
+            std::string body =
+                "The nav bake found no ground to stand on, so the game keeps the camera at the origin and ignores the "
+                "controller. The player walks on meshes with a Static collider that are flat enough and wider than the player.";
+            if (!meshes.empty()) {
+                body += meshes.size() == 1 ? std::string(" 1 mesh has no collider: the fix gives it a Static one.")
+                                           : " " + std::to_string(meshes.size()) +
+                                                 " meshes have no collider: the fix gives them a Static one.";
+                if (card("navempty", "The player can't walk", body, "Make meshes walkable"))
+                    doc.editMany(meshes, [](splash::Object& ob) {
+                        if (!ob.collider) ob.collider = splash::ColliderComponent{};
+                        ob.collider->kind = splash::ColliderKind::Static;
+                    });
+            } else {
+                note("The player can't walk. " + body, color::warn);
+            }
+        } else if (splash::navCoarsened(s)) {
+            char buf[256];
+            std::snprintf(buf, sizeof buf,
+                          "The walkable ground is %.0f x %.0f m, so the nav bake uses %.2f m cells instead of %.2f m to keep "
+                          "export fast. Walls and ledges are placed to about %.2f m.",
+                          double(s.navExtentX), double(s.navExtentZ), double(s.navCellSize), double(s.navCellSizeAsked),
+                          double(s.navCellSize));
+            note(buf, color::textFaint);
+        }
+    };
     if (o->player) {
         const splash::PlayerComponent& p = *o->player;
         top = y;
@@ -3336,6 +3387,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                [](splash::Object& ob, float v) { ob.player->moveSpeed = v; });
         number("pjump", "Jump height", "How high a jump goes.", p.jumpHeight, "m", "pjump", 0, 1000,
                [](splash::Object& ob, float v) { ob.player->jumpHeight = v; });
+        navNotes();
         sectionEnd(top);
     }
     if (o->navigation) {
@@ -3346,6 +3398,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                [](splash::Object& ob, float v) { ob.navigation->agentHeight = v; });
         number("nradius", "Agent radius", "How far walkable ground keeps from walls.", n.agentRadius, "m", "nradius", 0.01f, 100,
                [](splash::Object& ob, float v) { ob.navigation->agentRadius = v; });
+        if (!o->player) navNotes();
         sectionEnd(top);
     }
     if (o->trigger) {

@@ -334,6 +334,9 @@ int main(int argc, char** argv) {
                         st.clutBytes, st.fontBytes, st.vramBytes(), st.spuEnd, st.triangles);
             std::printf("ram=%zu ordering_table=%u bump=%u\n", splash::ramBudget(st).used, st.orderingTableSize,
                         st.bumpAllocatorSize);
+            if (st.navWanted)
+                std::printf("nav regions=%d cell=%g (asked %g) extent=%gx%g\n", st.navRegions, double(st.navCellSize),
+                            double(st.navCellSizeAsked), double(st.navExtentX), double(st.navExtentZ));
             if (st.streamRegions)
                 std::printf("stream regions=%d objects=%d split=%d slots=%d (wanted %d) slot_bytes=%u pool=%zu "
                             "streamed_tri_bytes=%zu table=%zu geo=%zu ram_saved=%lld load_radius=%d region_size=%lld\n",

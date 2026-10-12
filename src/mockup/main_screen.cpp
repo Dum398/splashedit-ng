@@ -2901,9 +2901,19 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             "slots", set.orderingTableSize, otNeed, otUsed, &splash::SceneSettings::orderingTableSize});
     const editor::RenderPeak* peak = st.play.peak && st.play.peakScene == doc.loadId() ? &*st.play.peak : nullptr;
     if (otUsed) caption("Draws up to " + metres(otUsed) + " away", color::textFaint);
-    if (peak)
-        caption("In Play: farthest drawn at " + std::to_string(peak->depth) + " (" + metres(uint32_t(peak->depth)) + ")",
-                otUsed && uint32_t(peak->depth) >= otUsed ? color::warn : color::accentHover);
+    if (peak) {
+        // The peak is the farthest corner of any triangle the fog let through.
+        // psxsplash drops a triangle only when all three corners are past the
+        // table and clamps the rest into its last slot, and fog already culls
+        // anything wholly past the fog wall (20000 / density), so with that
+        // wall inside the table nothing past it is lost.
+        const bool past = otUsed && uint32_t(peak->depth) >= otUsed;
+        const bool fogInside = set.fog.enabled && 20000 / std::clamp(set.fog.density, 1, 10) <= int(otUsed);
+        std::string s = "In Play: farthest drawn at " + std::to_string(peak->depth) + " (" + metres(uint32_t(peak->depth)) + ")";
+        if (past) s += fogInside ? ", past the table. The fog hides everything that far, so nothing is lost."
+                                 : ", past the table: triangles wholly beyond it are not drawn.";
+        caption(s, past && !fogInside ? color::warn : color::accentHover);
+    }
     const uint32_t buNeed = stats ? stats->bumpAllocatorNeed : 0, buUsed = stats ? stats->bumpAllocatorSize : 0;
     buffer({"bump", "Primitive buffer",
             "Bytes of GPU commands one frame can build: every triangle drawn, plus sprites and text. If a frame needs more, "

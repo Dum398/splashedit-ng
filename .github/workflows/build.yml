@@ -51,7 +51,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
-            libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev
+            libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev \
+            xvfb xauth libgl1-mesa-dri
       # SDL3 and FreeType are always built in, so the package never links a
       # library the target machine lacks (Homebrew's FreeType on macOS).
       - name: Configure
@@ -77,6 +78,9 @@ jobs:
           "$py" tests/disccheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Game view keys
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" sh tests/gamekeys.sh build/splashedit build/emulator_tests
       # One download: the editor with its assets, the example project, the
       # engine and the latest pcsx-redux dev build for this OS.
       - uses: actions/download-artifact@v4

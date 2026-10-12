@@ -108,6 +108,8 @@ public:
     // non-empty `mergeKey` on the same object merge into one undo step until
     // endMerge() is called; a drag passes a key and calls endMerge() on release.
     bool edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey = {});
+    // Runs `fn` on each object in `paths` as one undo step. Returns how many it changed.
+    int editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn);
     // Same for the scene's own settings (fog, render buffers, ...).
     void editSettings(const std::function<void(splash::SceneSettings&)>& fn, const std::string& mergeKey = {});
     // Closes the open merge, so the next edit starts a new undo step.

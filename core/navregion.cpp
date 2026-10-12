@@ -242,47 +242,74 @@ NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBui
     int nverts = int(verts.size() / 3);
     int ntris = int(tris.size() / 3);
 
-    // 2. Recast parameters in voxel units
-    float cs = p.cellSize, ch = p.cellHeight;
-    int walkableHeight = int(std::ceil(double(p.agentHeight) / ch));
-    int walkableClimb = int(std::floor(double(p.maxStepHeight) / ch));
-    int walkableRadius = int(std::ceil(double(p.agentRadius) / cs));
-    int maxEdgeLen = int(double(p.maxEdgeLength) / cs);
-    float detailSampleDist = cs * p.detailSampleDist;
-
-    // 3. Bounds, padded by the erosion radius in XZ
-    float bmin[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
+    // 2. Bounds of the walkable geometry
+    float gmin[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
                      std::numeric_limits<float>::max()};
-    float bmax[3] = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
+    float gmax[3] = {std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
                      std::numeric_limits<float>::lowest()};
     for (size_t i = 0; i < verts.size(); i += 3)
         for (int k = 0; k < 3; k++) {
-            bmin[k] = std::min(bmin[k], verts[i + size_t(k)]);
-            bmax[k] = std::max(bmax[k], verts[i + size_t(k)]);
+            gmin[k] = std::min(gmin[k], verts[i + size_t(k)]);
+            gmax[k] = std::max(gmax[k], verts[i + size_t(k)]);
         }
-    float borderPad = float(walkableRadius) * cs;
-    bmin[0] -= borderPad;
-    bmin[2] -= borderPad;
-    bmax[0] += borderPad;
-    bmax[2] += borderPad;
-    int gw = int((double(bmax[0]) - bmin[0]) / cs + 0.5);
-    int gh = int((double(bmax[2]) - bmin[2]) / cs + 0.5);
+    nav.extentX = gmax[0] - gmin[0];
+    nav.extentZ = gmax[2] - gmin[2];
 
-    // 4. Recast pipeline
+    // 3. Voxelise. Recast parameters are in voxel units, so they follow the
+    // cell size, which grows when the spans would not fit Recast's index
+    // (kNavMaxSpans). Spans scale with the inverse square of the cell size.
     Context ctx(errors);
     auto failed = [&](const char* step) {
         errors.push_back(std::string("nav: ") + step + " failed");
         return NavMesh{};
     };
-    HeightfieldPtr solid(rcAllocHeightfield());
-    if (!solid || !rcCreateHeightfield(&ctx, *solid, gw, gh, bmin, bmax, cs, ch)) return failed("rcCreateHeightfield");
+    float cs = p.cellSize, ch = p.cellHeight;
+    {
+        // One span per cell over the padded bounds is the floor; layered
+        // geometry adds more, which the loop below catches.
+        const double pad = 2.0 * p.agentRadius + 2.0 * cs;
+        const double cells = (double(nav.extentX) + pad) * (double(nav.extentZ) + pad) / (double(cs) * cs);
+        if (cells > kNavSpanBudget) cs = float(double(cs) * std::sqrt(cells / kNavSpanBudget));
+    }
+    int walkableHeight = int(std::ceil(double(p.agentHeight) / ch));
+    int walkableClimb = int(std::floor(double(p.maxStepHeight) / ch));
+    int walkableRadius = 0, maxEdgeLen = 0;
+    float detailSampleDist = 0;
+    float bmin[3], bmax[3];
     std::vector<unsigned char> areas(size_t(ntris), 0);
     rcMarkWalkableTriangles(&ctx, p.walkableSlopeAngle, verts.data(), nverts, tris.data(), ntris, areas.data());
-    if (!rcRasterizeTriangles(&ctx, verts.data(), nverts, tris.data(), areas.data(), ntris, *solid, walkableClimb))
-        return failed("rcRasterizeTriangles");
-    rcFilterLowHangingWalkableObstacles(&ctx, walkableClimb, *solid);
-    rcFilterLedgeSpans(&ctx, walkableHeight, walkableClimb, *solid);
-    rcFilterWalkableLowHeightSpans(&ctx, walkableHeight, *solid);
+    HeightfieldPtr solid;
+    for (int attempt = 0;; attempt++) {
+        walkableRadius = int(std::ceil(double(p.agentRadius) / cs));
+        maxEdgeLen = int(double(p.maxEdgeLength) / cs);
+        detailSampleDist = cs * p.detailSampleDist;
+        // Padded by the erosion radius in XZ
+        float borderPad = float(walkableRadius) * cs;
+        for (int k = 0; k < 3; k++) bmin[k] = gmin[k], bmax[k] = gmax[k];
+        bmin[0] -= borderPad;
+        bmin[2] -= borderPad;
+        bmax[0] += borderPad;
+        bmax[2] += borderPad;
+        int gw = int((double(bmax[0]) - bmin[0]) / cs + 0.5);
+        int gh = int((double(bmax[2]) - bmin[2]) / cs + 0.5);
+
+        solid.reset(rcAllocHeightfield());
+        if (!solid || !rcCreateHeightfield(&ctx, *solid, gw, gh, bmin, bmax, cs, ch)) return failed("rcCreateHeightfield");
+        if (!rcRasterizeTriangles(&ctx, verts.data(), nverts, tris.data(), areas.data(), ntris, *solid, walkableClimb))
+            return failed("rcRasterizeTriangles");
+        rcFilterLowHangingWalkableObstacles(&ctx, walkableClimb, *solid);
+        rcFilterLedgeSpans(&ctx, walkableHeight, walkableClimb, *solid);
+        rcFilterWalkableLowHeightSpans(&ctx, walkableHeight, *solid);
+
+        const int spans = rcGetHeightFieldSpanCount(&ctx, *solid);
+        if (spans <= kNavSpanBudget) break;
+        if (attempt == 4) {
+            if (spans <= kNavMaxSpans) break;
+            return failed("too many spans for Recast");
+        }
+        cs = float(double(cs) * std::sqrt(double(spans) / (0.95 * kNavSpanBudget)));
+    }
+    nav.cellSize = cs;
 
     CompactPtr chf(rcAllocCompactHeightfield());
     if (!chf || !rcBuildCompactHeightfield(&ctx, walkableHeight, walkableClimb, *solid, *chf))

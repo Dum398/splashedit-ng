@@ -30,6 +30,7 @@
 #include "editor/serial.hh"
 #include "editor/unirom.hh"
 #include "budget.hh"
+#include "navregion.hh"
 #include "splashpack.hh"
 #include "worldstream.hh"
 
@@ -1796,6 +1797,67 @@ void testWorldStreamExport() {
     CHECK(splash::loadScene(dir / "s.scene").settings.streamWorld);
 }
 
+// A flat square of `size` metres, two triangles facing up.
+splash::NavMesh bakePlane(float size, std::vector<std::string>& errors) {
+    const float h = size / 2;
+    static std::vector<splash::Vec3> pos;
+    pos = {{-h, 0, -h}, {-h, 0, h}, {h, 0, h}, {h, 0, -h}};
+    splash::NavInputObject in{true, false, splash::Mat34::trs({0, 0, 0}, splash::Quat{0, 0, 0, 1}, {1, 1, 1}), &pos,
+                              {0, 1, 2, 0, 2, 3}, splash::Bounds({0, 0, 0}, {size, 0, size})};
+    return splash::buildNavRegions({in}, splash::NavBuildParams{}, {0, 0, 0}, errors);
+}
+
+// Recast indexes compact spans with 24 bits: a 300 m plane at the default
+// 0.05 m cells is 36M spans, which used to bake to no regions at all, with no
+// error, so the player could not move. The bake now grows the cell size.
+void testNavBigWorld() {
+    std::vector<std::string> errors;
+    splash::NavMesh small = bakePlane(20, errors);
+    CHECK(errors.empty() && !small.regions.empty());
+    CHECK(small.cellSize == splash::NavBuildParams{}.cellSize);  // small worlds bake as asked
+    splash::NavMesh big = bakePlane(300, errors);
+    CHECK(errors.empty());
+    CHECK(!big.regions.empty());
+    CHECK(big.cellSize > splash::NavBuildParams{}.cellSize);
+    CHECK(double(big.extentX) / big.cellSize * (double(big.extentZ) / big.cellSize) <= 1.05 * splash::kNavSpanBudget);
+
+    // Export: stats carry the bake, and a player with nothing to stand on warns.
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    const fs::path dir = g_outDir / "nav";
+    fs::create_directories(dir);
+    splash::ExportResult ok = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(ok.ok() && ok.stats.navWanted && ok.stats.navRegions > 0 && !splash::navCoarsened(ok.stats));
+    CHECK(std::none_of(ok.warnings.begin(), ok.warnings.end(),
+                       [](const std::string& w) { return w == splash::navEmptyWarning(); }));
+    std::function<void(std::vector<splash::Object>&)> strip = [&](std::vector<splash::Object>& objs) {
+        for (splash::Object& o : objs) {
+            o.collider.reset();
+            strip(o.children);
+        }
+    };
+    strip(scene.objects);
+    splash::ExportResult none = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(none.ok() && none.stats.navWanted && none.stats.navRegions == 0);
+    CHECK(std::any_of(none.warnings.begin(), none.warnings.end(),
+                      [](const std::string& w) { return w == splash::navEmptyWarning(); }));
+}
+
+// editMany: one undo step over several objects.
+void testEditMany() {
+    editor::Document d;
+    d.reset(sample());
+    CHECK(d.editMany({{0}, {1, 0}, {9}}, [](splash::Object& o) { o.transform.position.y = 5; }) == 2);
+    CHECK(d.object({0})->transform.position.y == 5 && d.object({1, 0})->transform.position.y == 5);
+    CHECK(d.object({1})->transform.position.y == 0 && d.object({1})->children.size() == 1);
+    CHECK(d.undo());
+    CHECK(d.object({0})->transform.position.y == 0 && d.object({1, 0})->transform.position.y == 0);
+    CHECK(!d.undo());
+    CHECK(d.redo() && d.object({1, 0})->transform.position.y == 5);
+    CHECK(d.editMany({}, [](splash::Object&) {}) == 0);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -1817,6 +1879,8 @@ int main(int argc, char** argv) {
     testScriptWithoutMesh();
     testWorldStreamPlan();
     testWorldStreamExport();
+    testNavBigWorld();
+    testEditMany();
     testLiveExport();
     testPlay();
     testProject();

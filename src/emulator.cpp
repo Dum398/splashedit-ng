@@ -3,6 +3,8 @@
 #include <SDL3/SDL.h>
 
 static constexpr size_t kMaxLines = 400;
+// How long stop() lets the process close itself before it is killed.
+static constexpr Uint64 kStopGraceMs = 1000;
 
 Emulator::~Emulator() { stop(); }
 
@@ -74,9 +76,18 @@ void Emulator::poll() {
 
 void Emulator::stop() {
     if (!m_proc) return;
-    SDL_KillProcess(m_proc, false);
+    // Ask first, then force. On Windows the polite kill posts WM_CLOSE, which
+    // pcsx-redux run without its UI never reads, so waiting on it alone hangs.
     int code = 0;
-    SDL_WaitProcess(m_proc, true, &code);
+    bool ended = false;
+    if (SDL_KillProcess(m_proc, false)) {
+        for (Uint64 start = SDL_GetTicks(); !ended && SDL_GetTicks() - start < kStopGraceMs; SDL_Delay(10))
+            ended = SDL_WaitProcess(m_proc, false, &code);
+    }
+    if (!ended) {
+        SDL_KillProcess(m_proc, true);
+        SDL_WaitProcess(m_proc, true, &code);
+    }
     drain();
     SDL_DestroyProcess(m_proc);
     m_proc = nullptr;

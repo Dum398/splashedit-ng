@@ -461,6 +461,12 @@ int main(int argc, char** argv) {
             }
             if (!args.dropFile.empty() && frame == timelineEnd) state.drop.files.push_back({args.dropFile, ImVec2(args.dropX, args.dropY)});
         }
+        // While the Game view has the keyboard, arrows and Enter are the controller:
+        // they must not move ImGui's keyboard focus or press the button it lands on.
+        if (state.play.gameFocus && state.play.game.attached())
+            io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+        else
+            io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::NewFrame();
         ui::interactiveRects().clear();
         g_hit.titleBar = mockup::drawMainScreen(state, doc, view, io.DisplaySize);
@@ -488,6 +494,9 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::printf("wrote %s (%dx%d)\n", args.screenshot, fw, fh);
+            // For scripted checks: menus and pickers left open by the input.
+            std::printf("popups open: %s\n", ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ? "yes" : "no");
+            std::printf("game attached: %s\n", state.play.game.attached() ? "yes" : "no");
             running = false;
         }
         SDL_GL_SwapWindow(window);

@@ -207,3 +207,13 @@ the glyph sheet export builds and prints its cell size and VRAM cost.
 
 `ui/ui.scene` booted with `boot/boot.sh` at frame 300 shows both Inter fonts, the system font, the
 progress bar, the image, a line ending at x 311 and the full-width bar, at the positions above.
+
+`gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
+`SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in
+the Game view. They must reach the game only: the check fails if an editor menu or picker is
+open afterwards. Needs a display (CI runs it under `xvfb-run`).
+
+    sh gamekeys.sh <splashedit> <emulator_tests>
+
+`emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
+without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

@@ -146,6 +146,12 @@ target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/
 target_compile_definitions(imgui PUBLIC IMGUI_ENABLE_FREETYPE IMGUI_DEFINE_MATH_OPERATORS)
 target_link_libraries(imgui PUBLIC SDL3::SDL3 Freetype::Freetype OpenGL::GL)
 
+# Emulator::stop against a process that will not close when asked.
+add_executable(emulator_tests src/emulator_tests.cpp src/emulator.cpp)
+target_include_directories(emulator_tests PRIVATE src)
+target_link_libraries(emulator_tests PRIVATE SDL3::SDL3)
+add_test(NAME emulator_tests COMMAND emulator_tests)
+
 add_executable(splashedit
     src/main.cpp
     src/emulator.cpp

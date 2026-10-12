@@ -2944,6 +2944,34 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                  std::to_string(buUsed) + ", a frame that draws more stops the game. Play the scene to see what a frame really uses.",
              &splash::SceneSettings::bumpAllocatorSize);
 
+    // Every object costs heap when the scene loads, however small: past some
+    // count that, not the geometry, is what keeps a scene from fitting.
+    if (stats && splash::objectsBindRam(*stats)) {
+        bool fix = false;
+        const std::string body = splash::objectRamWarning(*stats);
+        float h = problemCard("objramwarn", ImVec2(x0, y), x1 - x0, "Too many objects for RAM", body.c_str(),
+                              "Select the biggest group", &fix);
+        y += h + space::sm;
+        if (fix) {
+            // The object with the most children: usually a scatter of props to merge.
+            editor::ObjectPath best, path;
+            size_t most = 0;
+            std::function<void(const std::vector<splash::Object>&)> walk = [&](const std::vector<splash::Object>& objs) {
+                for (size_t i = 0; i < objs.size(); i++) {
+                    path.push_back(int(i));
+                    if (objs[i].children.size() > most) most = objs[i].children.size(), best = path;
+                    walk(objs[i].children);
+                    path.pop_back();
+                }
+            };
+            walk(doc.scene().objects);
+            if (most) {
+                doc.select(best);
+                st.frameRequest = true;
+            }
+        }
+    }
+
     // World streaming: one switch, everything else is worked out by the export.
     {
         const float stop = y;
@@ -3587,9 +3615,8 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                    "Sound samples, placed the way psxsplash uploads them.") +
              space::xl;
         x += meter("m_ram", ImVec2(x, bar.Min.y), icon::hardDrive, "RAM", r.fraction(), rs.c_str(),
-                   "Scene data, the renderer's buffers, its visible-triangle list and the world streaming slots in "
-                   "psxsplash's heap, at the peak of loading. "
-                   "Lua's own allocations are not counted.") +
+                   "Scene data, the renderer's buffers, its visible-triangle list, the world streaming slots and what "
+                   "psxsplash and Lua allocate for each object, in psxsplash's heap at the peak of loading.") +
              space::xl;
         x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,
                    "Triangles in the exported meshes. How many are drawn depends on the camera.") +

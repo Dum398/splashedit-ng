@@ -59,6 +59,9 @@ struct ExportStats {
     // (Renderer::ReserveVisibleTriangles).
     uint32_t bvhTriangleRefs = 0;
     size_t visibleListBytes() const { return 4 * size_t(bvhTriangleRefs); }
+    // Game objects in the file, streaming's cut pieces included. psxsplash
+    // allocates per object when the scene loads (objectLoadBytes, budget.hh).
+    int gameObjects = 0;
 
     // World streaming (SceneSettings::streamWorld). All zero when the scene
     // does not stream. Distances and bounds are PS1 fixed point (4096 = one

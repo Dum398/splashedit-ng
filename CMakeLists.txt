@@ -159,6 +159,7 @@ add_executable(splashedit
     src/gl.cpp
     src/ui/brand.cpp
     src/ui/theme.cpp
+    src/ui/splash.cpp
     src/ui/widgets.cpp
     src/viewport/ps1view.cpp
     src/mockup/main_screen.cpp)

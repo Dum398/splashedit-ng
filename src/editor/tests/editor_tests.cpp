@@ -23,6 +23,7 @@
 #include "editor/hardware.hh"
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
+#include "editor/lua_editor.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
@@ -2212,6 +2213,265 @@ void testNavBigWorld() {
 }
 
 // editMany: one undo step over several objects.
+namespace lua = editor::lua;
+
+lua::Tok tokAt(const std::vector<std::string>& lines, int line, int col) {
+    std::vector<std::vector<lua::Token>> toks = lua::tokenize(lines);
+    for (const lua::Token& t : toks[line])
+        if (col >= t.col && col < t.col + t.len) return t.kind;
+    return lua::Tok::Text;
+}
+
+std::vector<std::string> luaLines(const char* text) {
+    lua::Buffer b;
+    b.setText(text);
+    return b.lines();
+}
+
+void testLuaTokenize() {
+    std::vector<std::string> l = luaLines(
+        "local x = Entity.Find(\"Door\") -- find\n"
+        "function onUpdate(self, dt)\n"
+        "  print(42)\n"
+        "  --[[ long\n"
+        "  comment ]] y = 0x1F .. 'open\n"
+        "  local s = [==[ a\n"
+        "  ]==] Input.CROSS = nope.Find\n");
+    using T = lua::Tok;
+    CHECK(tokAt(l, 0, 0) == T::Keyword);
+    CHECK(tokAt(l, 0, 6) == T::Identifier);
+    CHECK(tokAt(l, 0, 8) == T::Operator);
+    CHECK(tokAt(l, 0, 10) == T::Api);        // Entity
+    CHECK(tokAt(l, 0, 17) == T::ApiMember);  // Find
+    CHECK(tokAt(l, 0, 22) == T::String);     // "Door"
+    CHECK(tokAt(l, 0, 31) == T::Comment);
+    CHECK(tokAt(l, 1, 0) == T::Keyword);
+    CHECK(tokAt(l, 1, 9) == T::Function);   // onUpdate, defined
+    CHECK(tokAt(l, 1, 18) == T::Constant);  // self
+    CHECK(tokAt(l, 1, 24) == T::Identifier);
+    CHECK(tokAt(l, 2, 2) == T::Api);  // print
+    CHECK(tokAt(l, 2, 8) == T::Number);
+    CHECK(tokAt(l, 3, 4) == T::Comment);
+    CHECK(tokAt(l, 4, 2) == T::Comment);  // the long comment goes on
+    CHECK(tokAt(l, 4, 13) == T::Identifier);
+    CHECK(tokAt(l, 4, 17) == T::Number);
+    CHECK(tokAt(l, 4, 22) == T::Operator);  // ..
+    CHECK(tokAt(l, 4, 26) == T::Error);     // unfinished 'open
+    CHECK(tokAt(l, 5, 12) == T::String);
+    CHECK(tokAt(l, 6, 2) == T::String);  // the long string goes on
+    CHECK(tokAt(l, 6, 8) == T::Api);
+    CHECK(tokAt(l, 6, 14) == T::ApiMember);
+    CHECK(tokAt(l, 6, 27) == T::Identifier);  // nope.Find: not the API
+    CHECK(lua::columnOf("\tab", 2) == 5);
+    CHECK(lua::byteAt("\tab", 5) == 2);
+}
+
+void testLuaBuffer() {
+    lua::Buffer b;
+    b.setText("if x then\nend");
+    uint64_t start = b.revision();
+    b.moveTo({0, 9});
+    b.newline();
+    CHECK(b.line(1) == "    " && b.cursor() == (lua::Pos{1, 4}));
+    for (char c : std::string("y = 1")) b.insert(std::string(1, c));
+    CHECK(b.line(1) == "    y = 1");
+    CHECK(b.text() == "if x then\n    y = 1\nend");
+    // "y", " ", "=", " ", "1": a word and the spaces after it are one step each.
+    CHECK(b.undo() && b.line(1) == "    y = ");
+    CHECK(b.undo() && b.line(1) == "    y ");
+    CHECK(b.undo() && b.line(1) == "    ");
+    CHECK(b.undo() && b.text() == "if x then\nend" && b.cursor() == (lua::Pos{0, 9}));
+    CHECK(b.revision() == start);
+    CHECK(!b.undo());
+    CHECK(b.redo() && b.redo() && b.line(1) == "    y ");
+    CHECK(b.redo() && b.redo() && b.line(1) == "    y = 1" && !b.redo());
+    // Backspace merges too, and stops at tab stops in the indentation.
+    b.moveTo({1, 9});
+    b.backspace();
+    b.backspace();
+    CHECK(b.line(1) == "    y =");
+    CHECK(b.undo() && b.line(1) == "    y = 1");
+    b.moveTo({1, 4});
+    b.backspace();
+    CHECK(b.line(1) == "y = 1");
+    b.undo();
+    // Selections: typing replaces, Delete removes, multi-line text splits.
+    b.select({0, 3}, {0, 4});
+    b.insert("ready");
+    CHECK(b.line(0) == "if ready then");
+    b.select({0, 0}, {1, 4});
+    CHECK(b.selectedText() == "if ready then\n    ");
+    b.del();
+    CHECK(b.line(0) == "y = 1" && b.lineCount() == 2);
+    b.insert("a\nb\n");
+    CHECK(b.lineCount() == 4 && b.line(2) == "y = 1" && b.cursor() == (lua::Pos{2, 0}));
+    CHECK(b.undo() && b.lineCount() == 2);
+    // A closing line lines up with its opener on Enter.
+    b.setText("function f()\n    x()\n    end");
+    b.moveTo({2, 7});
+    b.newline();
+    CHECK(b.line(2) == "end" && b.line(3) == "" && b.cursor() == (lua::Pos{3, 0}));
+    // Comment toggling and indenting a selection.
+    b.select({0, 0}, {1, 3});
+    b.toggleComment();
+    CHECK(b.line(0) == "-- function f()" && b.line(1) == "--     x()");
+    b.toggleComment();
+    CHECK(b.line(0) == "function f()" && b.line(1) == "    x()");
+    b.select({0, 0}, {1, 3});
+    b.indent();
+    CHECK(b.line(0) == "    function f()" && b.line(1) == "        x()");
+    b.outdent();
+    CHECK(b.line(0) == "function f()");
+    // Find, forward and back, wrapping.
+    b.setText("Foo foo\nfoo");
+    auto hit = b.find("foo", {0, 1}, true, true);
+    CHECK(hit && hit->first == (lua::Pos{0, 4}));
+    hit = b.find("foo", {1, 1}, true, true);
+    CHECK(hit && hit->first == (lua::Pos{0, 4}));
+    hit = b.find("foo", {0, 0}, false, false);
+    CHECK(hit && hit->first == (lua::Pos{1, 0}));
+    CHECK(b.countMatches("foo", false) == 3 && b.countMatches("foo", true) == 2);
+    // Motions.
+    b.setText("local abc = x\n  y");
+    b.moveTo({0, 0});
+    b.move(lua::Buffer::Move::WordRight, false);
+    CHECK(b.cursor() == (lua::Pos{0, 6}));
+    b.move(lua::Buffer::Move::End, true);
+    CHECK(b.selectedText() == "abc = x");
+    b.move(lua::Buffer::Move::Down, false);
+    b.move(lua::Buffer::Move::Home, false);
+    CHECK(b.cursor() == (lua::Pos{1, 2}));
+}
+
+bool hasItem(const lua::Completions& c, const char* label, lua::ItemKind kind) {
+    for (const lua::Completion& i : c.items)
+        if (i.label == label && i.kind == kind) return true;
+    return false;
+}
+
+void testLuaComplete() {
+    std::vector<std::string> l = luaLines(
+        "local health = 3\n"
+        "local function hurt(n) health = health - n end\n"
+        "Ent\n"
+        "Entity.Fi\n"
+        "Input.\n"
+        "hea\n"
+        "-- Ent\n"
+        "function onUp\n"
+        "x = \"Ent\n"
+        "hurt(");
+    using K = lua::ItemKind;
+    lua::Completions c = lua::complete(l, {2, 3});
+    CHECK(c.prefix == "Ent" && c.from == (lua::Pos{2, 0}));
+    CHECK(!c.items.empty() && c.items[0].label == "Entity" && c.items[0].kind == K::ApiTable);
+    c = lua::complete(l, {3, 9});
+    CHECK(!c.items.empty() && c.items[0].label == "Find" && c.items[0].kind == K::ApiFunction);
+    CHECK(!c.items.empty() && c.items[0].api && std::string(c.items[0].api->signature).find("Entity.Find(") == 0);
+    CHECK(hasItem(c, "FindByIndex", K::ApiFunction) && !hasItem(c, "GetPlayer", K::ApiFunction));
+    c = lua::complete(l, {4, 6});
+    CHECK(hasItem(c, "CROSS", K::ApiConstant) && hasItem(c, "IsPressedPlayer1", K::ApiFunction));
+    c = lua::complete(l, {5, 3});
+    CHECK(!c.items.empty() && c.items[0].label == "health" && c.items[0].kind == K::Local);
+    CHECK(!hasItem(c, "hea", K::Local));
+    CHECK(hasItem(lua::complete(l, {1, 23}, true), "hurt", K::Function));  // Ctrl+Space, nothing typed
+    CHECK(lua::complete(l, {6, 6}).items.empty());  // in a comment
+    CHECK(lua::complete(l, {8, 8}).items.empty());  // in a string
+    c = lua::complete(l, {7, 13});
+    CHECK(!c.items.empty() && c.items[0].label == "onUpdate" && c.items[0].kind == K::Callback);
+    CHECK(lua::complete(l, {2, 0}).items.empty());  // nothing typed yet
+    // Signature hint inside a call.
+    lua::Lookup call = lua::callAt(l, {9, 5});
+    CHECK(call.def && call.def->name == "hurt" && call.def->signature == "function hurt(n)" && call.arg == 0);
+    call = lua::callAt(luaLines("Entity.SetPosition(self, "), {0, 25});
+    CHECK(call.api && std::string(call.api->name) == "SetPosition" && call.arg == 1);
+}
+
+void testLuaDefinitions() {
+    std::vector<std::string> l = luaLines(
+        "local speed = 4\n"                      // 0
+        "local function step(self, dt)\n"        // 1
+        "  return speed * dt\n"                   // 2
+        "end\n"                                   // 3
+        "function onUpdate(self, dt)\n"          // 4
+        "  local speed = step(self, dt)\n"       // 5
+        "  helper(speed)\n"                       // 6
+        "  Entity.SetPosition(self, speed)\n"    // 7
+        "end\n"                                   // 8
+        "function helper(v) print(v) end\n");     // 9
+    lua::Lookup r = lua::lookup(l, {5, 17});  // step(
+    CHECK(r.def && r.def->pos == (lua::Pos{1, 15}) && r.def->kind == lua::DefKind::LocalFunction);
+    CHECK(r.def && r.def->signature == "function step(self, dt)");
+    r = lua::lookup(l, {2, 10});  // speed in step: the file-level local
+    CHECK(r.def && r.def->pos.line == 0);
+    r = lua::lookup(l, {6, 10});  // speed after the shadowing local
+    CHECK(r.def && r.def->pos.line == 5);
+    r = lua::lookup(l, {6, 3});  // helper, defined below
+    CHECK(r.def && r.def->pos == (lua::Pos{9, 9}) && r.def->kind == lua::DefKind::Function);
+    r = lua::lookup(l, {7, 12});  // Entity.SetPosition
+    CHECK(!r.def && r.api && std::string(r.api->table) == "Entity" && std::string(r.api->name) == "SetPosition");
+    CHECK(r.start == (lua::Pos{7, 9}) && r.end == (lua::Pos{7, 20}));
+    r = lua::lookup(l, {9, 20});  // print
+    CHECK(!r.def && r.api && std::string(r.api->name) == "print");
+    r = lua::lookup(l, {3, 1});  // end
+    CHECK(!r.def && !r.api);
+}
+
+void testLuaCheck() {
+    lua::Diagnostic d = lua::check("local a = 1\nlocal b = = 2\nreturn a\n");
+    CHECK(!d.ok() && d.line == 1);
+    CHECK(d.message.find("unexpected symbol") != std::string::npos);
+    d = lua::check("function f()\n  if x then\n    y()\n  end\n");
+    CHECK(!d.ok() && d.line == 3 && d.message.find("'end' expected") != std::string::npos);
+    CHECK(lua::check("").ok());
+    std::ifstream in(std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "tests/lua/game_script.lua", std::ios::binary);
+    std::string src((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(!src.empty() && lua::check(src).ok());
+    // The script re-checks only when its text changed.
+    lua::Script s;
+    s.buffer.setText("x = 1");
+    CHECK(s.diagnose().ok());
+    s.buffer.moveTo({0, 5});
+    s.buffer.insert(" +");
+    CHECK(!s.diagnose().ok() && s.diagnostic().line == 0);
+    s.buffer.undo();
+    CHECK(s.diagnose().ok());
+}
+
+void testLuaScriptFile() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "lua-editor";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    const fs::path file = dir / "scripts" / "door.lua";
+    lua::Script s;
+    std::string err;
+    CHECK(s.open(file, &err) && s.buffer.text().empty());
+    CHECK(s.dirty() && s.title() == "door.lua");  // not on disk yet
+    s.buffer.insert("function onCreate(self)\nend\n");
+    CHECK(s.save(&err) && !s.dirty());
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    CHECK(slurp(file) == "function onCreate(self)\nend\n");
+    s.buffer.moveTo({1, 3});
+    s.buffer.insert(" -- done");
+    CHECK(s.dirty());
+    s.buffer.undo();
+    CHECK(!s.dirty());  // back to what is on disk
+    s.buffer.redo();
+    CHECK(s.dirty() && s.save(&err) && slurp(file) == "function onCreate(self)\nend -- done\n");
+    // CRLF files stay CRLF.
+    const fs::path crlf = dir / "crlf.lua";
+    { std::ofstream(crlf, std::ios::binary) << "a = 1\r\nb = 2\r\n"; }
+    lua::Script c;
+    CHECK(c.open(crlf, &err) && !c.dirty() && c.buffer.lineCount() == 3 && c.buffer.line(1) == "b = 2");
+    c.buffer.moveTo({1, 5});
+    c.buffer.insert("0");
+    CHECK(c.save(&err) && slurp(crlf) == "a = 1\r\nb = 20\r\n");
+}
+
 void testEditMany() {
     editor::Document d;
     d.reset(sample());
@@ -2248,6 +2508,12 @@ int main(int argc, char** argv) {
     testWorldStreamExport();
     testNavBigWorld();
     testEditMany();
+    testLuaTokenize();
+    testLuaBuffer();
+    testLuaComplete();
+    testLuaDefinitions();
+    testLuaCheck();
+    testLuaScriptFile();
     testLiveExport();
     testPlay();
     testProject();

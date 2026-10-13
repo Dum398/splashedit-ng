@@ -31,6 +31,7 @@
 #include "editor/project.hh"
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
+#include "editor/timeline.hh"
 #include "editor/unirom.hh"
 #include "budget.hh"
 #include "navregion.hh"
@@ -2725,6 +2726,194 @@ void testClipboard() {
     CHECK(s && *s == editor::ObjectPath({2}) && d.object({2})->name == "B" && d.object({2, 0}));
 }
 
+// Timeline model: every edit one undo step, keys kept sorted, and sampling
+// matching psxsplash's interpolation.cpp.
+bool near3(const editor::KeyValue& v, float x, float y, float z) {
+    return std::fabs(v[0] - x) < 1e-4f && std::fabs(v[1] - y) < 1e-4f && std::fabs(v[2] - z) < 1e-4f;
+}
+
+splash::CutsceneTrack trackOf(splash::TrackType type, std::initializer_list<std::pair<int, float>> keys,
+                              splash::Interp interp = splash::Interp::Linear) {
+    splash::CutsceneTrack t;
+    t.type = type;
+    t.target = "A";
+    for (auto [f, v] : keys) {
+        splash::Keyframe k;
+        k.frame = f;
+        k.value = {v, 2 * v, 0};
+        k.interp = interp;
+        t.keyframes.push_back(k);
+    }
+    return t;
+}
+
+void testTimelineSample() {
+    using splash::Interp;
+    using splash::TrackType;
+    // Curves, as psxsplash's applyCurve at 0.12 fixed point.
+    CHECK(editor::applyCurve(0.25f, Interp::Linear) == 0.25f);
+    CHECK(editor::applyCurve(0.75f, Interp::Step) == 0.0f);
+    CHECK(std::fabs(editor::applyCurve(0.5f, Interp::EaseIn) - 0.25f) < 1e-6f);
+    CHECK(std::fabs(editor::applyCurve(0.5f, Interp::EaseOut) - 0.75f) < 1e-6f);
+    CHECK(std::fabs(editor::applyCurve(0.25f, Interp::EaseInOut) - 0.15625f) < 1e-6f);
+    for (Interp m : {Interp::Linear, Interp::EaseIn, Interp::EaseOut, Interp::EaseInOut})
+        CHECK(std::fabs(editor::applyCurve(1.0f, m) - 1.0f) < 1e-6f && editor::applyCurve(0.0f, m) == 0.0f);
+
+    // Linear between keys; holds after the last; the first key from frame 0.
+    splash::CutsceneTrack lin = trackOf(TrackType::ObjectPosition, {{0, 0}, {10, 10}, {20, 30}});
+    CHECK(near3(editor::sample(lin, 5), 5, 10, 0));
+    CHECK(near3(editor::sample(lin, 15), 20, 40, 0));
+    CHECK(near3(editor::sample(lin, 10), 10, 20, 0));
+    CHECK(near3(editor::sample(lin, 7.5f), 7.5f, 15, 0));  // sub-frame
+    CHECK(near3(editor::sample(lin, 99), 30, 60, 0));
+    CHECK(near3(editor::sample(lin, 0), 0, 0, 0));
+
+    // A segment takes the later key's curve: Step on key 1 holds key 0 up to it.
+    splash::CutsceneTrack st = lin;
+    st.keyframes[1].interp = Interp::Step;
+    CHECK(near3(editor::sample(st, 9), 0, 0, 0));
+    CHECK(near3(editor::sample(st, 10), 10, 20, 0));
+    CHECK(near3(editor::sample(st, 15), 20, 40, 0));  // key 2 is still linear
+    splash::CutsceneTrack ease = lin;
+    ease.keyframes[1].interp = Interp::EaseIn;
+    CHECK(near3(editor::sample(ease, 5), 2.5f, 5, 0));
+    ease.keyframes[1].interp = Interp::EaseOut;
+    CHECK(near3(editor::sample(ease, 5), 7.5f, 15, 0));
+
+    // Before a first key past frame 0: blend from the initial state with its curve.
+    splash::CutsceneTrack late = trackOf(TrackType::ObjectPosition, {{10, 10}, {20, 20}});
+    CHECK(near3(editor::sample(late, 5, {0, 0, 4}), 5, 10, 2));
+    CHECK(near3(editor::sample(late, 0, {0, 0, 4}), 0, 0, 4));
+    late.keyframes[0].interp = Interp::Step;
+    CHECK(near3(editor::sample(late, 9, {1, 1, 1}), 1, 1, 1));
+    // Unsorted keys sample as the pack sorts them.
+    splash::CutsceneTrack shuffled = trackOf(TrackType::ObjectPosition, {{20, 30}, {0, 0}, {10, 10}});
+    CHECK(near3(editor::sample(shuffled, 15), 20, 40, 0));
+    // No keys: the target is left as it was.
+    CHECK(near3(editor::sample(trackOf(TrackType::ObjectPosition, {}), 3, {7, 8, 9}), 7, 8, 9));
+
+    // On/off tracks hold the last key at or before the whole frame; initial before the first.
+    splash::CutsceneTrack act = trackOf(TrackType::ObjectActive, {{5, 1}, {10, 0}});
+    CHECK(editor::sample(act, 4.9f, {0, 0, 0})[0] == 0);
+    CHECK(editor::sample(act, 5, {0, 0, 0})[0] == 1);
+    CHECK(editor::sample(act, 9.9f)[0] == 1);
+    CHECK(editor::sample(act, 10)[0] == 0);
+    CHECK(editor::sample(trackOf(TrackType::RumbleSmall, {{0, 1}}), 3)[0] == 1);
+    // ...and the large motor interpolates.
+    CHECK(std::fabs(editor::sample(trackOf(TrackType::RumbleLarge, {{0, 0}, {10, 200}}), 5)[0] - 100) < 1e-4f);
+    CHECK(editor::isDiscrete(TrackType::LightEnabled) && !editor::isDiscrete(TrackType::LightIntensity));
+}
+
+void testTimelineEdit() {
+    using splash::Interp;
+    using splash::TrackType;
+    splash::Scene sc;
+    sc.objects.push_back(named("Crate", 3));
+    splash::Cutscene cs;
+    cs.name = "intro";
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    CHECK(editor::valid(d, ref) && !editor::valid(d, {editor::SeqKind::Animation, 0}));
+    CHECK(editor::seqLength(d, ref) == 90 && *editor::seqName(d, ref) == "intro");
+
+    // Tracks: one undo step each; duplicates, missing targets and camera tracks in animations refused.
+    size_t h = d.historySize();
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectPosition, "Crate") == 0);
+    CHECK(d.historySize() == h + 1 && d.dirty());
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectPosition, "Crate") == -1);
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectRotation, "") == -1);
+    CHECK(editor::addTrack(d, ref, TrackType::CameraPosition, "ignored") == 1);
+    CHECK(editor::seqTracks(d, ref)->at(1).target.empty());
+    CHECK(editor::trackLabel(editor::seqTracks(d, ref)->at(0)) == "Crate: Position");
+    CHECK(editor::trackLabel(editor::seqTracks(d, ref)->at(1)) == "Camera: Position");
+    CHECK(d.historySize() == h + 2);
+    CHECK(d.undo() && editor::seqTracks(d, ref)->size() == 1);
+    for (int i = 0; i < 7; ++i) CHECK(editor::addTrack(d, ref, TrackType::ObjectActive, "o" + std::to_string(i)) == i + 1);
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectActive, "ninth") == -1);  // 8 tracks at most
+    for (int i = 0; i < 7; ++i) CHECK(editor::removeTrack(d, ref, 1));
+    CHECK(!editor::removeTrack(d, ref, 5));
+    CHECK(editor::seqTracks(d, ref)->size() == 1);
+
+    // Keys: added sorted; with no value they take the sampled one (the object's
+    // world position before any key), so adding one leaves the motion as it was.
+    h = d.historySize();
+    auto k0 = editor::addKey(d, ref, 0, 30);
+    CHECK(k0 && *k0 == (editor::KeyRef{0, 0}));
+    CHECK(near3(editor::key(d, ref, *k0)->value, 3, 0, 0));
+    CHECK(editor::addKey(d, ref, 0, 0, editor::KeyValue{0, 0, 0}) == (editor::KeyRef{0, 0}));
+    CHECK(editor::addKey(d, ref, 0, 60, editor::KeyValue{6, 0, 0}) == (editor::KeyRef{0, 2}));
+    CHECK(!editor::addKey(d, ref, 0, 60));  // the frame has a key
+    CHECK(!editor::addKey(d, ref, 3, 10));  // no such track
+    CHECK(d.historySize() == h + 3);
+    auto added = editor::addKey(d, ref, 0, 45);
+    CHECK(added && near3(editor::key(d, ref, *added)->value, 4.5f, 0, 0));  // between 3 at 30 and 6 at 60
+    CHECK(d.undo() && editor::seqTracks(d, ref)->at(0).keyframes.size() == 3);
+    CHECK(editor::addKey(d, ref, 0, 99999, editor::KeyValue{1, 1, 1})->key == 3);
+    CHECK(editor::seqTracks(d, ref)->at(0).keyframes.back().frame == editor::kMaxTimelineFrame);
+    CHECK(d.undo());
+
+    // Move: re-sorts and reports the new addresses; collisions and range refused.
+    auto moved = editor::moveKeys(d, ref, {{0, 0}}, 40);  // 0 -> 40, past the key at 30
+    CHECK(moved && moved->size() == 1 && (*moved)[0] == (editor::KeyRef{0, 1}));
+    CHECK(editor::seqTracks(d, ref)->at(0).keyframes[0].frame == 30);
+    CHECK(editor::seqTracks(d, ref)->at(0).keyframes[1].frame == 40);
+    CHECK(!editor::moveKeys(d, ref, {{0, 1}}, 20));  // onto 60
+    CHECK(!editor::moveKeys(d, ref, {{0, 0}}, -31));  // below frame 0
+    CHECK(editor::moveKeys(d, ref, {{0, 1}, {0, 2}}, 20));  // both move: 40->60 is free while 60 moves
+    CHECK(editor::seqTracks(d, ref)->at(0).keyframes[2].frame == 80);
+    CHECK(d.undo() && d.undo() && editor::seqTracks(d, ref)->at(0).keyframes[0].frame == 0);
+
+    // A drag merges into one step until endMerge.
+    editor::KeyRef drag{0, 1};
+    for (int i = 0; i < 5; ++i) {
+        auto r = editor::moveKeys(d, ref, {drag}, 1, "drag");
+        CHECK(r.has_value());
+        if (r) drag = (*r)[0];
+    }
+    d.endMerge();
+    // One step: nothing to redo after it, and one undo takes the whole drag back.
+    CHECK(!d.canRedo() && editor::key(d, ref, drag)->frame == 35);
+    CHECK(d.undo() && editor::seqTracks(d, ref)->at(0).keyframes[1].frame == 30);
+
+    // Value, curve and length.
+    CHECK(editor::setKeyValue(d, ref, {0, 1}, {1, 2, 3}));
+    CHECK(!editor::setKeyValue(d, ref, {0, 1}, {1, 2, 3}));  // no change, no step
+    CHECK(editor::setKeyInterp(d, ref, {0, 1}, Interp::EaseInOut));
+    CHECK(editor::key(d, ref, {0, 1})->interp == Interp::EaseInOut);
+    CHECK(editor::setLength(d, ref, 120) && editor::seqLength(d, ref) == 120);
+    CHECK(editor::setLength(d, ref, 0) && editor::seqLength(d, ref) == 1);
+    CHECK(d.undo() && d.undo() && editor::seqLength(d, ref) == 90);
+    CHECK(d.undo() && editor::key(d, ref, {0, 1})->interp == Interp::Linear);
+    CHECK(d.undo() && near3(editor::key(d, ref, {0, 1})->value, 3, 0, 0));
+
+    // Delete several at once, one step.
+    CHECK(editor::deleteKeys(d, ref, {{0, 0}, {0, 2}, {0, 9}}) == 2);
+    CHECK(editor::seqTracks(d, ref)->at(0).keyframes.size() == 1);
+    CHECK(editor::seqTracks(d, ref)->at(0).keyframes[0].frame == 30);
+    CHECK(d.undo() && editor::seqTracks(d, ref)->at(0).keyframes.size() == 3);
+    CHECK(editor::deleteKeys(d, ref, {}) == 0 && d.canRedo());  // refused: the redo is still there
+
+    // Sequences: unique names; animations refuse camera tracks.
+    auto anim = editor::addSequence(d, editor::SeqKind::Animation, "spin");
+    CHECK(anim && anim->index == 0 && d.scene().animations.size() == 1);
+    CHECK(editor::addTrack(d, *anim, TrackType::CameraRotation, "") == -1);
+    CHECK(editor::addTrack(d, *anim, TrackType::ObjectRotation, "Crate") == 0);
+    auto again = editor::addSequence(d, editor::SeqKind::Cutscene, "intro");
+    CHECK(again && *editor::seqName(d, *again) == "intro (2)");
+    CHECK(editor::allSequences(d).size() == 3);
+    CHECK(d.undo() && d.undo() && d.undo() && d.scene().animations.empty());
+
+    // The edits survive a save and load.
+    const std::filesystem::path dir = g_outDir / "timeline";
+    std::filesystem::create_directories(dir);
+    splash::saveScene(d.scene(), dir / "t.scene");
+    splash::Scene back = splash::loadScene(dir / "t.scene");
+    CHECK(back.cutscenes.size() == 1 && back.cutscenes[0].tracks.size() == 1);
+    CHECK(back.cutscenes[0].tracks[0].keyframes.size() == 3 && back.cutscenes[0].tracks[0].keyframes[2].frame == 60);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -2749,6 +2938,8 @@ int main(int argc, char** argv) {
     testWorldStreamExport();
     testNavBigWorld();
     testEditMany();
+    testTimelineSample();
+    testTimelineEdit();
     testLuaTokenize();
     testLuaBuffer();
     testLuaComplete();

@@ -81,6 +81,7 @@ add_library(splasheditdoc STATIC
     src/editor/play.cpp
     src/editor/project.cpp
     src/editor/serial.cpp
+    src/editor/timeline.cpp
     src/editor/hardware.cpp
     src/editor/psxmon.cpp
     src/editor/unirom.cpp)

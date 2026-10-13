@@ -45,7 +45,12 @@ FetchContent_Declare(cgltf
     GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
     GIT_TAG 360db1a95480fe102ae9c69b27c5d101167ff5ba
     SOURCE_SUBDIR none)
-FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf)
+# ufbx reads FBX and OBJ (with MTL) for model import.
+FetchContent_Declare(ufbx
+    GIT_REPOSITORY https://github.com/ufbx/ufbx.git
+    GIT_TAG 26a482ae66871d7de36eb722aa060bce95bce274
+    SOURCE_SUBDIR none)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf ufbx)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 

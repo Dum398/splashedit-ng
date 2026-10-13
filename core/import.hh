@@ -2,6 +2,7 @@
 // into a project .mesh plus the PNG textures its materials use.
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -32,8 +33,44 @@ struct ImportedModel {
     std::vector<std::string> warnings;
 };
 
+// How a model is imported, kept per model file in a sidecar beside it (see
+// importSettingsPath), the way Unity keeps a model's import settings.
+enum class UpAxis : uint8_t { File, YUp, ZUp };
+enum class Normals : uint8_t { Import, Recompute };
+struct ImportSettings {
+    float scale = 1;  // multiplies every position and node translation
+    // File: the axes the file declares. YUp, ZUp: the data is taken as
+    // right-handed Y up (+Z front) or Z up (-Y front) whatever the file says.
+    UpAxis up = UpAxis::File;
+    // Recompute: every corner gets the average of the face normals around its
+    // position that are within smoothingAngle degrees of its own face's, so a
+    // sharper edge stays hard. Import: the file's normals, flat where it has none.
+    Normals normals = Normals::Import;
+    float smoothingAngle = 60;
+    // Objects the editor makes from the model: one object drawing the baked
+    // mesh instead of the node tree, and these on each mesh component.
+    bool mergeMeshes = false;
+    BitDepth bitDepth = MeshComponent{}.bitDepth;
+    DynamicLighting lighting = MeshComponent{}.dynamicLighting;
+    // Absolute path of the file the model was copied into the project from;
+    // empty when it was in the project already.
+    std::string source;
+    ExtraKeys extra;
+};
+
+// models/crate.fbx -> models/crate.fbx.import.json
+std::filesystem::path importSettingsPath(const std::filesystem::path& model);
+// The settings in `model`'s sidecar, the defaults when it has none. Throws
+// std::runtime_error when the sidecar cannot be read.
+ImportSettings loadImportSettings(const std::filesystem::path& model);
+// Writes `model`'s sidecar. Throws std::runtime_error on failure.
+void saveImportSettings(const std::filesystem::path& model, const ImportSettings& settings);
+
 // File extensions importModel reads, lower case with the dot.
 bool canImportModel(const std::filesystem::path& file);
+
+// The name importModel writes `file`'s outputs under: models/<name>.mesh.
+std::string importName(const std::filesystem::path& file);
 
 // Reads `source` and writes models/<stem>.mesh and models/<stem>_<n>.png into
 // `project`, replacing earlier imports of the same name. Every mesh node of
@@ -50,7 +87,13 @@ bool canImportModel(const std::filesystem::path& file);
 // file, then the bare name in the model's folder and its textures/tex/
 // materials folders (one not found is a warning, not an error). Textures
 // larger than 256 texels on a side are scaled down to fit.
+// `settings` then apply in the .mesh space: an up axis other than File turns
+// the model (Z up: -90 degrees about X, so +Z becomes +Y), scale multiplies
+// every position and node translation, and Recompute replaces the normals.
+// The outputs are named after `as` (see importName) when it is given, so a
+// model read from where it was dropped is named after its copy in the project.
 // Throws std::runtime_error with a message for the user.
-ImportedModel importModel(const std::filesystem::path& source, const std::filesystem::path& project);
+ImportedModel importModel(const std::filesystem::path& source, const std::filesystem::path& project,
+                          const ImportSettings& settings = {}, const std::filesystem::path& as = {});
 
 }  // namespace splash

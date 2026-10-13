@@ -6,8 +6,10 @@
 # conversion worked out independently: X mirrored, winding reversed so every
 # triangle's cross product points along its normal (as in the bundled
 # courtyard meshes), V flipped, node transforms baked, colours read, textures
-# written unflipped, large textures scaled to 256. Then exports a scene that
-# uses the import.
+# written unflipped, large textures scaled to 256. Then the import settings:
+# scale, an up axis set for glTF, FBX and OBJ, normals recomputed on a cube at
+# two smoothing angles, and a sidecar beside the source. Then exports a scene
+# that uses the import.
 # usage: python3 importcheck.py <splashpack-cli>
 import json, math, os, struct, subprocess, sys, tempfile, zlib, base64
 
@@ -498,6 +500,148 @@ scene = {'format': 'splashedit-ng/scene', 'version': 1, 'settings': {'gteScaling
 json.dump(scene, open(os.path.join(proj, 'i.scene'), 'w'))
 r = run('export', os.path.join(proj, 'i.scene'), '-o', os.path.join(tmp, 'i.splashpack'))
 check('a scene using the imports exports', r.returncode == 0, r.stderr)
+
+# 7. Import settings, each against the conversion worked out here: the .glb of
+# section 1 (glTF world w = 2 * quad + (1, 2, 3), facing +Z) scaled and turned,
+# the FBX and OBJ given an up axis of their own, a cube's normals recomputed,
+# and a sidecar beside the source picked up by the CLI.
+sproj = os.path.join(tmp, 'settings')
+os.makedirs(sproj)
+glb = os.path.join(tmp, 'Sign Post.glb')
+world = [(2 * x + 1, 2 * y + 2, 2 * z + 3) for x, y, z in quad]
+
+
+def positions(m):
+    return [tuple(m['positions'][i:i + 3]) for i in range(0, len(m['positions']), 3)]
+
+
+def close(a, b, eps=1e-5):
+    return len(a) == len(b) and all(abs(x - y) < eps for p, q in zip(a, b) for x, y in zip(p, q))
+
+
+r = run('import', glb, '--project', sproj, '--scale', '2')
+m = json.load(open(os.path.join(sproj, 'models', 'Sign_Post.mesh')))
+check('scale 2: every position doubles', close(positions(m), [(-2 * x, 2 * y, 2 * z) for x, y, z in world]), positions(m))
+nodes = nodes_of(r.stdout)
+check('scale 2: node translation doubles, node scale kept',
+      len(nodes) == 1 and close([nodes[0]['pos'], nodes[0]['scale']], [(-2, 4, 6), (2, 2, 2)]), nodes)
+ok, why = composes(sproj, nodes, m)
+check('scale 2: node transform over node mesh gives the baked mesh', ok, why)
+
+# Z up: the file is turned -90 degrees about X before the conversion, glTF
+# (x, y, z) -> (x, z, -y), then X mirrored. The quad faced +Z, so it now faces +Y.
+r = run('import', glb, '--project', sproj, '--up', 'z')
+m = json.load(open(os.path.join(sproj, 'models', 'Sign_Post.mesh')))
+check('up z (glTF): positions turned (x, y, z) -> (-x, z, -y)', close(positions(m), [(-x, z, -y) for x, y, z in world]), positions(m))
+check('up z (glTF): normals turned from +Z to +Y', close(positions({'positions': m['normals']}), [(0, 1, 0)] * 4), m['normals'])
+tris = [m['submeshes'][0][t:t + 3] for t in range(0, 6, 3)]
+check('up z (glTF): winding still along the normal', all(crossdot(m, t) > 0 for t in tris), tris)
+nodes = nodes_of(r.stdout)
+h = math.sqrt(0.5)
+check('up z (glTF): the top node is turned, rotation (-sqrt(1/2), 0, 0, sqrt(1/2)), position (-1, 3, -2)',
+      len(nodes) == 1 and close([nodes[0]['rot'], nodes[0]['pos']], [(-h, 0, 0, h), (-1, 3, -2)]), nodes)
+ok, why = composes(sproj, nodes, m)
+check('up z (glTF): node transform over node mesh gives the baked mesh', ok, why)
+r = run('import', glb, '--project', sproj, '--up', 'y')
+m = json.load(open(os.path.join(sproj, 'models', 'Sign_Post.mesh')))
+check('up y (glTF): as the file says', close(positions(m), [(-x, y, z) for x, y, z in world]), positions(m))
+
+# The FBX says Z up. Taken as Y up its quad lies flat (only centimetres
+# converted); taken as Z up it stands as it does when the file is believed.
+fbx = os.path.join(fbxdir, 'Wall.fbx')
+r = run('import', fbx, '--project', sproj, '--up', 'y')
+m = json.load(open(os.path.join(sproj, 'models', 'Wall.mesh')))
+got = {tuple(round(c, 4) + 0.0 for c in p) for p in positions(m)}
+check('up y (FBX declaring Z up): the file axes are ignored, the quad lies flat',
+      got == {(0, 0, 0), (-1, 0, 0), (-1, 0, 1), (0, 0, 1)}, got)
+check('up y (FBX): normals -Y as in the file', all(abs(m['normals'][i + 1] + 1) < 1e-5 for i in range(0, len(m['normals']), 3)), m['normals'])
+ok, why = composes(sproj, nodes_of(r.stdout), m)
+check('up y (FBX): node transform over node mesh gives the baked mesh', ok, why)
+r = run('import', fbx, '--project', sproj, '--up', 'z')
+m = json.load(open(os.path.join(sproj, 'models', 'Wall.mesh')))
+got = {tuple(round(c, 4) + 0.0 for c in p) for p in positions(m)}
+check('up z (FBX declaring Z up): the same as the file', got == {(0, 0, 0), (-1, 0, 0), (-1, 1, 0), (0, 1, 0)}, got)
+ok, why = composes(sproj, nodes_of(r.stdout), m)
+check('up z (FBX): node transform over node mesh gives the baked mesh', ok, why)
+r = run('import', os.path.join(objdir, 'brick wall.obj'), '--project', sproj, '--up', 'z')
+m = json.load(open(os.path.join(sproj, 'models', 'brick_wall.mesh')))
+got = {tuple(round(c, 5) + 0.0 for c in p) for p in positions(m)}
+check('up z (OBJ): positions turned (x, y, z) -> (-x, z, -y)', got == {(-x + 0.0, z + 0.0, -y + 0.0) for x, y, z in oquad}, got)
+check('up z (OBJ): normals +Y', all(abs(m['normals'][i + 1] - 1) < 1e-5 for i in range(0, len(m['normals']), 3)), m['normals'])
+
+# A cube of 8 shared corners, every normal in the file pointing up (wrong).
+# Recompute at 60 degrees: the 90-degree edges stay hard, each corner of a
+# side gets that side's normal (24 vertices). At 120 they are smoothed: each
+# corner gets the average of its three sides, its position over sqrt(3) (8 vertices).
+corners = [(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)]
+cidx = []
+for axis in range(3):
+    for sign in (-1, 1):
+        f = [i for i, c in enumerate(corners) if c[axis] == sign]
+        a, b, c, d = f[0], f[1], f[3], f[2]  # around the side
+        u = [corners[b][k] - corners[a][k] for k in range(3)]
+        v = [corners[c][k] - corners[a][k] for k in range(3)]
+        cr = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+        if cr[axis] * sign < 0: b, d = d, b  # counter-clockwise seen from outside
+        cidx += [a, b, c, a, c, d]
+g = Gltf()
+g.mesh([{'attributes': {'POSITION': g.acc('f', 5126, 'VEC3', corners), 'NORMAL': g.acc('f', 5126, 'VEC3', [(0, 1, 0)] * 8)},
+         'indices': g.acc('H', 5123, 'SCALAR', cidx)}])
+g.node(mesh=0)
+g.glb(os.path.join(tmp, 'cube.glb'))
+r = run('import', os.path.join(tmp, 'cube.glb'), '--project', sproj)
+m = json.load(open(os.path.join(sproj, 'models', 'cube.mesh')))
+check('cube, normals imported: kept as the file has them', all(m['normals'][i:i + 3] == [0, 1, 0] for i in range(0, len(m['normals']), 3)), m['normals'])
+
+
+def cube_normals(m):  # (position, normal) of every corner of every triangle
+    out = []
+    for s in m['submeshes']:
+        for t in range(0, len(s), 3):
+            tri = s[t:t + 3]
+            P = [m['positions'][3 * i:3 * i + 3] for i in tri]
+            u = [P[1][k] - P[0][k] for k in range(3)]
+            v = [P[2][k] - P[0][k] for k in range(3)]
+            cr = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+            l = math.sqrt(sum(c * c for c in cr))
+            for i in tri: out.append((m['positions'][3 * i:3 * i + 3], m['normals'][3 * i:3 * i + 3], [c / l for c in cr]))
+    return out
+
+
+r = run('import', os.path.join(tmp, 'cube.glb'), '--project', sproj, '--normals', 'recompute', '--smoothing', '60')
+m = json.load(open(os.path.join(sproj, 'models', 'cube.mesh')))
+cn = cube_normals(m)
+check('cube, recompute at 60: every corner has its side\'s normal (hard edges)',
+      len(cn) == 36 and all(close([n], [f]) for p, n, f in cn), cn[:6])
+check('cube, recompute at 60: 24 vertices, one per corner of each side', len(m['positions']) == 24 * 3, len(m['positions']) // 3)
+r = run('import', os.path.join(tmp, 'cube.glb'), '--project', sproj, '--normals', 'recompute', '--smoothing', '120')
+m = json.load(open(os.path.join(sproj, 'models', 'cube.mesh')))
+cn = cube_normals(m)
+s3 = 1 / math.sqrt(3)
+check('cube, recompute at 120: every corner has its position over sqrt(3) (smooth)',
+      len(cn) == 36 and all(close([n], [[c * s3 for c in p]]) for p, n, f in cn), cn[:6])
+check('cube, recompute at 120: 8 vertices', len(m['positions']) == 8 * 3, len(m['positions']) // 3)
+# Without normals in the file, Recompute replaces the flat shading too.
+r = run('import', os.path.join(objdir, 'pair_o.obj'), '--project', sproj, '--normals', 'recompute')
+check('recompute on an OBJ exits 0', r.returncode == 0, r.stderr)
+
+# A sidecar beside the source sets the defaults; the flags win over it.
+side = glb + '.import.json'
+json.dump({'scale': 3, 'up': 'file', 'normals': 'import', 'mergeMeshes': True, 'futureKey': 1}, open(side, 'w'))
+r = run('import', glb, '--project', sproj)
+m = json.load(open(os.path.join(sproj, 'models', 'Sign_Post.mesh')))
+check('CLI reads the sidecar beside the source: scale 3', r.returncode == 0 and
+      close(positions(m), [(-3 * x, 3 * y, 3 * z) for x, y, z in world]) and 'settings scale 3 up file normals import smoothing 60 merge yes' in r.stdout,
+      r.stdout + r.stderr)
+r = run('import', glb, '--project', sproj, '--scale', '0.5')
+m = json.load(open(os.path.join(sproj, 'models', 'Sign_Post.mesh')))
+check('a flag overrides the sidecar', close(positions(m), [(-0.5 * x, 0.5 * y, 0.5 * z) for x, y, z in world]), positions(m))
+json.dump({'up': 'sideways'}, open(side, 'w'))
+r = run('import', glb, '--project', sproj)
+check('a sidecar with a bad value is refused with its name', r.returncode == 1 and 'Sign Post.glb.import.json' in r.stderr, r.stderr)
+os.remove(side)
+r = run('import', glb, '--project', sproj, '--scale', '0')
+check('scale 0 is refused', r.returncode == 1 and 'scale' in r.stderr, r.stderr)
 
 print('%d/%d checks passed' % (checks - fails, checks))
 sys.exit(1 if fails else 0)

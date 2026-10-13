@@ -12,6 +12,9 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <tuple>
+
+#include <nlohmann/json.hpp>
 
 #include "cgltf.h"
 #include "ufbx.h"
@@ -278,16 +281,103 @@ std::string safeName(const std::string& name) {
     return s.empty() ? std::string("node") : s;
 }
 
-// Counts triangles, then writes the textures, the baked .mesh and one .mesh
-// per node with geometry.
-void finishImport(ImportedModel& out, const Sink& baked, std::vector<NodeBuild>& nodes, const std::vector<SourceMaterial>& mats,
-                  const fs::path& source, const fs::path& project) {
+// Normals from the faces: each corner gets the sum of the face normals at its
+// position that are within `degrees` of its own face's, each weighted by the
+// angle its triangle makes there, so a cube corner takes its three sides
+// evenly. Corners holding the same vertex and normal share one vertex.
+void recomputeNormals(Mesh& mesh, float degrees) {
+    std::vector<std::array<int, 3>> tris;
+    for (const std::vector<int>& sm : mesh.submeshes)
+        for (size_t i = 0; i + 2 < sm.size(); i += 3) tris.push_back({sm[i], sm[i + 1], sm[i + 2]});
+    std::vector<Vec3> face(tris.size());
+    std::vector<std::array<float, 3>> angle(tris.size());
+    std::map<std::array<float, 3>, std::vector<std::pair<size_t, int>>> around;  // position -> (triangle, corner)
+    auto key = [&](int v) {
+        const Vec3& p = mesh.positions[size_t(v)];
+        return std::array<float, 3>{p.x + 0.0f, p.y + 0.0f, p.z + 0.0f};  // + 0 turns -0 into 0
+    };
+    for (size_t t = 0; t < tris.size(); t++) {
+        const Vec3 p[3] = {mesh.positions[size_t(tris[t][0])], mesh.positions[size_t(tris[t][1])], mesh.positions[size_t(tris[t][2])]};
+        face[t] = unit(cross(p[1] - p[0], p[2] - p[0]));
+        for (int c = 0; c < 3; c++) {
+            Vec3 a = p[(c + 1) % 3] - p[c], b = p[(c + 2) % 3] - p[c];
+            float la = magnitude(a), lb = magnitude(b);
+            angle[t][size_t(c)] = la > 0 && lb > 0 ? std::acos(std::clamp(dot(a, b) / (la * lb), -1.0f, 1.0f)) : 0.0f;
+            around[key(tris[t][size_t(c)])].push_back({t, c});
+        }
+    }
+    const float limit = float(std::cos(double(degrees) * 3.14159265358979 / 180.0)) - 1e-5f;
+    Mesh out;
+    out.skin = mesh.skin;
+    std::map<std::tuple<int, float, float, float>, int> made;  // (vertex, normal) -> new vertex
+    size_t t = 0;
+    for (std::vector<int>& sm : mesh.submeshes) {
+        std::vector<int> outSm;
+        for (size_t i = 0; i + 2 < sm.size(); i += 3, t++)
+            for (int c = 0; c < 3; c++) {
+                const int v = tris[t][size_t(c)];
+                Vec3 sum{};
+                for (auto [u, cu] : around[key(v)])
+                    if (dot(face[u], face[t]) >= limit) sum = sum + face[u] * angle[u][size_t(cu)];
+                Vec3 n = sqrMagnitude(sum) > 0 ? unit(sum) : face[t];
+                auto [it, fresh] = made.try_emplace({v, n.x, n.y, n.z}, int(out.positions.size()));
+                if (fresh) {
+                    out.positions.push_back(mesh.positions[size_t(v)]);
+                    out.normals.push_back(n);
+                    if (!mesh.uv.empty()) out.uv.push_back(mesh.uv[size_t(v)]);
+                    if (!mesh.colors.empty()) out.colors.push_back(mesh.colors[size_t(v)]);
+                }
+                outSm.push_back(it->second);
+            }
+        out.submeshes.push_back(std::move(outSm));
+    }
+    mesh = std::move(out);
+}
+
+// Quaternion product a * b: b's rotation, then a's.
+Quat mulQuat(Quat a, Quat b) {
+    return {a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y, a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+            a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w, a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+}
+
+// The settings that change geometry, in the .mesh space. Z up turns the model
+// -90 degrees about X, (x, y, z) -> (x, z, -y), which the X mirror leaves as
+// it is: the baked mesh and the top-level nodes turn. The scale multiplies the
+// baked mesh, every node translation and every node mesh, which scales the
+// composed tree by the same amount.
+void applySettings(Sink& baked, std::vector<NodeBuild>& nodes, const ImportSettings& s) {
+    const bool turn = s.up == UpAxis::ZUp;
+    const float k = s.scale;
+    auto turned = [&](Vec3 v) { return turn ? Vec3{v.x, v.z, -v.y + 0.0f} : v; };
+    for (Vec3& p : baked.mesh.positions) p = turned(p) * k;
+    for (Vec3& n : baked.mesh.normals) n = turned(n);
+    const float h = std::sqrt(0.5f);
+    for (NodeBuild& nb : nodes) {
+        if (nb.parent < 0 && turn) {
+            nb.transform.position = turned(nb.transform.position);
+            nb.transform.rotation = mulQuat({-h, 0, 0, h}, nb.transform.rotation);
+        }
+        nb.transform.position = nb.transform.position * k;
+        if (nb.local)
+            for (Vec3& p : nb.local->mesh.positions) p = p * k;
+    }
+    if (s.normals == Normals::Recompute) {
+        recomputeNormals(baked.mesh, s.smoothingAngle);
+        for (NodeBuild& nb : nodes)
+            if (nb.local) recomputeNormals(nb.local->mesh, s.smoothingAngle);
+    }
+}
+
+// Applies the settings, counts triangles, then writes the textures, the baked
+// .mesh and one .mesh per node with geometry, all named after `stem`.
+void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes, const std::vector<SourceMaterial>& mats,
+                  const fs::path& source, const fs::path& project, const ImportSettings& settings, const std::string& stem) {
     const std::string what = projectPath(source.filename());
+    applySettings(baked, nodes, settings);
     const Mesh& mesh = baked.mesh;
     out.triangles = baked.triangles();
     if (out.triangles == 0) fail(what + " has no triangles to import");
 
-    const std::string stem = safeStem(source);
     const fs::path dir = "models";
     std::error_code ec;
     fs::create_directories(project / dir, ec);
@@ -421,7 +511,7 @@ std::optional<std::vector<unsigned char>> textureBytes(const ufbx_texture& t, co
     return std::nullopt;
 }
 
-ImportedModel importGltf(const fs::path& source, const fs::path& project) {
+ImportedModel importGltf(const fs::path& source, const fs::path& project, const ImportSettings& settings, const std::string& stem) {
     const std::string what = projectPath(source.filename());
     cgltf_options opt{};
     cgltf_data* data = nullptr;
@@ -577,16 +667,19 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project) {
         }
         mats.push_back(std::move(sm));
     }
-    finishImport(out, baked, tree, mats, source, project);
+    finishImport(out, baked, tree, mats, source, project, settings, stem);
     return out;
 }
 
-ImportedModel importUfbx(const fs::path& source, const fs::path& project) {
+ImportedModel importUfbx(const fs::path& source, const fs::path& project, const ImportSettings& settings, const std::string& stem) {
     const std::string what = projectPath(source.filename());
     ufbx_load_opts opts{};
     // Let ufbx turn the file's axes and units into glTF's: right-handed, +X
-    // right, +Y up, +Z front, one unit a metre. From there on it is glTF.
-    opts.target_axes = ufbx_axes_right_handed_y_up;
+    // right, +Y up, +Z front, one unit a metre. From there on it is glTF. An
+    // up axis set in the settings stands in for the file's: ufbx then only
+    // converts units, the data is taken as Y up as it is, and Z up is turned
+    // in applySettings like a glTF.
+    if (settings.up == UpAxis::File) opts.target_axes = ufbx_axes_right_handed_y_up;
     opts.target_unit_meters = 1;
     opts.load_external_files = true;  // the .mtl of an .obj
     opts.ignore_missing_external_files = true;
@@ -727,7 +820,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project) {
         }
         mats.push_back(std::move(sm));
     }
-    finishImport(out, baked, tree, mats, source, project);
+    finishImport(out, baked, tree, mats, source, project, settings, stem);
     return out;
 }
 
@@ -738,10 +831,101 @@ bool canImportModel(const fs::path& file) {
     return e == ".gltf" || e == ".glb" || e == ".fbx" || e == ".obj";
 }
 
-ImportedModel importModel(const fs::path& source, const fs::path& project) {
+std::string importName(const fs::path& file) { return safeStem(file); }
+
+ImportedModel importModel(const fs::path& source, const fs::path& project, const ImportSettings& settings, const fs::path& as) {
     if (!canImportModel(source)) fail(projectPath(source.filename()) + ": only .glb, .gltf, .fbx and .obj models can be imported");
+    if (!(settings.scale > 0) || !std::isfinite(settings.scale)) fail("the import scale must be above 0");
     std::string e = lower(projectPath(source.extension()));
-    return e == ".fbx" || e == ".obj" ? importUfbx(source, project) : importGltf(source, project);
+    const std::string stem = safeStem(as.empty() ? source : as);
+    return e == ".fbx" || e == ".obj" ? importUfbx(source, project, settings, stem) : importGltf(source, project, settings, stem);
+}
+
+namespace {
+
+// Same float handling as the scene files.
+using json = nlohmann::basic_json<nlohmann::ordered_map, std::vector, std::string, bool, std::int64_t, std::uint64_t, float>;
+
+const std::pair<const char*, UpAxis> kUpAxes[] = {{"file", UpAxis::File}, {"y", UpAxis::YUp}, {"z", UpAxis::ZUp}};
+const std::pair<const char*, Normals> kNormals[] = {{"import", Normals::Import}, {"recompute", Normals::Recompute}};
+const std::pair<const char*, DynamicLighting> kLighting[] = {
+    {"auto", DynamicLighting::Auto}, {"on", DynamicLighting::On}, {"off", DynamicLighting::Off}, {"smooth", DynamicLighting::Smooth}};
+
+template <typename E, size_t N>
+E enumFrom(const json& j, const std::pair<const char*, E> (&table)[N], const std::string& key) {
+    std::string s = j.get<std::string>();
+    for (auto& [name, value] : table)
+        if (s == name) return value;
+    fail("unknown " + key + " '" + s + "'");
+}
+template <typename E, size_t N>
+const char* enumTo(E v, const std::pair<const char*, E> (&table)[N]) {
+    for (auto& [name, value] : table)
+        if (v == value) return name;
+    return table[0].first;
+}
+
+json settingsJson(const ImportSettings& s) {
+    return {{"scale", s.scale},
+            {"up", enumTo(s.up, kUpAxes)},
+            {"normals", enumTo(s.normals, kNormals)},
+            {"smoothingAngle", s.smoothingAngle},
+            {"mergeMeshes", s.mergeMeshes},
+            {"bitDepth", int(s.bitDepth)},
+            {"lighting", enumTo(s.lighting, kLighting)},
+            {"source", s.source}};
+}
+
+}  // namespace
+
+fs::path importSettingsPath(const fs::path& model) {
+    fs::path p = model;
+    p += ".import.json";
+    return p;
+}
+
+ImportSettings loadImportSettings(const fs::path& model) {
+    ImportSettings s;
+    const fs::path file = importSettingsPath(model);
+    std::error_code ec;
+    if (!fs::exists(file, ec)) return s;
+    const std::string what = projectPath(file.filename());
+    std::ifstream in(file, std::ios::binary);
+    if (!in) fail("cannot open " + what);
+    try {
+        json j = json::parse(in);
+        if (!j.is_object()) fail(what + ": not a JSON object");
+        s.scale = j.value("scale", s.scale);
+        if (j.contains("up")) s.up = enumFrom(j["up"], kUpAxes, "up axis");
+        if (j.contains("normals")) s.normals = enumFrom(j["normals"], kNormals, "normals");
+        s.smoothingAngle = j.value("smoothingAngle", s.smoothingAngle);
+        s.mergeMeshes = j.value("mergeMeshes", s.mergeMeshes);
+        if (j.contains("bitDepth")) {
+            int b = j["bitDepth"].get<int>();
+            if (b != 4 && b != 8 && b != 16) fail(what + ": bit depth must be 4, 8 or 16");
+            s.bitDepth = BitDepth(b);
+        }
+        if (j.contains("lighting")) s.lighting = enumFrom(j["lighting"], kLighting, "lighting");
+        s.source = j.value("source", s.source);
+        json written = settingsJson(s);
+        for (auto& [k, v] : j.items())
+            if (!written.contains(k)) s.extra.push_back({k, v.dump()});
+    } catch (const json::exception& e) {
+        fail(what + ": " + e.what());
+    } catch (const std::runtime_error& e) {
+        fail(std::string(e.what()).rfind(what, 0) == 0 ? e.what() : what + ": " + e.what());
+    }
+    return s;
+}
+
+void saveImportSettings(const fs::path& model, const ImportSettings& settings) {
+    json j = settingsJson(settings);
+    for (auto& [k, v] : settings.extra)
+        if (!j.contains(k)) j[k] = json::parse(v);
+    const fs::path file = importSettingsPath(model);
+    std::ofstream out(file, std::ios::binary);
+    out << j.dump(2) << "\n";
+    if (!out) fail("cannot write " + projectPath(file.filename()));
 }
 
 }  // namespace splash

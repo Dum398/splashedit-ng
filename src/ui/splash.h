@@ -3,8 +3,8 @@
 #include <imgui.h>
 
 // The psxsplash boot logo shown when the editor starts: the same animation
-// and jingle psxsplash plays before its first scene, drawn from the engine's
-// own 4bpp sheet and scaled up with square pixels. A click or a key skips it.
+// and jingle psxsplash plays before its first scene, drawn from the brand
+// art at full resolution (bootlogo-hires.png). A click or a key skips it.
 namespace splash {
 
 // Uploads the logo pieces and loads brand/boot-jingle.wav. Needs a current GL

@@ -2992,6 +2992,79 @@ void testTimelinePreview() {
     CHECK(bytes(dir / "before.scene") == bytes(dir / "after.scene") && !bytes(dir / "after.scene").empty());
 }
 
+// Every warning of a model's last import is kept for the inspector, by the
+// model's project path, and a reimport replaces them.
+void testImportWarnings() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "importwarnings";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game";
+    fs::create_directories(proj, ec);
+    const fs::path rig = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skinimport" / "rig.gltf";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    CHECK(doc.importWarnings("models/rig.gltf").empty());
+
+    editor::PlacedModel p = editor::placeModel(doc, rig, std::nullopt, {0}, {0, 0, 0});
+    CHECK(p.error.empty());
+    // rig.gltf: blended weights and cubic-spline keys, at least.
+    CHECK(p.model.warnings.size() >= 2);
+    const std::vector<std::string>& kept = doc.importWarnings("models/rig.gltf");
+    CHECK(kept == p.model.warnings);
+    CHECK(doc.importWarnings(proj / "models" / "rig.gltf") == p.model.warnings);  // absolute works too
+    CHECK(doc.importWarnings("models/other.gltf").empty());
+    bool blended = false, cubic = false;
+    for (const std::string& w : kept) {
+        editor::ImportWarning e = editor::explainImportWarning(w);
+        CHECK(!e.problem.empty());
+        if (w.find("the heaviest joint wins") != std::string::npos) {
+            blended = true;
+            CHECK(e.fix == "Weight-paint to single bones for exact deformation");
+            CHECK(e.problem.find("weight-paint") == std::string::npos);
+        }
+        if (w.find("cubic-spline") != std::string::npos) {
+            cubic = true;
+            CHECK(e.fix == "Bake the animation to linear keys for its exact curve");
+        }
+    }
+    CHECK(blended && cubic);
+
+    // The skin limits say what to change.
+    editor::ImportWarning j = editor::explainImportWarning(
+        "the skeleton has 70 joints, psxsplash draws at most 64: delete helper bones (IK targets, poles, twist bones) in the modelling tool");
+    CHECK(j.problem == "the skeleton has 70 joints, psxsplash draws at most 64" && j.fix.find("at most 64 joints") != std::string::npos);
+    editor::ImportWarning c = editor::explainImportWarning(
+        "20 animations, a skin plays at most 16: the first 16 go on the skin component, swap in others by hand");
+    CHECK(c.problem == "20 animations, a skin plays at most 16" && c.fix.find("at most 16 animations") != std::string::npos);
+    editor::ImportWarning t = editor::explainImportWarning("texture models/x.png was not found, the material is left untextured");
+    CHECK(t.problem == "texture models/x.png was not found, the material is left untextured" && !t.fix.empty());
+    editor::ImportWarning u = editor::explainImportWarning("something new: and odd");
+    CHECK(u.problem == "something new: and odd" && u.fix.empty());
+
+    // Reimport: the same warnings again, not added to the old ones.
+    editor::Reimported re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    CHECK(re.error.empty() && doc.importWarnings("models/rig.gltf") == re.model.warnings &&
+          re.model.warnings.size() == p.model.warnings.size());
+    // The model fixed (a plain one in its place, read from the copy): none left.
+    splash::ImportSettings st = splash::loadImportSettings(proj / "models" / "rig.gltf");
+    st.source.clear();
+    splash::saveImportSettings(proj / "models" / "rig.gltf", st);
+    std::ofstream(proj / "models" / "rig.gltf", std::ios::binary | std::ios::trunc) << robotGltf(1);
+    re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    CHECK(re.error.empty() && re.model.warnings.empty() && doc.importWarnings("models/rig.gltf").empty());
+    // Broken again: back.
+    fs::copy_file(rig, proj / "models" / "rig.gltf", fs::copy_options::overwrite_existing, ec);
+    re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    CHECK(re.error.empty() && doc.importWarnings("models/rig.gltf") == re.model.warnings && re.model.warnings.size() >= 2);
+
+    // Kept through loading another scene of the project, dropped with the project.
+    doc.reset(splash::Scene{}, proj, "other");
+    CHECK(doc.importWarnings("models/rig.gltf").size() >= 2);
+    doc.reset(splash::Scene{}, dir / "elsewhere", "game");
+    CHECK(doc.importWarnings("models/rig.gltf").empty());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -3039,6 +3112,7 @@ int main(int argc, char** argv) {
     runHardwarePsxmon(0x0007);
     runHardwarePsxmon(0x0001);
     testClipboard();
+    testImportWarnings();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

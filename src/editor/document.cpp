@@ -86,6 +86,7 @@ MeshInfo analyseMesh(const fs::path& file) {
 }  // namespace
 
 std::optional<std::string> Document::load(const fs::path& project, const fs::path& scene) {
+    if (project != m_project) m_importWarnings.clear();
     m_project = project;
     m_sceneFile = scene;
     m_stem = scene.stem().string();
@@ -120,6 +121,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
 }
 
 void Document::reset(splash::Scene scene, const fs::path& project, const std::string& stem) {
+    if (project != m_project) m_importWarnings.clear();
     m_project = project;
     m_stem = stem;
     m_sceneFile = stem + ".scene";
@@ -727,6 +729,29 @@ bool Document::hasWarning(const splash::Object& o) const {
     }
     if (o.script && !o.script->lua.empty() && !fileExists(o.script->lua)) return true;
     return false;
+}
+
+static std::string modelKey(const fs::path& project, const fs::path& model) {
+    fs::path rel = model;
+    if (model.is_absolute() && !project.empty()) {
+        std::error_code ec;
+        fs::path r = fs::relative(model, project, ec);
+        if (!ec && !r.empty()) rel = r;
+    }
+    std::u8string u = rel.lexically_normal().generic_u8string();
+    return std::string(u.begin(), u.end());
+}
+
+void Document::setImportWarnings(const fs::path& model, std::vector<std::string> warnings) {
+    const std::string key = modelKey(m_project, model);
+    if (warnings.empty()) m_importWarnings.erase(key);
+    else m_importWarnings[key] = std::move(warnings);
+}
+
+const std::vector<std::string>& Document::importWarnings(const fs::path& model) const {
+    static const std::vector<std::string> none;
+    auto it = m_importWarnings.find(modelKey(m_project, model));
+    return it == m_importWarnings.end() ? none : it->second;
 }
 
 }  // namespace editor

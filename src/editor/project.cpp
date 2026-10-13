@@ -296,6 +296,7 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
             r.model.warnings.push_back(std::string("the import settings were not saved: ") + e.what());
         }
     }
+    doc.setImportWarnings(copy, r.model.warnings);
     std::vector<std::string> written = r.model.textures;
     written.push_back(r.model.mesh);
     for (const splash::ImportedNode& n : r.model.nodes)
@@ -530,7 +531,59 @@ Reimported reimportModel(Document& doc, const fs::path& model, std::optional<boo
         if (sync.walk(copy)) trees.push_back({ObjectPath{int(i)}, std::move(copy)});
     }
     r.objects = doc.replaceTrees(std::move(trees));
+    doc.setImportWarnings(file, r.model.warnings);
     return r;
+}
+
+ImportWarning explainImportWarning(const std::string& warning) {
+    // `sep`: the importer already ends the warning with its fix after the
+    // last `sep`. `fix`: the fix to show (instead of that tail, when both).
+    struct Rule {
+        const char* needle;
+        const char* sep;
+        const char* fix;
+    };
+    static const Rule rules[] = {
+        {" joints, psxsplash draws at most ", ": ",
+         "Delete helper bones (IK targets, poles, twist bones) in the modelling tool so the skeleton has at most 64 joints, then "
+         "export again"},
+        {"mixes skinned and unskinned parts", ": ", nullptr},
+        {" but no skin moves it", ": ", nullptr},
+        {" weighted to more than one joint", "; ", nullptr},
+        {" have no bone weights", ": ", nullptr},
+        {"a non-uniform scale", ": ", nullptr},
+        {"cubic-spline keys", ": ", nullptr},
+        {" animations, a skin plays at most ", ": ",
+         "Keep at most 16 animations in the file (delete unused actions before exporting); the first 16 are on the Skin component, "
+         "swap others in by hand"},
+        {"' moves no joint and was left out", nullptr,
+         "Key the armature's bones instead of the object, or delete the animation in the modelling tool"},
+        {"has no skeleton animation", nullptr,
+         "Add an animation (action) to the armature in the modelling tool and export it with the model"},
+        {"' could not be read: ", nullptr, "Bake the animation in the exporter (Bake Animation) and export again"},
+        {"a texture was scaled down to ", nullptr, "Resize the texture to at most 256 x 256 in an image editor to choose how it is scaled"},
+        {" was not found, the material is left untextured", nullptr,
+         "Put the texture beside the model or in a textures/ folder next to it, then reimport"},
+        {"a skin whose joints are not all in the scene", nullptr, "Export the whole armature together with the mesh"},
+        {"points and lines were left out", nullptr, "Turn them into faces in the modelling tool if they should be drawn"},
+        {"morph target (shape key) animation", nullptr, "Drive the motion with bones instead of shape keys"},
+        {"the import settings were not saved", nullptr, "Make the models/ folder writable, then change a setting to save it again"},
+    };
+    ImportWarning w{warning, {}};
+    for (const Rule& r : rules) {
+        if (warning.find(r.needle) == std::string::npos) continue;
+        if (r.sep) {
+            const size_t at = warning.rfind(r.sep);
+            if (at != std::string::npos && at > warning.find(r.needle)) {
+                w.problem = warning.substr(0, at);
+                w.fix = warning.substr(at + std::string(r.sep).size());
+            }
+        }
+        if (r.fix) w.fix = r.fix;
+        if (!w.fix.empty() && w.fix[0] >= 'a' && w.fix[0] <= 'z') w.fix[0] = char(w.fix[0] - 'a' + 'A');
+        break;
+    }
+    return w;
 }
 
 std::vector<fs::path> ModelWatcher::poll(const fs::path& project) {

@@ -291,5 +291,13 @@ and the same drag writes nothing. Needs a display.
 
     python3 timelinepreviewcheck.py <splashedit>
 
+`importwarningscheck.py` drops `skinimport/rig.gltf` (blended skin weights and cubic-spline keys,
+two import warnings) on the courtyard example's viewport. The status bar must count the warnings
+and point at the inspector, and the inspector's Import settings must list both: the editor prints
+the warnings it drew with the screenshot, and the screenshot must show their warning marks. Needs
+a display (CI runs it under `xvfb-run` on Linux).
+
+    python3 importwarningscheck.py <splashedit> [screenshot.png]
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

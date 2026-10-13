@@ -198,6 +198,12 @@ public:
 
     std::filesystem::path resolve(const std::string& projectPath) const { return m_project / projectPath; }
 
+    // Every warning of the last import of `model` (absolute or project
+    // relative), for the inspector; empty when it has none or was not
+    // imported this session. Kept across scene loads in the same project.
+    void setImportWarnings(const std::filesystem::path& model, std::vector<std::string> warnings);
+    const std::vector<std::string>& importWarnings(const std::filesystem::path& model) const;
+
 private:
     void cacheAssets(const splash::Object& o);
     void clearHistory();
@@ -217,6 +223,7 @@ private:
     std::map<std::string, MeshInfo> m_meshes;
     std::map<std::string, TextureInfo> m_textures;
     std::map<std::string, bool> m_files;
+    std::map<std::string, std::vector<std::string>> m_importWarnings;  // by project-relative model path
 
     std::vector<std::unique_ptr<Command>> m_history;
     size_t m_cursor = 0;       // commands [0, m_cursor) are applied

@@ -105,6 +105,19 @@ struct Reimported {
     int objects = 0;  // top-level objects whose tree changed
 };
 Reimported reimportModel(Document& doc, const std::filesystem::path& model, std::optional<bool> wasMerged = std::nullopt);
+// placeModel and reimportModel keep the import's warnings, all of them, in the
+// document under the model's project path (Document::importWarnings), the
+// last import of a model replacing the ones before.
+
+// One import warning as the inspector lists it: what happened and, where one
+// is known, what to change so it does not. The importer's own "problem: fix"
+// wording is split where it has one; the other known warnings get a fix here.
+// An unknown warning is all problem, with no fix.
+struct ImportWarning {
+    std::string problem;
+    std::string fix;  // empty when none is known
+};
+ImportWarning explainImportWarning(const std::string& warning);
 
 // Notices model files that changed on disk. Each poll stats the models in the
 // project's models/ folder that have a sidecar, and each one's source; a

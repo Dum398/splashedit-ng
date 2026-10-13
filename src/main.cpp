@@ -517,6 +517,9 @@ int main(int argc, char** argv) {
             // For scripted checks: menus and pickers left open by the input.
             std::printf("popups open: %s\n", ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ? "yes" : "no");
             std::printf("game attached: %s\n", state.play.game.attached() ? "yes" : "no");
+            std::printf("status: %s\n", state.notice.c_str());
+            std::printf("inspector import warnings: %zu\n", state.importPanel.shown.size());
+            for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
             running = false;
         }
         SDL_GL_SwapWindow(window);

@@ -165,6 +165,8 @@ struct State {
         std::string error;  // the sidecar could not be read
         double checked = -1;
         std::optional<splash::ImportSettings> editing;
+        // The import warnings the inspector listed this frame, for scripted checks.
+        std::vector<std::string> shown;
     } importPanel;
     // Models to import again next frame (a reimport can rebuild the object the
     // inspector is drawing), and the watcher polled about once a second.

@@ -126,6 +126,21 @@ public:
     // Inserts a copy right after the original, named the way Unity names
     // duplicates ("Crate (2)"), and selects it. Returns the copy's path.
     std::optional<ObjectPath> duplicateObject(const ObjectPath& path);
+    // Clipboard text for the object at `path`, children included (see
+    // splash::writeObjectsText); empty when there is no such object. Asset
+    // paths stay project-relative, so a paste into another project points at
+    // files that may be missing there.
+    std::string copyObject(const ObjectPath& path) const;
+    // copyObject, then removes the object as one undo step. Empty, with no
+    // change, when there is no such object.
+    std::string cutObject(const ObjectPath& path);
+    // Inserts the objects in clipboard `text` right after `after` as its
+    // siblings, or at the end of the top level when `after` is unset or gone,
+    // as one undo step. A name already taken among the new siblings is
+    // numbered the way duplicateObject numbers it. Selects the last pasted
+    // object and returns its path; nullopt, with no change, for text that is
+    // not ours.
+    std::optional<ObjectPath> pasteObjects(const std::string& text, const std::optional<ObjectPath>& after);
     // Moves the object at `from`, with its children, to be child `index` of
     // `toParent` (empty = the scene root), keeping where it is in the world.
     // `index` counts the new parent's children as they are now, before the

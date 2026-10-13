@@ -790,6 +790,32 @@ static void openScript(State& st, const editor::Document& doc, const std::string
     if (projectPath.empty() || !st.scripts.open(doc.resolve(projectPath), &err)) notify(st, "Cannot open " + projectPath + ": " + err, true);
 }
 
+// Copy, Cut and Paste of objects through the system clipboard, as the text
+// Document::copyObject writes. Menu, row menu and shortcuts share these.
+static void copySelection(State& st, editor::Document& doc, const editor::ObjectPath& path) {
+    const std::string text = doc.copyObject(path);
+    if (!text.empty() && !SDL_SetClipboardText(text.c_str())) notify(st, std::string("Cannot copy: ") + SDL_GetError(), true);
+}
+
+static void cutSelection(State& st, editor::Document& doc, const editor::ObjectPath& path) {
+    const std::string text = doc.copyObject(path);
+    if (text.empty()) return;
+    // Only removed once the clipboard holds it, so a failed copy loses nothing.
+    if (!SDL_SetClipboardText(text.c_str())) {
+        notify(st, std::string("Cannot cut: ") + SDL_GetError(), true);
+        return;
+    }
+    doc.cutObject(path);
+}
+
+// Pastes right after `after`, or at the end of the top level when unset.
+static void pasteClipboard(State& st, editor::Document& doc, const std::optional<editor::ObjectPath>& after) {
+    char* raw = SDL_GetClipboardText();
+    const std::string text = raw ? raw : "";
+    SDL_free(raw);
+    if (!doc.pasteObjects(text, after)) notify(st, "The clipboard does not hold SplashEdit objects", true);
+}
+
 // The other asset fields' file dialogs (texture, scripts, audio, skin clips),
 // answered on their own thread and applied next frame to the object they were
 // opened for. A file outside the project is copied into it first.
@@ -1222,6 +1248,9 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 st.renamePath = *sel;
             }));
             m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
+            m.push_back(item("Cut", "Ctrl+X", hasSel, [&st, &doc, sel] { cutSelection(st, doc, *sel); }));
+            m.push_back(item("Copy", "Ctrl+C", hasSel, [&st, &doc, sel] { copySelection(st, doc, *sel); }));
+            m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, sel] { pasteClipboard(st, doc, sel); }));
             m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
             m.push_back(separator());
             m.push_back(item("Select None", "", hasSel, [&] { doc.select(std::nullopt); }));
@@ -1486,6 +1515,9 @@ static std::vector<MenuEntry> treeMenuEntries(int kind, State& st, editor::Docum
             st.renamePath = p;
         }));
         m.push_back(item("Duplicate", "Ctrl+D", true, [&doc, p] { doc.duplicateObject(p); }));
+        m.push_back(item("Cut", "Ctrl+X", true, [&st, &doc, p] { cutSelection(st, doc, p); }));
+        m.push_back(item("Copy", "Ctrl+C", true, [&st, &doc, p] { copySelection(st, doc, p); }));
+        m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, p] { pasteClipboard(st, doc, p); }));
         m.push_back(item("Delete", "Del", true, [&doc, p] { doc.removeObject(p); }));
         m.push_back(separator());
         // Out of its group, to the top level right after the group it was in.
@@ -4089,12 +4121,15 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (const std::optional<editor::ObjectPath> sel = doc.selection()) {
         if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
+        if (ctrl && !shift && pressed(ImGuiKey_C)) copySelection(st, doc, *sel);
+        if (ctrl && !shift && pressed(ImGuiKey_X)) cutSelection(st, doc, *sel);
         if (!ctrl && pressed(ImGuiKey_F2)) {
             st.renaming = true;
             st.renameStart = true;
             st.renamePath = *sel;
         }
     }
+    if (ctrl && !shift && pressed(ImGuiKey_V)) pasteClipboard(st, doc, doc.selection());
     if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
     if (ctrl && !shift && pressed(ImGuiKey_F)) st.focusTreeFilter = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);

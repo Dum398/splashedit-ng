@@ -84,6 +84,9 @@ jobs:
       - name: Script editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/scripteditorcheck.py build/splashedit
+      - name: Copy, cut and paste
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/clipboardcheck.py build/splashedit
       # One download: the editor with its assets, the example project, the
       # engine and the latest pcsx-redux dev build for this OS.
       - uses: actions/download-artifact@v4

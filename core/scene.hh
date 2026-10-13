@@ -362,6 +362,14 @@ std::vector<FlatObject> flatten(const Scene& scene);
 Scene loadScene(const std::filesystem::path& file);
 void saveScene(const Scene& scene, const std::filesystem::path& file);
 
+// Objects with their children as a self-contained JSON document, in the same
+// form the scene file stores them: {"splashedit-objects": 1, "objects": [...]}.
+// Asset paths stay project-relative strings. For the editor's clipboard.
+std::string writeObjectsText(const std::vector<Object>& objects);
+// The objects in such a document; nullopt for anything else (plain text,
+// other JSON, a later version, an empty list, a malformed object).
+std::optional<std::vector<Object>> readObjectsText(const std::string& text);
+
 // Skeleton in mesh space. Joint transforms are local to the parent joint
 // (parent -1 = mesh space) and give the rest pose.
 struct Joint {

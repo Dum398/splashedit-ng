@@ -782,6 +782,36 @@ void saveScene(const Scene& s, const fs::path& file) {
     writeJson(j, file);
 }
 
+namespace {
+constexpr const char* kObjectsMarker = "splashedit-objects";
+constexpr int kObjectsVersion = 1;
+}  // namespace
+
+std::string writeObjectsText(const std::vector<Object>& objects) {
+    json j;
+    j[kObjectsMarker] = kObjectsVersion;
+    json objs = json::array();
+    for (const Object& o : objects) objs.push_back(writeObject(o));
+    j["objects"] = objs;
+    return j.dump(2);
+}
+
+std::optional<std::vector<Object>> readObjectsText(const std::string& text) {
+    json j = json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return std::nullopt;
+    auto marker = j.find(kObjectsMarker);
+    if (marker == j.end() || !marker->is_number_integer() || marker->get<std::int64_t>() != kObjectsVersion) return std::nullopt;
+    auto objs = j.find("objects");
+    if (objs == j.end() || !objs->is_array() || objs->empty()) return std::nullopt;
+    std::vector<Object> out;
+    try {
+        for (const json& oj : *objs) out.push_back(readObject(oj));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    return out;
+}
+
 Bounds Mesh::bounds() const {
     if (positions.empty()) return {};
     Vec3 mn = positions[0], mx = positions[0];

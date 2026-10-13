@@ -325,6 +325,14 @@ the warnings it drew with the screenshot, and the screenshot must show their war
 a display (CI runs it under `xvfb-run` on Linux).
 
     python3 importwarningscheck.py <splashedit> [screenshot.png]
+`timelineeditcheck.py` checks the Timeline's edits beyond keys on copies of the courtyard example
+with two cutscenes: renaming one in the scene inspector (double-click the name) and from the
+timeline's sequence picker, undo of a rename, a taken name and a 25-character one refused, deleting
+one from the inspector and undoing it, pointing a track at another object from its lane menu (and
+undoing that), each read back from the saved scene; and the Scene view previewing a light track and a
+UV offset track (pixels at frame 0 against frame 75) without touching the scene file:
+
+    python3 timelineeditcheck.py <splashedit>
 
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

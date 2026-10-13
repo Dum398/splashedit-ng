@@ -127,6 +127,7 @@ class Ps1View {
     std::vector<Vertex> m_verts;
     std::vector<Batch> m_batches;
     std::map<std::string, unsigned> m_texCache;
+    std::map<unsigned, std::pair<int, int>> m_texSize;  // by GL id, for the preview's UV offsets (texels)
     editor::PickMesh m_pick;  // drawn triangles in Unity world space, by object
     std::map<std::string, splash::Mesh> m_meshCache;  // by project path, for the current load
     unsigned m_meshCacheLoad = ~0u;

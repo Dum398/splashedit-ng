@@ -251,6 +251,15 @@ void TimelinePanel::draw(ImDrawList* dl, editor::Document& doc) {
         lanes(dl, labels, body, doc);
         keyRow(dl, keyRowR, doc);
     }
+    // The note (a refused rename, a delete), over the lanes' bottom right.
+    if (ImGui::GetTime() < m_noteUntil) {
+        const ImVec2 ts = measure(fonts().medium, type::label, m_note.c_str());
+        const ImVec2 mx(r.Max.x - space::md, r.Max.y - kKeyRowH - space::sm);
+        const ImRect pill(mx - ts - ImVec2(space::md * 2, space::sm * 2), mx);
+        dl->AddRectFilled(pill.Min, pill.Max, color::raised, radius::field);
+        dl->AddRect(pill.Min, pill.Max, color::warn, radius::field);
+        text(dl, pill.Min + ImVec2(space::md, space::sm), fonts().medium, type::label, color::text, m_note.c_str());
+    }
     ImGui::PopClipRect();
     ImGui::PopID();
 }
@@ -270,22 +279,33 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
     {
         const ImRect dd(ImVec2(x, cy - 13), ImVec2(x + 210, cy + 13));
         std::string label = have ? *editor::seqName(doc, m_ref) : std::string("No cutscenes");
-        Hit h = interact("seq", dd);
-        dl->AddRectFilled(dd.Min, dd.Max, h.hover > 0 ? color::hover : color::field, radius::field);
-        dl->AddRect(dd.Min, dd.Max, color::borderStrong, radius::field);
         const char* kindLabel = !have ? "" : m_ref.kind == SeqKind::Cutscene ? "CUTSCENE" : "ANIM";
         const float kw = measure(f.medium, type::caption, kindLabel).x;
+        const float tx = dd.Min.x + space::sm + kw + (have ? space::sm : 0);
+        // Renaming: the name field takes the dropdown's place (Enter commits, Esc cancels).
+        std::string typed;
+        const TextEdit te = have ? textEdit("seqname", ImRect(ImVec2(tx - space::xs, dd.Min.y), dd.Max), f.medium, type::label, tx,
+                                            dd.Max.x - space::sm, &typed, 96)
+                                 : TextEdit::Inactive;
+        if (te == TextEdit::Commit) rename(doc, m_ref, typed);
+        if (te == TextEdit::Inactive) {
+            Hit h = interact("seq", dd);
+            dl->AddRectFilled(dd.Min, dd.Max, h.hover > 0 ? color::hover : color::field, radius::field);
+            dl->AddRect(dd.Min, dd.Max, color::borderStrong, radius::field);
+            ImGui::PushClipRect(dd.Min, ImVec2(dd.Max.x - 22, dd.Max.y), true);
+            text(dl, ImVec2(tx, cy - 9), f.medium, type::label, have ? color::text : color::textFaint, label.c_str());
+            ImGui::PopClipRect();
+            textCentered(dl, ImRect(ImVec2(dd.Max.x - 22, dd.Min.y), dd.Max), f.medium, type::caption + 1, color::textDim,
+                         icon::chevronDown);
+            if (h.clicked) ImGui::OpenPopup("##seqpick");
+        }
         text(dl, ImVec2(dd.Min.x + space::sm, cy - 8), f.medium, type::caption, m_ref.kind == SeqKind::Cutscene ? rgb(0x5ccfe0) : color::good,
              kindLabel);
-        const float tx = dd.Min.x + space::sm + kw + (have ? space::sm : 0);
-        ImGui::PushClipRect(dd.Min, ImVec2(dd.Max.x - 22, dd.Max.y), true);
-        text(dl, ImVec2(tx, cy - 9), f.medium, type::label, have ? color::text : color::textFaint, label.c_str());
-        ImGui::PopClipRect();
-        textCentered(dl, ImRect(ImVec2(dd.Max.x - 22, dd.Min.y), dd.Max), f.medium, type::caption + 1, color::textDim, icon::chevronDown);
-        if (h.clicked) ImGui::OpenPopup("##seqpick");
         // The panel sits at the bottom of the window: its popups open upwards.
         ImGui::SetNextWindowPos(ImVec2(dd.Min.x, dd.Min.y - 4), ImGuiCond_Always, ImVec2(0, 1));
         sequencePopup(doc);
+        if (m_renameArm && have) beginTextEdit("seqname", label);
+        m_renameArm = false;
         x = dd.Max.x + space::md;
     }
 
@@ -391,7 +411,80 @@ void TimelinePanel::sequencePopup(editor::Document& doc) {
             if (auto ref = editor::addSequence(doc, SeqKind::Cutscene, "cutscene")) show(doc, *ref);
         if (ImGui::Selectable("New animation"))
             if (auto ref = editor::addSequence(doc, SeqKind::Animation, "animation")) show(doc, *ref);
+        if (editor::valid(doc, m_ref)) {
+            ImGui::Separator();
+            if (ImGui::Selectable("Rename...")) m_renameArm = true;
+            const std::string del = "Delete '" + *editor::seqName(doc, m_ref) + "'";
+            if (ImGui::Selectable(del.c_str())) remove(doc, m_ref);
+        }
         ImGui::EndPopup();
+    }
+    popPopupStyle();
+}
+
+void TimelinePanel::note(std::string msg) {
+    m_note = std::move(msg);
+    m_noteUntil = ImGui::GetTime() + 4;
+}
+
+void TimelinePanel::rename(editor::Document& doc, SeqRef ref, const std::string& name) {
+    if (!editor::valid(doc, ref) || name == *editor::seqName(doc, ref)) return;
+    const std::string why = editor::seqNameProblem(doc, ref, name);
+    if (!why.empty())
+        note("Not renamed: " + why);
+    else
+        editor::renameSequence(doc, ref, name);
+}
+
+void TimelinePanel::remove(editor::Document& doc, SeqRef ref) {
+    if (!editor::valid(doc, ref)) return;
+    const std::string name = *editor::seqName(doc, ref);
+    if (!editor::removeSequence(doc, ref)) return;
+    note("Deleted '" + name + "' (Ctrl+Z brings it back)");
+    if (ref == m_ref) {
+        // On to whatever sits there now, or the first one.
+        m_sel.clear();
+        m_frame = 0;
+        m_playing = false;
+        m_fitPending = true;
+    } else if (ref.kind == m_ref.kind && ref.index < m_ref.index) {
+        --m_ref.index;  // the open one moved down
+    }
+}
+
+void TimelinePanel::trackMenu(editor::Document& doc) {
+    pushPopupStyle();
+    if (ImGui::BeginPopup("##trackmenu")) {
+        const std::vector<splash::CutsceneTrack>& tracks = *editor::seqTracks(doc, m_ref);
+        const int ti = m_menuTrack;
+        if (ti < 0 || ti >= int(tracks.size())) {
+            ImGui::CloseCurrentPopup();
+        } else {
+            const splash::CutsceneTrack t = tracks[size_t(ti)];
+            ImGui::TextDisabled("%s", editor::trackLabel(t).c_str());
+            ImGui::Separator();
+            if (editor::needsTarget(t.type)) {
+                const std::vector<std::string> targets = editor::targetsFor(doc, t.type);
+                if (ImGui::BeginMenu("Drive instead", !targets.empty())) {
+                    for (const std::string& name : targets) {
+                        const bool taken = std::any_of(tracks.begin(), tracks.end(),
+                                                       [&](const auto& o) { return o.type == t.type && o.target == name; });
+                        if (ImGui::MenuItem(name.c_str(), nullptr, name == t.target, !taken)) editor::setTrackTarget(doc, m_ref, ti, name);
+                    }
+                    ImGui::EndMenu();
+                }
+            } else {
+                ImGui::MenuItem("Drive instead", nullptr, false, false);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Camera and rumble tracks have no target");
+            }
+            if (ImGui::MenuItem("Remove track")) {
+                editor::removeTrack(doc, m_ref, ti);
+                m_sel.clear();
+            }
+        }
+        ImGui::EndPopup();
+    } else {
+        m_menuTrack = -1;
     }
     popPopupStyle();
 }
@@ -407,16 +500,6 @@ void TimelinePanel::addTrackPopup(editor::Document& doc) {
             const int i = editor::addTrack(doc, m_ref, t, target);
             if (i >= 0) m_scrollY = std::max(0.0f, (i + 1) * kLaneH - 4 * kLaneH);
         };
-        std::vector<std::string> objects, lights, canvases, elements;
-        // What the export can address: objects with a mesh, runtime point lights.
-        for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
-            if (fo.object->mesh && fo.object->active) objects.push_back(fo.object->name);
-            if (fo.object->light && fo.object->light->runtime) lights.push_back(fo.object->name);
-        }
-        for (const splash::UICanvas& c : doc.scene().canvases) {
-            canvases.push_back(c.name);
-            for (const splash::UIElement& e : c.elements) elements.push_back(c.name + "/" + e.name);
-        }
         int lastGroup = -1;
         for (int ti = 0; ti <= int(TrackType::LightEnabled); ++ti) {
             const TrackType t = TrackType(ti);
@@ -428,8 +511,8 @@ void TimelinePanel::addTrackPopup(editor::Document& doc) {
                 if (ImGui::MenuItem(editor::trackTypeName(t), nullptr, false, !has(t, ""))) add(t, "");
                 continue;
             }
-            const std::vector<std::string>& targets = group == 3 ? lights : group == 2 ? (t == TrackType::UICanvasVisible ? canvases : elements)
-                                                                                         : objects;
+            // What the export can address: objects with a mesh, runtime point lights, canvases, elements.
+            const std::vector<std::string> targets = editor::targetsFor(doc, t);
             if (ImGui::BeginMenu(editor::trackTypeName(t), !targets.empty())) {
                 for (const std::string& name : targets)
                     if (ImGui::MenuItem(name.c_str(), nullptr, false, !has(t, name))) add(t, name);
@@ -533,13 +616,14 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         const std::string who = t.target.empty() ? (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge ? "Rumble" : "Camera")
                                                  : t.target;
         const float tx = row.Min.x + 18;
-        ImGui::PushClipRect(row.Min, ImVec2(row.Max.x - 30, row.Max.y), true);
+        ImGui::PushClipRect(row.Min, ImVec2(row.Max.x - 54, row.Max.y), true);
         text(dl, ImVec2(tx, y + 4), f.medium, type::label, color::text, who.c_str());
         ImGui::PopClipRect();
         const std::string full = editor::trackLabel(t);
         const char* prop = full.c_str() + full.find(": ") + 2;
         text(dl, ImVec2(tx, y + 21), f.regular, type::caption, tc, prop);
-        // What the track samples at the scrub head (the Scene view has no preview yet).
+        // What the track samples at the scrub head, as the console rounds it.
+        // UI and rumble tracks have nothing in the Scene view: this is their preview.
         const std::string val = t.keyframes.empty() ? std::string("no keys") : fmtValue(t.type, editor::sampleAt(doc, m_ref, i, m_frame));
         const float vw = measure(f.regular, type::caption, val.c_str()).x;
         const float px = tx + measure(f.regular, type::caption, prop).x + space::sm;
@@ -549,12 +633,21 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         ImGui::PopClipRect();
         ImGui::PushID(i);
         const bool hovered = row.Contains(io.MousePos);
-        if (iconButton("rm", ImRect(ImVec2(row.Max.x - 28, y + 4), ImVec2(row.Max.x - 6, y + 20)), icon::x, false, "Remove this track",
-                       hovered ? color::textDim : withAlpha(color::textFaint, 110)))
+        const ImU32 btn = hovered || m_menuTrack == i ? color::textDim : withAlpha(color::textFaint, 110);
+        if (iconButton("rm", ImRect(ImVec2(row.Max.x - 28, y + 4), ImVec2(row.Max.x - 6, y + 20)), icon::x, false, "Remove this track", btn))
             removeTrack = i;
+        bool menu = iconButton("menu", ImRect(ImVec2(row.Max.x - 52, y + 4), ImVec2(row.Max.x - 30, y + 20)), icon::ellipsis, m_menuTrack == i,
+                               "Retarget or remove this track (or right-click the lane name)", btn);
         ImGui::PopID();
+        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && ImGui::IsWindowHovered()) menu = true;
+        if (menu) {
+            m_menuTrack = i;
+            ImGui::OpenPopup("##trackmenu");
+            ImGui::SetNextWindowPos(ImVec2(row.Min.x + 18, y + kLaneH), ImGuiCond_Always);
+        }
     }
     ImGui::PopClipRect();
+    trackMenu(doc);
 
     // Lanes.
     dl->AddRectFilled(body.Min, body.Max, rgb(0x16181d));
@@ -795,13 +888,32 @@ float TimelinePanel::sequenceList(ImDrawList* dl, float x0, float x1, float y, e
     }
     const char* editLabel = "Edit in timeline";
     const float bw = space::md * 2 + measure(f.medium, type::body, editLabel).x;
+    std::optional<SeqRef> removing;
     for (SeqRef ref : all) {
         ImGui::PushID(ref.kind == SeqKind::Cutscene ? ref.index : 1000 + ref.index);
         const bool cs = ref.kind == SeqKind::Cutscene;
         textCentered(dl, ImRect(ImVec2(x0, y), ImVec2(x0 + 18, y + 34)), f.medium, type::icon, cs ? rgb(0x5ccfe0) : color::good,
                      cs ? icon::camera : icon::play);
-        ImGui::PushClipRect(ImVec2(x0, y), ImVec2(x1 - bw - space::sm, y + 34), true);
-        text(dl, ImVec2(x0 + 26, y), f.medium, type::label, color::text, editor::seqName(doc, ref)->c_str());
+        // Delete, left of Edit in timeline.
+        const float delX = x1 - bw - space::xs - 26;
+        if (iconButton("del", ImRect(ImVec2(delX, y + 4), ImVec2(delX + 24, y + 28)), icon::x, false,
+                       cs ? "Delete this cutscene (Ctrl+Z brings it back)" : "Delete this animation (Ctrl+Z brings it back)"))
+            removing = ref;
+        // The name: double-click to rename (Enter commits, Esc cancels).
+        const std::string& name = *editor::seqName(doc, ref);
+        const ImVec2 np(x0 + 26, y);
+        std::string typed;
+        const TextEdit te = textEdit("seqname", ImRect(np - ImVec2(space::xs, 2), ImVec2(delX - space::xs, np.y + 17)), f.medium,
+                                     type::label, np.x, delX - space::sm, &typed, 96);
+        if (te == TextEdit::Commit) rename(doc, ref, typed);
+        ImGui::PushClipRect(ImVec2(x0, y), ImVec2(delX - space::xs, y + 34), true);
+        if (te == TextEdit::Inactive) {
+            const ImVec2 ns = measure(f.medium, type::label, name.c_str());
+            interact("seqname", ImRect(np, np + ImVec2(std::max(ns.x, 40.0f), ns.y)));
+            tooltip("Double-click to rename; Lua plays it by this name");
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) beginTextEdit("seqname", name);
+            text(dl, np, f.medium, type::label, color::text, name.c_str());
+        }
         char meta[64];
         const int nt = int(editor::seqTracks(doc, ref)->size());
         std::snprintf(meta, sizeof meta, "%s, %d frames, %d track%s", cs ? "cutscene" : "animation", editor::seqLength(doc, ref), nt,
@@ -813,6 +925,11 @@ float TimelinePanel::sequenceList(ImDrawList* dl, float x0, float x1, float y, e
             show(doc, ref);
         ImGui::PopID();
         y += 34 + space::xs;
+    }
+    if (removing) remove(doc, *removing);
+    if (ImGui::GetTime() < m_noteUntil) {
+        text(dl, ImVec2(x0, y + 2), f.medium, type::label, color::warn, m_note.c_str());
+        y += 24;
     }
     float w = 0;
     if (button("newcs", ImVec2(x0, y + space::xs), icon::plus, "New cutscene", ButtonKind::Ghost, &w))

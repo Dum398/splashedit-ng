@@ -61,6 +61,18 @@ private:
     void keyRow(ImDrawList* dl, ImRect r, editor::Document& doc);
     void addTrackPopup(editor::Document& doc);
     void sequencePopup(editor::Document& doc);
+    void trackMenu(editor::Document& doc);
+    // Renames, or says why not in the note.
+    void rename(editor::Document& doc, editor::SeqRef ref, const std::string& name);
+    void remove(editor::Document& doc, editor::SeqRef ref);
+    void note(std::string msg);
+    // The note: a refused rename, a deleted sequence; shown a few seconds.
+    std::string m_note;
+    double m_noteUntil = 0;
+    // The sequence picker's Rename arms the name field next frame.
+    bool m_renameArm = false;
+    // The lane whose menu is open.
+    int m_menuTrack = -1;
     float xOf(float frame) const;
     float frameAt(float x) const;
     void fit(int length);

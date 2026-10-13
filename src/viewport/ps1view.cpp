@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <set>
 
 #include <stb_image.h>
 
@@ -223,6 +224,7 @@ unsigned Ps1View::textureFor(const std::string& projectPath) {
         glGenTextures(1, &id);
         glBindTexture(GL_TEXTURE_2D, id);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        m_texSize[id] = {w, h};
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         stbi_image_free(data);
@@ -272,6 +274,7 @@ void Ps1View::rebuild() {
     }
     auto meshCacheKey = [](const std::string& p) { return p; };
     m_pick.clear();
+    std::set<std::string> uvPosed;
     for (size_t fi = 0; fi < flats.size(); ++fi) {
         const splash::FlatObject& fo = flats[fi];
         // Inactive objects ship switched off and the runtime skips them until a
@@ -298,12 +301,25 @@ void Ps1View::rebuild() {
         std::vector<splash::Vec3> wp(mesh->positions.size());
         for (size_t i = 0; i < mesh->positions.size(); ++i) wp[i] = fo.localToWorld.point(mesh->positions[i]);
         const bool haveUv = mesh->uv.size() == mesh->positions.size();
+        // A UV offset track: texels added on the mesh's uvOffsetMaterial, as
+        // the runtime adds them to that material's triangles.
+        std::optional<std::array<float, 2>> uvOff;
+        if (auto pit = m_preview.objects.find(fo.object->name); pit != m_preview.objects.end() && pit->second.uvOffset &&
+                                                              uvPosed.insert(fo.object->name).second)
+            uvOff = pit->second.uvOffset;
         const std::vector<splash::Vec3> colors = splash::exportVertexColors(flats, fo, *mesh);
 
         for (size_t sub = 0; sub < mesh->submeshes.size(); ++sub) {
             const splash::Material& mat = mc.materials[std::min(sub, mc.materials.size() - 1)];
             unsigned tex = textureFor(mat.texture);
             bool textured = !mat.texture.empty();
+            splash::Vec2 duv{0, 0};
+            if (uvOff && textured && int(std::min(sub, mc.materials.size() - 1)) == mc.uvOffsetMaterial) {
+                // PSX u = uv.x * (w - 1), v = (1 - uv.y) * (h - 1).
+                auto ts = m_texSize.find(tex);
+                if (ts != m_texSize.end() && ts->second.first > 1 && ts->second.second > 1)
+                    duv = {(*uvOff)[0] / float(ts->second.first - 1), -(*uvOff)[1] / float(ts->second.second - 1)};
+            }
             std::vector<Vertex>& bucket = buckets[tex];
             const std::vector<int>& tri = mesh->submeshes[sub];
             // The same triangles in Unity world space for picking, tagged with the object.
@@ -317,6 +333,7 @@ void Ps1View::rebuild() {
                 Vec3 col = i < colors.size() ? Vec3{colors[i].x, colors[i].y, colors[i].z} : Vec3{0.5f, 0.5f, 0.5f};
                 if (!textured) col = {col.x * mat.color[0], col.y * mat.color[1], col.z * mat.color[2]};
                 splash::Vec2 uv = haveUv ? mesh->uv[i] : splash::Vec2{};
+                uv = {uv.x + duv.x, uv.y + duv.y};
                 bucket.push_back({wp[i].x, wp[i].y, -wp[i].z, uv.x, uv.y, col.x, col.y, col.z});
             }
         }

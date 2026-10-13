@@ -2788,11 +2788,13 @@ static bool samePose(const splash::FlatObject& a, const splash::FlatObject& b) {
 // The camera a cutscene's camera tracks put at the scrub head: a frustum
 // (Unity camera axes, 4:3) with a camera icon at the eye.
 static void previewCamera(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const editor::Preview& p) {
-    if (!p.cameraPosition && !p.cameraRotation) return;
+    if (!p.cameraPosition && !p.cameraRotation && !p.cameraH) return;
     const splash::Vec3 eye = p.cameraPosition.value_or(splash::Vec3{});
     const splash::Quat q = editor::quatEuler(p.cameraRotation.value_or(splash::Vec3{}));
     const splash::Vec3 f = splash::rotate(q, {0, 0, 1}), u = splash::rotate(q, {0, 1, 0}), rt = splash::rotate(q, {1, 0, 0});
-    const float d = 1.2f, hh = d * 0.45f, hw = hh * 4.0f / 3.0f;
+    // A Camera H track sets the projection distance: half the 240 lines over H
+    // is the half height at distance 1 (camera.cpp projects with H).
+    const float d = 1.2f, hh = d * (p.cameraH ? 120.0f / std::max(1.0f, *p.cameraH) : 0.45f), hw = hh * 4.0f / 3.0f;
     const ImU32 col = rgb(0x5ccfe0);
     ImVec2 e, c[4];
     if (!view.project(toGl(eye), mn, sz, &e)) return;

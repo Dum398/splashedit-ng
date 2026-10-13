@@ -85,6 +85,44 @@ any active mesh within 100 units, raised by `playerHeight` (no hit: the position
 agent size of the player (or 1.8/0.5); if a `navigation` component exists, all its values win over
 the player's.
 
+### Memory card saves: `settings.memCard`
+
+Optional, after the other settings. What psxsplash's `MemCard.Save` names a save by and what the
+BIOS memory card screen shows for it (Unity: the PSXData `MemCard*` fields). Each key is written
+only when it differs from its default, and the object is left out when every key is at its default.
+
+```json
+"memCard": { "enabled": true, "region": "BE", "product": "SLES-01234", "title": "MY GAME",
+             "icons": ["icons/save0.png", "icons/save1.png"] }
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | false | pack the table; off, the header word is 0 |
+| `region` | `"BA"` | exactly 2 ASCII letters: `BA` America, `BE` Europe, `BI` Japan |
+| `product` | `"SLUS-00000"` | 1..10 ASCII characters, the game's product code |
+| `title` | `"PSXSPLASH SAVE"` | printable ASCII, at most 32 characters, shown by the BIOS |
+| `icons` | `[]` | 0..3 project-relative 16x16 images; 2 or 3 animate |
+
+A save's filename is `region + product + key` (the key passed to `MemCard.Save`), cut at 20
+characters, so with a 10-character product code only the first 8 characters of a key count. The
+title can be overridden per save by `MemCard.Save`'s fourth argument. The console writes ASCII
+titles only; `"`, `'`, `-`, `\` and `~` have no full-width form and show as `?`.
+
+The icon frames are quantised together into one 16-colour palette (the record has one). Texels
+with alpha below 0.5 are transparent and take palette entry 0; an icon with none of them uses all 16
+entries for colours. No icon gives a blank one.
+
+Export refuses (with a message saying what to change): a region that is not 2 ASCII characters, an
+empty or longer than 10 character or non-ASCII product code, a title over 32 characters or with
+non-ASCII characters, more than 3 icons, an icon that does not load or is not 16x16. It warns about
+a region other than BA/BE/BI, an empty title, a title with one of the five `?` characters and no
+icon. Nothing is checked while `enabled` is false.
+
+Off, psxsplash keeps the configuration of the last scene it loaded that had one (built in:
+BA, SLUS-00000, title PSXSPLASH, blank icon), so every scene of a game should carry the same
+values: a save made under one product code is not found under another.
+
 ### UI: `fonts` and `canvases`
 
 Two optional top-level arrays after `objects`.

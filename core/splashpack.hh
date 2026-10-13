@@ -116,6 +116,11 @@ inline std::string navEmptyWarning() {
 // Set when the bake ran with bigger cells than the scene asks for.
 inline bool navCoarsened(const ExportStats& s) { return s.navCellSize > s.navCellSizeAsked * 1.001f; }
 
+// Problems with a scene's memory card settings that export reports, one line
+// each saying how to fix it, for the inspector to show as they are typed. Only
+// checks an enabled config, and not the icon files (export loads those).
+void checkMemCard(const MemCardSettings& mc, std::vector<std::string>& errors, std::vector<std::string>& warnings);
+
 // `projectRoot` resolves the project-relative asset paths in the scene.
 // `out` is the .splashpack path; .vram and .spu are written next to it.
 ExportResult exportSplashpack(const Scene& scene, const std::filesystem::path& projectRoot,

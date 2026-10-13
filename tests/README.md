@@ -212,6 +212,19 @@ an unknown joint, no clips, a repeated or too-long clip name and fps 31 fail the
 `skin/skin.scene` booted with `boot/boot.sh` (its script loops `bend`) shows the upper box swinging
 about the elbow.
 
+## Memory card
+
+`memcardcheck.py` exports scenes with `settings.memCard` and reads the table back the way
+psxsplash's `splashpack.cpp` does: the header word at 120 (0 when saves are off, and then the same
+bytes as a scene without `memCard`), then the 464-byte record field by field at the loader's
+offsets. The three icon frames (made by the script as PNGs) must decode through the one shared CLUT
+to their source pixels, top row first and low nibble left, with transparent texels on word 0. It
+also checks the defaults, a 32-character title, the refused values (a 33-character title, an
+11-character product code, an empty product code, a one-letter region, a non-ASCII title, 4 frames,
+a 32x32 icon, a missing icon) and that `resave` keeps the fields and leaves defaults out.
+
+    python3 memcardcheck.py <splashpack-cli>
+
 ## UI
 
 `uicheck.py` exports `ui/ui.scene`, reads the UI table back the way `uisystem.cpp` does and resolves

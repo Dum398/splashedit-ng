@@ -187,6 +187,30 @@ struct FogSettings {
     ExtraKeys extra;
 };
 
+// Memory card saves (Unity: the PSXData MemCard* fields). psxsplash's
+// MemoryCardManager names a save region + product + the Lua key, shows the
+// title in the BIOS memory card manager, and draws the icon beside it. Off,
+// the pack carries no table and the console keeps the configuration of the
+// last scene that had one (or its built-in BA / SLUS-00000 / PSXSPLASH).
+// Every scene of a game should carry the same values, or saves made in one
+// scene are not found from another.
+struct MemCardSettings {
+    bool enabled = false;
+    std::string region = "BA";           // exactly 2 ASCII characters: BA America, BE Europe, BI Japan
+    std::string product = "SLUS-00000";  // 1..10 ASCII characters
+    std::string title = "PSXSPLASH SAVE";  // printable ASCII, at most 32 characters
+    // Project-relative 16x16 images, 1..3 frames (2 or 3 animate). The frames
+    // share one 16-colour palette; alpha below 0.5 is transparent. Empty = a
+    // blank icon.
+    std::vector<std::string> icons;
+    ExtraKeys extra;
+};
+
+constexpr size_t kMemCardRegionLen = 2, kMemCardProductMax = 10, kMemCardTitleMax = 32, kMemCardIconsMax = 3;
+constexpr int kMemCardIconSize = 16;
+// psxsplash's filename is region + product + key, cut at 20 characters.
+constexpr size_t kMemCardFilenameMax = 20;
+
 struct SceneSettings {
     float gteScaling = 100.f;
     SceneType sceneType = SceneType::Exterior;
@@ -200,6 +224,7 @@ struct SceneSettings {
     // Stream static scenery off the disc by region while playing (psxsplash
     // WorldStreamer), for worlds bigger than RAM. Regions are automatic.
     bool streamWorld = false;
+    MemCardSettings memCard;
     ExtraKeys extra;
 };
 

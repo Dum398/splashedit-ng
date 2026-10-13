@@ -1308,6 +1308,109 @@ static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObjec
     return uint32_t(std::min<uint64_t>((n + 3) & ~uint64_t(3), UINT32_MAX));
 }
 
+// ---- memory card table (v21; psxsplash splashpack.cpp SPLASHPACKMemcard)
+
+void checkMemCard(const MemCardSettings& mc, std::vector<std::string>& errors, std::vector<std::string>& warnings) {
+    if (!mc.enabled) return;
+    auto printable = [](const std::string& s) {
+        return std::all_of(s.begin(), s.end(), [](char c) { return c >= 0x20 && c <= 0x7e; });
+    };
+    if (mc.region.size() != kMemCardRegionLen || !printable(mc.region))
+        errors.push_back("Memory card region '" + mc.region +
+                         "' must be exactly 2 ASCII letters: BA (America), BE (Europe) or BI (Japan)");
+    else if (mc.region != "BA" && mc.region != "BE" && mc.region != "BI")
+        warnings.push_back("Memory card region '" + mc.region +
+                           "' is not one the BIOS knows: use BA (America), BE (Europe) or BI (Japan)");
+    if (mc.product.empty())
+        errors.push_back("Memory card product code is empty: set the game's code, e.g. SLUS-00000; it starts every "
+                         "save's filename");
+    else if (mc.product.size() > kMemCardProductMax)
+        errors.push_back("Memory card product code '" + mc.product + "' is " + std::to_string(mc.product.size()) +
+                         " characters, the splashpack stores 10: shorten it, e.g. SLUS-00000");
+    else if (!printable(mc.product))
+        errors.push_back("Memory card product code '" + mc.product +
+                         "' must be plain ASCII letters, digits and '-', e.g. SLUS-00000");
+    if (mc.title.size() > kMemCardTitleMax)
+        errors.push_back("Memory card save title '" + mc.title + "' is " + std::to_string(mc.title.size()) +
+                         " characters, the BIOS title holds 32: shorten it");
+    else if (!printable(mc.title))
+        errors.push_back("Memory card save title '" + mc.title +
+                         "' has a character that is not plain ASCII: the console writes ASCII titles only, replace it");
+    else if (mc.title.empty())
+        warnings.push_back("Memory card save title is empty, so the BIOS memory card screen shows saves with no name: "
+                           "set a title");
+    else if (mc.title.find_first_of("\"'-\\~") != std::string::npos)
+        warnings.push_back("Memory card save title '" + mc.title +
+                           "' shows a '?' in the BIOS for each \" ' - \\ or ~ (no full-width form): leave them out");
+    if (mc.icons.size() > kMemCardIconsMax)
+        errors.push_back(std::to_string(mc.icons.size()) +
+                         " memory card icon frames, the BIOS animates at most 3: remove the extra frames");
+    else if (mc.icons.empty())
+        warnings.push_back("Memory card saves have no icon, so the BIOS shows a blank square: add a 16x16 image");
+}
+
+namespace {
+
+// The 464-byte SPLASHPACKMemcard record: region[2], product[10], title[32]
+// (zero padded), u8 frameCount, u8 0, u16 0, u16 clut[16], u8 pixels[3][128]
+// (16x16 4bpp, top row first, low nibble = left pixel). Empty on errors.
+template <typename ImageFor>
+std::vector<uint8_t> memCardTable(const MemCardSettings& mc, ImageFor& imageFor, ExportResult& res) {
+    checkMemCard(mc, res.errors, res.warnings);
+    // The frames are quantised as one image stacked top to bottom, so they
+    // share the one palette the record holds.
+    const int frames = int(std::min(mc.icons.size(), kMemCardIconsMax));
+    const int n = kMemCardIconSize;
+    Image stack;
+    stack.width = n;
+    stack.height = n * frames;
+    stack.pixels.resize(size_t(n) * size_t(stack.height));
+    bool cutout = false;
+    for (int f = 0; f < frames; f++) {
+        const std::string& path = mc.icons[size_t(f)];
+        try {
+            const Image& img = imageFor(path);
+            if (img.width != n || img.height != n) {
+                res.errors.push_back("Memory card icon " + path + " is " + std::to_string(img.width) + "x" +
+                                     std::to_string(img.height) + ", the BIOS icon is 16x16: resize it");
+                continue;
+            }
+            // Image rows are bottom-up: frame f's top row r lands at stack row f*16 + r from the top.
+            for (int r = 0; r < n; r++)
+                for (int x = 0; x < n; x++) {
+                    const Image::Px& p = img.pixels[size_t(n - 1 - r) * n + x];
+                    stack.pixels[size_t(stack.height - 1 - (f * n + r)) * n + x] = p;
+                    cutout = cutout || p.a < 0.5f;
+                }
+        } catch (const std::exception& ex) {
+            res.errors.push_back("Memory card icon: " + std::string(ex.what()) + ": pick an image that exists");
+        }
+    }
+    if (!res.ok()) return {};
+
+    BinWriter t;
+    auto fixed = [&](const std::string& s, size_t len) {
+        for (size_t i = 0; i < len; i++) t.u8(i < s.size() ? uint8_t(s[i] & 0x7f) : 0);
+    };
+    fixed(mc.region, kMemCardRegionLen);
+    fixed(mc.product, kMemCardProductMax);
+    fixed(mc.title, kMemCardTitleMax);
+    t.u8(uint8_t(std::max(frames, 1)));
+    t.u8(0);
+    t.u16(0);
+    PsxTexture icon;
+    // Transparent texels take palette entry 0 (word 0, which the GPU skips),
+    // and only when the icon has any; otherwise all 16 entries are colours.
+    if (frames) icon = convertTexture(stack, BitDepth::Bpp4, cutout);
+    for (size_t i = 0; i < 16; i++) t.u16(i < icon.palette.size() ? icon.palette[i] : 0);
+    for (int f = 0; f < int(kMemCardIconsMax); f++)
+        for (int row = 0; row < n; row++)
+            for (int g = 0; g < n / 4; g++) t.u16(f < frames ? icon.word(g, f * n + row) : 0);
+    return t.data();
+}
+
+}  // namespace
+
 ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs::path& out,
                               const ExportOptions& options) {
     ExportResult res;
@@ -1328,6 +1431,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         if (it == images.end()) it = images.emplace(p, loadImage(root / p)).first;
         return it->second;
     };
+
+    // Memory card table; its errors stop the export with the others below.
+    std::vector<uint8_t> memCard;
+    if (scene.settings.memCard.enabled) memCard = memCardTable(scene.settings.memCard, imageFor, res);
 
     // Every light bakes into meshes that are not lit at runtime; a runtime-lit
     // mesh bakes only the non-runtime ones, so nothing is counted twice.
@@ -1825,7 +1932,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(0);  // agents
     size_t skinTableOffsetPos = w.pos();
     w.u32(0);
-    w.u32(0);  // memcard table offset
+    size_t memcardTableOffsetPos = w.pos();
+    w.u32(0);
     size_t streamTableOffsetPos = w.pos();
     w.u32(0);
     w.u32(0);  // sprite table offset
@@ -2173,6 +2281,13 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.bytes(name.data(), name.size());
             w.u8(0);
         }
+    }
+
+    // ---- memory card (v21): one 464-byte record, 0 in the header when off
+    if (!memCard.empty()) {
+        w.align4();
+        w.patchU32(memcardTableOffsetPos, uint32_t(w.pos()));
+        w.bytes(memCard.data(), memCard.size());
     }
 
     // ---- stream table (psxsplash streamplanner.hh): header, regions, object refs

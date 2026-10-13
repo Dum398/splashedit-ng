@@ -404,6 +404,33 @@ void flattenInto(const Object& o, const FlatObject* parent, std::vector<FlatObje
     for (const Object& c : o.children) flattenInto(c, &self, out);
 }
 
+// settings.memCard: each key only when it differs from MemCardSettings'
+// default, and no object at all for an untouched default.
+json writeMemCard(const MemCardSettings& mc) {
+    const MemCardSettings d;
+    json j = json::object();
+    if (mc.enabled != d.enabled) j["enabled"] = mc.enabled;
+    if (mc.region != d.region) j["region"] = mc.region;
+    if (mc.product != d.product) j["product"] = mc.product;
+    if (mc.title != d.title) j["title"] = mc.title;
+    if (!mc.icons.empty()) j["icons"] = mc.icons;
+    putExtras(j, mc.extra);
+    return j;
+}
+
+MemCardSettings readMemCard(const json& j) {
+    MemCardSettings mc;
+    mc.enabled = j.value("enabled", mc.enabled);
+    mc.region = j.value("region", mc.region);
+    mc.product = j.value("product", mc.product);
+    mc.title = j.value("title", mc.title);
+    if (j.contains("icons"))
+        for (const json& p : j["icons"]) mc.icons.push_back(p.get<std::string>());
+    // Against every known key: one holding its default is not written back.
+    mc.extra = extrasOf(j, json{{"enabled", 0}, {"region", 0}, {"product", 0}, {"title", 0}, {"icons", 0}});
+    return mc;
+}
+
 json writeFog(const FogSettings& fog) {
     json j = {{"enabled", fog.enabled},
               {"color", json::array({fog.color[0], fog.color[1], fog.color[2]})},
@@ -421,6 +448,7 @@ json writeSettings(const SceneSettings& st) {
     if (st.orderingTableSize) j["orderingTableSize"] = st.orderingTableSize;
     if (st.bumpAllocatorSize) j["bumpAllocatorSize"] = st.bumpAllocatorSize;
     if (st.streamWorld) j["streamWorld"] = true;
+    if (json mc = writeMemCard(st.memCard); !mc.empty()) j["memCard"] = mc;
     putExtras(j, st.extra);
     return j;
 }
@@ -738,7 +766,10 @@ Scene loadScene(const fs::path& file) {
         s.settings.orderingTableSize = st.value("orderingTableSize", 0);
         s.settings.bumpAllocatorSize = st.value("bumpAllocatorSize", 0);
         s.settings.streamWorld = st.value("streamWorld", false);
+        if (st.contains("memCard")) s.settings.memCard = readMemCard(st["memCard"]);
         s.settings.extra = extrasOf(st, writeSettings(s.settings));
+        // A memCard left at its defaults is not written back.
+        std::erase_if(s.settings.extra, [](const auto& e) { return e.first == "memCard"; });
     }
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));
     for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));

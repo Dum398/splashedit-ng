@@ -2778,10 +2778,14 @@ static ImRect splitViewport(State& st, ImDrawList* dl, ImRect r) {
     return scene;
 }
 
-static bool samePose(const splash::FlatObject& a, const splash::FlatObject& b) {
+// The same pose as far as the console can tell: the preview samples in its
+// fixed point, so a key on the scene's own pose comes back rounded. Within
+// one position step (gte / 4096 world units) and half an angle step on each
+// axis (180 / 2048 degrees) it is the scene's own.
+static bool samePose(const splash::FlatObject& a, const splash::FlatObject& b, float gte) {
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 4; ++j)
-            if (std::fabs(a.localToWorld.m[i][j] - b.localToWorld.m[i][j]) > 1e-4f) return false;
+            if (std::fabs(a.localToWorld.m[i][j] - b.localToWorld.m[i][j]) > (j == 3 ? gte / 4096.0f + 1e-4f : 5e-3f)) return false;
     return (a.object->mesh.has_value() == b.object->mesh.has_value());
 }
 
@@ -2904,7 +2908,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 // An object the preview moves (itself or through a parent)
                 // shows no gizmo: a drag from the drawn pose would write the
                 // previewed value into the document.
-                const bool posed = previewing && !samePose(fo, drawnFo);
+                const bool posed = previewing && !samePose(fo, drawnFo, doc.scene().settings.gteScaling);
                 if (posed) {
                     const char* note = "Posed by the timeline: its keys move it";
                     ImVec2 ns = measure(f.regular, type::caption, note);

@@ -1323,6 +1323,13 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 if (luas.empty()) m.push_back(item("No scripts in this scene", "", false, nullptr));
                 for (const std::string& p : luas) m.push_back(item(p, "", true, [&st, &doc, p] { openScript(st, doc, p); }));
             }
+            m.push_back(separator());
+            m.push_back(heading("Timeline"));
+            m.push_back(item("Timeline", "", true, [&] { st.timeline.open = !st.timeline.open; }, st.timeline.open));
+            for (const editor::SeqRef ref : editor::allSequences(doc)) {
+                const char* kindName = ref.kind == editor::SeqKind::Cutscene ? "Cutscene: " : "Animation: ";
+                m.push_back(item(kindName + *editor::seqName(doc, ref), "", true, [&st, &doc, ref] { st.timeline.show(doc, ref); }));
+            }
             break;
         case 5:  // Help
             m.push_back(item("Documentation", "", true, [] { SDL_OpenURL("https://github.com/psxsplash/splashedit-ng#readme"); }));
@@ -3047,6 +3054,22 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
 
+    // Cutscenes and animations, each with Edit in timeline.
+    {
+        const float stop = y;
+        const bool open = section("s_sequences", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::camera, rgb(0x5ccfe0),
+                                  "Cutscenes and animations", true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y = st.timeline.sequenceList(dl, x0 + space::sm, x1 - space::sm, y + 34 + space::xs, doc);
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
     float top = y;
     // Closed, the body runs under an empty clip rect (see the object inspector's fold).
     const bool renderOpen = section("s_render", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::cpu, color::textDim, "Render buffers",
@@ -4387,6 +4410,8 @@ static void updateModels(State& st, editor::Document& doc) {
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     filesPending(st, doc);
+    // The timeline takes Delete and Space while it has focus, before the scene's shortcuts see them.
+    st.timeline.takeKeys(doc);
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
     updatePlay(st, doc);
@@ -4412,7 +4437,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.scripts.closeAll();
         st.scriptsProject = doc.projectRoot();
     }
-    const ImRect body = st.scripts.tabStrip(dl, mid);
+    const ImRect body = st.scripts.tabStrip(dl, st.timeline.dock(mid));
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;
@@ -4421,6 +4446,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.viewportRect = ImRect();
         if (st.scripts.hasKeyboard()) st.play.gameFocus = false;
     }
+    st.timeline.draw(dl, doc);
     if (!st.scripts.notice.empty()) {
         notify(st, st.scripts.notice, st.scripts.noticeBad);
         st.scripts.notice.clear();

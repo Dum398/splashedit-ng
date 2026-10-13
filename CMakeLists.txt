@@ -171,7 +171,8 @@ add_executable(splashedit
     src/ui/widgets.cpp
     src/viewport/ps1view.cpp
     src/mockup/main_screen.cpp
-    src/editor/lua_editor_view.cpp)
+    src/editor/lua_editor_view.cpp
+    src/editor/timeline_view.cpp)
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(splashedit PRIVATE imgui splasheditdoc splashcore)

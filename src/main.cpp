@@ -81,6 +81,7 @@ struct Args {
     const char* project = nullptr;  // project root; default: the bundled example
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
+    const char* timeline = nullptr; // cutscene or animation to open in the Timeline at startup
     std::vector<Action> actions;
     int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
     bool splash = false;
@@ -233,6 +234,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
+        else if (!std::strcmp(argv[i], "--timeline")) a.timeline = next();
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
@@ -412,6 +414,11 @@ int main(int argc, char** argv) {
     }
     editor::Document doc;
     openDocument(doc, args);
+    if (args.timeline) {
+        for (const editor::SeqRef ref : editor::allSequences(doc))
+            if (!state.timeline.open && *editor::seqName(doc, ref) == args.timeline) state.timeline.show(doc, ref);
+        if (!state.timeline.open) std::fprintf(stderr, "no cutscene or animation named '%s' in the scene\n", args.timeline);
+    }
     // A project named on the command line joins File > Recent like one opened from the menu.
     if (args.project && !args.screenshot && std::filesystem::is_regular_file(doc.scenePath()))
         state.recent.add(std::filesystem::absolute(doc.scenePath()));

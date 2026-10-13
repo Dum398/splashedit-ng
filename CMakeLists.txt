@@ -87,7 +87,8 @@ add_library(splasheditdoc STATIC
     src/editor/hardware.cpp
     src/editor/psxmon.cpp
     src/editor/texture_preview.cpp
-    src/editor/unirom.cpp)
+    src/editor/unirom.cpp
+    src/editor/ui_canvas.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 find_package(Threads REQUIRED)
 target_link_libraries(splasheditdoc PUBLIC splashcore Threads::Threads)

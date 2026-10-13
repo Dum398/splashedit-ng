@@ -100,6 +100,16 @@ public:
     const std::optional<ObjectPath>& pinned() const { return m_pinned; }
     void pin(std::optional<ObjectPath> path) { m_pinned = std::move(path); }
 
+    // The UI canvas editor's selection: the canvas being edited and the
+    // element selected in it (-1 = none). Kept apart from the object
+    // selection; UI edits (ui_canvas.hh) restore it on undo.
+    struct UiSelection {
+        int canvas = -1, element = -1;
+        bool operator==(const UiSelection&) const = default;
+    };
+    const UiSelection& uiSelection() const { return m_uiSelection; }
+    void selectUi(UiSelection s) { m_uiSelection = s; }
+
     // Editing. Every change goes through the history: it bumps revision() and
     // marks the document dirty.
     //
@@ -183,6 +193,7 @@ public:
     splash::Scene& sceneMut() { return m_scene; }
     std::vector<splash::Cutscene>& cutscenesMut() { return m_scene.cutscenes; }
     std::vector<splash::Animation>& animationsMut() { return m_scene.animations; }
+    std::vector<splash::UICanvas>& canvasesMut() { return m_scene.canvases; }
     // Children of the object at `parentPath`, or the top level for the empty path.
     std::vector<splash::Object>* childrenMut(const ObjectPath& parentPath);
     // Keeps selection and tree expansion on the same objects when a sibling
@@ -232,6 +243,7 @@ private:
     std::optional<ObjectPath> m_selection;
     std::set<ObjectPath> m_collapsed;
     std::optional<ObjectPath> m_pinned;
+    UiSelection m_uiSelection;
     std::map<std::string, MeshInfo> m_meshes;
     std::map<std::string, TextureInfo> m_textures;
     std::map<std::string, bool> m_files;

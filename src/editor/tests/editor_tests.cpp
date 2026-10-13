@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -24,6 +25,7 @@
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
 #include "editor/lua_editor.hh"
+#include "editor/memcard.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
@@ -33,6 +35,7 @@
 #include "budget.hh"
 #include "navregion.hh"
 #include "splashpack.hh"
+#include "texture.hh"
 #include "worldstream.hh"
 
 namespace {
@@ -164,6 +167,118 @@ void testSettings() {
     CHECK(!d.dirty());
     CHECK(d.redo());
     CHECK(d.scene().settings.orderingTableSize == 500);
+}
+
+// The Memory card section's helpers: the filename preview, each problem's
+// fix, and the icon decoded through the export's shared palette.
+void testMemCard() {
+    splash::MemCardSettings mc;
+    CHECK(editor::memCardFilename(mc, "SAVE1") == "BASLUS-00000SAVE1");
+    CHECK(editor::memCardKeyRoom(mc) == 8);
+    CHECK(editor::memCardFilename(mc, "CHECKPOINT_42") == "BASLUS-00000CHECKPOI");
+    CHECK(editor::memCardFilename(mc, "CHECKPOINT_42").size() == splash::kMemCardFilenameMax);
+    mc.product = "LONGPRODUCTCODE12345";
+    CHECK(editor::memCardKeyRoom(mc) == 0);
+    CHECK(editor::memCardFilename(mc, "SAVE1") == "BALONGPRODUCTCODE123");
+
+    // Off: no problems at all, whatever the values.
+    mc = {};
+    mc.region = "X";
+    CHECK(editor::memCardProblems(mc).empty());
+
+    auto only = [](const splash::MemCardSettings& m) {
+        std::vector<editor::MemCardProblem> ps = editor::memCardProblems(m);
+        return ps.size() == 1 ? ps[0] : editor::MemCardProblem{true, "?", "?", editor::MemCardFix::None, nullptr};
+    };
+    auto fixes = [&](splash::MemCardSettings m, editor::MemCardFix fix, bool error) {
+        editor::MemCardProblem p = only(m);
+        bool ok = p.fix == fix && p.error == error && p.fixLabel && !p.title.empty() && !p.body.empty();
+        ok = ok && editor::applyMemCardFix(m, p.fix, "my_level-1") && editor::memCardProblems(m).empty();
+        if (!ok) std::fprintf(stderr, "memcard: %s | %s\n", p.title.c_str(), p.body.c_str());
+        return ok;
+    };
+    splash::MemCardSettings on;
+    on.enabled = true;
+    on.icons = {"textures/icon.png"};
+    CHECK(editor::memCardProblems(on).empty());
+    splash::MemCardSettings m = on;
+    m.region = "B";
+    CHECK(fixes(m, editor::MemCardFix::RegionBA, true));
+    m = on, m.region = "BX";
+    CHECK(fixes(m, editor::MemCardFix::RegionBA, false));
+    m = on, m.product = "";
+    CHECK(fixes(m, editor::MemCardFix::ProductDefault, true));
+    m = on, m.product = "SLUS-0000012";
+    CHECK(fixes(m, editor::MemCardFix::ProductCut, true));
+    m = on, m.product = "SLUS\x01" "000";
+    CHECK(fixes(m, editor::MemCardFix::ProductAscii, true));
+    m = on, m.title = std::string(40, 'A');
+    CHECK(fixes(m, editor::MemCardFix::TitleCut, true));
+    m = on, m.title = "CAF\xc3\xa9";
+    CHECK(fixes(m, editor::MemCardFix::TitleAscii, true));
+    m = on, m.title = "";
+    CHECK(fixes(m, editor::MemCardFix::TitleScene, false));
+    applyMemCardFix(m, editor::MemCardFix::TitleScene, "my_level-1");
+    CHECK(m.title == "my level1");
+    m = on, m.title = "Bob's save - 1";
+    CHECK(fixes(m, editor::MemCardFix::TitleDropMarks, false));
+    m = on, m.icons = {"a.png", "b.png", "c.png", "d.png"};
+    CHECK(fixes(m, editor::MemCardFix::IconsFirst3, true));
+    m = on, m.icons.clear();
+    CHECK(only(m).fix == editor::MemCardFix::AddIcon && !only(m).error);
+    CHECK(!editor::applyMemCardFix(m, editor::MemCardFix::AddIcon, "x"));
+    CHECK(editor::memCardTitleFrom("") == "SAVE");
+    CHECK(editor::memCardTitleFrom(std::string(50, 'z')).size() == splash::kMemCardTitleMax);
+
+    // Icons: a 16x16 frame with a transparent corner and 20 colours, a
+    // 16x16 one-colour frame, a 8x8 frame and a missing one.
+    std::error_code ec;
+    const std::filesystem::path root = g_outDir / "memcard";
+    std::filesystem::remove_all(root, ec);
+    std::filesystem::create_directories(root / "textures", ec);
+    auto image = [](int w, int h, auto px) {
+        splash::Image img;
+        img.width = w, img.height = h;
+        img.pixels.resize(size_t(w) * h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) img.pixels[size_t(y) * w + x] = px(x, h - 1 - y);  // top row first
+        return img;
+    };
+    splash::savePng(image(16, 16,
+                          [](int x, int y) {
+                              if (x == 0 && y == 0) return splash::Image::Px{0, 0, 0, 0};
+                              return splash::Image::Px{float(x % 20) / 19.f, float(y) / 15.f, 0.5f, 1};
+                          }),
+                    root / "textures/a.png");
+    splash::savePng(image(16, 16, [](int, int) { return splash::Image::Px{1, 0, 0, 1}; }), root / "textures/b.png");
+    splash::savePng(image(8, 8, [](int, int) { return splash::Image::Px{0, 1, 0, 1}; }), root / "textures/small.png");
+    editor::MemCardIcon ic = editor::memCardIcon({"textures/a.png", "textures/b.png", "textures/small.png", "textures/none.png"}, root);
+    CHECK(ic.frames.size() == 3);  // the export reads 3 at most
+    CHECK(ic.frames.size() == 3 && ic.frames[0].error.empty() && ic.frames[0].rgba.size() == 256);
+    CHECK(ic.frames.size() == 3 && ic.frames[1].error.empty() && ic.frames[1].rgba.size() == 256);
+    CHECK(ic.frames.size() == 3 && ic.frames[2].error == "8x8, not 16x16" && ic.frames[2].rgba.empty() && ic.frames[2].width == 8);
+    CHECK(ic.paletteColors == 15);
+    CHECK(ic.colors > 16);
+    if (ic.frames.size() == 3 && ic.frames[0].rgba.size() == 256 && ic.frames[1].rgba.size() == 256) {
+        CHECK(ic.frames[0].rgba[0] == 0);                         // the transparent top-left texel
+        CHECK((ic.frames[0].rgba[1] >> 24) == 0xff);
+        CHECK(ic.frames[1].rgba[0] == 0xff0000ffu);               // pure red, top row
+        std::unordered_set<uint32_t> shown;
+        for (const auto& f : ic.frames)
+            for (uint32_t c : f.rgba)
+                if (c) shown.insert(c);
+        CHECK(shown.size() <= 15);                                 // one palette, entry 0 transparent
+    }
+    ic = editor::memCardIcon({"textures/none.png"}, root);
+    CHECK(ic.frames.size() == 1 && ic.frames[0].error == "not found" && ic.colors == 0);
+
+    // One edit, one undo step.
+    editor::Document d;
+    d.reset(sample());
+    d.editSettings([](splash::SceneSettings& s) { s.memCard.enabled = true; });
+    d.editSettings([](splash::SceneSettings& s) { s.memCard.title = "MY GAME"; });
+    CHECK(d.historySize() == 2);
+    CHECK(d.undo() && d.scene().settings.memCard.title == "PSXSPLASH SAVE" && d.scene().settings.memCard.enabled);
 }
 
 void testRenderPeak() {
@@ -2618,6 +2733,7 @@ int main(int argc, char** argv) {
     testMerge();
     testSettings();
     testRenderPeak();
+    testMemCard();
     testDirtyAndSave();
     testStructure();
     testMove();

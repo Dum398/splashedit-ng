@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 
@@ -431,7 +432,8 @@ void beginTextEdit(const char* id, const std::string& initial) {
 
 bool textEditing(const char* id) { return textState().id != 0 && textState().id == ImGui::GetID(id); }
 
-TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out) {
+TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out,
+                  size_t maxLen) {
     TextEditState& s = textState();
     if (s.id == 0 || s.id != ImGui::GetID(id)) return TextEdit::Inactive;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -458,7 +460,7 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
     ImGui::SetNextItemWidth(std::max(8.0f, textRight - textX));
     if (s.frames == 0) ImGui::SetKeyboardFocusHere();
     ImGui::PushID(id);
-    bool enter = ImGui::InputText("##textedit", s.buf, sizeof s.buf, ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+    bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
     bool deactivated = ImGui::IsItemDeactivated();
     bool active = ImGui::IsItemActive();
     ImGui::PopID();
@@ -472,6 +474,42 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
         return TextEdit::Commit;
     }
     return TextEdit::Editing;
+}
+
+bool textField(const char* id, ImRect r, const std::string& value, std::string* out, const char* placeholder, size_t maxLen) {
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // A value already past the cap stays editable, so it can be shortened.
+    const size_t cap = maxLen ? std::max(maxLen, value.size()) : 255;
+    std::string count;
+    if (maxLen) count = std::to_string(textEditing(id) ? std::strlen(textState().buf) : value.size()) + "/" + std::to_string(maxLen);
+    const float countW = count.empty() ? 0 : measure(f.regular, type::caption, count.c_str()).x;
+    const float x = r.Min.x + space::sm, right = r.Max.x - space::sm - (countW > 0 ? countW + space::sm : 0);
+    auto drawCount = [&](size_t len) {
+        if (count.empty()) return;
+        text(dl, ImVec2(r.Max.x - space::sm - countW, centerY(f.regular, type::caption, r.Min.y, r.Max.y)), f.regular,
+             type::caption, len > maxLen ? color::warn : color::textFaint, count.c_str());
+    };
+    if (textEditing(id)) {
+        std::string typed;
+        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed, cap);
+        drawCount(std::strlen(textState().buf));
+        if (res == TextEdit::Commit && typed != value) {
+            *out = typed;
+            return true;
+        }
+        return false;
+    }
+    Hit h = interact(id, r);
+    if (h.hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+    if (h.clicked) beginTextEdit(id, value);
+    well(dl, r, h.hover);
+    drawCount(value.size());
+    const bool empty = value.empty() && placeholder;
+    const ImVec4 clip(r.Min.x, r.Min.y, right, r.Max.y);
+    dl->AddText(f.regular, type::body, ImVec2(x, centerY(f.regular, type::body, r.Min.y, r.Max.y)), empty ? color::textFaint : color::text,
+                empty ? placeholder : value.c_str(), nullptr, 0.0f, &clip);
+    return false;
 }
 
 // Scrub state of the number field being dragged.

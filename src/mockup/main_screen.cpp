@@ -21,6 +21,7 @@
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include "editor/memcard.hh"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
 
@@ -819,9 +820,12 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // The other asset fields' file dialogs (texture, scripts, audio, skin clips),
 // answered on their own thread and applied next frame to the object they were
 // opened for. A file outside the project is copied into it first.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua };  // SceneLua: no target object
+// SceneLua and MemCardIcon: no target object. MemCardIcon replaces icon frame
+// `index`, or with index -1 adds the picked files as new frames.
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
+static int g_assetIndex = 0;
 static std::vector<std::string> g_assetPicked;
 
 static void SDLCALL onAssetPicked(void*, const char* const* files, int) {
@@ -831,35 +835,40 @@ static void SDLCALL onAssetPicked(void*, const char* const* files, int) {
     for (const char* const* f = files; *f; ++f) g_assetPicked.emplace_back(*f);
 }
 
-static void pickAsset(AssetSlot slot, const editor::ObjectPath& target) {
+static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int index = 0) {
     {
         std::lock_guard<std::mutex> lock(g_pickMutex);
         g_assetSlot = slot;
         g_assetTarget = target;
+        g_assetIndex = index;
     }
     static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
     static const SDL_DialogFileFilter lua[] = {{"Lua scripts", "lua"}};
     static const SDL_DialogFileFilter wav[] = {{"WAV audio", "wav"}};
     static const SDL_DialogFileFilter anim[] = {{"Animation clips", "anim"}};
-    const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture ? images
+    const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? images
                                          : slot == AssetSlot::Clip    ? wav
                                          : slot == AssetSlot::SkinClips ? anim
                                                                         : lua;
-    SDL_ShowOpenFileDialog(onAssetPicked, nullptr, nullptr, filter, 1, nullptr, slot == AssetSlot::SkinClips);
+    SDL_ShowOpenFileDialog(onAssetPicked, nullptr, nullptr, filter, 1, nullptr,
+                           slot == AssetSlot::SkinClips || (slot == AssetSlot::MemCardIcon && index < 0));
 }
 
 static void applyPickedAssets(State& st, editor::Document& doc) {
     std::vector<std::string> files;
     AssetSlot slot;
     editor::ObjectPath target;
+    int index;
     {
         std::lock_guard<std::mutex> lock(g_pickMutex);
         files.swap(g_assetPicked);
         slot = g_assetSlot;
         target = g_assetTarget;
+        index = g_assetIndex;
     }
-    if (files.empty() || (slot != AssetSlot::SceneLua && !doc.object(target))) return;
-    const char* folder = slot == AssetSlot::Texture     ? "textures"
+    const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon;
+    if (files.empty() || (!sceneWide && !doc.object(target))) return;
+    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
                                                         : "scripts";
@@ -880,6 +889,24 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
     const std::string& first = paths.front();
     if (slot == AssetSlot::SceneLua) {
         doc.editSettings([&](splash::SceneSettings& s) { s.script = first; });
+        doc.refreshAssets(paths);
+        return;
+    }
+    if (slot == AssetSlot::MemCardIcon) {
+        const size_t have = doc.scene().settings.memCard.icons.size();
+        if (index < 0 && have + paths.size() > splash::kMemCardIconsMax) {
+            const size_t room = have < splash::kMemCardIconsMax ? splash::kMemCardIconsMax - have : 0;
+            notify(st, "Kept " + std::to_string(room) + " of " + std::to_string(paths.size()) + " images; an icon has at most 3 frames.",
+                   false);
+            paths.resize(room);
+            if (paths.empty()) return;
+        }
+        doc.editSettings([&](splash::SceneSettings& s) {
+            std::vector<std::string>& icons = s.memCard.icons;
+            if (index < 0) icons.insert(icons.end(), paths.begin(), paths.end());
+            else if (size_t(index) < icons.size()) icons[size_t(index)] = paths.front();
+            else icons.push_back(paths.front());
+        });
         doc.refreshAssets(paths);
         return;
     }
@@ -905,6 +932,7 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
                 if (o.skin) o.skin->clips = paths;
                 break;
             case AssetSlot::SceneLua:
+            case AssetSlot::MemCardIcon:
                 break;
         }
     });
@@ -2961,6 +2989,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
     const float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
     const splash::SceneSettings& set = doc.scene().settings;
+    // Taller than the panel, it scrolls with the wheel.
+    static float scroll = 0;
+    const float top0 = y;
+    y -= scroll;
 
     ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
     dl->AddRectFilled(ic.Min, ic.Max, (color::accentHover & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
@@ -3208,11 +3240,199 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             }
     }
 
+    // Memory card: what MemCard.Save files are called and how the console's
+    // memory card screen shows them. Off, the fields stay editable, dimmed.
+    {
+        const splash::MemCardSettings& mc = set.memCard;
+        auto edit = [&](const std::function<void(splash::MemCardSettings&)>& fn) {
+            doc.editSettings([&](splash::SceneSettings& s) { fn(s.memCard); });
+        };
+        // Each field's tip; while saves are off it says so first.
+        auto tip = [&](const char* t) { return mc.enabled ? std::string(t) : "Not used: turn on Enable saves first. " + std::string(t); };
+        const float stop = y;
+        const bool open = section("s_memcard", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::hardDrive, color::textDim, "Memory card",
+                                  true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        ImRect ev = row("lmcenable", "Enable saves",
+                        "Pack memory card settings into this scene. Off, the console keeps the last scene's settings. Use the same "
+                        "values in every scene.");
+        if (toggle("mcenable", ImRect(ImVec2(ev.Min.x, ev.GetCenter().y - 8), ImVec2(ev.Min.x + 30, ev.GetCenter().y + 8)), mc.enabled))
+            edit([](splash::MemCardSettings& m) { m.enabled = !m.enabled; });
+        const float dimTop = y;
+
+        static const char* const regions[3] = {"BA", "BE", "BI"};
+        int cur = -1;
+        for (int i = 0; i < 3; i++)
+            if (mc.region == regions[i]) cur = i;
+        static const char* const regionNames[3] = {"BA  America", "BE  Europe", "BI  Japan"};
+        const std::string shown = cur >= 0 ? regionNames[cur] : mc.region.empty() ? "None" : mc.region + "  (not a BIOS region)";
+        int pick = dropdownMenu("mcregion", row("lmcregion", "Region", tip("Starts every save filename.").c_str()), nullptr,
+                                shown.c_str(), {regionNames[0], regionNames[1], regionNames[2]}, cur);
+        if (pick >= 0 && pick != cur) edit([&](splash::MemCardSettings& m) { m.region = regions[pick]; });
+
+        std::string typed;
+        if (textField("mcproduct",
+                      row("lmcproduct", "Product code",
+                          tip("e.g. SLUS-00000. The save filename is region + product + the Lua key, cut at 20 characters.").c_str()),
+                      mc.product, &typed, "SLUS-00000", splash::kMemCardProductMax))
+            edit([&](splash::MemCardSettings& m) { m.product = typed; });
+        const int room = editor::memCardKeyRoom(mc);
+        if (room > 0)
+            caption("File " + editor::memCardFilename(mc, "SAVE1") + " for key SAVE1\nKeys keep their first " + std::to_string(room) +
+                        " characters.",
+                    color::textFaint);
+        else
+            caption("Region and product fill all 20 characters of the filename, so every key saves to the same file.", color::warn);
+        y += space::xs;
+
+        if (textField("mctitle",
+                      row("lmctitle", "Save title",
+                          tip("Shown in the console's memory card screen. ASCII only; \" ' - \\ ~ show as ?. MemCard.Save's 4th "
+                              "argument overrides it per save.")
+                              .c_str()),
+                      mc.title, &typed, "No title", splash::kMemCardTitleMax))
+            edit([&](splash::MemCardSettings& m) { m.title = typed; });
+
+        // Icon: up to 3 frames, each drawn 4x as the console shows it, after
+        // the shared 16-colour palette.
+        static struct {
+            std::vector<std::string> icons;
+            unsigned assets = ~0u;
+            std::filesystem::path root;
+            editor::MemCardIcon icon;
+        } cache;
+        if (cache.icons != mc.icons || cache.assets != doc.assetsId() || cache.root != doc.projectRoot()) {
+            cache.icons = mc.icons;
+            cache.assets = doc.assetsId();
+            cache.root = doc.projectRoot();
+            cache.icon = editor::memCardIcon(mc.icons, doc.projectRoot());
+        }
+        const editor::MemCardIcon& icn = cache.icon;
+        const char* iconTip = "16x16 images; 2 or 3 frames animate. All frames share one 16-colour palette. Alpha below 0.5 is "
+                              "transparent. Click a frame to pick another image.";
+        ImRect iv = row("lmcicon", "Icon", tip(iconTip).c_str());
+        const float tile = 4.0f * splash::kMemCardIconSize, gap = 4;
+        const float ty = iv.Min.y;
+        const int nFrames = int(icn.frames.size());
+        for (int i = 0; i < nFrames + (nFrames < int(splash::kMemCardIconsMax) ? 1 : 0); i++) {
+            ImRect tr(ImVec2(iv.Min.x + i * (tile + gap), ty), ImVec2(iv.Min.x + i * (tile + gap) + tile, ty + tile));
+            ImGui::PushID(i);
+            if (i == nFrames) {
+                Hit h = interact("mcadd", tr);
+                tooltip(nFrames ? "Add a frame: 2 or 3 frames animate. Pick several images to add them at once." : iconTip);
+                dl->AddRectFilled(tr.Min, tr.Max, lerpColor(color::field, color::hover, h.hover), radius::field);
+                dl->AddRect(tr.Min, tr.Max, lerpColor(color::border, color::borderStrong, h.hover), radius::field);
+                textCentered(dl, ImRect(tr.Min, ImVec2(tr.Max.x, tr.Max.y - 14)), f.medium, type::icon, color::textDim, icon::plus);
+                textCentered(dl, ImRect(ImVec2(tr.Min.x, tr.Max.y - 26), ImVec2(tr.Max.x, tr.Max.y - 6)), f.regular, type::caption,
+                             color::textFaint, nFrames ? "Add frame" : "Add icon");
+                if (h.clicked) pickAsset(AssetSlot::MemCardIcon, {}, -1);
+            } else {
+                const editor::MemCardIcon::Frame& fr = icn.frames[size_t(i)];
+                Hit h = interact("mcframe", tr);
+                const std::string ft = "Frame " + std::to_string(i + 1) + ": " + fr.path +
+                                       (fr.error.empty() ? "" : " (" + fr.error + ")") + ". Click to pick another image.";
+                tooltip(ft.c_str());
+                // Transparent texels show a checkerboard, as in image editors.
+                for (int cy = 0; cy < 4; cy++)
+                    for (int cx = 0; cx < 4; cx++)
+                        dl->AddRectFilled(tr.Min + ImVec2(cx * 16.f, cy * 16.f), tr.Min + ImVec2(cx * 16.f + 16, cy * 16.f + 16),
+                                          (cx + cy) % 2 ? rgb(0x2a2f39) : rgb(0x1f232b));
+                if (!fr.rgba.empty()) {
+                    const int n = splash::kMemCardIconSize;
+                    for (int py = 0; py < n; py++)
+                        for (int px = 0; px < n; px++) {
+                            const ImU32 c = fr.rgba[size_t(py) * n + px];
+                            if (c) dl->AddRectFilled(tr.Min + ImVec2(px * 4.f, py * 4.f), tr.Min + ImVec2(px * 4.f + 4, py * 4.f + 4), c);
+                        }
+                } else {
+                    textCentered(dl, tr, f.medium, type::icon, color::warn, icon::warning);
+                }
+                dl->AddRect(tr.Min, tr.Max,
+                            !fr.error.empty() ? color::warn : lerpColor(color::border, color::borderStrong, h.hover), radius::field);
+                if (h.clicked) pickAsset(AssetSlot::MemCardIcon, {}, i);
+                // Under it: its number and a button that takes it out.
+                const float ly = tr.Max.y + 2;
+                text(dl, ImVec2(tr.Min.x + 2, ly + 2), f.regular, type::caption, color::textFaint, std::to_string(i + 1).c_str());
+                const std::string rt = "Remove frame " + std::to_string(i + 1);
+                if (iconButton("mcremove", ImRect(ImVec2(tr.Max.x - 18, ly), ImVec2(tr.Max.x, ly + 18)), icon::x, false, rt.c_str()))
+                    edit([&](splash::MemCardSettings& m) {
+                        if (size_t(i) < m.icons.size()) m.icons.erase(m.icons.begin() + i);
+                    });
+            }
+            ImGui::PopID();
+        }
+        y = ty + tile + 22 + space::xs;
+        if (nFrames)
+            caption(nFrames == 1 ? "1 frame: still" : std::to_string(nFrames) + " frames: animated", color::textFaint);
+        if (icn.colors > icn.paletteColors)
+            caption("The frames use " + std::to_string(icn.colors) + " colours and share a palette of " +
+                        std::to_string(icn.paletteColors) + (icn.paletteColors == 15 ? " (one more is transparent)" : "") +
+                        ", so close colours merge. The frames above show the result.",
+                    color::warn);
+        y += space::xs;
+        // Off: dimmed like other settings that do nothing yet, still editable.
+        if (!mc.enabled) dl->AddRectFilled(ImVec2(x0 + space::sm, dimTop), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150));
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+
+        // What the export would refuse or warn about, each with its fix.
+        if (mc.enabled) {
+            auto problemAt = [&](const std::string& id, const std::string& title, const std::string& body, const char* fixLabel) {
+                bool fix = false;
+                float h = problemCard(id.c_str(), ImVec2(x0, y), x1 - x0, title.c_str(), body.c_str(), fixLabel, &fix);
+                y += h + space::sm;
+                return fix;
+            };
+            for (int i = 0; i < nFrames; i++) {
+                const editor::MemCardIcon::Frame& fr = icn.frames[size_t(i)];
+                if (fr.error.empty()) continue;
+                const bool missing = fr.error == "not found";
+                const std::string title = "Icon frame " + std::to_string(i + 1) + (missing ? " not found" : " can't be used");
+                const std::string body =
+                    missing ? fr.path + " is not in the project. The export stops until it is found or replaced."
+                    : fr.width ? fr.path + " is " + std::to_string(fr.width) + "x" + std::to_string(fr.height) +
+                                     ", the BIOS icon is 16x16: resize it or pick another image. The export stops until then."
+                               : fr.path + ": " + fr.error + ". The export stops until it is replaced.";
+                if (problemAt("mcframefix" + std::to_string(i), title, body, missing ? "Locate file" : "Pick another image"))
+                    pickAsset(AssetSlot::MemCardIcon, {}, i);
+            }
+            const std::vector<editor::MemCardProblem> problems = editor::memCardProblems(mc);
+            for (size_t i = 0; i < problems.size(); i++) {
+                const editor::MemCardProblem& p = problems[i];
+                const std::string body = p.error ? p.body + ". The export stops until it is fixed." : p.body + ".";
+                if (p.fix == editor::MemCardFix::None) {
+                    caption(body, p.error ? color::bad : color::warn);
+                    continue;
+                }
+                if (!problemAt("mcfix" + std::to_string(i), p.title, body, p.fixLabel)) continue;
+                if (p.fix == editor::MemCardFix::AddIcon) pickAsset(AssetSlot::MemCardIcon, {}, -1);
+                else edit([&](splash::MemCardSettings& m) { editor::applyMemCardFix(m, p.fix, doc.sceneStem()); });
+            }
+        }
+    }
+
     const char* hint = "Pick an object in the Scene panel to edit it.";
     ImVec2 hs = measure(f.regular, type::label, hint);
     text(dl, ImVec2((r.Min.x + r.Max.x - hs.x) * 0.5f, std::max(y + space::lg, r.Max.y - space::xl - hs.y)), f.regular, type::label,
          color::textFaint, hint);
     ImGui::PopClipRect();
+
+    const float content = y + space::lg + hs.y + space::xl - (top0 - scroll), view = r.Max.y - top0;
+    const float maxScroll = std::max(0.0f, content - view);
+    if (maxScroll > 0 && ImGui::IsMouseHoveringRect(r.Min, r.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        scroll -= ImGui::GetIO().MouseWheel * 48.0f;
+    scroll = std::clamp(scroll, 0.0f, maxScroll);
+    if (maxScroll > 0) {
+        // A thin bar at the right edge: where the view sits in the settings.
+        const float h = view * view / content, t = top0 + (view - h) * (scroll / maxScroll);
+        dl->AddRectFilled(ImVec2(r.Max.x - 5, t + 2), ImVec2(r.Max.x - 2, t + h - 2), rgb(0xffffff, 40), 2);
+    }
 }
 
 static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {

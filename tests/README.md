@@ -265,5 +265,12 @@ first. Needs a display (CI runs it under `xvfb-run` on Linux).
 
     python3 exportflipcheck.py <splashedit> <splashpack-cli>
 
+`memcardeditcheck.py` edits the courtyard example's memory card settings in the scene inspector:
+the Enable saves switch, then the Save title field (Enter or clicking away commits, Escape
+cancels), saves with Ctrl+S and reads `settings.memCard` back from the scene. Saving alone must
+write no `memCard`, and one Ctrl+Z must take the title back and leave saves on. Needs a display.
+
+    python3 memcardeditcheck.py <splashedit>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

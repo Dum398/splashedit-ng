@@ -214,8 +214,11 @@ unsigned Ps1View::textureFor(const std::string& projectPath) {
     unsigned id = m_fallback;
     std::string file = m_doc->resolve(projectPath).string();
     int w = 0, h = 0, n = 0;
-    stbi_set_flip_vertically_on_load(1);  // row 0 at the bottom, so UV v=0 is the bottom edge
+    // Row 0 at the bottom, so UV v=0 is the bottom edge. Only for this load and
+    // this thread: the global flag would flip every image export decodes later.
+    stbi_set_flip_vertically_on_load_thread(1);
     unsigned char* data = stbi_load(file.c_str(), &w, &h, &n, 4);
+    stbi_set_flip_vertically_on_load_thread(0);
     if (data) {
         glGenTextures(1, &id);
         glBindTexture(GL_TEXTURE_2D, id);

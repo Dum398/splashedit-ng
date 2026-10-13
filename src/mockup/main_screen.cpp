@@ -793,7 +793,7 @@ static void openScript(State& st, const editor::Document& doc, const std::string
 // The other asset fields' file dialogs (texture, scripts, audio, skin clips),
 // answered on their own thread and applied next frame to the object they were
 // opened for. A file outside the project is copied into it first.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips };
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua };  // SceneLua: no target object
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 static std::vector<std::string> g_assetPicked;
@@ -832,7 +832,7 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
         slot = g_assetSlot;
         target = g_assetTarget;
     }
-    if (files.empty() || !doc.object(target)) return;
+    if (files.empty() || (slot != AssetSlot::SceneLua && !doc.object(target))) return;
     const char* folder = slot == AssetSlot::Texture     ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
@@ -852,6 +852,11 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
         paths.resize(16);
     }
     const std::string& first = paths.front();
+    if (slot == AssetSlot::SceneLua) {
+        doc.editSettings([&](splash::SceneSettings& s) { s.script = first; });
+        doc.refreshAssets(paths);
+        return;
+    }
     doc.edit(target, [&](splash::Object& o) {
         switch (slot) {
             case AssetSlot::Texture:
@@ -873,11 +878,34 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
             case AssetSlot::SkinClips:
                 if (o.skin) o.skin->clips = paths;
                 break;
+            case AssetSlot::SceneLua:
+                break;
         }
     });
     doc.endMerge();
     doc.refreshAssets(paths);
     if (!note.empty()) notify(st, note, false);
+}
+
+// The inspector's New script: writes scripts/<name>.lua from a template, sets
+// it on the object's Script component (the scene's script when `object` is
+// null) as one undo step and opens it in the script editor.
+static void newScript(State& st, editor::Document& doc, const editor::ObjectPath* object) {
+    const splash::Object* o = object ? doc.object(*object) : nullptr;
+    if (object && (!o || !o->script)) return;
+    editor::NewScript ns = editor::createScript(doc.projectRoot(), o ? o->name : doc.sceneStem(), !o);
+    if (!ns.error.empty()) {
+        notify(st, "Cannot create a script: " + ns.error, true);
+        return;
+    }
+    if (o) {
+        doc.edit(*object, [&](splash::Object& ob) { ob.script->lua = ns.path; });
+        doc.endMerge();
+    } else {
+        doc.editSettings([&](splash::SceneSettings& s) { s.script = ns.path; });
+    }
+    doc.refreshAssets({ns.path});
+    openScript(st, doc, ns.path);
 }
 
 // ---- File menu: projects, scenes, and the unsaved-changes prompt ----
@@ -2923,6 +2951,38 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, x1 - space::sm - tx, s.c_str()).y + space::xs;
     };
 
+    // The scene's own script: onSceneCreationStart/End and anything scene-wide.
+    {
+        const float stop = y;
+        const bool open = section("s_scenescript", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::script, kind::script, "Script",
+                                  true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const std::string& lua = set.script;
+        const bool found = !lua.empty() && doc.fileExists(lua);
+        if (assetField("scenelua", row("lscenelua", "File", "The Lua file that runs for the whole scene. Click to pick one."),
+                       icon::fileCode, lua.empty() || found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(),
+                       nullptr))
+            pickAsset(AssetSlot::SceneLua, {});
+        const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
+        if (lua.empty()) {
+            if (button("newscenelua", at, icon::plus, "New script", ButtonKind::Secondary, nullptr,
+                       "Writes scripts/<scene name>.lua with onSceneCreationStart and onSceneCreationEnd, and opens it."))
+                newScript(st, doc, nullptr);
+        } else if (button("editscenelua", at, icon::fileCode, found ? "Edit script" : "Create script", ButtonKind::Secondary, nullptr,
+                          "Opens the file in the script editor, beside the Scene.")) {
+            openScript(st, doc, lua);
+        }
+        y += size::field + space::sm;
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
     float top = y;
     // Closed, the body runs under an empty clip rect (see the object inspector's fold).
     const bool renderOpen = section("s_render", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::cpu, color::textDim, "Render buffers",
@@ -3543,14 +3603,18 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         bool found = doc.fileExists(lua);
         if (assetField("lua", row("llua", "File", "The Lua file that runs for this object. Click to pick one."), icon::fileCode,
                        found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr) |
-            fileCard("fixlua", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string()))
+            // No file yet: the field and New script below say so, a "not found" card would not.
+            fileCard("fixlua", found || lua.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string()))
             pickAsset(AssetSlot::Lua, path);
         if (!lua.empty()) {
             if (button("editlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::fileCode, found ? "Edit script" : "Create script",
                        ButtonKind::Secondary, nullptr, "Opens the file in the script editor, beside the Scene."))
                 openScript(st, doc, lua);
-            y += size::field + space::sm;
+        } else if (button("newlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::plus, "New script", ButtonKind::Secondary,
+                          nullptr, "Writes scripts/<object name>.lua with onCreate ready to fill in, and opens it.")) {
+            newScript(st, doc, &path);
         }
+        y += size::field + space::sm;
         sectionEnd(top);
     }
 

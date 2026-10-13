@@ -238,7 +238,9 @@ open afterwards. Needs a display (CI runs it under `xvfb-run`).
 
 `scripteditorcheck.py` opens the courtyard example's `game_logic.lua` with Edit script, types a
 line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the
-tab before building, so the file on disk starts with the typed line; typing alone must not. Needs
+tab before building, so the file on disk starts with the typed line; typing alone must not. Then
+New script, in the scene inspector and on an object whose Script component has no file: it writes
+`scripts/<name>.lua` (numbered when taken), sets it, undoes in one step and opens the file. Needs
 a display (CI runs it under `xvfb-run` on Linux).
 
     python3 scripteditorcheck.py <splashedit>

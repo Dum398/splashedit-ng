@@ -893,6 +893,42 @@ void testProject() {
     CHECK(std::find(back.items().begin(), back.items().end(), proj / "s9.scene") == back.items().end());
 }
 
+// New script: the file name from the object's or scene's name, numbered
+// rather than overwriting, and a template that compiles for the PS1.
+void testNewScript() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    CHECK(editor::scriptFileStem("Game Logic") == "game_logic");
+    CHECK(editor::scriptFileStem("  Door (2)!") == "door_2");
+    CHECK(editor::scriptFileStem("Crate--Big__one") == "crate_big_one");
+    CHECK(editor::scriptFileStem("\xc3\xa9t\xc3\xa9") == "t");
+    CHECK(editor::scriptFileStem("***") == "script");
+    CHECK(editor::scriptFileStem("") == "script");
+
+    const std::string object = editor::scriptTemplate("Door", false), scene = editor::scriptTemplate("courtyard", true);
+    CHECK(object.find("function onCreate(self)") != std::string::npos);
+    CHECK(scene.find("function onSceneCreationStart()") != std::string::npos);
+    CHECK(scene.find("function onSceneCreationEnd()") != std::string::npos);
+    CHECK(editor::lua::check(object).ok() && editor::lua::check(scene).ok());
+    CHECK(editor::lua::check(editor::scriptTemplate("two\nlines", false)).ok());
+
+    fs::path proj = g_outDir / "newscript";
+    fs::remove_all(proj, ec);
+    fs::create_directories(proj, ec);
+    editor::NewScript a = editor::createScript(proj, "Game Logic", false);
+    CHECK(a.error.empty() && a.path == "scripts/game_logic.lua");
+    std::ifstream in(proj / "scripts" / "game_logic.lua", std::ios::binary);
+    CHECK(std::string((std::istreambuf_iterator<char>(in)), {}) == editor::scriptTemplate("Game Logic", false));
+    // Taken: numbered, the first left alone.
+    std::ofstream(proj / "scripts" / "game_logic.lua", std::ios::binary) << "mine";
+    editor::NewScript b = editor::createScript(proj, "Game Logic", false);
+    CHECK(b.error.empty() && b.path == "scripts/game_logic_2.lua");
+    std::ifstream mine(proj / "scripts" / "game_logic.lua", std::ios::binary);
+    CHECK(std::string((std::istreambuf_iterator<char>(mine)), {}) == "mine");
+    CHECK(editor::createScript(proj, "Game Logic", true).path == "scripts/game_logic_3.lua");
+    CHECK(!editor::createScript({}, "x", false).error.empty());
+}
+
 void testAdoptAsset() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -2518,6 +2554,7 @@ int main(int argc, char** argv) {
     testPlay();
     testProject();
     testAdoptAsset();
+    testNewScript();
     testPlaceModel();
     testPlaceSkinnedModel();
     testImportSettings();

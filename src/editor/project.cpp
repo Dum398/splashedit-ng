@@ -128,6 +128,73 @@ AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std
     return r;
 }
 
+std::string scriptFileStem(const std::string& name) {
+    std::string out;
+    bool gap = false;
+    for (unsigned char c : name) {
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z')) {
+            if (gap && !out.empty()) out += '_';
+            gap = false;
+            out += char(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+        } else {
+            gap = true;
+        }
+    }
+    return out.empty() ? "script" : out;
+}
+
+std::string scriptTemplate(const std::string& name, bool scene) {
+    std::string title;
+    for (char c : name) title += c == '\n' || c == '\r' ? ' ' : c;
+    if (scene)
+        return "-- " + title +
+               ": the scene's script.\n"
+               "\n"
+               "-- Before the scene's objects are created.\n"
+               "function onSceneCreationStart()\n"
+               "end\n"
+               "\n"
+               "-- After every object is created and its onCreate has run.\n"
+               "function onSceneCreationEnd()\n"
+               "end\n";
+    return "-- " + title +
+           "\n"
+           "\n"
+           "-- Once, after the scene has loaded. self is this object.\n"
+           "function onCreate(self)\n"
+           "end\n"
+           "\n"
+           "-- Every frame; dt is 4096 for one 30 fps frame. Leave it out unless needed.\n"
+           "-- function onUpdate(self, dt)\n"
+           "-- end\n";
+}
+
+NewScript createScript(const fs::path& project, const std::string& name, bool scene) {
+    NewScript r;
+    std::error_code ec;
+    if (project.empty()) {
+        r.error = "no project is open";
+        return r;
+    }
+    const fs::path dir = project / "scripts";
+    fs::create_directories(dir, ec);
+    if (ec) {
+        r.error = "could not create " + utf8(dir) + ": " + ec.message();
+        return r;
+    }
+    const std::string stem = scriptFileStem(name);
+    fs::path dest = dir / fromUtf8(stem + ".lua");
+    for (int n = 2; fs::exists(dest, ec); ++n) dest = dir / fromUtf8(stem + "_" + std::to_string(n) + ".lua");
+    std::ofstream out(dest, std::ios::binary);
+    out << scriptTemplate(name, scene);
+    if (!out.flush()) {
+        r.error = "could not write " + utf8(dest);
+        return r;
+    }
+    r.path = "scripts/" + utf8(dest.filename());
+    return r;
+}
+
 // A mesh component for an object made from a model.
 static splash::MeshComponent modelMesh(const std::string& mesh, const std::vector<splash::Material>& materials,
                                        const splash::ImportSettings& settings) {

@@ -76,13 +76,16 @@ splash::Object modelObject(const splash::ImportedModel& model, const std::string
 // mesh; otherwise modelObject() is inserted at `at` (the parent's path plus
 // the index), named after the file and unique among its siblings, at
 // `position` in the parent's space. Either way it is one undo step.
+// `converted`, when given, is what to read instead of `file` (the GLB Blender
+// wrote for a .blend, see splash::BlendExport); the outputs are still named
+// after the copy of `file`.
 struct PlacedModel {
     std::string error;  // empty on success
     splash::ImportedModel model;
     ObjectPath path;  // the object placed or changed
 };
 PlacedModel placeModel(Document& doc, const std::filesystem::path& file, const std::optional<ObjectPath>& replace,
-                       const ObjectPath& at, splash::Vec3 position);
+                       const ObjectPath& at, splash::Vec3 position, const std::filesystem::path& converted = {});
 
 // The model in `project`'s models/ folder that wrote the project-relative
 // `mesh` (models/<name>.mesh or models/<name>/<node>.mesh): the file with a
@@ -99,15 +102,21 @@ std::filesystem::path modelOfMesh(const std::filesystem::path& project, const st
 // and differs from the sidecar's mergeMeshes, the top object of each instance
 // is rebuilt the other way: the node objects swapped for the baked mesh or
 // back, the rest of the object kept. The scene changes are one undo step.
+// `converted`, when given, is read instead of modelSource() (as for placeModel).
 struct Reimported {
     std::string error;  // empty on success
     splash::ImportedModel model;
     int objects = 0;  // top-level objects whose tree changed
 };
-Reimported reimportModel(Document& doc, const std::filesystem::path& model, std::optional<bool> wasMerged = std::nullopt);
+Reimported reimportModel(Document& doc, const std::filesystem::path& model, std::optional<bool> wasMerged = std::nullopt,
+                         const std::filesystem::path& converted = {});
 // placeModel and reimportModel keep the import's warnings, all of them, in the
 // document under the model's project path (Document::importWarnings), the
 // last import of a model replacing the ones before.
+
+// The file reimportModel reads for `model` (absolute, or relative to the
+// project): its sidecar's source while that file is there, else the copy.
+std::filesystem::path modelSource(const Document& doc, const std::filesystem::path& model);
 
 // One import warning as the inspector lists it: what happened and, where one
 // is known, what to change so it does not. The importer's own "problem: fix"

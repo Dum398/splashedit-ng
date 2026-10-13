@@ -86,6 +86,7 @@ MeshInfo analyseMesh(const fs::path& file) {
 }  // namespace
 
 std::optional<std::string> Document::load(const fs::path& project, const fs::path& scene) {
+    if (project != m_project) m_importWarnings.clear();
     m_project = project;
     m_sceneFile = scene;
     m_stem = scene.stem().string();
@@ -120,6 +121,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
 }
 
 void Document::reset(splash::Scene scene, const fs::path& project, const std::string& stem) {
+    if (project != m_project) m_importWarnings.clear();
     m_project = project;
     m_stem = stem;
     m_sceneFile = stem + ".scene";
@@ -585,7 +587,7 @@ std::string Document::cutObject(const ObjectPath& path) {
     return text;
 }
 
-std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const std::optional<ObjectPath>& after) {
+std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const std::optional<ObjectPath>& after, float step) {
     std::optional<std::vector<splash::Object>> objs = splash::readObjectsText(text);
     if (!objs) return std::nullopt;
     ObjectPath parentPath;
@@ -594,7 +596,41 @@ std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const 
         parentPath.assign(after->begin(), after->end() - 1);
         index = static_cast<size_t>(after->back()) + 1;
     }
-    std::vector<std::string> names = namesOf(*childrenMut(parentPath));
+    const std::vector<splash::Object>& siblings = *childrenMut(parentPath);
+    // Moved off what it would cover: k steps along X, the least k at which no
+    // pasted object sits on a sibling copied from the same object: the same
+    // name but for its number, and the same in all but name and position.
+    auto kind = [](const splash::Object& o) {
+        splash::Object k = o;
+        splitNumbered(o.name, &k.name);
+        const std::string base = k.name;
+        k.name.clear();
+        k.transform.position = {};
+        return base + '\n' + splash::writeObjectsText({k});
+    };
+    std::vector<std::string> sibKinds;
+    for (const splash::Object& sib : siblings) sibKinds.push_back(kind(sib));
+    auto covers = [&](const splash::Object& o, const std::string& k, float dx) {
+        const splash::Vec3 p{o.transform.position.x + dx, o.transform.position.y, o.transform.position.z};
+        auto near = [](float a, float b) { return std::fabs(a - b) <= 1e-4f; };
+        for (size_t i = 0; i < siblings.size(); ++i) {
+            const splash::Vec3& q = siblings[i].transform.position;
+            if (near(q.x, p.x) && near(q.y, p.y) && near(q.z, p.z) && sibKinds[i] == k) return true;
+        }
+        return false;
+    };
+    if (step > 0) {
+        std::vector<std::string> kinds;
+        for (const splash::Object& o : *objs) kinds.push_back(kind(o));
+        float dx = 0;
+        for (int k = 0; k <= static_cast<int>(siblings.size()); ++k, dx = step * static_cast<float>(k)) {
+            bool hit = false;
+            for (size_t i = 0; i < objs->size() && !hit; ++i) hit = covers((*objs)[i], kinds[i], dx);
+            if (!hit) break;
+        }
+        for (splash::Object& o : *objs) o.transform.position.x += dx;
+    }
+    std::vector<std::string> names = namesOf(siblings);
     std::vector<std::unique_ptr<Command>> parts;
     ObjectPath at = parentPath;
     at.push_back(0);
@@ -727,6 +763,29 @@ bool Document::hasWarning(const splash::Object& o) const {
     }
     if (o.script && !o.script->lua.empty() && !fileExists(o.script->lua)) return true;
     return false;
+}
+
+static std::string modelKey(const fs::path& project, const fs::path& model) {
+    fs::path rel = model;
+    if (model.is_absolute() && !project.empty()) {
+        std::error_code ec;
+        fs::path r = fs::relative(model, project, ec);
+        if (!ec && !r.empty()) rel = r;
+    }
+    std::u8string u = rel.lexically_normal().generic_u8string();
+    return std::string(u.begin(), u.end());
+}
+
+void Document::setImportWarnings(const fs::path& model, std::vector<std::string> warnings) {
+    const std::string key = modelKey(m_project, model);
+    if (warnings.empty()) m_importWarnings.erase(key);
+    else m_importWarnings[key] = std::move(warnings);
+}
+
+const std::vector<std::string>& Document::importWarnings(const fs::path& model) const {
+    static const std::vector<std::string> none;
+    auto it = m_importWarnings.find(modelKey(m_project, model));
+    return it == m_importWarnings.end() ? none : it->second;
 }
 
 }  // namespace editor

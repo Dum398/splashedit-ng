@@ -139,8 +139,17 @@ public:
     // as one undo step. A name already taken among the new siblings is
     // numbered the way duplicateObject numbers it. Selects the last pasted
     // object and returns its path; nullopt, with no change, for text that is
-    // not ours.
-    std::optional<ObjectPath> pasteObjects(const std::string& text, const std::optional<ObjectPath>& after);
+    // not ours. So a copy does not land on top of what it was copied from,
+    // the pasted objects move together along X by `step`, as many steps as
+    // it takes for none of them to sit where a new sibling copied from the
+    // same object already sits (the same name but for its " (N)", the same in
+    // all but name and position): pasting again lands one step further on.
+    // Cut then paste finds the place free and stays where the object was; an
+    // unrelated object at the same place does not count.
+    std::optional<ObjectPath> pasteObjects(const std::string& text, const std::optional<ObjectPath>& after,
+                                           float step = kPasteStep);
+    // The snap grid's step (0.25 m), the one paste offsets copies by.
+    static constexpr float kPasteStep = 0.25f;
     // Moves the object at `from`, with its children, to be child `index` of
     // `toParent` (empty = the scene root), keeping where it is in the world.
     // `index` counts the new parent's children as they are now, before the
@@ -198,6 +207,12 @@ public:
 
     std::filesystem::path resolve(const std::string& projectPath) const { return m_project / projectPath; }
 
+    // Every warning of the last import of `model` (absolute or project
+    // relative), for the inspector; empty when it has none or was not
+    // imported this session. Kept across scene loads in the same project.
+    void setImportWarnings(const std::filesystem::path& model, std::vector<std::string> warnings);
+    const std::vector<std::string>& importWarnings(const std::filesystem::path& model) const;
+
 private:
     void cacheAssets(const splash::Object& o);
     void clearHistory();
@@ -217,6 +232,7 @@ private:
     std::map<std::string, MeshInfo> m_meshes;
     std::map<std::string, TextureInfo> m_textures;
     std::map<std::string, bool> m_files;
+    std::map<std::string, std::vector<std::string>> m_importWarnings;  // by project-relative model path
 
     std::vector<std::unique_ptr<Command>> m_history;
     size_t m_cursor = 0;       // commands [0, m_cursor) are applied

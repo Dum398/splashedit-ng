@@ -2656,10 +2656,13 @@ void testClipboard() {
     CHECK(pasted && pasted->children.size() == 1 && pasted->children[0].name == "B1");
     CHECK(d.object({3}) && d.object({3})->name == "C");
     CHECK(d.objectCount() == 6);
+    // Moved one grid step along X off the original it would cover.
+    CHECK(pasted && pasted->transform.position.x == 2.25f);
     if (pasted) {
         splash::Object same = *pasted;
         same.name = "B";
-        CHECK(splash::writeObjectsText({same}) == text);  // equal to the original but for the name
+        same.transform.position.x = 2;
+        CHECK(splash::writeObjectsText({same}) == text);  // equal to the original but for the name and place
     }
     CHECK(d.undo());
     CHECK(d.scene().objects.size() == 3 && d.object({2})->name == "C" && d.objectCount() == 4);
@@ -2992,6 +2995,156 @@ void testTimelinePreview() {
     CHECK(bytes(dir / "before.scene") == bytes(dir / "after.scene") && !bytes(dir / "after.scene").empty());
 }
 
+// Paste moves a copy off the object it would cover, one grid step along X per
+// copy already there; a cut object pastes back where it was.
+void testPasteOffset() {
+    editor::Document d;
+    d.reset(sample());
+    const std::string text = d.copyObject({1});  // B at x 2, child B1 at x 3
+    const float step = editor::Document::kPasteStep;
+    CHECK(step == 0.25f);
+
+    // Pasting three times: three different places, each one undo step.
+    std::vector<float> xs;
+    for (int i = 0; i < 3; ++i) {
+        const size_t hist = d.historySize();
+        auto p = d.pasteObjects(text, editor::ObjectPath{1});
+        CHECK(p && d.historySize() == hist + 1);
+        if (p && d.object(*p)) xs.push_back(d.object(*p)->transform.position.x);
+    }
+    CHECK(xs == std::vector<float>({2 + step, 2 + 2 * step, 2 + 3 * step}));
+    CHECK(d.object({1})->transform.position.x == 2);  // the original stays
+    // Children keep their place in the moved parent.
+    for (int i = 2; i <= 4; ++i) CHECK(d.object({i, 0}) && d.object({i, 0})->transform.position.x == 3);
+    // Undo takes the last paste back in one step; pasting again fills its place.
+    CHECK(d.undo());
+    CHECK(d.scene().objects.size() == 5);
+    auto again = d.pasteObjects(text, editor::ObjectPath{1});
+    CHECK(again && d.object(*again)->transform.position.x == 2 + 3 * step);
+    CHECK(d.undo() && d.undo() && d.undo() && !d.canUndo());
+    CHECK(d.scene().objects.size() == 3);
+
+    // The step is the caller's to give.
+    auto wide = d.pasteObjects(text, editor::ObjectPath{1}, 1.0f);
+    CHECK(wide && d.object(*wide)->transform.position.x == 3);
+    CHECK(d.undo());
+
+    // Only a copy of the same object counts: another object where C sits
+    // (x 4), one with a mesh or one turned another way, stays where it is.
+    splash::Object m = named("M", 4);
+    m.mesh = splash::MeshComponent{};
+    m.mesh->mesh = "meshes/crate.mesh";
+    auto pm = d.pasteObjects(splash::writeObjectsText({m}), std::nullopt);
+    CHECK(pm && d.object(*pm)->transform.position.x == 4);
+    splash::Object turned = named("T", 4);
+    turned.transform.rotation = {0, 0.70710678f, 0, 0.70710678f};
+    auto pt = d.pasteObjects(splash::writeObjectsText({turned}), std::nullopt);
+    CHECK(pt && d.object(*pt)->transform.position.x == 4);
+    auto other = d.pasteObjects(splash::writeObjectsText({named("Other", 4)}), std::nullopt);
+    CHECK(other && d.object(*other)->transform.position.x == 4);
+    CHECK(d.undo());
+    // M again, on the first M: moved.
+    auto pm2 = d.pasteObjects(splash::writeObjectsText({m}), std::nullopt);
+    CHECK(pm2 && d.object(*pm2)->transform.position.x == 4 + step);
+    CHECK(d.undo() && d.undo() && d.undo());
+
+    // Several objects move together, by the same steps, keeping their layout.
+    auto two = d.pasteObjects(splash::writeObjectsText({named("A", 1), named("Q", 9)}), std::nullopt);
+    CHECK(two && d.scene().objects.size() == 5);
+    CHECK(d.object({3})->transform.position.x == 1 + step && d.object({4})->transform.position.x == 9 + step);
+    CHECK(d.undo());
+
+    // Into a child level: checked against the new siblings there.
+    auto child = d.pasteObjects(d.copyObject({1, 0}), editor::ObjectPath{1, 0});
+    CHECK(child && *child == editor::ObjectPath({1, 1}) && d.object({1, 1})->transform.position.x == 3 + step);
+    CHECK(d.undo());
+
+    // Cut then paste moves the object: nothing is left to cover, no offset.
+    // A second paste of the same text is a copy, and steps off it.
+    CHECK(d.cutObject({1}) == text);
+    auto back = d.pasteObjects(text, editor::ObjectPath{0});
+    CHECK(back && *back == editor::ObjectPath({1}) && d.object({1})->name == "B" && d.object({1})->transform.position.x == 2);
+    CHECK(d.historySize() == 2);
+    auto copy = d.pasteObjects(text, editor::ObjectPath{1});
+    CHECK(copy && d.object(*copy)->transform.position.x == 2 + step);
+    CHECK(d.undo() && d.undo());
+    CHECK(d.scene().objects.size() == 2 && !d.object({2}));
+    CHECK(d.undo() && d.object({1})->name == "B" && d.object({1})->transform.position.x == 2 && !d.canUndo());
+}
+
+// Every warning of a model's last import is kept for the inspector, by the
+// model's project path, and a reimport replaces them.
+void testImportWarnings() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "importwarnings";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game";
+    fs::create_directories(proj, ec);
+    const fs::path rig = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skinimport" / "rig.gltf";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    CHECK(doc.importWarnings("models/rig.gltf").empty());
+
+    editor::PlacedModel p = editor::placeModel(doc, rig, std::nullopt, {0}, {0, 0, 0});
+    CHECK(p.error.empty());
+    // rig.gltf: blended weights and cubic-spline keys, at least.
+    CHECK(p.model.warnings.size() >= 2);
+    const std::vector<std::string>& kept = doc.importWarnings("models/rig.gltf");
+    CHECK(kept == p.model.warnings);
+    CHECK(doc.importWarnings(proj / "models" / "rig.gltf") == p.model.warnings);  // absolute works too
+    CHECK(doc.importWarnings("models/other.gltf").empty());
+    bool blended = false, cubic = false;
+    for (const std::string& w : kept) {
+        editor::ImportWarning e = editor::explainImportWarning(w);
+        CHECK(!e.problem.empty());
+        if (w.find("the heaviest joint wins") != std::string::npos) {
+            blended = true;
+            CHECK(e.fix == "Weight-paint to single bones for exact deformation");
+            CHECK(e.problem.find("weight-paint") == std::string::npos);
+        }
+        if (w.find("cubic-spline") != std::string::npos) {
+            cubic = true;
+            CHECK(e.fix == "Bake the animation to linear keys for its exact curve");
+        }
+    }
+    CHECK(blended && cubic);
+
+    // The skin limits say what to change.
+    editor::ImportWarning j = editor::explainImportWarning(
+        "the skeleton has 70 joints, psxsplash draws at most 64: delete helper bones (IK targets, poles, twist bones) in the modelling tool");
+    CHECK(j.problem == "the skeleton has 70 joints, psxsplash draws at most 64" && j.fix.find("at most 64 joints") != std::string::npos);
+    editor::ImportWarning c = editor::explainImportWarning(
+        "20 animations, a skin plays at most 16: the first 16 go on the skin component, swap in others by hand");
+    CHECK(c.problem == "20 animations, a skin plays at most 16" && c.fix.find("at most 16 animations") != std::string::npos);
+    editor::ImportWarning t = editor::explainImportWarning("texture models/x.png was not found, the material is left untextured");
+    CHECK(t.problem == "texture models/x.png was not found, the material is left untextured" && !t.fix.empty());
+    editor::ImportWarning u = editor::explainImportWarning("something new: and odd");
+    CHECK(u.problem == "something new: and odd" && u.fix.empty());
+
+    // Reimport: the same warnings again, not added to the old ones.
+    editor::Reimported re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    CHECK(re.error.empty() && doc.importWarnings("models/rig.gltf") == re.model.warnings &&
+          re.model.warnings.size() == p.model.warnings.size());
+    // The model fixed (a plain one in its place, read from the copy): none left.
+    splash::ImportSettings st = splash::loadImportSettings(proj / "models" / "rig.gltf");
+    st.source.clear();
+    splash::saveImportSettings(proj / "models" / "rig.gltf", st);
+    std::ofstream(proj / "models" / "rig.gltf", std::ios::binary | std::ios::trunc) << robotGltf(1);
+    re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    CHECK(re.error.empty() && re.model.warnings.empty() && doc.importWarnings("models/rig.gltf").empty());
+    // Broken again: back.
+    fs::copy_file(rig, proj / "models" / "rig.gltf", fs::copy_options::overwrite_existing, ec);
+    re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    CHECK(re.error.empty() && doc.importWarnings("models/rig.gltf") == re.model.warnings && re.model.warnings.size() >= 2);
+
+    // Kept through loading another scene of the project, dropped with the project.
+    doc.reset(splash::Scene{}, proj, "other");
+    CHECK(doc.importWarnings("models/rig.gltf").size() >= 2);
+    doc.reset(splash::Scene{}, dir / "elsewhere", "game");
+    CHECK(doc.importWarnings("models/rig.gltf").empty());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -3039,6 +3192,8 @@ int main(int argc, char** argv) {
     runHardwarePsxmon(0x0007);
     runHardwarePsxmon(0x0001);
     testClipboard();
+    testPasteOffset();
+    testImportWarnings();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

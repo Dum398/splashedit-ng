@@ -1474,6 +1474,14 @@ struct ModelTarget {
     std::optional<splash::Vec3> at;             // the viewport: added at the top level, here (world)
 };
 
+// The status bar's word on an import's warnings: one is shown whole; more are
+// counted, the inspector's Import settings listing them all with their fixes.
+static std::string importNote(const std::vector<std::string>& warnings) {
+    if (warnings.empty()) return {};
+    if (warnings.size() == 1) return ". Note: " + warnings.front();
+    return ". " + std::to_string(warnings.size()) + " import warnings, see the inspector";
+}
+
 // Imports a model file into the project and places it (see editor::placeModel),
 // as one undo step.
 static void importModelFile(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& file,
@@ -1508,7 +1516,7 @@ static void importModelFile(State& st, editor::Document& doc, const viewport::Ps
     std::string msg = "Imported " + utf8(src.filename()) + ", " + std::to_string(m.triangles) +
                       (m.triangles == 1 ? " triangle" : " triangles");
     if (m.nodes.size() > 1 && !to.replace) msg += " in " + std::to_string(m.nodes.size()) + " parts";
-    if (!m.warnings.empty()) msg += ". Note: " + m.warnings.front();
+    msg += importNote(m.warnings);
     notify(st, msg, false);
 }
 
@@ -3795,6 +3803,31 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     next.lighting = lights[lPick];
                     apply(next);
                 }
+                // Every warning of the model's last import, each with its fix.
+                const std::vector<std::string>& warns = doc.importWarnings(ip.model);
+                if (!warns.empty()) {
+                    y += space::sm;
+                    const float ix = x0 + space::sm, tx = ix + 22, tw = x1 - space::sm - tx;
+                    const std::string head = "Warnings (" + std::to_string(warns.size()) + ")";
+                    text(dl, ImVec2(ix, y), f.medium, type::label, color::warn, icon::warning);
+                    text(dl, ImVec2(tx, y), f.semibold, type::label, color::text, head.c_str());
+                    y += measure(f.semibold, type::label, head.c_str()).y + space::sm;
+                    for (const std::string& w : warns) {
+                        const editor::ImportWarning e = editor::explainImportWarning(w);
+                        std::string problem = e.problem;
+                        if (!problem.empty() && problem[0] >= 'a' && problem[0] <= 'z') problem[0] = char(problem[0] - 'a' + 'A');
+                        dl->AddCircleFilled(ImVec2(ix + 8, y + 7), 2.5f, color::warn);
+                        dl->AddText(f.regular, type::label, ImVec2(tx, y), color::text, problem.c_str(), nullptr, tw);
+                        y += f.regular->CalcTextSizeA(type::label, FLT_MAX, tw, problem.c_str()).y + 2;
+                        if (!e.fix.empty()) {
+                            const std::string fix = "Fix: " + e.fix;
+                            dl->AddText(f.regular, type::label, ImVec2(tx, y), color::textDim, fix.c_str(), nullptr, tw);
+                            y += f.regular->CalcTextSizeA(type::label, FLT_MAX, tw, fix.c_str()).y;
+                        }
+                        y += space::sm;
+                        ip.shown.push_back(w);
+                    }
+                }
             }
             sectionEnd(top);
         }
@@ -4460,13 +4493,14 @@ static void updateModels(State& st, editor::Document& doc) {
             continue;
         }
         std::string msg = "Reimported " + utf8(r.model.filename());
-        if (!re.model.warnings.empty()) msg += ". Note: " + re.model.warnings.front();
+        msg += importNote(re.model.warnings);
         notify(st, msg, false);
         st.importPanel.checked = -1;
     }
 }
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
+    st.importPanel.shown.clear();
     filesPending(st, doc);
     // The timeline takes Delete and Space while it has focus, before the scene's shortcuts see them.
     st.timeline.takeKeys(doc);

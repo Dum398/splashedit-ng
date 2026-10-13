@@ -103,8 +103,11 @@ public:
     // The UI canvas editor's selection: the canvas being edited and the
     // element selected in it (-1 = none). Kept apart from the object
     // selection; UI edits (ui_canvas.hh) restore it on undo.
+    // `element` is the primary one (the last clicked: the paste anchor and the
+    // inspector's); `more` holds the other selected elements of the canvas.
     struct UiSelection {
         int canvas = -1, element = -1;
+        std::vector<int> more;
         bool operator==(const UiSelection&) const = default;
     };
     const UiSelection& uiSelection() const { return m_uiSelection; }

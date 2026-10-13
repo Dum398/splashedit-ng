@@ -1,6 +1,7 @@
 #include "editor/ui_canvas.hh"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -398,6 +399,46 @@ bool editElement(Document& doc, int c, int e, const std::function<void(UIElement
     return true;
 }
 
+bool editElements(Document& doc, int c, const std::vector<int>& idx, const std::function<void(UIElement&, size_t)>& fn,
+                  const std::string& mergeKey) {
+    if (!validCanvas(doc, c)) return false;
+    std::vector<UICanvas> after = doc.scene().canvases;
+    bool changed = false;
+    for (size_t k = 0; k < idx.size(); k++) {
+        if (!validElement(doc, c, idx[k])) return false;
+        UIElement& el = after[size_t(c)].elements[size_t(idx[k])];
+        fn(el, k);
+        changed |= !sameElement(el, doc.scene().canvases[size_t(c)].elements[size_t(idx[k])]);
+    }
+    if (!changed) return false;
+    commit(doc, std::move(after), doc.uiSelection(), mergeKey);
+    return true;
+}
+
+std::vector<int> selectedElements(const Document& doc) {
+    const Document::UiSelection& sel = doc.uiSelection();
+    std::vector<int> out;
+    if (!validCanvas(doc, sel.canvas)) return out;
+    const int n = int(doc.scene().canvases[size_t(sel.canvas)].elements.size());
+    if (sel.element >= 0 && sel.element < n) out.push_back(sel.element);
+    for (int i : sel.more)
+        if (i >= 0 && i < n) out.push_back(i);
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+Document::UiSelection selectionOf(int c, std::vector<int> idx, int primary) {
+    std::sort(idx.begin(), idx.end());
+    idx.erase(std::unique(idx.begin(), idx.end()), idx.end());
+    if (idx.empty()) return {c, -1};
+    if (primary < 0 || !std::binary_search(idx.begin(), idx.end(), primary)) primary = idx.back();
+    Document::UiSelection sel{c, primary, {}};
+    for (int i : idx)
+        if (i != primary) sel.more.push_back(i);
+    return sel;
+}
+
 bool editCanvas(Document& doc, int c, const std::function<void(UICanvas&)>& fn, const std::string& mergeKey) {
     if (!validCanvas(doc, c)) return false;
     std::vector<UICanvas> after = doc.scene().canvases;
@@ -487,17 +528,128 @@ bool deleteElement(Document& doc, int c, int e) {
     return true;
 }
 
+bool deleteElements(Document& doc, int c, const std::vector<int>& idx) {
+    if (!validCanvas(doc, c) || idx.empty()) return false;
+    std::vector<int> sorted = idx;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    for (int i : sorted)
+        if (!validElement(doc, c, i)) return false;
+    std::vector<UICanvas> after = doc.scene().canvases;
+    auto& els = after[size_t(c)].elements;
+    for (size_t k = sorted.size(); k-- > 0;) els.erase(els.begin() + sorted[k]);
+    commit(doc, std::move(after), {c, -1});
+    return true;
+}
+
+int duplicateElements(Document& doc, int c, const std::vector<int>& idx) {
+    if (!validCanvas(doc, c) || idx.empty()) return -1;
+    std::vector<int> sorted = idx;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+    for (int i : sorted)
+        if (!validElement(doc, c, i)) return -1;
+    if (int(doc.scene().canvases[size_t(c)].elements.size() + sorted.size()) > kMaxCanvasElements) return -2;
+    std::vector<UICanvas> after = doc.scene().canvases;
+    UICanvas& cv = after[size_t(c)];
+    std::vector<int> copies;
+    for (size_t k = 0; k < sorted.size(); k++) {
+        const int at = sorted[k] + int(k);  // earlier copies pushed it down
+        UIElement copy = cv.elements[size_t(at)];
+        std::string base;
+        splitNumbered(copy.name, &base);
+        copy.name = uniqueElementName(cv, base);
+        if (copy.type == UIElementType::Line) {
+            copy.from = {copy.from[0] + 8, copy.from[1] + 8};
+            copy.to = {copy.to[0] + 8, copy.to[1] + 8};
+        } else {
+            copy.rect[0] += 8;
+            copy.rect[1] += 8;
+        }
+        cv.elements.insert(cv.elements.begin() + at + 1, std::move(copy));
+        copies.push_back(at + 1);
+    }
+    commit(doc, std::move(after), selectionOf(c, copies));
+    return int(copies.size());
+}
+
+std::string copyElementsText(const Document& doc, int c, const std::vector<int>& idx) {
+    if (!validCanvas(doc, c)) return {};
+    std::vector<int> sorted = idx;
+    std::sort(sorted.begin(), sorted.end());
+    std::vector<UIElement> els;
+    for (int i : sorted) {
+        if (!validElement(doc, c, i)) return {};
+        els.push_back(doc.scene().canvases[size_t(c)].elements[size_t(i)]);
+    }
+    return els.empty() ? std::string() : splash::writeUIElementsText(els);
+}
+
+Rect boundsOf(const UIElement& e, Screen s) {
+    if (e.type != UIElementType::Line) return layout(e, s);
+    return Rect{std::min(e.from[0], e.to[0]), std::min(e.from[1], e.to[1]), std::abs(e.to[0] - e.from[0]),
+                std::abs(e.to[1] - e.from[1])};
+}
+
+std::vector<int> elementsInBox(const UICanvas& cv, Screen s, float x0, float y0, float x1, float y1) {
+    if (x0 > x1) std::swap(x0, x1);
+    if (y0 > y1) std::swap(y0, y1);
+    std::vector<int> out;
+    for (int i = 0; i < int(cv.elements.size()); i++) {
+        const UIElement& e = cv.elements[size_t(i)];
+        if (!e.visible || !e.unknown.empty()) continue;
+        bool hit;
+        if (e.type == UIElementType::Line) {
+            // Liang-Barsky on the pixel centres of the endpoints.
+            const float ax = e.from[0] + 0.5f, ay = e.from[1] + 0.5f, dx = e.to[0] - e.from[0], dy = e.to[1] - e.from[1];
+            float t0 = 0, t1 = 1;
+            hit = true;
+            const float p[4] = {-dx, dx, -dy, dy}, q[4] = {ax - x0, x1 - ax, ay - y0, y1 - ay};
+            for (int k = 0; k < 4 && hit; k++) {
+                if (p[k] == 0) {
+                    if (q[k] < 0) hit = false;
+                } else {
+                    const float t = q[k] / p[k];
+                    if (p[k] < 0) t0 = std::max(t0, t);
+                    else t1 = std::min(t1, t);
+                    if (t0 > t1) hit = false;
+                }
+            }
+        } else {
+            const Rect r = layout(e, s);
+            hit = r.w > 0 && r.h > 0 && float(r.x) <= x1 && float(r.right()) >= x0 && float(r.y) <= y1 && float(r.bottom()) >= y0;
+        }
+        if (hit) out.push_back(i);
+    }
+    return out;
+}
+
+std::optional<Rect> clipboardBounds(const std::string& text, Screen s) {
+    std::optional<std::vector<UIElement>> els = splash::readUIElementsText(text);
+    if (!els || els->empty()) return std::nullopt;
+    int x0 = INT_MAX, y0 = INT_MAX, x1 = INT_MIN, y1 = INT_MIN;
+    for (const UIElement& e : *els) {
+        if (!e.unknown.empty()) continue;
+        const Rect r = boundsOf(e, s);
+        x0 = std::min(x0, r.x), y0 = std::min(y0, r.y), x1 = std::max(x1, r.right()), y1 = std::max(y1, r.bottom());
+    }
+    if (x0 == INT_MAX) return std::nullopt;
+    return Rect{x0, y0, x1 - x0, y1 - y0};
+}
+
 std::string copyElementText(const Document& doc, int c, int e) {
     if (!validElement(doc, c, e)) return {};
     return splash::writeUIElementsText({doc.scene().canvases[size_t(c)].elements[size_t(e)]});
 }
 
-int pasteElements(Document& doc, int c, int after, const std::string& text, Screen s) {
+int pasteElements(Document& doc, int c, int after, const std::string& text, Screen s, const std::array<int, 2>* where) {
     if (!validCanvas(doc, c)) return -1;
     std::optional<std::vector<UIElement>> pasted = splash::readUIElementsText(text);
     if (!pasted) return -1;
+    if (int(doc.scene().canvases[size_t(c)].elements.size() + pasted->size()) > kMaxCanvasElements) return -2;
     std::vector<UICanvas> next = doc.scene().canvases;
     UICanvas& cv = next[size_t(c)];
+    int first = -1;
     int at = after >= 0 && after < int(cv.elements.size()) ? after + 1 : int(cv.elements.size());
     // Where an element sits, for "is a copy already there": a line by its
     // endpoints, anything else by its rect on screen.
@@ -510,8 +662,22 @@ int pasteElements(Document& doc, int c, int after, const std::string& text, Scre
         return std::any_of(cv.elements.begin(), cv.elements.end(),
                            [&](const UIElement& o) { return o.type == e.type && o.unknown.empty() && spot(o) == r; });
     };
+    int dx = 0, dy = 0;
+    if (where) {
+        if (const std::optional<Rect> b = clipboardBounds(text, s)) dx = (*where)[0] - b->x, dy = (*where)[1] - b->y;
+    }
     for (UIElement& e : *pasted) {
-        if (e.unknown.empty()) {
+        if (where) {
+            if (e.unknown.empty()) {
+                if (e.type == UIElementType::Line) {
+                    e.from = {e.from[0] + dx, e.from[1] + dy};
+                    e.to = {e.to[0] + dx, e.to[1] + dy};
+                } else {
+                    const Rect r = layout(e, s);
+                    place(e, Rect{r.x + dx, r.y + dy, r.w, r.h}, s);
+                }
+            }
+        } else if (e.unknown.empty()) {
             const Rect home = layout(e, s);
             const std::array<int, 2> from = e.from, to = e.to;
             for (int k = 0; k < 64 && taken(e); k++) {
@@ -528,10 +694,13 @@ int pasteElements(Document& doc, int c, int after, const std::string& text, Scre
         splitNumbered(e.name, &base);
         if (std::any_of(cv.elements.begin(), cv.elements.end(), [&](const UIElement& o) { return o.name == e.name; }))
             e.name = uniqueElementName(cv, base);
+        if (first < 0) first = at;
         cv.elements.insert(cv.elements.begin() + at, std::move(e));
         at++;
     }
-    commit(doc, std::move(next), {c, at - 1});
+    std::vector<int> added;
+    for (int i = first; i < at; i++) added.push_back(i);
+    commit(doc, std::move(next), selectionOf(c, added));
     return at - 1;
 }
 
@@ -546,10 +715,15 @@ bool moveElement(Document& doc, int c, int from, int to) {
     els.erase(els.begin() + from);
     els.insert(els.begin() + to, std::move(moved));
     Document::UiSelection sel = doc.uiSelection();
-    if (sel.canvas == c && sel.element >= 0) {
-        if (sel.element == from) sel.element = to;
-        else if (from < sel.element && sel.element <= to) sel.element--;
-        else if (to <= sel.element && sel.element < from) sel.element++;
+    if (sel.canvas == c) {
+        auto remap = [&](int& i) {
+            if (i < 0) return;
+            if (i == from) i = to;
+            else if (from < i && i <= to) i--;
+            else if (to <= i && i < from) i++;
+        };
+        remap(sel.element);
+        for (int& i : sel.more) remap(i);
     }
     commit(doc, std::move(after), sel);
     return true;

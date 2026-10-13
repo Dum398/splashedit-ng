@@ -13,6 +13,7 @@
 #include "unitymath.hh"
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
+#include "editor/lua_editor_view.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
 #include "emulator.h"
@@ -197,6 +198,10 @@ struct State {
         float handlePx = 1;
         float shown = 0;  // the value the drag label shows (degrees or factor)
     } gizmo;
+
+    // Lua files open in the script editor, as tabs beside the Scene.
+    ui::ScriptTabs scripts;
+    std::filesystem::path scriptsProject;  // the project they belong to
 };
 
 // Draws the main screen for `doc` filling `size`. Returns the title-bar

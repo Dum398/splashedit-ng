@@ -771,6 +771,12 @@ static void notify(State& st, std::string msg, bool bad) {
     st.noticeUntil = ImGui::GetTime() + 8;
 }
 
+// Shows a project Lua file in the script editor.
+static void openScript(State& st, const editor::Document& doc, const std::string& projectPath) {
+    std::string err;
+    if (projectPath.empty() || !st.scripts.open(doc.resolve(projectPath), &err)) notify(st, "Cannot open " + projectPath + ": " + err, true);
+}
+
 // The other asset fields' file dialogs (texture, scripts, audio, skin clips),
 // answered on their own thread and applied next frame to the object they were
 // opened for. A file outside the project is copied into it first.
@@ -995,7 +1001,7 @@ static void perform(State& st, editor::Document& doc, State::Pending what, const
 
 // Runs `what` now, or after the unsaved-changes prompt when there are changes.
 static void request(State& st, editor::Document& doc, State::Pending what, const std::filesystem::path& path = {}) {
-    if (!doc.dirty()) {
+    if (!doc.dirty() && !st.scripts.dirtyCount()) {
         perform(st, doc, what, path);
         return;
     }
@@ -1071,7 +1077,12 @@ static void unsavedPrompt(State& st, editor::Document& doc, ImVec2 size) {
     const ImVec2 o = ImGui::GetCursorScreenPos();
     const float inner = w - space::lg * 2;
     float y = o.y;
-    const std::string title = "Save changes to " + doc.sceneStem() + "?";
+    // Changed scripts are asked about with the scene.
+    const int scripts = st.scripts.dirtyCount();
+    const std::string what = scripts == 0  ? doc.sceneStem()
+                             : !doc.dirty() ? (scripts == 1 ? std::string("1 script") : std::to_string(scripts) + " scripts")
+                                            : doc.sceneStem() + (scripts == 1 ? " and 1 script" : " and " + std::to_string(scripts) + " scripts");
+    const std::string title = "Save changes to " + what + "?";
     text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, title.c_str());
     y += 26;
     text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, "Your changes are lost if you don't save them.");
@@ -1081,7 +1092,10 @@ static void unsavedPrompt(State& st, editor::Document& doc, ImVec2 size) {
     State::Pending go = State::Pending::None;
     bool close = false;
     if (button("save", ImVec2(bx, y), nullptr, "Save", ButtonKind::Primary) || ImGui::IsKeyPressed(ImGuiKey_Enter, false)) {
-        if (saveDoc(st, doc)) go = st.pending;
+        std::string err;
+        bool saved = (!doc.dirty() || saveDoc(st, doc)) && st.scripts.saveAll(&err);
+        if (!err.empty()) notify(st, "Save failed: " + err, true);
+        if (saved) go = st.pending;
         close = true;
     }
     bx -= space::sm + dw;
@@ -1195,6 +1209,22 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(separator());
             m.push_back(item("Snap", "", true, [&] { st.snap = !st.snap; }, st.snap));
             m.push_back(item("Orthographic", "", true, [&] { view.setOrtho(!view.ortho()); }, view.ortho()));
+            {
+                // Every Lua file the scene uses, to open in the script editor.
+                std::vector<std::string> luas;
+                auto addLua = [&](const std::string& p) {
+                    if (!p.empty() && std::find(luas.begin(), luas.end(), p) == luas.end()) luas.push_back(p);
+                };
+                addLua(doc.scene().settings.script);
+                for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+                    if (fo.object->script) addLua(fo.object->script->lua);
+                    if (fo.object->trigger) addLua(fo.object->trigger->lua);
+                }
+                m.push_back(separator());
+                m.push_back(heading("Scripts"));
+                if (luas.empty()) m.push_back(item("No scripts in this scene", "", false, nullptr));
+                for (const std::string& p : luas) m.push_back(item(p, "", true, [&st, &doc, p] { openScript(st, doc, p); }));
+            }
             break;
         case 5:  // Help
             m.push_back(item("Documentation", "", true, [] { SDL_OpenURL("https://github.com/psxsplash/splashedit-ng#readme"); }));
@@ -3502,6 +3532,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                        found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr) |
             fileCard("fixlua", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string()))
             pickAsset(AssetSlot::Lua, path);
+        if (!lua.empty()) {
+            if (button("editlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::fileCode, found ? "Edit script" : "Create script",
+                       ButtonKind::Secondary, nullptr, "Opens the file in the script editor, beside the Scene."))
+                openScript(st, doc, lua);
+            y += size::field + space::sm;
+        }
         sectionEnd(top);
     }
 
@@ -3608,6 +3644,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (assetField("tlua", row("ltlua", "Script", "The Lua file that gets the enter and exit calls. Click to pick one."), icon::fileCode,
                        tr.lua.empty() || found ? kind::script : color::warn, tr.lua.empty() ? "None" : fileName(tr.lua).c_str(), nullptr))
             pickAsset(AssetSlot::TriggerLua, path);
+        if (!tr.lua.empty()) {
+            if (button("edittlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::fileCode, found ? "Edit script" : "Create script",
+                       ButtonKind::Secondary, nullptr, "Opens the file in the script editor, beside the Scene."))
+                openScript(st, doc, tr.lua);
+            y += size::field + space::sm;
+        }
         sectionEnd(top);
     }
     if (o->interactable) {
@@ -3941,7 +3983,7 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
 // Document-wide shortcuts. Skipped while a text field has the keyboard.
 static void shortcuts(State& st, editor::Document& doc) {
     ImGuiIO& io = ImGui::GetIO();
-    if (io.WantTextInput || st.unsavedShown || st.menuOpen >= 0) return;
+    if (io.WantTextInput || st.unsavedShown || st.menuOpen >= 0 || st.scripts.hasKeyboard()) return;
     auto pressed = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
     auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
@@ -4026,8 +4068,32 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect right(ImVec2(size.x - g - 352, top), ImVec2(size.x - g, bottom));
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
     sceneTree(st, dl, left, doc, view);
-    viewportPanel(st, dl, mid, doc, view);
-    st.viewportRect = mid;
+    // Open scripts belong to the project; another project closes them.
+    if (st.scriptsProject != doc.projectRoot()) {
+        st.scripts.closeAll();
+        st.scriptsProject = doc.projectRoot();
+    }
+    const ImRect body = st.scripts.tabStrip(dl, mid);
+    if (st.scripts.sceneShown()) {
+        viewportPanel(st, dl, body, doc, view);
+        st.viewportRect = body;
+    } else {
+        st.scripts.draw(dl, body);
+        st.viewportRect = ImRect();
+        if (st.scripts.hasKeyboard()) st.play.gameFocus = false;
+    }
+    if (!st.scripts.notice.empty()) {
+        notify(st, st.scripts.notice, st.scripts.noticeBad);
+        st.scripts.notice.clear();
+    }
+    // A saved script may be one the scene was missing; the live game reloads it.
+    std::vector<std::string> savedScripts;
+    for (const std::filesystem::path& p : st.scripts.takeSaved()) {
+        std::error_code ec;
+        std::filesystem::path rel = std::filesystem::relative(p, doc.projectRoot(), ec);
+        if (!ec && !rel.empty()) savedScripts.push_back(utf8(rel.generic_u8string()));
+    }
+    if (!savedScripts.empty()) doc.refreshAssets(savedScripts);
     st.modelField = ImRect();
     inspector(st, dl, right, doc);
     if (st.drop.hovering && !st.modelField.Contains(st.drop.pos)) {

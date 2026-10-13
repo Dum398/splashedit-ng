@@ -2926,6 +2926,190 @@ void testTimelineEdit() {
 
 // The Scene view's preview: a sequence posed at a frame, drawn from a copy;
 // the document, its history and the saved scene stay as they were.
+// Sequences renamed and deleted, one undo step each; names held to the
+// exporter's rule (1..24 UTF-16 units, unique within the kind).
+void testTimelineRenameDelete() {
+    using editor::SeqKind;
+    splash::Scene sc;
+    for (const char* n : {"intro", "outro"}) {
+        splash::Cutscene c;
+        c.name = n;
+        sc.cutscenes.push_back(c);
+    }
+    splash::Animation a;
+    a.name = "spin";
+    sc.animations.push_back(a);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef intro{SeqKind::Cutscene, 0}, outro{SeqKind::Cutscene, 1}, spin{SeqKind::Animation, 0};
+    size_t h = d.historySize();
+    CHECK(editor::renameSequence(d, intro, "opening") && *editor::seqName(d, intro) == "opening");
+    CHECK(d.historySize() == h + 1);
+    CHECK(d.undo() && *editor::seqName(d, intro) == "intro" && d.redo() && *editor::seqName(d, intro) == "opening");
+    h = d.historySize();
+    // Refused: empty, taken by the same kind, too long, unchanged. No step.
+    CHECK(!editor::renameSequence(d, intro, ""));
+    CHECK(!editor::renameSequence(d, intro, "outro") && !editor::seqNameProblem(d, intro, "outro").empty());
+    CHECK(!editor::renameSequence(d, intro, std::string(25, 'x')));
+    CHECK(!editor::renameSequence(d, intro, "opening"));
+    CHECK(d.historySize() == h && *editor::seqName(d, intro) == "opening");
+    // 24 units is fine; an astral character counts two (String.Substring).
+    CHECK(editor::seqNameProblem(d, intro, std::string(24, 'x')).empty());
+    CHECK(!editor::seqNameProblem(d, intro, std::string(23, 'x') + "\xF0\x9F\x8E\xAC").empty());
+    CHECK(editor::seqNameProblem(d, intro, std::string(22, 'x') + "\xF0\x9F\x8E\xAC").empty());
+    CHECK(editor::seqNameProblem(d, intro, std::string(23, 'x') + "\xC3\xA9").empty());
+    // Another kind may share the name: the exporter checks each kind on its own.
+    CHECK(editor::renameSequence(d, spin, "outro") && *editor::seqName(d, spin) == "outro");
+
+    // Delete: one step, the later ones move down, undo brings it back in place.
+    h = d.historySize();
+    CHECK(editor::removeSequence(d, intro));
+    CHECK(d.historySize() == h + 1 && d.scene().cutscenes.size() == 1 && *editor::seqName(d, intro) == "outro");
+    CHECK(!editor::removeSequence(d, {SeqKind::Cutscene, 5}) && d.historySize() == h + 1);
+    CHECK(d.undo() && d.scene().cutscenes.size() == 2 && *editor::seqName(d, intro) == "opening" &&
+          *editor::seqName(d, outro) == "outro");
+    CHECK(editor::removeSequence(d, spin) && d.scene().animations.empty() && d.scene().cutscenes.size() == 2);
+}
+
+// A track pointed at another target: one step, keys kept; refused where the
+// export could not tell the tracks apart or the track has no target.
+void testTimelineRetarget() {
+    using splash::TrackType;
+    splash::Scene sc;
+    for (const char* n : {"Crate", "Barrel", "Ghost"}) {
+        splash::Object o = named(n);
+        if (std::string(n) != "Ghost") o.mesh = splash::MeshComponent{};
+        sc.objects.push_back(o);
+    }
+    splash::Object lamp = named("Lamp");
+    lamp.light = splash::LightComponent{};
+    lamp.light->runtime = true;
+    sc.objects.push_back(lamp);
+    splash::Cutscene cs;
+    cs.name = "intro";
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectPosition, "Crate") == 0);
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectPosition, "Barrel") == 1);
+    CHECK(editor::addTrack(d, ref, TrackType::ObjectRotation, "Crate") == 2);
+    CHECK(editor::addTrack(d, ref, TrackType::CameraPosition, "") == 3);
+    CHECK(editor::addKey(d, ref, 2, 10, editor::KeyValue{0, 90, 0}));
+    CHECK((editor::targetsFor(d, TrackType::ObjectPosition) == std::vector<std::string>{"Crate", "Barrel"}));
+    CHECK((editor::targetsFor(d, TrackType::LightColor) == std::vector<std::string>{"Lamp"}));
+    CHECK(editor::targetsFor(d, TrackType::CameraPosition).empty());
+
+    size_t h = d.historySize();
+    CHECK(editor::setTrackTarget(d, ref, 2, "Barrel"));
+    CHECK(d.historySize() == h + 1 && d.scene().cutscenes[0].tracks[2].target == "Barrel");
+    CHECK(d.scene().cutscenes[0].tracks[2].keyframes.size() == 1 && d.scene().cutscenes[0].tracks[2].keyframes[0].value[1] == 90);
+    CHECK(d.undo() && d.scene().cutscenes[0].tracks[2].target == "Crate");
+    h = d.historySize();
+    CHECK(!editor::setTrackTarget(d, ref, 0, "Barrel"));  // Barrel already has a position track
+    CHECK(!editor::setTrackTarget(d, ref, 0, "Crate"));   // unchanged
+    CHECK(!editor::setTrackTarget(d, ref, 0, ""));
+    CHECK(!editor::setTrackTarget(d, ref, 3, "Crate"));   // the camera has no target
+    CHECK(!editor::setTrackTarget(d, ref, 9, "Crate"));
+    CHECK(d.historySize() == h);
+}
+
+// Sampling as the console does it: keys packed to fixed point, then
+// interpolation.cpp's integer blend. The float curve misses by a step.
+void testTimelineFixedSample() {
+    using splash::Interp;
+    using splash::TrackType;
+    // x 0 -> -1, y 0 -> -2 (packed with Y negated) over frames 0..3, GTE scaling 100.
+    splash::CutsceneTrack t = trackOf(TrackType::ObjectPosition, {{0, 0.0f}, {3, -1.0f}});
+    CHECK((editor::encodeValue(TrackType::ObjectPosition, {-1, -2, 0}, 100) == editor::FixedValue{-41, 82, 0}));
+    // Frame 1: t = 4096 / 3 = 1365; x: -41 * 1365 >> 12 = -14 (floor), y: 82 * 1365 >> 12 = 27.
+    CHECK((editor::sampleFixedRaw(t, 1, {0, 0, 0}, 100) == editor::FixedValue{-14, 27, 0}));
+    const editor::KeyValue v = editor::sampleFixed(t, 1, {0, 0, 0}, 100);
+    CHECK(near3(v, -14 * 100 / 4096.0f, -27 * 100 / 4096.0f, 0));
+    // The float curve says -1/3: more than a tenth of a fixed-point step off.
+    CHECK(std::fabs(editor::sample(t, 1)[0] - v[0]) > 0.1f * 100 / 4096);
+    // Through the document: sampleAt is the console's value.
+    splash::Scene sc;
+    sc.objects.push_back(named("A"));
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(t);
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    CHECK(near3(editor::sampleAt(d, {editor::SeqKind::Cutscene, 0}, 0, 1), v[0], v[1], v[2]));
+    // Sub-frames: frame 1.5 is 4096 + 2048 into a 3-frame span.
+    CHECK(editor::sampleFixedRaw(t, 1.5f, {0, 0, 0}, 100)[0] == int16_t((-41 * int32_t((4096 + 2048) / 3)) >> 12));
+    // The ease curves in 0.12: EaseInOut at t = 1024 is (3 * 1024^2 - 2 * (1024^3 >> 12)) >> 12 = 640.
+    splash::CutsceneTrack e = trackOf(TrackType::ObjectPosition, {{0, 0.0f}, {4, 100.0f}}, Interp::EaseInOut);
+    CHECK(editor::sampleFixedRaw(e, 1, {0, 0, 0}, 100)[0] == int16_t((4096 * 640) >> 12));
+    // Before the first key: from the initial value, packed the same way.
+    splash::CutsceneTrack late = trackOf(TrackType::ObjectPosition, {{10, 1.0f}});
+    CHECK(editor::sampleFixedRaw(late, 5, {0, 0, 1}, 100)[2] == int16_t(41 + ((0 - 41) * 2048 >> 12)));
+    // On the keys and past the end: the keys' packed values exactly.
+    CHECK(editor::sampleFixedRaw(t, 3, {0, 0, 0}, 100)[0] == -41 && editor::sampleFixedRaw(t, 9, {0, 0, 0}, 100)[0] == -41);
+    CHECK(editor::sampleFixedRaw(t, 0, {0, 0, 0}, 100)[0] == 0);
+    // Angles: degrees * 1024 / 180, X negated; colours to 0..255.
+    CHECK((editor::encodeValue(TrackType::ObjectRotation, {90, 45, 0}, 100) == editor::FixedValue{-512, 256, 0}));
+    CHECK((editor::encodeValue(TrackType::LightColor, {1, 0.5f, 0}, 100) == editor::FixedValue{255, 128, 0}));
+    CHECK(near3(editor::decodeValue(TrackType::ObjectRotation, {-512, 256, 0}, 100), 90, 45, 0));
+}
+
+// Light, UV offset and camera H tracks in the Scene view's preview.
+void testTimelinePreviewMore() {
+    using splash::TrackType;
+    splash::Scene sc;
+    splash::Object lamp = named("Lamp", 1);
+    lamp.light = splash::LightComponent{};
+    lamp.light->runtime = true;
+    lamp.light->color = {1, 1, 1};
+    lamp.light->intensity = 1;
+    lamp.light->range = 10;
+    sc.objects.push_back(lamp);
+    splash::Object crate = named("Crate", 2);
+    crate.mesh = splash::MeshComponent{};
+    sc.objects.push_back(crate);
+    splash::Cutscene cs;
+    cs.name = "intro";
+    auto track = [](TrackType ty, const char* target, int f, editor::KeyValue v) {
+        splash::CutsceneTrack t;
+        t.type = ty;
+        t.target = target;
+        splash::Keyframe k;
+        k.frame = f;
+        k.value = v;
+        t.keyframes.push_back(k);
+        return t;
+    };
+    cs.tracks.push_back(track(TrackType::LightColor, "Lamp", 10, {0, 0, 1}));
+    cs.tracks.push_back(track(TrackType::LightIntensity, "Lamp", 0, {2, 0, 0}));
+    cs.tracks.push_back(track(TrackType::LightEnabled, "Lamp", 4, {0, 0, 0}));
+    cs.tracks.push_back(track(TrackType::LightPosition, "Lamp", 0, {0, 5, 0}));
+    cs.tracks.push_back(track(TrackType::LightRadius, "Lamp", 0, {4, 0, 0}));
+    cs.tracks.push_back(track(TrackType::ObjectUVOffset, "Crate", 0, {8, 16, 0}));
+    cs.tracks.push_back(track(TrackType::CameraH, "", 10, {240, 0, 0}));
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const editor::Preview p = editor::samplePreview(d, ref, 5);
+    CHECK(p.lights.size() == 1 && p.lights.count("Lamp"));
+    const editor::LightPose& lp = p.lights.at("Lamp");
+    // Halfway into the first colour key, from the light's own white: 255 + (-255 * 2048 >> 12) = 127, not 127.5.
+    CHECK(lp.color && std::fabs((*lp.color)[0] - 127 / 255.0f) < 1e-6f && (*lp.color)[2] == 1.0f);
+    CHECK(lp.intensity && *lp.intensity == 2.0f && lp.enabled == false && lp.radius && std::fabs(*lp.radius - 4) < 0.025f);
+    CHECK(lp.position && std::fabs(lp.position->y - 5) < 0.025f);
+    CHECK(p.objects.at("Crate").uvOffset && (*p.objects.at("Crate").uvOffset == std::array<float, 2>{8, 16}));
+    // Camera H blends from the runtime's 120.
+    CHECK(p.cameraH && *p.cameraH == 180.0f);
+    splash::Scene posed = d.scene();
+    editor::applyPreview(posed, p);
+    const splash::LightComponent& l = *posed.objects[0].light;
+    CHECK(!l.enabled && l.intensity == 2.0f && std::fabs(l.range - 4) < 0.025f && std::fabs(posed.objects[0].transform.position.y - 5) < 0.025f);
+    CHECK(d.scene().objects[0].light->enabled && d.scene().objects[0].light->intensity == 1.0f);
+    CHECK(editor::samplePreview(d, ref, 3).lights.at("Lamp").enabled == true);
+}
+
 void testTimelinePreview() {
     using splash::TrackType;
     auto keyed = [](TrackType type, const char* target, std::initializer_list<std::pair<int, std::array<float, 3>>> keys) {
@@ -2942,6 +3126,11 @@ void testTimelinePreview() {
     };
     auto nearV = [](splash::Vec3 a, splash::Vec3 b) {
         return std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.y - b.y) < 1e-3f && std::fabs(a.z - b.z) < 1e-3f;
+    };
+    // Sampled as the console plays it: within one fixed-point step (GTE
+    // scaling 100: 100 / 4096 world units; angles 180 / 1024 degrees).
+    auto nearQ = [](splash::Vec3 a, splash::Vec3 b) {
+        return std::fabs(a.x - b.x) < 0.025f && std::fabs(a.y - b.y) < 0.025f && std::fabs(a.z - b.z) < 0.025f;
     };
     auto sameRot = [](splash::Quat a, splash::Quat b) {
         return std::fabs(std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) - 1) < 1e-4f;
@@ -2978,10 +3167,10 @@ void testTimelinePreview() {
 
     editor::Preview p = editor::samplePreview(d, ref, 5);
     CHECK(p.objects.size() == 3 && !p.objects.count("B"));
-    CHECK(p.objects["A"].position && nearV(*p.objects["A"].position, {5, 0, 0}) && !p.objects["A"].rotation);
-    CHECK(p.objects["B1"].rotation && nearV(*p.objects["B1"].rotation, {0, 45, 0}));
+    CHECK(p.objects["A"].position && nearQ(*p.objects["A"].position, {5, 0, 0}) && !p.objects["A"].rotation);
+    CHECK(p.objects["B1"].rotation && nearQ(*p.objects["B1"].rotation, {0, 45, 0}));
     CHECK(p.objects["C"].active == false && editor::samplePreview(d, ref, 4).objects["C"].active == true);
-    CHECK(p.cameraPosition && nearV(*p.cameraPosition, {5, 3, -10}) && p.cameraRotation && nearV(*p.cameraRotation, {10, 0, 0}));
+    CHECK(p.cameraPosition && nearQ(*p.cameraPosition, {5, 3, -10}) && p.cameraRotation && nearQ(*p.cameraRotation, {10, 0, 0}));
     CHECK(editor::samplePreview(d, ref, 5) == p && !(editor::samplePreview(d, ref, 6) == p));
     CHECK(editor::samplePreview(d, {editor::SeqKind::Cutscene, 3}, 5).empty());
     CHECK(editor::samplePreview(d, {editor::SeqKind::Animation, 0}, 5).empty());
@@ -2990,9 +3179,9 @@ void testTimelinePreview() {
     splash::Scene posed = d.scene();
     editor::applyPreview(posed, p);
     std::vector<splash::FlatObject> f = splash::flatten(posed);  // A, B, B1, C
-    CHECK(f.size() == 4 && nearV(f[0].worldPosition, {5, 0, 0}));
+    CHECK(f.size() == 4 && nearQ(f[0].worldPosition, {5, 0, 0}));
     CHECK(nearV(f[1].worldPosition, {2, 0, 0}) && sameRot(f[1].worldRotation, editor::quatEuler({0, 30, 0})));
-    CHECK(nearV(f[2].worldPosition, {1, 2, 3}) && sameRot(f[2].worldRotation, editor::quatEuler({0, 45, 0})));
+    CHECK(nearQ(f[2].worldPosition, {1, 2, 3}) && sameRot(f[2].worldRotation, editor::quatEuler({0, 45, 0})));
     CHECK(!posed.objects[2].mesh && d.scene().objects[2].mesh);
 
     // The document is untouched: values, revision, history, dirty flag and the saved bytes.
@@ -3258,6 +3447,10 @@ int main(int argc, char** argv) {
     testTimelineSample();
     testTimelineEdit();
     testTimelinePreview();
+    testTimelineRenameDelete();
+    testTimelineRetarget();
+    testTimelineFixedSample();
+    testTimelinePreviewMore();
     testLuaTokenize();
     testLuaBuffer();
     testLuaComplete();

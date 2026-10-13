@@ -232,6 +232,54 @@ std::optional<SeqRef> addSequence(Document& doc, SeqKind kind, const std::string
     return ref;
 }
 
+// String.Substring's count, as splashpack.cpp's truncateUtf16: UTF-16 code
+// units, so a character outside the BMP counts two.
+static int utf16Units(const std::string& s) {
+    int n = 0;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = uint8_t(s[i]);
+        const size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        n += len == 4 ? 2 : 1;
+        i += len;
+    }
+    return n;
+}
+
+std::string seqNameProblem(const Document& doc, SeqRef ref, const std::string& name) {
+    if (!valid(doc, ref)) return "No such sequence";
+    const bool cs = ref.kind == SeqKind::Cutscene;
+    if (name.empty()) return "A name is needed: Lua plays it by name";
+    if (utf16Units(name) > kMaxSeqName) return "At most " + std::to_string(kMaxSeqName) + " characters (the runtime's limit)";
+    const int n = cs ? int(doc.scene().cutscenes.size()) : int(doc.scene().animations.size());
+    for (int i = 0; i < n; ++i)
+        if (i != ref.index && *seqName(doc, {ref.kind, i}) == name)
+            return std::string("Another ") + (cs ? "cutscene" : "animation") + " is named '" + name + "'";
+    return {};
+}
+
+bool renameSequence(Document& doc, SeqRef ref, const std::string& name) {
+    if (!valid(doc, ref) || *seqName(doc, ref) == name || !seqNameProblem(doc, ref, name).empty()) return false;
+    std::vector<splash::Cutscene> cs = doc.scene().cutscenes;
+    std::vector<splash::Animation> as = doc.scene().animations;
+    (ref.kind == SeqKind::Cutscene ? cs[size_t(ref.index)].name : as[size_t(ref.index)].name) = name;
+    doc.execute(std::make_unique<TimelineCommand>(doc.scene().cutscenes, doc.scene().animations, std::move(cs), std::move(as),
+                                                  std::string()));
+    return true;
+}
+
+bool removeSequence(Document& doc, SeqRef ref) {
+    if (!valid(doc, ref)) return false;
+    std::vector<splash::Cutscene> cs = doc.scene().cutscenes;
+    std::vector<splash::Animation> as = doc.scene().animations;
+    if (ref.kind == SeqKind::Cutscene)
+        cs.erase(cs.begin() + ref.index);
+    else
+        as.erase(as.begin() + ref.index);
+    doc.execute(std::make_unique<TimelineCommand>(doc.scene().cutscenes, doc.scene().animations, std::move(cs), std::move(as),
+                                                  std::string()));
+    return true;
+}
+
 int addTrack(Document& doc, SeqRef ref, TrackType type, const std::string& target) {
     int added = -1;
     editSeq(doc, ref, [&](SeqMut& m) {
@@ -259,12 +307,48 @@ bool removeTrack(Document& doc, SeqRef ref, int track) {
     });
 }
 
+bool setTrackTarget(Document& doc, SeqRef ref, int track, const std::string& target) {
+    return editSeq(doc, ref, [&](SeqMut& m) {
+        if (!trackOk(m, track) || target.empty()) return false;
+        CutsceneTrack& t = (*m.tracks)[size_t(track)];
+        if (!needsTarget(t.type) || t.target == target) return false;
+        for (const CutsceneTrack& o : *m.tracks)
+            if (o.type == t.type && o.target == target) return false;
+        t.target = target;
+        return true;
+    });
+}
+
+std::vector<std::string> targetsFor(const Document& doc, TrackType type) {
+    std::vector<std::string> out;
+    if (!needsTarget(type)) return out;
+    const int ti = int(type);
+    if (ti >= 5 && ti <= 9) {
+        for (const splash::UICanvas& c : doc.scene().canvases) {
+            if (type == TrackType::UICanvasVisible)
+                out.push_back(c.name);
+            else
+                for (const splash::UIElement& e : c.elements) out.push_back(c.name + "/" + e.name);
+        }
+        return out;
+    }
+    const bool light = ti >= 14;
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+        if (light ? (fo.object->light && fo.object->light->runtime) : (fo.object->mesh && fo.object->active))
+            out.push_back(fo.object->name);
+    }
+    return out;
+}
+
 std::optional<KeyRef> addKey(Document& doc, SeqRef ref, int track, int frame, std::optional<KeyValue> value) {
     frame = std::clamp(frame, 0, kMaxTimelineFrame);
     // Sampled before the edit: the value the track has there now.
     const std::vector<CutsceneTrack>* now = seqTracks(doc, ref);
     if (!now || track < 0 || track >= int(now->size())) return std::nullopt;
-    const KeyValue v = value ? *value : sampleAt(doc, ref, track, float(frame));
+    // The authored curve, not the runtime's rounding of it: the new key reads
+    // as the values the user typed (the export rounds it the same way anyway).
+    const CutsceneTrack& cur = (*now)[size_t(track)];
+    const KeyValue v = value ? *value : sample(cur, float(frame), initialValue(doc, cur));
     std::optional<KeyRef> added;
     editSeq(doc, ref, [&](SeqMut& m) {
         std::vector<Keyframe>& keys = (*m.tracks)[size_t(track)].keyframes;
@@ -435,8 +519,176 @@ KeyValue sample(const CutsceneTrack& track, float frame, const KeyValue& initial
     return mix(ka.value, kb.value, applyCurve(t, kb.interp));
 }
 
+// The runtime's numbers: keys packed as the exporter packs them, then
+// interpolation.cpp's integer arithmetic.
+
+namespace {
+
+int roundInt(float f) { return int(std::nearbyint(double(f))); }  // splash::roundToInt
+int16_t sat16(int v) { return int16_t(std::clamp(v, -32768, 32767)); }
+
+int32_t applyCurveFixed(int32_t t, Interp mode) {
+    switch (mode) {
+        case Interp::Linear: return t;
+        case Interp::Step: return 0;
+        case Interp::EaseIn: return int32_t(int64_t(t) * t >> 12);
+        case Interp::EaseOut: return int32_t((int64_t(t) * (8192 - t)) >> 12);
+        case Interp::EaseInOut: {
+            const int64_t t2 = int64_t(t) * t;
+            const int64_t t3 = t2 * t;
+            return int32_t((3 * t2 - 2 * (t3 >> 12)) >> 12);
+        }
+    }
+    return t;
+}
+
+}  // namespace
+
+FixedValue encodeValue(TrackType t, const KeyValue& v, float gte) {
+    auto coord = [&](float x) { return sat16(roundInt((x / gte) * 4096.f)); };
+    auto angle = [](float deg) { return sat16(roundInt(deg * 1024.f / 180.f)); };
+    auto byteOf = [](float x, int lo, int hi) { return int16_t(std::clamp(roundInt(x), lo, hi)); };
+    FixedValue o{0, 0, 0};
+    switch (t) {
+        case TrackType::CameraPosition:
+        case TrackType::ObjectPosition:
+        case TrackType::LightPosition: o = {coord(v[0]), coord(-v[1]), coord(v[2])}; break;
+        case TrackType::CameraRotation:
+        case TrackType::ObjectRotation: o = {angle(-v[0]), angle(v[1]), angle(-v[2])}; break;
+        case TrackType::ObjectActive:
+        case TrackType::UICanvasVisible:
+        case TrackType::UIElementVisible:
+        case TrackType::RumbleSmall:
+        case TrackType::LightEnabled: o[0] = v[0] > 0.5f ? 1 : 0; break;
+        case TrackType::UIProgress: o[0] = byteOf(v[0], 0, 100); break;
+        // The exporter adds the element's anchor offset to both keys; a
+        // linear blend carries it through unchanged, so it is left out.
+        case TrackType::UIPosition: o = {sat16(roundInt(v[0])), sat16(roundInt(v[1])), 0}; break;
+        case TrackType::UIColor:
+        case TrackType::LightColor:
+            for (int i = 0; i < 3; ++i) o[size_t(i)] = byteOf(v[size_t(i)] * 255.f, 0, 255);
+            break;
+        case TrackType::CameraH: o[0] = byteOf(v[0], 1, 1024); break;
+        case TrackType::RumbleLarge: o[0] = byteOf(v[0], 0, 255); break;
+        case TrackType::ObjectUVOffset: o = {byteOf(v[0], 0, 255), byteOf(v[1], 0, 255), 0}; break;
+        case TrackType::LightIntensity: o[0] = byteOf(v[0] * 4096.f, 0, 32767); break;
+        case TrackType::LightRadius: o[0] = std::max<int16_t>(0, coord(v[0])); break;
+    }
+    return o;
+}
+
+KeyValue decodeValue(TrackType t, const FixedValue& o, float gte) {
+    const float c = gte / 4096.f, a = 180.f / 1024.f;
+    switch (t) {
+        case TrackType::CameraPosition:
+        case TrackType::ObjectPosition:
+        case TrackType::LightPosition: return {o[0] * c, -o[1] * c, o[2] * c};
+        case TrackType::CameraRotation:
+        case TrackType::ObjectRotation: return {-o[0] * a, o[1] * a, -o[2] * a};
+        case TrackType::UIColor:
+        case TrackType::LightColor: return {o[0] / 255.f, o[1] / 255.f, o[2] / 255.f};
+        case TrackType::LightIntensity: return {o[0] / 4096.f, 0, 0};
+        case TrackType::LightRadius: return {o[0] * c, 0, 0};
+        default: return {float(o[0]), float(o[1]), float(o[2])};
+    }
+}
+
+FixedValue sampleFixedRaw(const CutsceneTrack& track, float frame, const KeyValue& initial, float gte) {
+    const TrackType ty = track.type;
+    if (isDiscrete(ty)) return encodeValue(ty, sample(track, frame, initial), gte);
+    struct K {
+        int frame;
+        FixedValue v;
+        Interp interp;
+    };
+    // Sorted stably by frame, as the export writes them.
+    std::vector<K> kf;
+    for (const Keyframe& k : track.keyframes) kf.push_back({k.frame & 0x1FFF, encodeValue(ty, k.value, gte), k.interp});
+    std::stable_sort(kf.begin(), kf.end(), [](const K& a, const K& b) { return a.frame < b.frame; });
+    const FixedValue init = encodeValue(ty, initial, gte);
+    if (kf.empty()) return init;  // the runtime leaves the target alone
+    // CutscenePlayer's m_frame and m_subFrame (0.12).
+    frame = std::max(frame, 0.0f);
+    const uint32_t fr = uint32_t(std::floor(frame));
+    const uint32_t sub = std::min(uint32_t((frame - float(fr)) * 4096.f), 4095u);
+    const size_t count = kf.size();
+    FixedValue out{0, 0, 0};
+    // lerpKeyframesSub: findKfPairSub, then the blend from the initial value
+    // before the first key.
+    if (fr < uint32_t(kf[0].frame) || (fr == uint32_t(kf[0].frame) && sub == 0)) {
+        out = kf[0].v;
+        if (kf[0].frame > 0 && fr < uint32_t(kf[0].frame)) {
+            const uint32_t num = fr * 4096u + sub;
+            const int32_t rawT = std::min<int32_t>(int32_t(num / uint32_t(kf[0].frame)), 4096);
+            const int32_t ct = applyCurveFixed(rawT, kf[0].interp);
+            for (size_t i = 0; i < 3; ++i) {
+                const int32_t delta = int32_t(kf[0].v[i]) - int32_t(init[i]);
+                out[i] = int16_t(int32_t(init[i]) + ((delta * ct) >> 12));
+            }
+        }
+    } else if (fr > uint32_t(kf[count - 1].frame) || (fr == uint32_t(kf[count - 1].frame) && (sub > 0 || count == 1))) {
+        out = kf[count - 1].v;
+    } else if (fr == uint32_t(kf[count - 1].frame)) {
+        // On the last key with no sub-frame the runtime's search runs one past
+        // the end, but its distance into that segment is 0: the last key.
+        out = kf[count - 1].v;
+    } else {
+        size_t b = 1;
+        while (b < count && uint32_t(kf[b].frame) <= fr) ++b;
+        const size_t a = b - 1;
+        const uint32_t span = uint32_t(kf[b].frame - kf[a].frame);
+        if (span == 0) {
+            out = kf[a].v;
+        } else {
+            const uint32_t num = (fr - uint32_t(kf[a].frame)) * 4096u + sub;
+            const int32_t t = applyCurveFixed(std::min<int32_t>(int32_t(num / span), 4096), kf[b].interp);
+            for (size_t i = 0; i < 3; ++i) {
+                const int32_t delta = int32_t(kf[b].v[i]) - int32_t(kf[a].v[i]);
+                out[i] = int16_t(int32_t(kf[a].v[i]) + ((delta * t) >> 12));
+            }
+        }
+    }
+    // What the apply step clamps (cutscene.cpp).
+    switch (ty) {
+        case TrackType::CameraH: out[0] = int16_t(std::clamp<int>(out[0], 1, 1024)); break;
+        case TrackType::LightColor:
+            for (int16_t& c : out) c = int16_t(std::clamp<int>(c, 0, 255));
+            break;
+        case TrackType::LightIntensity:
+        case TrackType::LightRadius: out[0] = std::max<int16_t>(out[0], 0); break;
+        default: break;
+    }
+    return out;
+}
+
+KeyValue sampleFixed(const CutsceneTrack& track, float frame, const KeyValue& initial, float gte) {
+    if (isDiscrete(track.type)) return sample(track, frame, initial);
+    return decodeValue(track.type, sampleFixedRaw(track, frame, initial, gte), gte);
+}
+
 KeyValue initialValue(const Document& doc, const CutsceneTrack& track) {
+    const int ti = int(track.type);
+    if (ti >= 14 && track.type != TrackType::LightEnabled) {
+        // captureLightTrack: the light as the scene ships it.
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+            if (fo.object->name == track.target && fo.object->light) {
+                const splash::LightComponent& l = *fo.object->light;
+                switch (track.type) {
+                    case TrackType::LightPosition: return {fo.worldPosition.x, fo.worldPosition.y, fo.worldPosition.z};
+                    case TrackType::LightColor: return {l.color[0], l.color[1], l.color[2]};
+                    case TrackType::LightIntensity: return {l.intensity, 0, 0};
+                    case TrackType::LightRadius: return {l.range, 0, 0};
+                    default: break;
+                }
+            }
+        return {0, 0, 0};
+    }
     switch (track.type) {
+        case TrackType::CameraH: return {120, 0, 0};  // psxsplash Camera's m_projH
+        case TrackType::LightEnabled:
+            for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+                if (fo.object->name == track.target && fo.object->light) return {fo.object->light->enabled ? 1.0f : 0.0f, 0, 0};
+            break;
         case TrackType::ObjectPosition:
             for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
                 if (fo.object->name == track.target) return {fo.worldPosition.x, fo.worldPosition.y, fo.worldPosition.z};
@@ -458,7 +710,7 @@ KeyValue sampleAt(const Document& doc, SeqRef ref, int track, float frame) {
     const std::vector<CutsceneTrack>* tracks = seqTracks(doc, ref);
     if (!tracks || track < 0 || track >= int(tracks->size())) return {0, 0, 0};
     const CutsceneTrack& t = (*tracks)[size_t(track)];
-    return sample(t, frame, initialValue(doc, t));
+    return sampleFixed(t, frame, initialValue(doc, t), doc.scene().settings.gteScaling);
 }
 
 }  // namespace editor
@@ -478,8 +730,16 @@ Preview samplePreview(const Document& doc, SeqRef ref, float frame) {
             case TrackType::ObjectPosition: p.objects[t.target].position = v3; break;
             case TrackType::ObjectRotation: p.objects[t.target].rotation = v3; break;
             case TrackType::ObjectActive: p.objects[t.target].active = v[0] > 0.5f; break;
+            case TrackType::ObjectUVOffset: p.objects[t.target].uvOffset = std::array<float, 2>{v[0], v[1]}; break;
             case TrackType::CameraPosition: p.cameraPosition = v3; break;
             case TrackType::CameraRotation: p.cameraRotation = v3; break;
+            case TrackType::CameraH: p.cameraH = v[0]; break;
+            case TrackType::LightPosition: p.lights[t.target].position = v3; break;
+            case TrackType::LightColor: p.lights[t.target].color = v; break;
+            case TrackType::LightIntensity: p.lights[t.target].intensity = v[0]; break;
+            case TrackType::LightRadius: p.lights[t.target].radius = v[0]; break;
+            case TrackType::LightEnabled: p.lights[t.target].enabled = v[0] > 0.5f; break;
+            // UI and rumble: nothing in the Scene view to pose.
             default: break;
         }
     }
@@ -497,13 +757,24 @@ splash::Quat quatEuler(splash::Vec3 deg) {
 }
 
 void applyPreview(splash::Scene& scene, const Preview& preview) {
-    for (const auto& [name, pose] : preview.objects) {
+    // Objects, then lights: a light's pose is an object pose (its position)
+    // plus the light component's own fields.
+    std::vector<std::pair<std::string, ObjectPose>> poses(preview.objects.begin(), preview.objects.end());
+    for (const auto& [name, lp] : preview.lights) {
+        ObjectPose op;
+        op.position = lp.position;
+        poses.push_back({name, op});
+    }
+    for (size_t pi = 0; pi < poses.size(); ++pi) {
+        const std::string& name = poses[pi].first;
+        const ObjectPose& pose = poses[pi].second;
+        const bool isLight = pi >= preview.objects.size();
         // Flattened again per target: an earlier target may be this one's parent.
         const std::vector<splash::FlatObject> flats = splash::flatten(scene);
         const splash::FlatObject* fo = nullptr;
         const splash::FlatObject* parent = nullptr;
         for (const splash::FlatObject& f : flats)
-            if (f.object->name == name) {
+            if (f.object->name == name && (!isLight || f.object->light)) {
                 fo = &f;
                 break;
             }
@@ -526,6 +797,14 @@ void applyPreview(splash::Scene& scene, const Preview& preview) {
         }
         if (pose.rotation) ob.transform.rotation = quatNormalize(quatMul(prInv, quatEuler(*pose.rotation)));
         if (pose.active && !*pose.active) ob.mesh.reset();
+        if (isLight) {
+            const LightPose& lp = preview.lights.at(name);
+            splash::LightComponent& l = *ob.light;
+            if (lp.color) l.color = *lp.color;
+            if (lp.intensity) l.intensity = *lp.intensity;
+            if (lp.radius) l.range = *lp.radius;
+            if (lp.enabled) l.enabled = *lp.enabled;
+        }
     }
 }
 

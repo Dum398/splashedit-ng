@@ -1323,6 +1323,13 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 if (luas.empty()) m.push_back(item("No scripts in this scene", "", false, nullptr));
                 for (const std::string& p : luas) m.push_back(item(p, "", true, [&st, &doc, p] { openScript(st, doc, p); }));
             }
+            m.push_back(separator());
+            m.push_back(heading("Timeline"));
+            m.push_back(item("Timeline", "", true, [&] { st.timeline.open = !st.timeline.open; }, st.timeline.open));
+            for (const editor::SeqRef ref : editor::allSequences(doc)) {
+                const char* kindName = ref.kind == editor::SeqKind::Cutscene ? "Cutscene: " : "Animation: ";
+                m.push_back(item(kindName + *editor::seqName(doc, ref), "", true, [&st, &doc, ref] { st.timeline.show(doc, ref); }));
+            }
             break;
         case 5:  // Help
             m.push_back(item("Documentation", "", true, [] { SDL_OpenURL("https://github.com/psxsplash/splashedit-ng#readme"); }));
@@ -2742,6 +2749,39 @@ static ImRect splitViewport(State& st, ImDrawList* dl, ImRect r) {
     return scene;
 }
 
+static bool samePose(const splash::FlatObject& a, const splash::FlatObject& b) {
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 4; ++j)
+            if (std::fabs(a.localToWorld.m[i][j] - b.localToWorld.m[i][j]) > 1e-4f) return false;
+    return (a.object->mesh.has_value() == b.object->mesh.has_value());
+}
+
+// The camera a cutscene's camera tracks put at the scrub head: a frustum
+// (Unity camera axes, 4:3) with a camera icon at the eye.
+static void previewCamera(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const editor::Preview& p) {
+    if (!p.cameraPosition && !p.cameraRotation) return;
+    const splash::Vec3 eye = p.cameraPosition.value_or(splash::Vec3{});
+    const splash::Quat q = editor::quatEuler(p.cameraRotation.value_or(splash::Vec3{}));
+    const splash::Vec3 f = splash::rotate(q, {0, 0, 1}), u = splash::rotate(q, {0, 1, 0}), rt = splash::rotate(q, {1, 0, 0});
+    const float d = 1.2f, hh = d * 0.45f, hw = hh * 4.0f / 3.0f;
+    const ImU32 col = rgb(0x5ccfe0);
+    ImVec2 e, c[4];
+    if (!view.project(toGl(eye), mn, sz, &e)) return;
+    const float sx[4] = {-1, 1, 1, -1}, sy[4] = {1, 1, -1, -1};
+    for (int i = 0; i < 4; ++i)
+        if (!view.project(toGl(eye + f * d + rt * (hw * sx[i]) + u * (hh * sy[i])), mn, sz, &c[i])) return;
+    for (int i = 0; i < 4; ++i) {
+        dl->AddLine(e, c[i], col, 1.5f);
+        dl->AddLine(c[i], c[(i + 1) % 4], col, 1.5f);
+    }
+    // The up side, so a rolled camera reads as one.
+    ImVec2 top;
+    if (view.project(toGl(eye + f * d + u * (hh * 1.4f)), mn, sz, &top)) dl->AddTriangleFilled(c[0], c[1], top, (col & 0x00ffffffu) | (150u << IM_COL32_A_SHIFT));
+    ImGui::PushID("previewCamera");
+    sceneIcon(dl, view, mn, sz, toGl(eye), icon::camera, col);
+    ImGui::PopID();
+}
+
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     Fonts& f = fonts();
     if (st.play.game.attached()) r = splitViewport(st, dl, r);
@@ -2754,6 +2794,12 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     ImGui::PushClipRect(r.Min, r.Max, true);
     std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
     const splash::Object* sel = doc.selected();
+    // While the timeline previews a pose, outlines and markers follow the
+    // scene as drawn (same flatten order); gizmos, picking and every edit
+    // keep reading the document's own transforms.
+    const splash::Scene* drawn = view.drawnScene();
+    const bool previewing = drawn && drawn != &doc.scene();
+    const std::vector<splash::FlatObject> shown = previewing ? splash::flatten(*drawn) : flats;
 
     // The mouse goes to the first item that claims it, so items are submitted
     // toolbars first, then the gizmo, then scene markers, then the viewport
@@ -2816,14 +2862,32 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
 
     // Selection outline and the tool's gizmo follow the selected object.
     if (sel) {
-        for (const splash::FlatObject& fo : flats)
-            if (fo.object == sel) {
+        for (size_t si = 0; si < flats.size(); ++si)
+            if (const splash::FlatObject& fo = flats[si]; fo.object == sel) {
+                const splash::FlatObject& drawnFo = si < shown.size() ? shown[si] : fo;
                 dl->ChannelsSetCurrent(kScene);
                 viewport::Vec3 lo, hi;
-                selectedBoxGl(doc, fo, &lo, &hi);
+                selectedBoxGl(doc, drawnFo, &lo, &hi);
                 selectionOutline(dl, view, mn, sz, lo, hi);
                 dl->ChannelsSetCurrent(kGizmo);
-                if (st.tool >= 1 && st.tool <= 3) {
+                // An object the preview moves (itself or through a parent)
+                // shows no gizmo: a drag from the drawn pose would write the
+                // previewed value into the document.
+                const bool posed = previewing && !samePose(fo, drawnFo);
+                if (posed) {
+                    const char* note = "Posed by the timeline: its keys move it";
+                    ImVec2 ns = measure(f.regular, type::caption, note);
+                    ImRect nc(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24 - space::sm - 24),
+                              ImVec2(r.Min.x + space::md + ns.x + 20, r.Max.y - space::md - 24 - space::sm));
+                    dl->AddRectFilled(nc.Min, nc.Max, rgb(0x0e1014, 190), radius::pill);
+                    textCentered(dl, nc, f.regular, type::caption, color::textDim, note);
+                }
+                if (posed && st.gizmo.handle >= 0) {
+                    doc.endMerge();
+                    if (GImGui->ActiveId == ImGui::GetID("##gizmo")) ImGui::ClearActiveID();
+                    st.gizmo.handle = -1;
+                }
+                if (!posed && st.tool >= 1 && st.tool <= 3) {
                     const splash::Object* par = doc.parent(*doc.selection());
                     const splash::Mat34* parentToWorld = nullptr;
                     for (const splash::FlatObject& pf : flats)
@@ -2864,9 +2928,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     // script-only objects get none. Clicking one selects its object.
     dl->ChannelsSetCurrent(kScene);
     std::vector<editor::ObjectPath> paths = doc.flatPaths();
-    for (size_t i = 0; i < flats.size(); ++i) {
+    for (size_t i = 0; i < shown.size() && i < flats.size(); ++i) {
         const splash::FlatObject& fo = flats[i];
-        viewport::Vec3 pos = toGl(fo.localToWorld.position());
+        viewport::Vec3 pos = toGl(shown[i].localToWorld.position());
         const char* ic = nullptr;
         ImU32 col = 0;
         if (fo.object->light) ic = icon::lightbulb, col = kind::light;
@@ -2876,6 +2940,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         if (sceneIcon(dl, view, mn, sz, pos, ic, col) && i < paths.size()) doc.select(paths[i]);
         ImGui::PopID();
     }
+    if (previewing) previewCamera(dl, view, mn, sz, view.preview());
     dl->ChannelsMerge();
 
     viewportInput(st, r, doc, view, flats);
@@ -3038,6 +3103,22 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             openScript(st, doc, lua);
         }
         y += size::field + space::sm;
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // Cutscenes and animations, each with Edit in timeline.
+    {
+        const float stop = y;
+        const bool open = section("s_sequences", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::camera, rgb(0x5ccfe0),
+                                  "Cutscenes and animations", true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y = st.timeline.sequenceList(dl, x0 + space::sm, x1 - space::sm, y + 34 + space::xs, doc);
         if (!open) {
             ImGui::PopClipRect();
             y = stop + 34 + space::md;
@@ -4387,6 +4468,8 @@ static void updateModels(State& st, editor::Document& doc) {
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     filesPending(st, doc);
+    // The timeline takes Delete and Space while it has focus, before the scene's shortcuts see them.
+    st.timeline.takeKeys(doc);
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
     updatePlay(st, doc);
@@ -4412,7 +4495,11 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.scripts.closeAll();
         st.scriptsProject = doc.projectRoot();
     }
-    const ImRect body = st.scripts.tabStrip(dl, mid);
+    const ImRect body = st.scripts.tabStrip(dl, st.timeline.dock(mid));
+    // The timeline takes this frame's scrub first, so the Scene draws the
+    // pose at the new scrub head now rather than a frame late (empty when closed).
+    st.timeline.draw(dl, doc);
+    view.setPreview(st.timeline.preview(doc));
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;

@@ -169,6 +169,8 @@ public:
     // changes. Everything else edits through the history.
     splash::Object* objectMut(const ObjectPath& path);
     splash::SceneSettings& settingsMut() { return m_scene.settings; }
+    std::vector<splash::Cutscene>& cutscenesMut() { return m_scene.cutscenes; }
+    std::vector<splash::Animation>& animationsMut() { return m_scene.animations; }
     // Children of the object at `parentPath`, or the top level for the empty path.
     std::vector<splash::Object>* childrenMut(const ObjectPath& parentPath);
     // Keeps selection and tree expansion on the same objects when a sibling

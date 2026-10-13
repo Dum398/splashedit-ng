@@ -272,5 +272,24 @@ write no `memCard`, and one Ctrl+Z must take the title back and leave saves on. 
 
     python3 memcardeditcheck.py <splashedit>
 
+`timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
+panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
+ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is
+selected, and undoes; each run saves with Ctrl+S and the check reads the saved scene: the new key
+sits at the scrub frame with the value the track had there, the dragged key keeps its value and
+curve, and Delete takes the key, not the object. Needs a display.
+
+    python3 timelinecheck.py <splashedit>
+
+`timelinepreviewcheck.py` checks the Scene view's preview of the Timeline panel: on a copy of the
+courtyard example with a cutscene that lifts and turns the Crate, it scrubs to frame 0 and to 75 and
+compares the Scene view's pixels in the two screenshots, takes one more (`--shot-at 6`) on the very
+frame the scrub click presses and expects the frame 75 pose already there, saves while previewing and
+compares the file byte for byte with a save made without the timeline, and drags the Crate's move
+gizmo: at frame 0 (the scene's own pose) the drag moves it, at frame 75 (posed) the gizmo is hidden
+and the same drag writes nothing. Needs a display.
+
+    python3 timelinepreviewcheck.py <splashedit>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

@@ -16,6 +16,7 @@
 #include "editor/lua_editor_view.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
+#include "editor/timeline_view.hh"
 #include "emulator.h"
 #include "game_view.h"
 
@@ -202,6 +203,9 @@ struct State {
     // Lua files open in the script editor, as tabs beside the Scene.
     ui::ScriptTabs scripts;
     std::filesystem::path scriptsProject;  // the project they belong to
+
+    // Cutscene and animation tracks, docked under the Scene.
+    ui::TimelinePanel timeline;
 };
 
 // Draws the main screen for `doc` filling `size`. Returns the title-bar

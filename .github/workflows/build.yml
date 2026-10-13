@@ -94,6 +94,12 @@ jobs:
       - name: Memory card settings
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/memcardeditcheck.py build/splashedit
+      - name: Timeline
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/timelinecheck.py build/splashedit
+      - name: Timeline preview
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/timelinepreviewcheck.py build/splashedit
       # One download: the editor with its assets, the example project, the
       # engine and the latest pcsx-redux dev build for this OS.
       - uses: actions/download-artifact@v4

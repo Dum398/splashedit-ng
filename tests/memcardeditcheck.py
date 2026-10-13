@@ -11,11 +11,12 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 # At 1600x960 with nothing selected the inspector shows the scene. Folding
-# Render buffers first keeps what follows where it is whether or not the
-# background export has filled in its sizes.
-FOLD_RENDER = '1400,273'
-ENABLE = '1390,478'  # the Enable saves switch
-TITLE = '1450,606'  # the Save title field
+# Cutscenes and animations, then Render buffers, keeps what follows where it is
+# whether or not the background export has filled in its sizes.
+FOLD_CUTSCENES = '1400,273'
+FOLD_RENDER = '1400,319'
+ENABLE = '1390,524'  # the Enable saves switch
+TITLE = '1450,652'  # the Save title field
 TYPED = 'MY GAME 1'
 
 
@@ -26,11 +27,11 @@ def check(name, ok, detail=''):
 
 
 def run(args):
-    """Runs `args` after folding Render buffers, then Ctrl+S; returns the saved
+    """Runs `args` after folding the two sections above, then Ctrl+S; returns the saved
     scene's settings.memCard ({} when absent) and the editor's output."""
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
-    cmd = [editor, '--size', '1600x960', '--project', project, '--click', FOLD_RENDER, '--wait', '5'] + args + [
+    cmd = [editor, '--size', '1600x960', '--project', project, '--click', FOLD_CUTSCENES, '--wait', '3', '--click', FOLD_RENDER, '--wait', '5'] + args + [
         '--key', 'ctrl+s', '--wait', '10', '--screenshot', os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
     out = (r.stdout + r.stderr).strip()

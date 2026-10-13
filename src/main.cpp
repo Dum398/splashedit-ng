@@ -77,10 +77,12 @@ struct Args {
     int width = 1600, height = 960;
     float mouseX = -1, mouseY = -1;
     int frames = 30;
+    int shotAt = -1;  // screenshot frame, overriding the padding after actions
     int viewMode = 0;
     const char* project = nullptr;  // project root; default: the bundled example
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
+    const char* timeline = nullptr; // cutscene or animation to open in the Timeline at startup
     std::vector<Action> actions;
     int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
     bool splash = false;
@@ -229,10 +231,12 @@ Args parse(int argc, char** argv) {
             a.dropFile = v.substr(0, at);
         }
         else if (!std::strcmp(argv[i], "--frames")) a.frames = std::atoi(next());
+        else if (!std::strcmp(argv[i], "--shot-at")) a.shotAt = std::atoi(next());
         else if (!std::strcmp(argv[i], "--clean")) a.viewMode = 1;
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
+        else if (!std::strcmp(argv[i], "--timeline")) a.timeline = next();
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
@@ -412,6 +416,11 @@ int main(int argc, char** argv) {
     }
     editor::Document doc;
     openDocument(doc, args);
+    if (args.timeline) {
+        for (const editor::SeqRef ref : editor::allSequences(doc))
+            if (!state.timeline.open && *editor::seqName(doc, ref) == args.timeline) state.timeline.show(doc, ref);
+        if (!state.timeline.open) std::fprintf(stderr, "no cutscene or animation named '%s' in the scene\n", args.timeline);
+    }
     // A project named on the command line joins File > Recent like one opened from the menu.
     if (args.project && !args.screenshot && std::filesystem::is_regular_file(doc.scenePath()))
         state.recent.add(std::filesystem::absolute(doc.scenePath()));
@@ -429,6 +438,8 @@ int main(int argc, char** argv) {
         timelineEnd += actionFrames(a);
     }
     if (args.screenshot && !args.actions.empty()) args.frames = std::max(args.frames, timelineEnd + 30);
+    // --shot-at: the exact frame, even mid-script (actions start at frame 5).
+    if (args.shotAt >= 0) args.frames = args.shotAt + 1;
 
     int frame = 0;
     bool running = true;

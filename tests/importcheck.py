@@ -349,7 +349,139 @@ check('fbx UVs: V kept', fuv[(0, 0, 0)] == ouv[0] and fuv[(-1, 1, 0)] == ouv[2],
 check('fbx texture found by bare name in tex/, colour from DiffuseColor',
       'material 0 texture models/Wall.png colour 0.5 0.25 1 1' in r.stdout and 'warning' not in r.stdout, r.stdout)
 
-# 4. Refusals carry a message.
+# 4. The node tree. Each node's transform, composed down the tree the way a
+# scene composes Unity transforms (full matrices), over its own .mesh must
+# give back that node's part of the baked mesh: the baked mesh lists the nodes'
+# vertices in tree order, so the concatenation is compared vertex by vertex.
+def nodes_of(out):
+    found = []
+    for line in out.splitlines():
+        if not line.startswith('node '): continue
+        w = line.split(' ')
+        found.append({'parent': int(w[3]), 'pos': [float(x) for x in w[5:8]], 'rot': [float(x) for x in w[9:13]],
+                      'scale': [float(x) for x in w[14:17]], 'mesh': w[18], 'materials': int(w[20]),
+                      'name': ' '.join(w[22:])})
+    return found
+
+
+def trs(t, q, s):  # Matrix4x4.TRS, rows of a 3x4
+    x, y, z, w = q
+    r = [[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+         [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+         [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]]
+    return [[r[i][0] * s[0], r[i][1] * s[1], r[i][2] * s[2], t[i]] for i in range(3)]
+
+
+def mul(a, b):  # 3x4 affine product a * b
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) + (a[i][3] if j == 3 else 0) for j in range(4)] for i in range(3)]
+
+
+def composed(proj, nodes):
+    world, pts = [], []
+    for n in nodes:
+        local = trs(n['pos'], n['rot'], n['scale'])
+        world.append(mul(world[n['parent']], local) if n['parent'] >= 0 else local)
+        if n['mesh'] == '-': continue
+        nm = json.load(open(os.path.join(proj, n['mesh'])))
+        M = world[-1]
+        for i in range(0, len(nm['positions']), 3):
+            p = nm['positions'][i:i + 3]
+            pts.append(tuple(sum(M[r][k] * p[k] for k in range(3)) + M[r][3] for r in range(3)))
+    return pts
+
+
+def composes(proj, nodes, baked):
+    want = [tuple(baked['positions'][i:i + 3]) for i in range(0, len(baked['positions']), 3)]
+    got = composed(proj, nodes)
+    err = max((abs(a - b) for p, q in zip(got, want) for a, b in zip(p, q)), default=1e9)
+    return len(got) == len(want) and err < 1e-4, 'max error %g, %d vs %d vertices' % (err, len(got), len(want))
+
+
+def axis_angle(ax, deg):
+    l = math.sqrt(sum(a * a for a in ax))
+    s = math.sin(math.radians(deg) / 2)
+    return [ax[0] / l * s, ax[1] / l * s, ax[2] / l * s, math.cos(math.radians(deg) / 2)]
+
+
+# A .gltf (base64 buffer) with a parent, two children under it named so their
+# file names collide, and a grandchild given as a matrix. Rotations about
+# skewed axes, so a wrong mirror of any quaternion component shows.
+g = Gltf()
+tri = g.acc('f', 5126, 'VEC3', [(0, 0, 0), (1, 0, 0.5), (0.25, 1, -0.5)])
+nrm = g.acc('f', 5126, 'VEC3', [(0, 0, 1)] * 3)
+g.mesh([{'attributes': {'POSITION': tri, 'NORMAL': nrm}}])
+q_body, q_arm = axis_angle((1, 2, 3), 40), axis_angle((-2, 1, 0.5), 75)
+qm = axis_angle((0.3, -1, 2), 120)
+x, y, z, w = qm
+rm = [[1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+      [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+      [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]]
+mat = [rm[r][c] * 1.5 for c in range(3) for r in range(3)]
+mat = mat[0:3] + [0] + mat[3:6] + [0] + mat[6:9] + [0] + [0.25, -2, 0.75, 1]  # column-major, uniform scale 1.5
+g.j['nodes'] += [{'name': 'Body', 'mesh': 0, 'translation': [1, 2, 3], 'rotation': q_body, 'scale': [2, 2, 2], 'children': [1, 3]},
+                 {'name': 'Arm.L', 'mesh': 0, 'translation': [0.5, -1, 2], 'rotation': q_arm, 'scale': [1, 0.5, 3], 'children': [2]},
+                 {'name': 'Tip', 'mesh': 0, 'matrix': mat},
+                 {'name': 'Arm_L', 'mesh': 0, 'translation': [-3, 0, 0]}]
+g.j['scenes'][0]['nodes'] = [0]
+g.gltf(os.path.join(tmp, 'robot.gltf'))
+r = run('import', os.path.join(tmp, 'robot.gltf'), '--project', proj)
+check('gltf tree import exits 0', r.returncode == 0, r.stderr)
+nodes = nodes_of(r.stdout)
+check('gltf tree: four nodes, parents before children',
+      [(n['name'], n['parent']) for n in nodes] == [('Body', -1), ('Arm.L', 0), ('Tip', 1), ('Arm_L', 0)], nodes)
+check('gltf tree: one .mesh per node, names file-safe and unique',
+      [n['mesh'] for n in nodes] == ['models/robot/Body.mesh', 'models/robot/Arm_L.mesh', 'models/robot/Tip.mesh',
+                                     'models/robot/Arm_L_2.mesh'] and all(n['materials'] == 1 for n in nodes), nodes)
+check('gltf tree: the baked mesh is still written', 'mesh models/robot.mesh (4 triangles)' in r.stdout, r.stdout)
+b = nodes[0]
+check('gltf tree: position X mirrored', all(abs(a - c) < 1e-6 for a, c in zip(b['pos'], [-1, 2, 3])), b['pos'])
+check('gltf tree: rotation (x, y, z, w) -> (x, -y, -z, w)',
+      all(abs(a - c) < 1e-6 for a, c in zip(b['rot'], [q_body[0], -q_body[1], -q_body[2], q_body[3]])), b['rot'])
+check('gltf tree: scale kept', all(abs(a - c) < 1e-5 for a, c in zip(b['scale'] + nodes[1]['scale'], [2, 2, 2, 1, 0.5, 3])), (b['scale'], nodes[1]['scale']))
+check('gltf tree: matrix node split into a uniform 1.5 scale', all(abs(s - 1.5) < 1e-5 for s in nodes[2]['scale']), nodes[2]['scale'])
+ok, why = composes(proj, nodes, json.load(open(os.path.join(proj, 'models', 'robot.mesh'))))
+check('gltf tree: node transforms over node meshes give the baked mesh (1e-4)', ok, why)
+local = json.load(open(os.path.join(proj, 'models', 'robot', 'Tip.mesh')))
+check('gltf tree: a node mesh is in its own space, X mirrored',
+      [round(c, 6) + 0.0 for c in local['positions']] == [0, 0, 0, -1, 0, 0.5, -0.25, 1, -0.5], local['positions'])
+ltris = [local['submeshes'][0][t:t + 3] for t in range(0, len(local['submeshes'][0]), 3)]
+check('gltf tree: node mesh winding matches the courtyard meshes', all(crossdot(local, t) > 0 for t in ltris), ltris)
+
+# Re-importing replaces the node meshes: a node that is gone leaves no file.
+g.j['nodes'][0]['children'] = [1]
+g.gltf(os.path.join(tmp, 'robot.gltf'))
+r = run('import', os.path.join(tmp, 'robot.gltf'), '--project', proj)
+check('gltf tree: re-import drops meshes of nodes that are gone',
+      sorted(os.listdir(os.path.join(proj, 'models', 'robot'))) == ['Arm_L.mesh', 'Body.mesh', 'Tip.mesh'],
+      os.listdir(os.path.join(proj, 'models', 'robot')))
+
+# An OBJ with two objects (`o`) and one with two groups (`g`): ufbx makes each
+# a top-level node with an identity transform, the vertices in model space.
+for kw in ('o', 'g'):
+    open(os.path.join(objdir, 'pair_%s.obj' % kw), 'w').write(
+        '%s Left\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 1\nf 1//1 2//1 3//1\n'
+        '%s Right side\nv 2 0 0\nv 3 0 1\nv 2 1 1\nvn 0 0 1\nf 4//2 5//2 6//2\n' % (kw, kw))
+    r = run('import', os.path.join(objdir, 'pair_%s.obj' % kw), '--project', proj)
+    nodes = nodes_of(r.stdout)
+    check('obj `%s`: two top-level nodes named after them' % kw,
+          [(n['name'], n['parent'], n['mesh']) for n in nodes] ==
+          [('Left', -1, 'models/pair_%s/Left.mesh' % kw), ('Right side', -1, 'models/pair_%s/Right_side.mesh' % kw)], r.stdout)
+    ok, why = composes(proj, nodes, json.load(open(os.path.join(proj, 'models', 'pair_%s.mesh' % kw))))
+    check('obj `%s`: node meshes give the baked mesh' % kw, ok, why)
+
+# The FBX above (Z-up centimetres): ufbx's axis and unit conversion lives on
+# its root node and must reach the top-level node's transform.
+r = run('import', os.path.join(fbxdir, 'Wall.fbx'), '--project', proj)
+nodes = nodes_of(r.stdout)
+ok, why = composes(proj, nodes, json.load(open(os.path.join(proj, 'models', 'Wall.mesh'))))
+check('fbx: one node, its transform over its mesh gives the baked mesh', len(nodes) == 1 and ok, (nodes, why))
+
+# A model with a single unnamed node gives one node.
+r = run('import', os.path.join(objdir, 'lost.obj'), '--project', proj)
+nodes = nodes_of(r.stdout)
+check('single-node model: one node', len(nodes) == 1 and nodes[0]['mesh'] == 'models/lost/node.mesh', r.stdout)
+
+# 5. Refusals carry a message.
 open(os.path.join(tmp, 'x.dae'), 'w').write('<COLLADA/>\n')
 r = run('import', os.path.join(tmp, 'x.dae'), '--project', proj)
 check('.dae refused with a reason', r.returncode == 1 and 'only .glb, .gltf, .fbx and .obj' in r.stderr, r.stderr)
@@ -357,7 +489,7 @@ open(os.path.join(tmp, 'junk.glb'), 'wb').write(b'not a model at all')
 r = run('import', os.path.join(tmp, 'junk.glb'), '--project', proj)
 check('garbage refused with a reason', r.returncode == 1 and 'junk.glb:' in r.stderr, r.stderr)
 
-# 5. The import exports.
+# 6. The import exports.
 obj = lambda name, mesh, mats: {'name': name, 'active': True, 'transform': {'position': [0, 0, 2], 'rotation': [0, 0, 0, 1], 'scale': [1, 1, 1]},
                                 'components': [{'type': 'mesh', 'mesh': mesh, 'materials': mats}], 'children': []}
 scene = {'format': 'splashedit-ng/scene', 'version': 1, 'settings': {'gteScaling': 100.0},

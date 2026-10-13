@@ -71,6 +71,8 @@ class Ps1View {
     // Index (in splash::flatten order) of the object whose drawn triangles the
     // ray through a screen point hits first, or nullopt.
     std::optional<int> pick(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize) const;
+    // Where (GL space) that ray first meets drawn triangles, or nullopt.
+    std::optional<Vec3> pickPoint(ImVec2 screen, ImVec2 panelMin, ImVec2 panelSize) const;
     // Bounds of the scene's geometry, false when it has none.
     bool sceneBounds(Vec3* lo, Vec3* hi) const;
     // Unit right, up and forward vectors of the camera.

@@ -10,9 +10,23 @@
 
 namespace splash {
 
+// One node of the model's hierarchy. The transform is local to the parent
+// node (to the model's root for a top-level node) and already in the .mesh
+// space: X mirrored in the position, the rotation (x, y, z, w) taken to
+// (x, -y, -z, w), the scale as it is. Composing it down the tree over `mesh`
+// gives the node's part of the baked mesh.
+struct ImportedNode {
+    std::string name;
+    int parent = -1;  // index into ImportedModel::nodes, -1 for a top-level node
+    Transform transform;
+    std::string mesh;                 // project-relative .mesh in the node's own space, empty for none
+    std::vector<Material> materials;  // one per submesh of `mesh`
+};
+
 struct ImportedModel {
     std::string mesh;                 // project-relative path of the written .mesh
     std::vector<Material> materials;  // one per submesh, textures project-relative
+    std::vector<ImportedNode> nodes;  // the node tree, every parent before its children
     std::vector<std::string> textures;  // every PNG written, project-relative
     int triangles = 0;
     std::vector<std::string> warnings;
@@ -24,7 +38,9 @@ bool canImportModel(const std::filesystem::path& file);
 // Reads `source` and writes models/<stem>.mesh and models/<stem>_<n>.png into
 // `project`, replacing earlier imports of the same name. Every mesh node of
 // the file (the default scene for glTF) is baked into one mesh in the file's
-// root space, one submesh per material. glTF is read through cgltf, FBX and
+// root space, one submesh per material. The node tree is kept too: every node
+// with a mesh also gets models/<stem>/<node>.mesh in its own space (names made
+// file-safe and unique). glTF is read through cgltf, FBX and
 // OBJ through ufbx, which first converts their axes and units to glTF's
 // (right-handed, Y up, +Z front, metres). From there all three take the same
 // route to the left-handed space a .mesh uses: X mirrored, winding reversed

@@ -659,6 +659,11 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         bool flipActive = false;
         Hit h = treeRow("row", rr, row, &flipActive);
         ++c.shown;
+        if (ImGui::IsRectVisible(rr.Min, rr.Max)) {
+            ImRect shown = rr;
+            shown.ClipWith(c.panel);
+            c.st.treeRows.push_back({shown, path});
+        }
         if (c.st.treeDragging) {
             treeDropTarget(c, rr, path, o, open);
         } else if (flipActive) {
@@ -1305,50 +1310,69 @@ static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
     if (run) run();
 }
 
-// Imports a model file into the project. With `into` naming an object that
-// has a mesh, its model and materials are replaced; otherwise a new object
-// named after the file is added where the Add object picker would put it.
-static void importModelFile(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& file,
-                            const std::optional<editor::ObjectPath>& into) {
-    const std::filesystem::path src(std::u8string(file.begin(), file.end()));
-    splash::ImportedModel m;
-    try {
-        m = splash::importModel(src, doc.projectRoot());
-    } catch (const std::exception& e) {
-        notify(st, std::string("Import failed: ") + e.what(), true);
-        return;
+// Where a model dropped on the viewport at `pos` lands, Unity world space: on
+// the first drawn surface under the pointer, else on the level plane through
+// the pivot, else the pivot itself.
+static splash::Vec3 dropPoint(const viewport::Ps1View& view, ImRect r, ImVec2 pos) {
+    if (std::optional<viewport::Vec3> hit = view.pickPoint(pos, r.Min, r.GetSize())) return {hit->x, hit->y, -hit->z};
+    viewport::Vec3 o, d, p = view.pivot();
+    view.ray(pos, r.Min, r.GetSize(), &o, &d);
+    if (std::fabs(d.y) > 1e-4f) {
+        float t = (p.y - o.y) / d.y;
+        if (t > 0) return {o.x + d.x * t, o.y + d.y * t, -(o.z + d.z * t)};
     }
-    std::vector<std::string> written = m.textures;
-    written.push_back(m.mesh);
-    doc.refreshAssets(written);
-    const splash::Object* target = into ? doc.object(*into) : nullptr;
-    if (target && target->mesh) {
-        doc.edit(*into, [&](splash::Object& o) {
-            o.mesh->mesh = m.mesh;
-            o.mesh->materials = m.materials;
-        });
-        doc.endMerge();
+    return {p.x, p.y, -p.z};
+}
+
+// The scene tree row drawn this frame under `pos`, if any.
+static std::optional<editor::ObjectPath> treeRowAt(const State& st, ImVec2 pos) {
+    for (const auto& [rect, path] : st.treeRows)
+        if (rect.Contains(pos)) return path;
+    return std::nullopt;
+}
+
+// Where an imported model goes. With none of these set, a new object goes
+// where the Add object picker would put it.
+struct ModelTarget {
+    std::optional<editor::ObjectPath> replace;  // the Model field's object: its model is swapped
+    std::optional<editor::ObjectPath> under;    // a scene tree row: added as its last child
+    std::optional<splash::Vec3> at;             // the viewport: added at the top level, here (world)
+};
+
+// Imports a model file into the project and places it (see editor::placeModel),
+// as one undo step.
+static void importModelFile(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& file,
+                            const ModelTarget& to) {
+    const std::filesystem::path src(std::u8string(file.begin(), file.end()));
+    editor::ObjectPath at;
+    splash::Vec3 pos{};
+    if (to.under && doc.object(*to.under)) {
+        at = *to.under;
+        at.push_back(static_cast<int>(doc.object(*to.under)->children.size()));
+    } else if (to.at) {
+        at = {static_cast<int>(doc.scene().objects.size())};
+        pos = *to.at;
     } else {
-        editor::ObjectPath at;
         if (const std::optional<editor::ObjectPath>& sel = doc.selection(); sel && doc.object(*sel)) {
             at = *sel;
             at.back() += 1;
         } else {
             at = {static_cast<int>(doc.scene().objects.size())};
         }
-        const editor::ObjectPath parentPath(at.begin(), at.end() - 1);
-        const splash::Object* parent = doc.object(parentPath);
-        splash::Object obj;
-        obj.name = editor::uniqueName(utf8(src.stem()), parent ? parent->children : doc.scene().objects);
-        obj.transform.position = spawnPoint(view, doc, parentPath);
-        obj.mesh.emplace();
-        obj.mesh->mesh = m.mesh;
-        obj.mesh->materials = m.materials;
-        if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
-        doc.insertObject(at, std::move(obj));
+        pos = spawnPoint(view, doc, editor::ObjectPath(at.begin(), at.end() - 1));
     }
+    editor::PlacedModel placed = editor::placeModel(doc, src, to.replace, at, pos);
+    if (!placed.error.empty()) {
+        notify(st, "Import failed: " + placed.error, true);
+        return;
+    }
+    // Show what was added: its parent row open.
+    const editor::ObjectPath parentPath(placed.path.begin(), placed.path.end() - 1);
+    if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
+    const splash::ImportedModel& m = placed.model;
     std::string msg = "Imported " + utf8(src.filename()) + ", " + std::to_string(m.triangles) +
                       (m.triangles == 1 ? " triangle" : " triangles");
+    if (m.nodes.size() > 1 && !to.replace) msg += " in " + std::to_string(m.nodes.size()) + " parts";
     if (!m.warnings.empty()) msg += ". Note: " + m.warnings.front();
     notify(st, msg, false);
 }
@@ -1363,13 +1387,19 @@ static void importPending(State& st, editor::Document& doc, const viewport::Ps1V
         picked.swap(g_modelPicked);
         pickedFor = g_modelTarget;
     }
-    if (!picked.empty()) importModelFile(st, doc, view, picked, pickedFor);
+    if (!picked.empty()) importModelFile(st, doc, view, picked, ModelTarget{pickedFor, std::nullopt, std::nullopt});
     applyPickedAssets(st, doc);
     std::vector<std::pair<std::string, ImVec2>> files;
     files.swap(st.drop.files);
     for (const auto& [file, pos] : files) {
-        const bool onField = st.modelField.GetWidth() > 0 && st.modelField.Contains(pos);
-        importModelFile(st, doc, view, file, onField ? std::optional<editor::ObjectPath>(st.modelFieldPath) : std::nullopt);
+        ModelTarget to;
+        if (st.modelField.GetWidth() > 0 && st.modelField.Contains(pos))
+            to.replace = st.modelFieldPath;
+        else if (std::optional<editor::ObjectPath> row = treeRowAt(st, pos))
+            to.under = row;
+        else if (st.viewportRect.GetWidth() > 0 && st.viewportRect.Contains(pos))
+            to.at = dropPoint(view, st.viewportRect, pos);
+        importModelFile(st, doc, view, file, to);
     }
 }
 
@@ -1438,6 +1468,7 @@ static void treeMenu(State& st, editor::Document& doc) {
 }
 
 static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
+    st.treeRows.clear();
     panel(dl, r);
     std::string count = std::to_string(doc.objectCount()) + (doc.objectCount() == 1 ? " object" : " objects");
     float y = panelHeader(dl, r, "Scene", count.c_str());
@@ -3200,7 +3231,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         fold(section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true, true, true,
                      removeFlag(editor::ComponentKind::Mesh)));
         y += 34 + space::xs;
-        const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb or .gltf file, or drop one here.");
+        const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb, .gltf, .fbx or .obj file, or drop one here.");
         bool pickModel = assetField("model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
                                     modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
         st.modelField = folded ? ImRect() : modelRow;
@@ -3214,7 +3245,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 std::lock_guard<std::mutex> lock(g_pickMutex);
                 g_modelTarget = path;
             }
-            static const SDL_DialogFileFilter modelFilter[] = {{"glTF models", "glb;gltf"}};
+            static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj"}};
             SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
         }
         if (assetField("texture", row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export."),
@@ -3818,13 +3849,23 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     ImRect mid(ImVec2(left.Max.x + g, top), ImVec2(right.Min.x - g, bottom));
     sceneTree(st, dl, left, doc, view);
     viewportPanel(st, dl, mid, doc, view);
+    st.viewportRect = mid;
     st.modelField = ImRect();
     inspector(st, dl, right, doc);
     if (st.drop.hovering && !st.modelField.Contains(st.drop.pos)) {
-        // Anywhere but the Model field, a dropped model becomes a new object.
-        dl->AddRect(mid.Min, mid.Max, color::accent, radius::card, 0, 2.0f);
+        // Anywhere but the Model field, a dropped model becomes a new object:
+        // on a scene tree row, that object's child.
+        std::string under;
+        if (std::optional<editor::ObjectPath> rowPath = treeRowAt(st, st.drop.pos))
+            for (const auto& [rect, path] : st.treeRows)
+                if (path == *rowPath && doc.object(path)) {
+                    dl->AddRect(rect.Min, rect.Max, color::accent, radius::card, 0, 2.0f);
+                    under = doc.object(path)->name;
+                }
+        if (under.empty()) dl->AddRect(mid.Min, mid.Max, color::accent, radius::card, 0, 2.0f);
         Fonts& f = fonts();
-        const char* hint = "Drop to add the model to the scene";
+        const std::string hintText = under.empty() ? std::string("Drop to add the model to the scene") : "Drop to add the model under " + under;
+        const char* hint = hintText.c_str();
         ImVec2 hs = measure(f.medium, type::body, hint);
         ImRect pill(ImVec2((mid.Min.x + mid.Max.x - hs.x) * 0.5f - space::md, mid.Max.y - 56),
                     ImVec2((mid.Min.x + mid.Max.x + hs.x) * 0.5f + space::md, mid.Max.y - 24));

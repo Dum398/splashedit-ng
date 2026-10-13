@@ -193,6 +193,14 @@ static int importCmd(int argc, char** argv) {
             std::printf("material %zu texture %s colour %g %g %g %g\n", i, mat.texture.empty() ? "-" : mat.texture.c_str(),
                         mat.color[0], mat.color[1], mat.color[2], mat.color[3]);
         }
+        for (size_t i = 0; i < m.nodes.size(); i++) {
+            const splash::ImportedNode& n = m.nodes[i];
+            const splash::Transform& t = n.transform;
+            std::printf("node %zu parent %d position %.9g %.9g %.9g rotation %.9g %.9g %.9g %.9g scale %.9g %.9g %.9g mesh %s materials %zu name %s\n",
+                        i, n.parent, t.position.x, t.position.y, t.position.z, t.rotation.x, t.rotation.y, t.rotation.z,
+                        t.rotation.w, t.scale.x, t.scale.y, t.scale.z, n.mesh.empty() ? "-" : n.mesh.c_str(), n.materials.size(),
+                        n.name.c_str());
+        }
         for (const std::string& w : m.warnings) std::printf("warning: %s\n", w.c_str());
         return 0;
     } catch (const std::exception& e) {

@@ -43,6 +43,11 @@ struct State {
     // object's model), clipped to the panel; empty when not shown.
     ImRect modelField;
     std::vector<int> modelFieldPath;
+    // Scene tree rows drawn this frame (a drop on one adds the model as that
+    // object's child), and the viewport panel (a drop there lands where the
+    // pointer meets the scene).
+    std::vector<std::pair<ImRect, std::vector<int>>> treeRows;
+    ImRect viewportRect;
     // Outcome of the last model import, in the status bar until noticeUntil (ImGui time).
     std::string notice;
     bool noticeBad = false;

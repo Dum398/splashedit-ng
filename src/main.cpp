@@ -469,7 +469,8 @@ int main(int argc, char** argv) {
         }
         // While the Game view has the keyboard, arrows and Enter are the controller:
         // they must not move ImGui's keyboard focus or press the button it lands on.
-        if (state.play.gameFocus && state.play.game.attached())
+        // The script editor's arrows, Tab and Enter edit text.
+        if ((state.play.gameFocus && state.play.game.attached()) || state.scripts.hasKeyboard())
             io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         else
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;

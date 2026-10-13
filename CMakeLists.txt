@@ -76,6 +76,7 @@ add_library(splasheditdoc STATIC
     src/editor/pick.cpp
     src/editor/gizmo.cpp
     src/editor/live_export.cpp
+    src/editor/lua_editor.cpp
     src/editor/play.cpp
     src/editor/project.cpp
     src/editor/serial.cpp
@@ -167,7 +168,8 @@ add_executable(splashedit
     src/ui/splash.cpp
     src/ui/widgets.cpp
     src/viewport/ps1view.cpp
-    src/mockup/main_screen.cpp)
+    src/mockup/main_screen.cpp
+    src/editor/lua_editor_view.cpp)
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(splashedit PRIVATE imgui splasheditdoc splashcore)

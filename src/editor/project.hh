@@ -43,6 +43,21 @@ struct AdoptedAsset {
 };
 AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesystem::path& file, const std::string& folder);
 
+// A new Lua file for an object's Script component or the scene's own script,
+// for the inspector's New script button. The name is the object's or scene's,
+// lowercased with every run of other characters one '_' ("Game Logic" ->
+// game_logic, "script" when nothing is left), written as scripts/<name>.lua,
+// numbered (<name>_2.lua) when that is taken: an existing file is never
+// overwritten. The text names the psxsplash callbacks a script of its kind
+// gets: onCreate for an object, onSceneCreationStart/End for a scene.
+std::string scriptFileStem(const std::string& name);
+std::string scriptTemplate(const std::string& name, bool scene);
+struct NewScript {
+    std::string path;   // project-relative, '/'-separated; empty on failure
+    std::string error;  // empty on success
+};
+NewScript createScript(const std::filesystem::path& project, const std::string& name, bool scene);
+
 // The objects an imported model becomes, the top one named `name`. A model of
 // one node, or any model with `settings.mergeMeshes`, is one object drawing
 // the baked mesh. Otherwise the top object is an empty holding an object per

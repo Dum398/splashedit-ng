@@ -523,36 +523,88 @@ bool Document::removeObject(const ObjectPath& path) {
     return true;
 }
 
+namespace {
+
+// "Crate (3)" -> base "Crate" and 3; a name without a number gives 0.
+int splitNumbered(const std::string& name, std::string* base) {
+    size_t open = name.rfind(" (");
+    if (open != std::string::npos && name.size() > open + 3 && name.back() == ')') {
+        std::string num = name.substr(open + 2, name.size() - open - 3);
+        if (num.find_first_not_of("0123456789") == std::string::npos) {
+            *base = name.substr(0, open);
+            return std::stoi(num);
+        }
+    }
+    *base = name;
+    return 0;
+}
+
+// The name Unity gives a copy of `name` among `siblings`: its base with the
+// next free number, at least 2.
+std::string numberedName(const std::string& name, const std::vector<std::string>& siblings) {
+    std::string base;
+    splitNumbered(name, &base);
+    int next = 1;
+    for (const std::string& sib : siblings) {
+        std::string b;
+        int n = splitNumbered(sib, &b);
+        if (b == base) next = std::max(next, n + 1);
+    }
+    return base + " (" + std::to_string(std::max(next, 2)) + ")";
+}
+
+std::vector<std::string> namesOf(const std::vector<splash::Object>& objs) {
+    std::vector<std::string> names;
+    for (const splash::Object& o : objs) names.push_back(o.name);
+    return names;
+}
+
+}  // namespace
+
 std::optional<ObjectPath> Document::duplicateObject(const ObjectPath& path) {
     const splash::Object* o = object(path);
     if (!o) return std::nullopt;
-    // "Crate (3)" -> base "Crate"; the copy takes the next free number among its siblings.
-    auto split = [](const std::string& name, std::string* base) {
-        size_t open = name.rfind(" (");
-        if (open != std::string::npos && name.size() > open + 3 && name.back() == ')') {
-            std::string num = name.substr(open + 2, name.size() - open - 3);
-            if (num.find_first_not_of("0123456789") == std::string::npos) {
-                *base = name.substr(0, open);
-                return std::stoi(num);
-            }
-        }
-        *base = name;
-        return 0;
-    };
-    std::string base;
-    split(o->name, &base);
     const ObjectPath parentPath(path.begin(), path.end() - 1);
-    int next = 1;
-    for (const splash::Object& sib : parentPath.empty() ? m_scene.objects : object(parentPath)->children) {
-        std::string b;
-        int n = split(sib.name, &b);
-        if (b == base) next = std::max(next, n + 1);
-    }
     splash::Object copy = *o;
-    copy.name = base + " (" + std::to_string(std::max(next, 2)) + ")";
+    copy.name = numberedName(o->name, namesOf(parentPath.empty() ? m_scene.objects : object(parentPath)->children));
     ObjectPath at = path;
     ++at.back();
     insertObject(at, std::move(copy));
+    return at;
+}
+
+std::string Document::copyObject(const ObjectPath& path) const {
+    const splash::Object* o = object(path);
+    if (!o) return {};
+    return splash::writeObjectsText({*o});
+}
+
+std::string Document::cutObject(const ObjectPath& path) {
+    std::string text = copyObject(path);
+    if (!text.empty()) removeObject(path);
+    return text;
+}
+
+std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const std::optional<ObjectPath>& after) {
+    std::optional<std::vector<splash::Object>> objs = splash::readObjectsText(text);
+    if (!objs) return std::nullopt;
+    ObjectPath parentPath;
+    size_t index = m_scene.objects.size();
+    if (after && !after->empty() && object(*after)) {
+        parentPath.assign(after->begin(), after->end() - 1);
+        index = static_cast<size_t>(after->back()) + 1;
+    }
+    std::vector<std::string> names = namesOf(*childrenMut(parentPath));
+    std::vector<std::unique_ptr<Command>> parts;
+    ObjectPath at = parentPath;
+    at.push_back(0);
+    for (splash::Object& o : *objs) {
+        if (std::find(names.begin(), names.end(), o.name) != names.end()) o.name = numberedName(o.name, names);
+        names.push_back(o.name);
+        at.back() = static_cast<int>(index++);
+        parts.push_back(std::make_unique<StructureCommand>(at, std::move(o), true));
+    }
+    execute(std::make_unique<GroupCommand>(std::move(parts)));
     return at;
 }
 

@@ -1,5 +1,7 @@
 # Builds small glTF files here (a .glb with an embedded texture, a .gltf with
-# a data-URI buffer, an external texture, no normals and a mirrored node),
+# a data-URI buffer, an external texture, no normals and a mirrored node) and
+# an OBJ+MTL whose texture is found by bare name in a Textures/ folder, an ASCII
+# FBX (Z-up, centimetres) whose texture is found in tex/,
 # imports them with `splashpack-cli import` and checks the .mesh against the
 # conversion worked out independently: X mirrored, winding reversed so every
 # triangle's cross product points along its normal (as in the bundled
@@ -204,10 +206,153 @@ r = run('import', os.path.join(tmp, 'big.glb'), '--project', proj)
 w, h, _ = readpng(os.path.join(proj, 'models', 'big.png'))
 check('512x300 texture scaled to 256x150 with a warning', (w, h) == (256, 150) and 'scaled down to 256 x 150' in r.stdout, (w, h, r.stdout))
 
+# 3b. .obj + .mtl through ufbx: a textured quad, the texture found by bare name in a
+# Textures/ folder next to the model; V is already bottom-up in OBJ so it is kept.
+objdir = os.path.join(tmp, 'objs')
+os.makedirs(os.path.join(objdir, 'Textures'))
+oquad = [(0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0)]
+ouv = [(0.1, 0.2), (0.9, 0.2), (0.9, 0.7), (0.1, 0.7)]
+open(os.path.join(objdir, 'brick wall.obj'), 'w').write(
+    'mtllib brick.mtl\n' + ''.join('v %g %g %g\n' % p for p in oquad) + ''.join('vt %g %g\n' % t for t in ouv) +
+    'vn 0 0 1\nusemtl bricks\nf 1/1/1 2/2/1 3/3/1 4/4/1\n')
+open(os.path.join(objdir, 'brick.mtl'), 'w').write('newmtl bricks\nKd 0.5 0.25 1\nmap_Kd bricks.png\n')
+open(os.path.join(objdir, 'Textures', 'bricks.png'), 'wb').write(png(4, 2, tex))
+r = run('import', os.path.join(objdir, 'brick wall.obj'), '--project', proj)
+check('obj import exits 0', r.returncode == 0, r.stderr)
+check('obj quad is two triangles in models/', 'mesh models/brick_wall.mesh (2 triangles)' in r.stdout, r.stdout)
+m = json.load(open(os.path.join(proj, 'models', 'brick_wall.mesh')))
+got = [tuple(m['positions'][i:i + 3]) for i in range(0, len(m['positions']), 3)]
+check('obj positions: X mirrored', set(got) == {(-x, y, z) for x, y, z in oquad}, got)
+check('obj normals: X mirrored, still +Z', all(m['normals'][i:i + 3] == [0, 0, 1] for i in range(0, len(m['normals']), 3)), m['normals'])
+ugot = {p: tuple(round(c, 5) for c in m['uv'][2 * i:2 * i + 2]) for i, p in enumerate(got)}
+check('obj UVs: V kept, OBJ already has a bottom-left origin',
+      all(ugot[(-x, y, z)] == t for (x, y, z), t in zip(oquad, ouv)), ugot)
+otris = [m['submeshes'][0][t:t + 3] for t in range(0, len(m['submeshes'][0]), 3)]
+check('obj winding matches the courtyard meshes', len(otris) == 2 and all(crossdot(m, t) > 0 for t in otris), otris)
+check('obj texture found by bare name in Textures/, colour from Kd',
+      'material 0 texture models/brick_wall.png colour 0.5 0.25 1 1' in r.stdout and 'warning' not in r.stdout, r.stdout)
+pngfile = os.path.join(proj, 'models', 'brick_wall.png')
+check('obj texture pixels kept', os.path.exists(pngfile) and readpng(pngfile) == (4, 2, tex), pngfile)
+
+# An OBJ with no normals (flat shading, faces +Z) whose texture does not exist is a
+# warning that names the file, not a failure.
+open(os.path.join(objdir, 'lost.obj'), 'w').write(
+    'mtllib lost.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nusemtl gone\nf 1 2 3\n')
+open(os.path.join(objdir, 'lost.mtl'), 'w').write('newmtl gone\nmap_Kd missing.png\n')
+r = run('import', os.path.join(objdir, 'lost.obj'), '--project', proj)
+check('obj with a missing texture still imports', r.returncode == 0 and 'mesh models/lost.mesh (1 triangles)' in r.stdout, r.stderr + r.stdout)
+check('missing texture warns by name, material left untextured',
+      'warning: texture missing.png was not found' in r.stdout and 'material 0 texture - ' in r.stdout, r.stdout)
+m = json.load(open(os.path.join(proj, 'models', 'lost.mesh')))
+check('obj flat normals face +Z with winding intact',
+      all(m['normals'][i:i + 3] == [0, 0, 1] for i in range(0, len(m['normals']), 3)) and crossdot(m, m['submeshes'][0]) > 0, m)
+
+# 3c. .fbx through ufbx: a hand-written ASCII FBX, Z-up and in centimetres, so the
+# axis and unit conversion is exercised. Source (x, y, z) becomes glTF (x, z, -y) / 100,
+# so this quad stands where the OBJ one does, facing +Z. The texture is named by a
+# path that does not exist and is found by bare name in tex/.
+fbxdir = os.path.join(tmp, 'fbxs')
+os.makedirs(os.path.join(fbxdir, 'tex'))
+open(os.path.join(fbxdir, 'tex', 'Bricks.png'), 'wb').write(png(4, 2, tex))
+fquad = [(0, 0, 0), (100, 0, 0), (100, 0, 100), (0, 0, 100)]
+fnum = lambda vs: ','.join('%g' % c for v in vs for c in v)
+open(os.path.join(fbxdir, 'Wall.fbx'), 'w').write('''; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",2
+		P: "UpAxisSign", "int", "Integer", "",1
+		P: "FrontAxis", "int", "Integer", "",1
+		P: "FrontAxisSign", "int", "Integer", "",-1
+		P: "CoordAxis", "int", "Integer", "",0
+		P: "CoordAxisSign", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",1
+	}
+}
+Objects:  {
+	Geometry: 100, "Geometry::Wall", "Mesh" {
+		Vertices: *12 { a: %s }
+		PolygonVertexIndex: *4 { a: 0,1,2,-4 }
+		GeometryVersion: 124
+		LayerElementNormal: 0 {
+			Version: 101
+			Name: ""
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "Direct"
+			Normals: *12 { a: 0,-1,0,0,-1,0,0,-1,0,0,-1,0 }
+		}
+		LayerElementUV: 0 {
+			Version: 101
+			Name: "UVMap"
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "IndexToDirect"
+			UV: *8 { a: %s }
+			UVIndex: *4 { a: 0,1,2,3 }
+		}
+		LayerElementMaterial: 0 {
+			Version: 101
+			Name: ""
+			MappingInformationType: "AllSame"
+			ReferenceInformationType: "IndexToDirect"
+			Materials: *1 { a: 0 }
+		}
+		Layer: 0 {
+			Version: 100
+			LayerElement:  { Type: "LayerElementNormal" TypedIndex: 0 }
+			LayerElement:  { Type: "LayerElementMaterial" TypedIndex: 0 }
+			LayerElement:  { Type: "LayerElementUV" TypedIndex: 0 }
+		}
+	}
+	Model: 200, "Model::Wall", "Mesh" {
+		Version: 232
+		Properties70:  {
+		}
+	}
+	Material: 300, "Material::Brick", "" {
+		Version: 102
+		ShadingModel: "lambert"
+		Properties70:  {
+			P: "DiffuseColor", "Color", "", "A",0.5,0.25,1
+		}
+	}
+	Texture: 400, "Texture::Brick", "" {
+		Type: "TextureVideoClip"
+		Version: 202
+		TextureName: "Texture::Brick"
+		FileName: "C:\\\\Nowhere\\\\Art\\\\bricks.png"
+		RelativeFilename: "Art\\\\bricks.png"
+	}
+}
+Connections:  {
+	C: "OO",200,0
+	C: "OO",100,200
+	C: "OO",300,200
+	C: "OP",400,300, "DiffuseColor"
+}
+''' % (fnum(fquad), fnum(ouv)))
+r = run('import', os.path.join(fbxdir, 'Wall.fbx'), '--project', proj)
+check('fbx import exits 0', r.returncode == 0, r.stderr)
+check('fbx quad is two triangles', 'mesh models/Wall.mesh (2 triangles)' in r.stdout, r.stdout)
+m = json.load(open(os.path.join(proj, 'models', 'Wall.mesh')))
+got = {tuple(round(c, 4) + 0.0 for c in m['positions'][i:i + 3]) for i in range(0, len(m['positions']), 3)}
+check('fbx: Z-up centimetres became Y-up metres, X mirrored', got == {(0, 0, 0), (-1, 0, 0), (-1, 1, 0), (0, 1, 0)}, got)
+check('fbx normals face +Z like the OBJ', all(abs(m['normals'][i + 2] - 1) < 1e-5 for i in range(0, len(m['normals']), 3)), m['normals'])
+ftris = [m['submeshes'][0][t:t + 3] for t in range(0, len(m['submeshes'][0]), 3)]
+check('fbx winding matches the courtyard meshes', len(ftris) == 2 and all(crossdot(m, t) > 0 for t in ftris), ftris)
+fuv = {tuple(round(c, 4) + 0.0 for c in m['positions'][3 * i:3 * i + 3]): tuple(round(c, 5) for c in m['uv'][2 * i:2 * i + 2])
+       for i in range(len(m['positions']) // 3)}
+check('fbx UVs: V kept', fuv[(0, 0, 0)] == ouv[0] and fuv[(-1, 1, 0)] == ouv[2], fuv)
+check('fbx texture found by bare name in tex/, colour from DiffuseColor',
+      'material 0 texture models/Wall.png colour 0.5 0.25 1 1' in r.stdout and 'warning' not in r.stdout, r.stdout)
+
 # 4. Refusals carry a message.
-open(os.path.join(tmp, 'x.obj'), 'w').write('v 0 0 0\n')
-r = run('import', os.path.join(tmp, 'x.obj'), '--project', proj)
-check('.obj refused with a reason', r.returncode == 1 and 'only .glb and .gltf' in r.stderr, r.stderr)
+open(os.path.join(tmp, 'x.dae'), 'w').write('<COLLADA/>\n')
+r = run('import', os.path.join(tmp, 'x.dae'), '--project', proj)
+check('.dae refused with a reason', r.returncode == 1 and 'only .glb, .gltf, .fbx and .obj' in r.stderr, r.stderr)
 open(os.path.join(tmp, 'junk.glb'), 'wb').write(b'not a model at all')
 r = run('import', os.path.join(tmp, 'junk.glb'), '--project', proj)
 check('garbage refused with a reason', r.returncode == 1 and 'junk.glb:' in r.stderr, r.stderr)

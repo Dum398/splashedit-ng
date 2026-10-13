@@ -1,5 +1,5 @@
-// Model import: a glTF 2.0 file (.gltf or .glb) turned into a project .mesh
-// plus the PNG textures its materials use.
+// Model import: a glTF 2.0 (.gltf, .glb), FBX or OBJ (with its .mtl) file turned
+// into a project .mesh plus the PNG textures its materials use.
 #pragma once
 
 #include <filesystem>
@@ -23,10 +23,17 @@ bool canImportModel(const std::filesystem::path& file);
 
 // Reads `source` and writes models/<stem>.mesh and models/<stem>_<n>.png into
 // `project`, replacing earlier imports of the same name. Every mesh node of
-// the default scene is baked into one mesh in the file's root space, one
-// submesh per material. glTF's right-handed axes become the left-handed ones
-// a .mesh uses (X mirrored, winding reversed) and UVs move to a bottom-left
-// origin. Textures larger than 256 texels on a side are scaled down to fit.
+// the file (the default scene for glTF) is baked into one mesh in the file's
+// root space, one submesh per material. glTF is read through cgltf, FBX and
+// OBJ through ufbx, which first converts their axes and units to glTF's
+// (right-handed, Y up, +Z front, metres). From there all three take the same
+// route to the left-handed space a .mesh uses: X mirrored, winding reversed
+// (again for each mirrored node). UVs end up with a bottom-left origin: glTF's
+// are flipped, FBX and OBJ already have it. Base colour textures come from the
+// glTF buffers or files; for FBX and OBJ from embedded data, the path in the
+// file, then the bare name in the model's folder and its textures/tex/
+// materials folders (one not found is a warning, not an error). Textures
+// larger than 256 texels on a side are scaled down to fit.
 // Throws std::runtime_error with a message for the user.
 ImportedModel importModel(const std::filesystem::path& source, const std::filesystem::path& project);
 

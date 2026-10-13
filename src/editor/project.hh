@@ -48,7 +48,8 @@ AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesys
 // the baked mesh. Otherwise the top object is an empty holding an object per
 // node, the file's tree kept: each with the node's local transform and, if it
 // has one, its mesh and materials. Every mesh component gets the settings'
-// bit depth and lighting.
+// bit depth and lighting. An object drawing a skinned mesh also gets a skin
+// component playing the model's clips (the first 16), when it has any.
 splash::Object modelObject(const splash::ImportedModel& model, const std::string& name,
                            const splash::ImportSettings& settings = {});
 

@@ -1055,6 +1055,80 @@ void testPlaceModel() {
     CHECK(!p.error.empty() && doc.historySize() == before && !fs::exists(proj / "models" / "junk.glb"));
 }
 
+// Dropping a skinned model (tests/skinimport/rig.gltf): the object drawing the
+// skinned mesh gets a skin component playing the model's clips, the scene
+// exports with it, and a reimport keeps a clip added by hand.
+void testPlaceSkinnedModel() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "placeskinned";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game";
+    fs::create_directories(proj, ec);
+    const fs::path rig = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skinimport" / "rig.gltf";
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+
+    editor::PlacedModel p = editor::placeModel(doc, rig, std::nullopt, {0}, {0, 0, 0});
+    CHECK(p.error.empty() && p.model.clips.size() == 2);
+    const splash::Object* root = doc.object({0});
+    CHECK(root && root->name == "rig" && root->children.size() == 1 && !root->skin);
+    // Armature holding Upper (holding Lower) and Body, the skinned mesh.
+    const splash::Object* arm = doc.object({0, 0});
+    CHECK(arm && arm->name == "Armature" && arm->children.size() == 2);
+    const splash::Object* body = doc.object({0, 0, 1});
+    CHECK(body && body->name == "Body" && body->mesh && body->mesh->mesh == "models/rig/Body.mesh");
+    CHECK(body && body->skin &&
+          body->skin->clips == std::vector<std::string>({"models/rig/Wave.anim", "models/rig/Nod_Big.anim"}));
+    const splash::Object* upper = doc.object({0, 0, 0});
+    CHECK(upper && upper->name == "Upper" && !upper->mesh && !upper->skin);
+    CHECK(doc.fileExists("models/rig/Wave.anim") && doc.fileExists("models/rig/Nod_Big.anim"));
+    bool warned = false;
+    for (const std::string& w : p.model.warnings) warned |= w.find("the heaviest joint wins") != std::string::npos;
+    CHECK(warned);
+
+    // The scene exports with the skin: one skinned mesh, no errors.
+    splash::ExportResult r = splash::exportSplashpack(doc.scene(), proj, dir / "scene.splashpack");
+    CHECK(r.ok());
+    for (const std::string& e : r.errors) std::fprintf(stderr, "  export error: %s\n", e.c_str());
+
+    // Merged: the root object draws the baked mesh and holds the skin.
+    splash::ImportSettings merged;
+    merged.mergeMeshes = true;
+    splash::Object m = editor::modelObject(p.model, "rig", merged);
+    CHECK(m.mesh && m.mesh->mesh == "models/rig.mesh" && m.skin && m.skin->clips.size() == 2);
+
+    // A clip added by hand stays through a reimport; the model's are rewritten.
+    doc.edit({0, 0, 1}, [](splash::Object& o) {
+        if (o.skin) o.skin->clips.push_back("anims/extra.anim");
+    });
+    editor::Reimported re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    CHECK(re.error.empty());
+    body = doc.object({0, 0, 1});
+    CHECK(body && body->skin && body->skin->clips.size() == 3 && body->skin->clips[2] == "anims/extra.anim");
+    // A skin taken off by hand stays off.
+    doc.edit({0, 0, 1}, [](splash::Object& o) { o.skin.reset(); });
+    re = editor::reimportModel(doc, proj / "models" / "rig.gltf");
+    body = doc.object({0, 0, 1});
+    CHECK(re.error.empty() && body && !body->skin);
+
+    // Merge meshes turned on: the instance becomes one object with the baked
+    // mesh and a skin; off again: the node objects, the skin back on Body.
+    splash::ImportSettings st = splash::loadImportSettings(proj / "models" / "rig.gltf");
+    st.mergeMeshes = true;
+    splash::saveImportSettings(proj / "models" / "rig.gltf", st);
+    re = editor::reimportModel(doc, proj / "models" / "rig.gltf", false);
+    root = doc.object({0});
+    CHECK(re.error.empty() && root && root->children.empty() && root->mesh && root->mesh->mesh == "models/rig.mesh" &&
+          root->skin && root->skin->clips.size() == 2);
+    st.mergeMeshes = false;
+    splash::saveImportSettings(proj / "models" / "rig.gltf", st);
+    re = editor::reimportModel(doc, proj / "models" / "rig.gltf", true);
+    root = doc.object({0});
+    body = doc.object({0, 0, 1});
+    CHECK(re.error.empty() && root && !root->mesh && !root->skin && body && body->skin && body->skin->clips.size() == 2);
+}
+
 // A robot like testPlaceModel's: Body (moved 1 along X) holding Arm, each
 // drawing one triangle, with a material of the given colour.
 std::string robotGltf(float red, bool twoTriangles = false) {
@@ -2179,6 +2253,7 @@ int main(int argc, char** argv) {
     testProject();
     testAdoptAsset();
     testPlaceModel();
+    testPlaceSkinnedModel();
     testImportSettings();
     testUnirom();
     testPsxmon();

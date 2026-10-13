@@ -643,5 +643,255 @@ os.remove(side)
 r = run('import', glb, '--project', sproj, '--scale', '0')
 check('scale 0 is refused', r.returncode == 1 and 'scale' in r.stderr, r.stderr)
 
+# 6. Skins: skinimport/rig.gltf and rig.fbx, the same rig twice (make_rig.py
+# has the layout). The .mesh skeleton is posed here independently: joint
+# worlds composed from the rest transforms with the .anim keys over them, times
+# each inverse bind, against the rig's own matrices from make_rig.py taken
+# through the X mirror.
+sys.path.insert(0, os.path.join(here, 'skinimport'))
+import make_rig
+
+rigdir = os.path.join(here, 'skinimport')
+S45 = math.sqrt(0.5)
+check('skinimport/rig.gltf and rig.fbx are what make_rig.py writes',
+      open(os.path.join(rigdir, 'rig.gltf')).read() == make_rig.gltf() + '\n' and
+      open(os.path.join(rigdir, 'rig.fbx')).read() == make_rig.fbx())
+
+
+def inv34(m):
+    a = [row[:3] for row in m]
+    det = (a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+           a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]))
+    c = [[(a[(j + 1) % 3][(i + 1) % 3] * a[(j + 2) % 3][(i + 2) % 3] - a[(j + 1) % 3][(i + 2) % 3] * a[(j + 2) % 3][(i + 1) % 3]) / det
+          for j in range(3)] for i in range(3)]
+    return [c[i] + [-sum(c[i][k] * m[k][3] for k in range(3))] for i in range(3)]
+
+
+def apply34(m, p):
+    return [sum(m[r][k] * p[k] for k in range(3)) + m[r][3] for r in range(3)]
+
+
+def qmul(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return [aw * bx + ax * bw + ay * bz - az * by, aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw, aw * bw - ax * bx - ay * by - az * bz]
+
+
+def key(ch, t):  # channel value at t: step, or linear (normalised lerp for rotations)
+    ts, n = ch['times'], 4 if ch['property'] == 'rotation' else 3
+    v = lambda i: ch['values'][i * n:i * n + n]
+    if t <= ts[0]: return v(0)
+    if t >= ts[-1]: return v(len(ts) - 1)
+    i = max(k for k in range(len(ts)) if ts[k] <= t)
+    if ch['interpolation'] == 'step' or ts[i] == t: return v(i)
+    u = (t - ts[i]) / (ts[i + 1] - ts[i])
+    a, b = v(i), v(i + 1)
+    if n == 4 and sum(x * y for x, y in zip(a, b)) < 0: b = [-x for x in b]
+    out = [x + (y - x) * u for x, y in zip(a, b)]
+    if n == 4:
+        l = math.sqrt(sum(x * x for x in out))
+        out = [x / l for x in out]
+    return out
+
+
+def bones(mesh, clip=None, t=0):  # per joint: posed world times inverse bind, mesh space
+    sk, world, out = mesh['skin'], [], []
+    for j, jt in enumerate(sk['joints']):
+        p, q, s = jt['position'], jt['rotation'], jt['scale']
+        for ch in (clip or {}).get('channels', []):
+            if ch['joint'] != jt['name']: continue
+            v = key(ch, t)
+            if ch['property'] == 'position': p = v
+            elif ch['property'] == 'rotation': q = v
+            else: s = v
+        local = trs(p, q, s)
+        world.append(mul(world[jt['parent']], local) if jt['parent'] >= 0 else local)
+        ib = sk['inverseBind'][j * 12:j * 12 + 12]
+        out.append(mul(world[-1], [ib[0:4], ib[4:8], ib[8:12]]))
+    return out
+
+
+def skinned(mesh, clip=None, t=0):  # every vertex, blended
+    B, P, sk = bones(mesh, clip, t), mesh['positions'], mesh['skin']
+    res = []
+    for i in range(len(P) // 3):
+        v = P[3 * i:3 * i + 3]
+        acc = [0, 0, 0]
+        for k in range(4):
+            w = sk['vertexWeights'][4 * i + k]
+            if w: acc = [a + w * b for a, b in zip(acc, apply34(B[sk['vertexJoints'][4 * i + k]], v))]
+        res.append(acc)
+    return res
+
+
+M3 = lambda m: [row[:3] + [m[i][3]] for i, row in enumerate(m[:3])]  # 4x4 -> 3x4
+mir = lambda p: [-p[0], p[1], p[2]]
+
+
+def expected(mesh, pose):  # the rig's own matrices: rest G_j and posed G'_j, right-handed
+    sk, P, out = mesh['skin'], mesh['positions'], []
+    moves = [mul(M3(pose[j]), inv34(M3(g))) for j, g in enumerate(make_rig.JOINTS)]
+    for i in range(len(P) // 3):
+        r = mir(P[3 * i:3 * i + 3])
+        acc = [0, 0, 0]
+        for k in range(4):
+            w = sk['vertexWeights'][4 * i + k]
+            if w: acc = [a + w * b for a, b in zip(acc, apply34(moves[sk['vertexJoints'][4 * i + k]], r))]
+        out.append(mir(acc))
+    return out
+
+
+def maxerr(a, b):
+    return max((abs(x - y) for p, q in zip(a, b) for x, y in zip(p, q)), default=1e9) if len(a) == len(b) else 1e9
+
+
+# Wave at 0.5 s: Upper stepped up to y + 0.75, Lower turned 90 degrees about Y.
+up_wave = make_rig.matmul(make_rig.ARMATURE, make_rig.trs((0, 0.75, 0)))
+WAVE = [up_wave, make_rig.matmul(make_rig.matmul(up_wave, make_rig.trs((0, 1, 0))), make_rig.trs((0, 0, 0), make_rig.axis_angle((0, 1, 0), 90)))]
+rest_pts = [mir(p) for p in make_rig.boxes()[0]]
+kproj = os.path.join(tmp, 'skins')
+os.makedirs(kproj)
+for fmt in ('gltf', 'fbx'):
+    src = os.path.join(rigdir, 'rig.' + fmt)
+    r = run('import', src, '--project', kproj)
+    check('%s rig: import exits 0' % fmt, r.returncode == 0, r.stderr)
+    if r.returncode: continue
+    check('%s rig: the Body node mesh and the baked mesh carry the skeleton' % fmt,
+          'skinned models/rig/Body.mesh' in r.stdout and 'skinned models/rig.mesh' in r.stdout, r.stdout)
+    check('%s rig: one .anim per animation, names file-safe' % fmt,
+          'clip models/rig/Wave.anim\nclip models/rig/Nod_Big.anim\n' in r.stdout, r.stdout)
+    check('%s rig: no "skeleton was left out"' % fmt, 'skeleton was left out' not in r.stdout, r.stdout)
+    body = json.load(open(os.path.join(kproj, 'models', 'rig', 'Body.mesh')))
+    baked = json.load(open(os.path.join(kproj, 'models', 'rig.mesh')))
+    sk = body['skin']
+    check('%s rig: joints Upper, Lower under it' % fmt,
+          [(j['name'], j['parent']) for j in sk['joints']] == [('Upper', -1), ('Lower', 0)], sk['joints'])
+    P = [body['positions'][i:i + 3] for i in range(0, len(body['positions']), 3)]
+    check('%s rig: vertices in root space, X mirrored (%s)' % (fmt, 'Body transform ignored' if fmt == 'gltf' else 'Body transform applied'),
+          all(min(max(abs(a - b) for a, b in zip(p, q)) for q in rest_pts) < 1e-4 for p in P), P[:4])
+    check('%s rig: the node mesh is the baked mesh' % fmt, body['positions'] == baked['positions'] and body['skin'] == baked['skin'])
+    nodes = nodes_of(r.stdout)
+    ok, why = composes(kproj, nodes, baked)
+    check('%s rig: the Body node sits at the root (tree composes to the baked mesh)' % fmt, ok, why)
+    wsum = [sum(sk['vertexWeights'][i:i + 4]) for i in range(0, len(sk['vertexWeights']), 4)]
+    check('%s rig: weights normalised, 4 per vertex' % fmt,
+          len(wsum) == len(P) and all(abs(s - 1) < 1e-5 for s in wsum) and len(sk['vertexJoints']) == 4 * len(P), wsum[:6])
+    blend = sorted(set(tuple(round(w, 6) for w in sk['vertexWeights'][i:i + 2]) for i in range(0, len(sk['vertexWeights']), 4)))
+    check('%s rig: the 3:1 corners come out 0.75 / 0.25, the rest 1 / 0' % fmt, blend == [(0.75, 0.25), (1.0, 0.0)], blend)
+    err = maxerr(skinned(body), P)
+    check('%s rig: rest pose through the inverse binds gives the rest vertices (1e-3)' % fmt, err < 1e-3, err)
+    ib0 = sk['inverseBind'][0:12]
+    # ufbx keeps the centimetre-to-metre scale in the joints, so an FBX joint's
+    # world is the rig's with its axes 0.01 long.
+    f = 0.01 if fmt == 'fbx' else 1
+    want = inv34([[row[c] * (-1 if (r == 0) != (c == 0) else 1) * (f if c < 3 else 1) for c in range(4)]
+                  for r, row in enumerate(make_rig.UPPER[:3])])
+    check('%s rig: Upper inverse bind is S G^-1 S of the rig (1e-4)' % fmt,
+          max(abs(a - b) for a, b in zip(ib0, [x for row in want for x in row])) < 1e-4, ib0)
+    wave = json.load(open(os.path.join(kproj, 'models', 'rig', 'Wave.anim')))
+    nod = json.load(open(os.path.join(kproj, 'models', 'rig', 'Nod_Big.anim')))
+    check('%s rig: clip names are the file names' % fmt, (wave['name'], nod['name']) == ('Wave', 'Nod_Big'), (wave['name'], nod['name']))
+    ch = {(c['joint'], c['property']): c for c in wave['channels']}
+    lr = ch.get(('Lower', 'rotation'))
+    got = key(lr, 0.5) if lr else None
+    check('%s rig: a 90 degree key about Y comes out mirrored, (0, -s, 0, c)' % fmt,
+          got is not None and max(abs(a - b) for a, b in zip(got, [0, -S45, 0, S45])) < 1e-4, got)
+    ut = ch.get(('Upper', 'position'))
+    got = key(ut, 0.5) if ut else None
+    check('%s rig: a root joint\'s keys go through the Armature: y + 0.75 lands at (-1, 0.75, 0.5)' % fmt,
+          got is not None and max(abs(a - b) for a, b in zip(got, [-1, 0.75, 0.5])) < 1e-4, got)
+    if fmt == 'gltf':
+        check('gltf rig: STEP keys stay step', ut is not None and ut['interpolation'] == 'step', ut)
+        check('gltf rig: cubic-spline warning', 'cubic-spline keys were read by their values only' in r.stdout, r.stdout)
+    got = key(next(c for c in nod['channels'] if c['joint'] == 'Upper' and c['property'] == 'rotation'), 1.0)
+    want = qmul([0, -S45, 0, S45], make_rig.axis_angle((1, 0, 0), 45))  # Armature, then the key, both mirrored
+    check('%s rig: Nod ends at the Armature turn times 45 degrees about X' % fmt,
+          min(max(abs(a - b) for a, b in zip(got, w)) for w in (want, [-x for x in want])) < 1e-4, (got, want))
+    check('%s rig: Nod length 1 s, Wave 1 s' % fmt, abs(nod['length'] - 1) < 1e-4 and abs(wave['length'] - 1) < 1e-4,
+          (nod['length'], wave['length']))
+    err = maxerr(skinned(body, wave, 0.5), expected(body, WAVE))
+    check('%s rig: Wave at 0.5 s poses the vertices where the rig puts them (1e-3)' % fmt, err < 1e-3, err)
+    check('%s rig: one-bone-per-vertex warning says how to fix it' % fmt,
+          'the heaviest joint wins; weight-paint to single bones for exact deformation' in r.stdout, r.stdout)
+
+    # Z up and scale 2: the same pose, turned (x, y, z) -> (x, z, -y) and doubled.
+    r2 = run('import', src, '--project', kproj, '--up', 'z', '--scale', '2', '--normals', 'recompute')
+    turned = json.load(open(os.path.join(kproj, 'models', 'rig', 'Body.mesh')))
+    wave2 = json.load(open(os.path.join(kproj, 'models', 'rig', 'Wave.anim')))
+    tsk = turned['skin']
+    check('%s rig, Z up x2, normals recomputed: one influence set per vertex' % fmt,
+          r2.returncode == 0 and len(tsk['vertexJoints']) == len(turned['positions']) // 3 * 4, r2.stderr)
+    err = maxerr(skinned(turned), [turned['positions'][i:i + 3] for i in range(0, len(turned['positions']), 3)])
+    check('%s rig, Z up x2: rest pose still gives the rest vertices (1e-3)' % fmt, err < 1e-3, err)
+    # Pose the turned import, untransform it, and compare with the plain pose of the same vertices.
+    back = [[p[0] / 2, -p[2] / 2, p[1] / 2] for p in skinned(turned, wave2, 0.5)]
+    plain = dict(turned)
+    plain['positions'] = [c for i in range(0, len(turned['positions']), 3)
+                          for c in (turned['positions'][i] / 2, -turned['positions'][i + 2] / 2, turned['positions'][i + 1] / 2)]
+    plain['skin'] = tsk
+    err = maxerr(back, expected(plain, WAVE))
+    check('%s rig, Z up x2: Wave at 0.5 s is the plain pose turned and doubled (1e-3)' % fmt, err < 1e-3, err)
+    tnodes = nodes_of(r2.stdout)
+    ok, why = composes(kproj, tnodes, json.load(open(os.path.join(kproj, 'models', 'rig.mesh'))))
+    check('%s rig, Z up x2: the Body node still sits at the root' % fmt, ok, why)
+
+# The exported splashpack: Body with a skin of both clips, read back the way
+# psxsplash reads its skin table. At Wave's frame 15 (0.5 s at 30 fps) each
+# bone moves its vertices where the heaviest joint alone puts them.
+r = run('import', os.path.join(rigdir, 'rig.gltf'), '--project', kproj)
+body = json.load(open(os.path.join(kproj, 'models', 'rig', 'Body.mesh')))
+wave = json.load(open(os.path.join(kproj, 'models', 'rig', 'Wave.anim')))
+GTE = 100.0
+scene = {'format': 'splashedit-ng/scene', 'version': 1,
+         'settings': {'gteScaling': GTE, 'sceneType': 'exterior', 'fog': {'enabled': False, 'color': [0, 0, 0], 'density': 5}},
+         'objects': [{'name': 'Body', 'active': True,
+                      'transform': {'position': [0, 0, 0], 'rotation': [0, 0, 0, 1], 'scale': [1, 1, 1]},
+                      'components': [{'type': 'mesh', 'mesh': 'models/rig/Body.mesh', 'materials': [{'texture': None, 'color': [1, 1, 1, 1]}],
+                                      'vertexColors': 'flat'},
+                                     {'type': 'skin', 'clips': ['models/rig/Wave.anim', 'models/rig/Nod_Big.anim'], 'fps': 30}]}]}
+json.dump(scene, open(os.path.join(kproj, 'rig.scene'), 'w'))
+out = os.path.join(kproj, 'rig.splashpack')
+r = subprocess.run([cli, 'export', os.path.join(kproj, 'rig.scene'), '-o', out], capture_output=True, text=True)
+check('skinned import exports', r.returncode == 0, r.stderr)
+if r.returncode == 0:
+    d = open(out, 'rb').read()
+    version, nlua, ngo = struct.unpack_from('<HHH', d, 2)
+    header = 156 if version >= 25 else 148 if version >= 24 else 144
+    o = header + nlua * 8
+    meshoff, = struct.unpack_from('<I', d, o)
+    poly, = struct.unpack_from('<H', d, o + 52)
+    tris = [[struct.unpack_from('<hhh', d, meshoff + t * 52 + k * 6) for k in range(3)] for t in range(poly)]
+    n, = struct.unpack_from('<H', d, 112)
+    table, = struct.unpack_from('<I', d, 116)
+    doff, = struct.unpack_from('<I', d, table)
+    go, nb, nclip = struct.unpack_from('<HBB', d, doff)
+    p = doff + 4
+    idx = list(d[p:p + poly * 3])
+    p = (p + poly * 3 + 3) & ~3
+    clips = []
+    for c in range(nclip):
+        cl = d[p]
+        name = d[p + 1:p + 1 + cl].decode()
+        p += 1 + cl + 1 + 2
+        p = (p + 1) & ~1
+        fc, = struct.unpack_from('<H', d, p)
+        p += 2
+        clips.append((name, [[struct.unpack_from('<12h', d, p + (f * nb + b) * 24) for b in range(nb)] for f in range(fc)]))
+        p += fc * nb * 24
+    check('splashpack: one skinned mesh, 2 bones, clips Wave and Nod_Big',
+          (n, nb, [c[0] for c in clips]) == (1, 2, ['Wave', 'Nod_Big']), (n, nb, [c[0] for c in clips]))
+    B = bones(body, wave, 0.5)
+    psx = lambda q: (q[0] / GTE * 4096, -q[1] / GTE * 4096, q[2] / GTE * 4096)
+    worst = 0
+    for t, tri in enumerate(tris):
+        for k, v in enumerate(tri):
+            b = idx[t * 3 + k]
+            m = clips[0][1][15][b]
+            got = [sum(m[r * 3 + c] * v[c] for c in range(3)) / 4096 + m[9 + r] for r in range(3)]
+            rest = [v[0] / 4096 * GTE, -v[1] / 4096 * GTE, v[2] / 4096 * GTE]
+            worst = max(worst, max(abs(a - e) for a, e in zip(got, psx(apply34(B[b], rest)))))
+    check('splashpack: Wave frame 15 moves every vertex with its bone (within 3 units)', poly == 24 and worst < 3, (poly, worst))
+
 print('%d/%d checks passed' % (checks - fails, checks))
 sys.exit(1 if fails else 0)

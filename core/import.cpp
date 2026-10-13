@@ -922,9 +922,10 @@ void saveImportSettings(const fs::path& model, const ImportSettings& settings) {
     json j = settingsJson(settings);
     for (auto& [k, v] : settings.extra)
         if (!j.contains(k)) j[k] = json::parse(v);
+    const std::string text = j.dump(2) + "\n";  // before the file is opened, so a failure leaves it as it was
     const fs::path file = importSettingsPath(model);
     std::ofstream out(file, std::ios::binary);
-    out << j.dump(2) << "\n";
+    out << text;
     if (!out) fail("cannot write " + projectPath(file.filename()));
 }
 

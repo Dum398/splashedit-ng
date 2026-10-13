@@ -3854,7 +3854,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         fold(section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true, true, true,
                      removeFlag(editor::ComponentKind::Mesh)));
         y += 34 + space::xs;
-        const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb, .gltf, .fbx or .obj file, or drop one here.");
+        const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb, .gltf, .fbx, .obj or .blend file (.blend needs Blender installed), or drop one here.");
         bool pickModel = assetField("model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
                                     modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
         st.modelField = folded ? ImRect() : modelRow;
@@ -3868,7 +3868,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 std::lock_guard<std::mutex> lock(g_pickMutex);
                 g_modelTarget = path;
             }
-            static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj"}};
+            static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj;blend"}};
             SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
         }
         if (assetField("texture", row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export."),

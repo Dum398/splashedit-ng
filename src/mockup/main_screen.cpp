@@ -1371,11 +1371,21 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 st.renameStart = true;
                 st.renamePath = *sel;
             }));
-            m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
-            m.push_back(item("Cut", "Ctrl+X", hasSel, [&st, &doc, sel] { cutSelection(st, doc, *sel); }));
-            m.push_back(item("Copy", "Ctrl+C", hasSel, [&st, &doc, sel] { copySelection(st, doc, *sel); }));
-            m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, sel] { pasteClipboard(st, doc, sel); }));
-            m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
+            if (st.scripts.uiShown()) {
+                // The UI tab: these act on the selected UI element.
+                const bool hasEl = st.canvasView.hasElement(doc);
+                m.push_back(item("Duplicate", "Ctrl+D", hasEl, [&st, &doc] { st.canvasView.duplicate(doc); }));
+                m.push_back(item("Cut", "Ctrl+X", hasEl, [&st, &doc] { st.canvasView.cut(doc); }));
+                m.push_back(item("Copy", "Ctrl+C", hasEl, [&st, &doc] { st.canvasView.copy(doc); }));
+                m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc] { st.canvasView.paste(doc); }));
+                m.push_back(item("Delete", "Del", hasEl, [&st, &doc] { st.canvasView.remove(doc); }));
+            } else {
+                m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
+                m.push_back(item("Cut", "Ctrl+X", hasSel, [&st, &doc, sel] { cutSelection(st, doc, *sel); }));
+                m.push_back(item("Copy", "Ctrl+C", hasSel, [&st, &doc, sel] { copySelection(st, doc, *sel); }));
+                m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, sel] { pasteClipboard(st, doc, sel); }));
+                m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
+            }
             m.push_back(separator());
             m.push_back(item("Select None", "", hasSel, [&] { doc.select(std::nullopt); }));
             break;

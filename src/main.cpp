@@ -131,6 +131,10 @@ bool parseKey(const char* spec, Action& a) {
     else if (s == "ctrl") a.key = ImGuiKey_LeftCtrl, a.ctrl = true;
     else if (s == "shift") a.key = ImGuiKey_LeftShift, a.shift = true;
     else if (s == "alt") a.key = ImGuiKey_LeftAlt, a.alt = true;
+    else if (s.size() == 1 && s[0] >= '0' && s[0] <= '9') a.key = (ImGuiKey)(ImGuiKey_0 + (s[0] - '0'));
+    else if (s == "=") a.key = ImGuiKey_Equal;
+    else if (s == "-") a.key = ImGuiKey_Minus;
+    else if (s == "space") a.key = ImGuiKey_Space;
     else return false;
     return true;
 }

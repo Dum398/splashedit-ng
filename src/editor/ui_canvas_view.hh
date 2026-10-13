@@ -32,6 +32,17 @@ public:
     // or the canvas when none is selected.
     void inspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc);
 
+    // Element clipboard commands, on the selected element, for the keys, the
+    // right-click menus and the Edit menu. The text goes through the system
+    // clipboard (uic::copyElementText), so it survives between projects and
+    // scene object text is never taken for it.
+    bool hasElement(const editor::Document& doc) const;
+    void copy(editor::Document& doc);
+    void cut(editor::Document& doc);
+    void paste(editor::Document& doc);
+    void duplicate(editor::Document& doc);
+    void remove(editor::Document& doc);
+
     // Scripted tests (--ui): print where the canvas, the list and the
     // canvas's eye are whenever that changes.
     static bool reportLayout;
@@ -43,6 +54,10 @@ private:
     void elementInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc);
     void canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc);
     void upload(const editor::Document& doc, const std::vector<bool>& show);
+    void elementMenu(editor::Document& doc);
+    void notice(std::string msg, bool bad);
+    // Zoom to `scale` keeping canvas point under screen point `at` in place.
+    void zoomAt(float scale, ImVec2 at);
 
     editor::uic::Assets m_assets;
     editor::uic::Screen m_screen;
@@ -67,12 +82,31 @@ private:
     std::string m_dragLabel;
     bool m_snap = true;
 
+    // The one screen <-> canvas transform: canvas pixel (x, y) is drawn at
+    // m_origin + (x, y) * m_scale. Worked out at the start of each frame from
+    // the zoom (0 = fit the area) and the pan (screen pixels from centred).
+    float m_zoom = 0;
+    ImVec2 m_pan{0, 0};
+    ImRect m_area;
+    float m_fit = 1, m_scale = 1;
+    ImVec2 m_origin{0, 0};
+    bool m_panning = false;
+    int m_panButton = 0;
+    ImVec2 m_panMouse, m_panStart;
+    void layoutCanvas();
+    ImVec2 toScreen(float x, float y) const { return ImVec2(m_origin.x + x * m_scale, m_origin.y + y * m_scale); }
+    ImVec2 toCanvas(ImVec2 p) const { return ImVec2((p.x - m_origin.x) / m_scale, (p.y - m_origin.y) / m_scale); }
+
+    std::string m_notice;
+    bool m_noticeBad = false;
+    double m_noticeUntil = 0;
+
     // A row dragged in the element list.
     int m_rowDrag = -1;
     bool m_rowDragging = false;
     float m_listScroll = 0;
 
-    std::string m_reported, m_listLayout;
+    std::string m_reported, m_listLayout, m_menuReported;
 };
 
 }  // namespace ui

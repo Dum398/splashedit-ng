@@ -304,6 +304,18 @@ reorders by dragging a list row, duplicates, deletes, hides the canvas with its 
 empty canvas to deselect, then saves and reads the scene back. One Ctrl+Z must take back one
 whole drag. Needs a display (CI runs it under `xvfb-run` on Linux).
 
+It also copies, cuts and pastes elements (Ctrl+C/X/V and the right-click menu on the canvas and
+on a list row, whose rows the editor prints when it opens): a paste lands in front of the
+selection 8 px down and right of the original (a second one past the first copy, a cut one back
+in place) with a numbered name, and one Ctrl+Z takes it back. Then it zooms (Ctrl+wheel and the
+plain wheel, about the pointer, which must stay over the same canvas pixel) and, zoomed in,
+selects by clicking where the fit view has nothing, drags and resizes by a handle; pans with a
+middle drag and with Space + drag (which must move no element), and Ctrl+0 fits again. At 100%
+(Ctrl+1) the canvas in the screenshot must equal `ui/ui-runtime.png` in 15-bit colour wherever
+the game drew, except the 1 px element outlines. The clipboard text is
+`{"splashedit-ui-elements": 1, ...}`; `editor_tests` checks that it and the scene objects'
+`splashedit-objects` text are never pasted as each other.
+
     python3 uicanvascheck.py <splashedit>
 
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with

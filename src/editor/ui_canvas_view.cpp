@@ -6,7 +6,10 @@
 #include <cstdio>
 #include <functional>
 
+#include <SDL3/SDL_clipboard.h>
 #include <SDL3/SDL_dialog.h>
+#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_stdinc.h>
 
 #include <mutex>
 
@@ -188,6 +191,20 @@ float problem(ImDrawList* dl, const char* id, ImVec2 pos, float width, const uic
     return h;
 }
 
+// The zoom one step in (dir > 0) or out from `scale`: whole multiples above
+// 100% so pixels stay square and sharp.
+float stepZoom(float scale, int dir) {
+    static const float steps[] = {0.25f, 0.5f, 0.75f, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32};
+    if (dir > 0) {
+        for (float z : steps)
+            if (z > scale + 1e-3f) return z;
+        return steps[std::size(steps) - 1];
+    }
+    for (int i = int(std::size(steps)) - 1; i >= 0; i--)
+        if (steps[i] < scale - 1e-3f) return steps[i];
+    return steps[0];
+}
+
 }  // namespace
 
 CanvasView::CanvasView() = default;
@@ -227,6 +244,7 @@ void CanvasView::draw(ImDrawList* dl, ImRect r, editor::Document& doc) {
     list(dl, left, doc);
     canvas(dl, right, doc);
     keys(doc);
+    elementMenu(doc);
     ImGui::PopID();
 }
 
@@ -325,7 +343,7 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
         m_warnLoad = doc.loadId();
     }
     ImGui::PushClipRect(area.Min, area.Max, true);
-    int clickedRow = -1, eyeRow = -1;
+    int clickedRow = -1, eyeRow = -1, rightRow = -2;
     for (int i = 0; i < n; i++) {
         ImRect rr(ImVec2(x0 - space::xs, top + i * rowH), ImVec2(x1 + space::xs, top + (i + 1) * rowH));
         if (rr.Max.y < area.Min.y || rr.Min.y > area.Max.y) continue;
@@ -344,6 +362,7 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
         ImGui::PopID();
         if (eyeHit) eyeRow = i;
         else if (h.clicked && !m_rowDragging) clickedRow = i;
+        if (h.hovered && !m_rowDragging && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) rightRow = i;
         if (h.held && !m_rowDragging && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 5)) {
             m_rowDrag = i;
             m_rowDragging = true;
@@ -360,6 +379,14 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImGui::PopClipRect();
     if (eyeRow >= 0) uic::editElement(doc, c, eyeRow, [](UIElement& e) { e.visible = !e.visible; });
     if (clickedRow >= 0) doc.selectUi({c, clickedRow});
+    // Right click: on a row selects it, below the rows selects none; then the element menu.
+    if (rightRow == -2 && !m_rowDragging && ImGui::IsMouseHoveringRect(area.Min, area.Max) &&
+        !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
+        rightRow = -1;
+    if (rightRow >= -1) {
+        doc.selectUi({c, rightRow});
+        ImGui::OpenPopup("##elmenu");
+    }
     if (m_rowDragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         if (gap >= 0) {
             const int to = gap > m_rowDrag ? gap - 1 : gap;
@@ -404,6 +431,34 @@ void CanvasView::upload(const editor::Document& doc, const std::vector<bool>& sh
     m_texShow = show;
 }
 
+// The transform from the zoom and pan. Fit: the largest whole scale that
+// fits, centred. Otherwise the zoom, panned, kept so some of the screen stays
+// in view. The origin is always on a whole pixel, so whole scales draw the
+// texture pixel for pixel.
+void CanvasView::layoutCanvas() {
+    const uic::Screen s = m_screen;
+    if (m_zoom <= 0) m_pan = ImVec2(0, 0);
+    m_scale = m_zoom > 0 ? m_zoom : m_fit;
+    const ImVec2 size(s.w * m_scale, s.h * m_scale);
+    const ImVec2 centred(std::floor(m_area.GetCenter().x - size.x * 0.5f), std::floor(m_area.GetCenter().y - size.y * 0.5f));
+    const float keep = 48;
+    const float hx = std::floor(m_area.Max.x - keep - centred.x), hy = std::floor(m_area.Max.y - keep - centred.y);
+    m_pan.x = std::clamp(m_pan.x, std::min(hx, std::floor(m_area.Min.x + keep - size.x - centred.x)), hx);
+    m_pan.y = std::clamp(m_pan.y, std::min(hy, std::floor(m_area.Min.y + keep - size.y - centred.y)), hy);
+    m_origin = centred + m_pan;
+}
+
+void CanvasView::zoomAt(float scale, ImVec2 at) {
+    scale = std::clamp(scale, 0.25f, 32.0f);
+    const ImVec2 cp = toCanvas(at);
+    const uic::Screen s = m_screen;
+    const ImVec2 size(s.w * scale, s.h * scale);
+    const ImVec2 centred(std::floor(m_area.GetCenter().x - size.x * 0.5f), std::floor(m_area.GetCenter().y - size.y * 0.5f));
+    m_zoom = scale;
+    m_pan = ImVec2(std::round(at.x - cp.x * scale - centred.x), std::round(at.y - cp.y * scale - centred.y));
+    layoutCanvas();
+}
+
 void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     Fonts& f = fonts();
     ImGuiIO& io = ImGui::GetIO();
@@ -412,27 +467,80 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     const auto& cvs = doc.scene().canvases;
     const uic::Screen s = m_screen;
 
-    // Header: resolution and scale, the snap switch, the hints.
+    // Header: resolution, the zoom controls, the snap switch, the hints.
     const float headH = size::panelHeader;
     ImRect head(r.Min, ImVec2(r.Max.x, r.Min.y + headH));
     ImRect area(ImVec2(r.Min.x, head.Max.y), r.Max);
+    m_area = area;
     const float pad = 24;
-    float scale = std::min((area.GetWidth() - pad * 2) / s.w, (area.GetHeight() - pad * 2) / s.h);
-    scale = scale >= 1 ? std::floor(scale) : std::max(scale, 0.25f);  // whole pixels when it fits
-    const ImVec2 size(s.w * scale, s.h * scale);
-    const ImVec2 origin(std::floor(area.GetCenter().x - size.x * 0.5f), std::floor(area.GetCenter().y - size.y * 0.5f));
+    float fit = std::min((area.GetWidth() - pad * 2) / s.w, (area.GetHeight() - pad * 2) / s.h);
+    m_fit = fit >= 1 ? std::floor(fit) : std::max(fit, 0.25f);  // whole pixels when it fits
+    layoutCanvas();
+
     char res[64];
-    std::snprintf(res, sizeof res, "%d x %d   %gx", s.w, s.h, scale);
+    std::snprintf(res, sizeof res, "%d x %d", s.w, s.h);
     text(dl, ImVec2(head.Min.x + space::md, centerY(f.medium, type::label, head.Min.y, head.Max.y)), f.medium, type::label,
          color::textDim, res);
-    const char* hint = "Drag to move, handles resize, arrows nudge (Shift 8 px), Ctrl skips snapping";
-    const float hw = measure(f.regular, type::caption, hint).x;
-    if (iconButton("snap", ImRect(ImVec2(head.Max.x - 32, head.Min.y + 5), ImVec2(head.Max.x - 6, head.Max.y - 5)), icon::magnet, m_snap,
+    const float by0 = head.Min.y + 5, by1 = head.Max.y - 5;
+    if (iconButton("snap", ImRect(ImVec2(head.Max.x - 32, by0), ImVec2(head.Max.x - 6, by1)), icon::magnet, m_snap,
                    m_snap ? "Snapping to the screen and other elements: on" : "Snapping: off (Ctrl snaps while dragging)"))
         m_snap = !m_snap;
-    if (head.Max.x - 40 - hw > head.Min.x + 160)
-        text(dl, ImVec2(head.Max.x - 40 - hw, centerY(f.regular, type::caption, head.Min.y, head.Max.y)), f.regular, type::caption,
+    const bool canZoom = sel.canvas >= 0;
+    if (iconButton("zoomfit", ImRect(ImVec2(head.Max.x - 70, by0), ImVec2(head.Max.x - 44, by1)), icon::maximize, m_zoom <= 0,
+                   "Fit the screen in the view (Ctrl+0)", color::textDim, canZoom))
+        m_zoom = 0, m_pan = ImVec2(0, 0);
+    if (iconButton("zoomin", ImRect(ImVec2(head.Max.x - 98, by0), ImVec2(head.Max.x - 72, by1)), icon::plus, false,
+                   "Zoom in (Ctrl+=, wheel)", color::textDim, canZoom))
+        zoomAt(stepZoom(m_scale, 1), area.GetCenter());
+    {
+        char pct[16];
+        std::snprintf(pct, sizeof pct, "%d%%", int(std::lround(m_scale * 100)));
+        ImRect pr(ImVec2(head.Max.x - 150, by0), ImVec2(head.Max.x - 100, by1));
+        Hit ph = interact("zoom100", pr);
+        if (ph.hovered) dl->AddRectFilled(pr.Min, pr.Max, color::hover, radius::field);
+        textCentered(dl, pr, f.medium, type::caption, m_scale == 1 ? color::text : color::textDim, pct);
+        if (ph.hovered) tooltip("Actual pixels: 100% (Ctrl+1)");
+        if (ph.clicked && canZoom) m_zoom = 1, m_pan = ImVec2(0, 0);
+    }
+    if (iconButton("zoomout", ImRect(ImVec2(head.Max.x - 178, by0), ImVec2(head.Max.x - 152, by1)), icon::minus, false,
+                   "Zoom out (Ctrl+-, wheel)", color::textDim, canZoom))
+        zoomAt(stepZoom(m_scale, -1), area.GetCenter());
+    const char* hint = "Drag to move, handles resize, arrows nudge, wheel zooms, middle-drag or Space pans";
+    const float hw = measure(f.regular, type::caption, hint).x;
+    if (head.Max.x - 190 - hw > head.Min.x + 100)
+        text(dl, ImVec2(head.Max.x - 190 - hw, centerY(f.regular, type::caption, head.Min.y, head.Max.y)), f.regular, type::caption,
              color::textFaint, hint);
+
+    // Zoom about the pointer with the wheel; pan with the middle button or
+    // Space + left. Before anything reads the transform this frame.
+    const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    const bool overArea = canZoom && !popup && ImGui::IsMouseHoveringRect(area.Min, area.Max) && !ImGui::IsAnyItemActive();
+    const bool spaceHeld = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
+    if (overArea && io.MouseWheel != 0 && m_drag.element < 0) zoomAt(stepZoom(m_scale, io.MouseWheel > 0 ? 1 : -1), io.MousePos);
+    if (!m_panning && overArea && m_drag.element < 0) {
+        int button = -1;
+        if (ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) button = ImGuiMouseButton_Middle;
+        else if (spaceHeld && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) button = ImGuiMouseButton_Left;
+        if (button >= 0) {
+            m_panning = true;
+            m_panButton = button;
+            m_panMouse = io.MousePos;
+            if (m_zoom <= 0) m_zoom = m_scale;
+            m_panStart = m_pan;
+        }
+    }
+    if (m_panning) {
+        if (!ImGui::IsMouseDown(m_panButton)) {
+            m_panning = false;
+        } else {
+            const ImVec2 d = io.MousePos - m_panMouse;
+            m_pan = ImVec2(std::round(m_panStart.x + d.x), std::round(m_panStart.y + d.y));
+        }
+    }
+    layoutCanvas();
+    const float scale = m_scale;
+    const ImVec2 size(s.w * scale, s.h * scale);
+    const ImVec2 origin = m_origin;
 
     if (sel.canvas < 0) {
         textCentered(dl, area, f.regular, type::body, color::textFaint, "No canvas to show");
@@ -466,9 +574,9 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
         textCentered(dl, chip, f.medium, type::caption, color::warn, note);
     }
 
-    auto toScreen = [&](float x, float y) { return ImVec2(o.x + x * scale, o.y + y * scale); };
     const ImVec2 m = io.MousePos;
-    const float mx = (m.x - o.x) / scale, my = (m.y - o.y) / scale;
+    const ImVec2 mc = toCanvas(m);
+    const float mx = mc.x, my = mc.y;
     const float slop = 5.0f / scale;
     const int threshold = std::max(1, int(std::lround(6.0f / scale)));
 
@@ -483,7 +591,12 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     uic::Handle hoverHandle = uic::Handle::None;
     if (selEl && selEl->unknown.empty()) hoverHandle = handleAt(*selEl);
     const int hoverEl = h.hovered ? uic::hitTest(cv, s, mx, my, slop) : -1;
-    if (h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+    if (h.hovered && !m_panning && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && m_drag.element < 0) {
+        // Right click: selects what is under the pointer, then the element menu.
+        if (hoverEl >= 0) doc.selectUi({sel.canvas, hoverEl});
+        ImGui::OpenPopup("##elmenu");
+    }
+    if (h.hovered && !m_panning && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         int el = -1;
         uic::Handle hd = uic::Handle::None;
         if (hoverHandle != uic::Handle::None && hoverHandle != uic::Handle::Move) {
@@ -575,6 +688,7 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
             break;
         case uic::Handle::None: break;
     }
+    if (m_panning || (spaceHeld && overArea)) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
 
     // Outlines: every element faintly, the one under the pointer brighter,
     // the selection with its handles.
@@ -623,6 +737,14 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
         dl->AddRect(chip.Min, chip.Max, color::borderStrong, radius::field);
         textCentered(dl, chip, f.medium, type::caption, color::text, m_dragLabel.c_str());
     }
+    if (!m_notice.empty() && ImGui::GetTime() < m_noticeUntil) {
+        ImVec2 ns = measure(f.medium, type::caption, m_notice.c_str());
+        const float cx = area.GetCenter().x;
+        ImRect chip(ImVec2(cx - ns.x * 0.5f - space::md, area.Max.y - 40), ImVec2(cx + ns.x * 0.5f + space::md, area.Max.y - 16));
+        dl->AddRectFilled(chip.Min, chip.Max, m_noticeBad ? color::warnSoft : color::raised, radius::pill);
+        dl->AddRect(chip.Min, chip.Max, color::borderStrong, radius::pill);
+        textCentered(dl, chip, f.medium, type::caption, m_noticeBad ? color::warn : color::text, m_notice.c_str());
+    }
     ImGui::PopClipRect();
 
     if (reportLayout) {
@@ -636,15 +758,118 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
 }
 
+// ---- Element commands
+
+bool CanvasView::hasElement(const editor::Document& doc) const {
+    const editor::Document::UiSelection sel = doc.uiSelection();
+    const auto& cvs = doc.scene().canvases;
+    return sel.canvas >= 0 && sel.canvas < int(cvs.size()) && sel.element >= 0 &&
+           sel.element < int(cvs[size_t(sel.canvas)].elements.size());
+}
+
+void CanvasView::notice(std::string msg, bool bad) {
+    m_notice = std::move(msg);
+    m_noticeBad = bad;
+    m_noticeUntil = ImGui::GetTime() + (bad ? 5 : 2.5);
+}
+
+void CanvasView::copy(editor::Document& doc) {
+    if (!hasElement(doc)) return;
+    const editor::Document::UiSelection sel = doc.uiSelection();
+    const std::string text = uic::copyElementText(doc, sel.canvas, sel.element);
+    if (!SDL_SetClipboardText(text.c_str())) return notice(std::string("Cannot copy: ") + SDL_GetError(), true);
+    notice("Copied " + doc.scene().canvases[size_t(sel.canvas)].elements[size_t(sel.element)].name, false);
+}
+
+void CanvasView::cut(editor::Document& doc) {
+    if (!hasElement(doc)) return;
+    const editor::Document::UiSelection sel = doc.uiSelection();
+    const std::string text = uic::copyElementText(doc, sel.canvas, sel.element);
+    // Only removed once the clipboard holds it, so a failed copy loses nothing.
+    if (!SDL_SetClipboardText(text.c_str())) return notice(std::string("Cannot cut: ") + SDL_GetError(), true);
+    notice("Cut " + doc.scene().canvases[size_t(sel.canvas)].elements[size_t(sel.element)].name, false);
+    uic::deleteElement(doc, sel.canvas, sel.element);
+}
+
+void CanvasView::paste(editor::Document& doc) {
+    const editor::Document::UiSelection sel = doc.uiSelection();
+    if (sel.canvas < 0) return;
+    char* raw = SDL_GetClipboardText();
+    const std::string text = raw ? raw : "";
+    SDL_free(raw);
+    if (uic::pasteElements(doc, sel.canvas, sel.element, text, m_screen) < 0)
+        notice(text.find("splashedit-objects") != std::string::npos ? "The clipboard holds scene objects: paste them on the Scene tab"
+                                                                     : "The clipboard holds no UI elements",
+               true);
+}
+
+void CanvasView::duplicate(editor::Document& doc) {
+    if (hasElement(doc)) uic::duplicateElement(doc, doc.uiSelection().canvas, doc.uiSelection().element);
+}
+
+void CanvasView::remove(editor::Document& doc) {
+    if (hasElement(doc)) uic::deleteElement(doc, doc.uiSelection().canvas, doc.uiSelection().element);
+}
+
+// The right-click menu of the canvas and the element list.
+void CanvasView::elementMenu(editor::Document& doc) {
+    pushMenuStyle();
+    if (ImGui::BeginPopup("##elmenu")) {
+        const editor::Document::UiSelection sel = doc.uiSelection();
+        const bool has = hasElement(doc);
+        const int n = sel.canvas >= 0 ? int(doc.scene().canvases[size_t(sel.canvas)].elements.size()) : 0;
+        bool canPaste = false;
+        if (sel.canvas >= 0 && SDL_HasClipboardText()) {
+            char* raw = SDL_GetClipboardText();
+            canPaste = raw && splash::readUIElementsText(raw).has_value();
+            SDL_free(raw);
+        }
+        if (reportLayout) {
+            // Scripted tests: where the first row is and how far apart rows are.
+            char buf[96];
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            std::snprintf(buf, sizeof buf, "uicanvas: menu %.0f,%.0f step %.0f", p.x + 40, p.y + 11, 22 + ImGui::GetStyle().ItemSpacing.y);
+            if (m_menuReported != buf) {
+                m_menuReported = buf;
+                std::printf("%s\n", buf);
+                std::fflush(stdout);
+            }
+        }
+        if (menuItem(icon::x, color::textDim, "Cut", "Ctrl+X", has)) cut(doc);
+        if (menuItem(icon::copy, color::textDim, "Copy", "Ctrl+C", has)) copy(doc);
+        if (menuItem(icon::plus, color::textDim, "Paste", "Ctrl+V", canPaste)) paste(doc);
+        if (menuItem(icon::layers, color::textDim, "Duplicate", "Ctrl+D", has)) duplicate(doc);
+        if (menuItem(icon::trash, color::bad, "Delete", "Del", has)) remove(doc);
+        ImGui::Separator();
+        if (menuItem(icon::arrowDown, color::textDim, "Bring forward", "Ctrl+]", has && sel.element + 1 < n))
+            uic::moveElement(doc, sel.canvas, sel.element, sel.element + 1);
+        if (menuItem(icon::arrowUp, color::textDim, "Send backward", "Ctrl+[", has && sel.element > 0))
+            uic::moveElement(doc, sel.canvas, sel.element, sel.element - 1);
+        ImGui::EndPopup();
+    }
+    popMenuStyle();
+}
+
 void CanvasView::keys(editor::Document& doc) {
     ImGuiIO& io = ImGui::GetIO();
     if (io.WantTextInput || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return;
     const editor::Document::UiSelection sel = doc.uiSelection();
-    if (sel.canvas < 0 || sel.element < 0) return;
-    const int c = sel.canvas, e = sel.element;
+    if (sel.canvas < 0) return;
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
-    const int n = int(doc.scene().canvases[size_t(c)].elements.size());
     auto pressed = [](ImGuiKey k, bool repeat = true) { return ImGui::IsKeyPressed(k, repeat); };
+    if (ctrl && !shift && pressed(ImGuiKey_V, false)) paste(doc);
+    if (ctrl && !shift && pressed(ImGuiKey_0, false)) m_zoom = 0, m_pan = ImVec2(0, 0);
+    if (ctrl && !shift && pressed(ImGuiKey_1, false)) m_zoom = 1, m_pan = ImVec2(0, 0);
+    if (ctrl && (pressed(ImGuiKey_Equal) || pressed(ImGuiKey_KeypadAdd))) zoomAt(stepZoom(m_scale, 1), m_area.GetCenter());
+    if (ctrl && (pressed(ImGuiKey_Minus) || pressed(ImGuiKey_KeypadSubtract))) zoomAt(stepZoom(m_scale, -1), m_area.GetCenter());
+    if (sel.element < 0) return;
+    const int c = sel.canvas, e = sel.element;
+    const int n = int(doc.scene().canvases[size_t(c)].elements.size());
+    if (ctrl && !shift && pressed(ImGuiKey_C, false)) copy(doc);
+    if (ctrl && !shift && pressed(ImGuiKey_X, false)) {
+        cut(doc);
+        return;
+    }
     if (!ctrl && m_drag.element < 0) {
         const int step = shift ? 8 : 1;
         int dx = 0, dy = 0;
@@ -659,10 +884,10 @@ void CanvasView::keys(editor::Document& doc) {
                 r.y += dy;
                 uic::place(el, r, m_screen);
             });
-        if (pressed(ImGuiKey_Delete, false)) uic::deleteElement(doc, c, e);
+        if (pressed(ImGuiKey_Delete, false)) remove(doc);
         if (pressed(ImGuiKey_Escape, false)) doc.selectUi({c, -1});
     }
-    if (ctrl && !shift && pressed(ImGuiKey_D, false)) uic::duplicateElement(doc, c, e);
+    if (ctrl && !shift && pressed(ImGuiKey_D, false)) duplicate(doc);
     if (ctrl && pressed(ImGuiKey_RightBracket, false)) uic::moveElement(doc, c, e, shift ? n - 1 : e + 1);
     if (ctrl && pressed(ImGuiKey_LeftBracket, false) && e > 0) uic::moveElement(doc, c, e, shift ? 0 : e - 1);
 }

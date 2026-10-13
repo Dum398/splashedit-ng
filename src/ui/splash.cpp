@@ -173,7 +173,8 @@ bool draw(ImVec2 display, double clockMs) {
         const double lift = bounce(t, kPsxDrop, 160);
         const double tip = std::clamp((t - kPsxDrop) / kTip, 0.0, 1.0);
         const double turn = kPsxAngle * tip * tip * (3 - 2 * tip) / 4096.0;  // eased, in turns
-        const double sn = std::sin(turn * 2 * M_PI), cs = std::cos(turn * 2 * M_PI);
+        constexpr double kTau = 6.283185307179586;
+        const double sn = std::sin(turn * kTau), cs = std::cos(turn * kTau);
         const double cx = kPsxCentreX, cy = kPsxCentreY - lift;
         auto rot = [&](double x, double y) {
             const double rx = x - kPsxCentreX, ry = y - kPsxCentreY;

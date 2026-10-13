@@ -139,6 +139,15 @@ static splash::MeshComponent modelMesh(const std::string& mesh, const std::vecto
     return m;
 }
 
+// A skin component playing the model's clips, the first 16; none when the
+// model has no clips, since psxsplash never draws a skinned mesh without one.
+static std::optional<splash::SkinComponent> modelSkin(const splash::ImportedModel& model) {
+    if (model.clips.empty()) return std::nullopt;
+    splash::SkinComponent s;
+    s.clips.assign(model.clips.begin(), model.clips.begin() + static_cast<std::ptrdiff_t>(std::min<size_t>(model.clips.size(), 16)));
+    return s;
+}
+
 // An object per node, each holding its children: the model's top-level nodes
 // in file order.
 static std::vector<splash::Object> nodeObjects(const splash::ImportedModel& model, const splash::ImportSettings& settings) {
@@ -148,6 +157,7 @@ static std::vector<splash::Object> nodeObjects(const splash::ImportedModel& mode
         objs[i].name = n.name;
         objs[i].transform = n.transform;
         if (!n.mesh.empty()) objs[i].mesh = modelMesh(n.mesh, n.materials, settings);
+        if (!n.mesh.empty() && n.skinned) objs[i].skin = modelSkin(model);
     }
     // Parents come before their children, so walking backwards finishes every
     // object's subtree before it moves into its parent (at the front, which
@@ -170,6 +180,7 @@ splash::Object modelObject(const splash::ImportedModel& model, const std::string
     root.name = name;
     if (model.nodes.size() <= 1 || settings.mergeMeshes) {
         root.mesh = modelMesh(model.mesh, model.materials, settings);
+        if (model.skinned) root.skin = modelSkin(model);
         return root;
     }
     root.children = nodeObjects(model, settings);
@@ -222,6 +233,7 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
     written.push_back(r.model.mesh);
     for (const splash::ImportedNode& n : r.model.nodes)
         if (!n.mesh.empty()) written.push_back(n.mesh);
+    written.insert(written.end(), r.model.clips.begin(), r.model.clips.end());
     doc.refreshAssets(written);
 
     const splash::Object* target = replace ? doc.object(*replace) : nullptr;
@@ -229,6 +241,7 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
         doc.edit(*replace, [&](splash::Object& o) {
             o.mesh->mesh = r.model.mesh;
             o.mesh->materials = r.model.materials;
+            if (r.model.skinned && !o.skin) o.skin = modelSkin(r.model);
         });
         doc.endMerge();
         r.path = *replace;
@@ -335,6 +348,21 @@ struct Resync {
         m.materials = mats;
         return true;
     }
+    // The skin of an object drawing a skinned mesh of the model: the model's
+    // clips (those under models/<name>/) swapped for the new ones, others
+    // kept after them. An object without a skin is left without one, so a
+    // skin taken off stays off and the mesh draws in its rest pose.
+    bool syncSkin(splash::Object& o, bool skinned) {
+        if (!skinned || !o.skin) return false;
+        std::optional<splash::SkinComponent> fresh = modelSkin(model);
+        if (!fresh) return false;
+        std::vector<std::string> clips = fresh->clips;
+        for (const std::string& c : o.skin->clips)
+            if (c.rfind(nodePrefix, 0) != 0 && clips.size() < 16) clips.push_back(c);
+        if (clips == o.skin->clips) return false;
+        o.skin->clips = std::move(clips);
+        return true;
+    }
     // An object made from node `n`: transform, mesh and materials, then its
     // children by name.
     bool syncNode(splash::Object& o, size_t n) {
@@ -345,6 +373,7 @@ struct Resync {
             if (!o.mesh) o.mesh = modelMesh(node.mesh, node.materials, settings), changed = true;
             if (o.mesh->mesh != node.mesh) o.mesh->mesh = node.mesh, changed = true;
             changed |= setMaterials(*o.mesh, node.materials);
+            changed |= syncSkin(o, node.skinned);
         }
         std::vector<bool> matched(o.children.size());
         if (auto m = match(o, childNodes[n]))
@@ -363,6 +392,7 @@ struct Resync {
             if (toMerged) {
                 for (auto k = top->rbegin(); k != top->rend(); ++k) o.children.erase(o.children.begin() + static_cast<std::ptrdiff_t>(*k));
                 o.mesh = modelMesh(model.mesh, model.materials, settings);
+                if (model.skinned && !o.skin) o.skin = modelSkin(model);
                 handled.assign(o.children.size(), false);
                 changed = true;
             } else {
@@ -374,6 +404,7 @@ struct Resync {
         } else if (o.mesh && o.mesh->mesh == model.mesh) {
             if (toTree && model.nodes.size() > 1) {
                 o.mesh.reset();
+                o.skin.reset();  // a skin cannot exist without its mesh
                 std::vector<splash::Object> made = nodeObjects(model, settings);
                 o.children.insert(o.children.begin(), std::make_move_iterator(made.begin()), std::make_move_iterator(made.end()));
                 handled.assign(o.children.size(), false);
@@ -381,10 +412,14 @@ struct Resync {
                 changed = true;
             } else {
                 changed |= setMaterials(*o.mesh, model.materials);
+                changed |= syncSkin(o, model.skinned);
             }
         } else if (o.mesh) {
             auto it = nodeOfMesh.find(o.mesh->mesh);
-            if (it != nodeOfMesh.end()) changed |= setMaterials(*o.mesh, model.nodes[it->second].materials);
+            if (it != nodeOfMesh.end()) {
+                changed |= setMaterials(*o.mesh, model.nodes[it->second].materials);
+                changed |= syncSkin(o, model.nodes[it->second].skinned);
+            }
         }
         for (size_t k = 0; k < o.children.size(); ++k)
             if (!handled[k]) changed |= walk(o.children[k]);
@@ -416,6 +451,7 @@ Reimported reimportModel(Document& doc, const fs::path& model, std::optional<boo
     written.push_back(r.model.mesh);
     for (const splash::ImportedNode& n : r.model.nodes)
         if (!n.mesh.empty()) written.push_back(n.mesh);
+    written.insert(written.end(), r.model.clips.begin(), r.model.clips.end());
     doc.refreshAssets(written);
 
     Resync sync(r.model, settings, "models/" + splash::importName(file) + "/");

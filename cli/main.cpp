@@ -230,6 +230,10 @@ static int importCmd(int argc, char** argv) {
                         t.rotation.w, t.scale.x, t.scale.y, t.scale.z, n.mesh.empty() ? "-" : n.mesh.c_str(), n.materials.size(),
                         n.name.c_str());
         }
+        if (m.skinned) std::printf("skinned %s\n", m.mesh.c_str());
+        for (const splash::ImportedNode& n : m.nodes)
+            if (n.skinned) std::printf("skinned %s\n", n.mesh.c_str());
+        for (const std::string& c : m.clips) std::printf("clip %s\n", c.c_str());
         for (const std::string& w : m.warnings) std::printf("warning: %s\n", w.c_str());
         return 0;
     } catch (const std::exception& e) {

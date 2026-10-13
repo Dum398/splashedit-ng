@@ -487,6 +487,54 @@ bool deleteElement(Document& doc, int c, int e) {
     return true;
 }
 
+std::string copyElementText(const Document& doc, int c, int e) {
+    if (!validElement(doc, c, e)) return {};
+    return splash::writeUIElementsText({doc.scene().canvases[size_t(c)].elements[size_t(e)]});
+}
+
+int pasteElements(Document& doc, int c, int after, const std::string& text, Screen s) {
+    if (!validCanvas(doc, c)) return -1;
+    std::optional<std::vector<UIElement>> pasted = splash::readUIElementsText(text);
+    if (!pasted) return -1;
+    std::vector<UICanvas> next = doc.scene().canvases;
+    UICanvas& cv = next[size_t(c)];
+    int at = after >= 0 && after < int(cv.elements.size()) ? after + 1 : int(cv.elements.size());
+    // Where an element sits, for "is a copy already there": a line by its
+    // endpoints, anything else by its rect on screen.
+    auto spot = [&](const UIElement& e) {
+        if (e.type == UIElementType::Line) return Rect{e.from[0], e.from[1], e.to[0], e.to[1]};
+        return layout(e, s);
+    };
+    auto taken = [&](const UIElement& e) {
+        const Rect r = spot(e);
+        return std::any_of(cv.elements.begin(), cv.elements.end(),
+                           [&](const UIElement& o) { return o.type == e.type && o.unknown.empty() && spot(o) == r; });
+    };
+    for (UIElement& e : *pasted) {
+        if (e.unknown.empty()) {
+            const Rect home = layout(e, s);
+            const std::array<int, 2> from = e.from, to = e.to;
+            for (int k = 0; k < 64 && taken(e); k++) {
+                const int d = 8 * (k + 1);
+                if (e.type == UIElementType::Line) {
+                    e.from = {from[0] + d, from[1] + d};
+                    e.to = {to[0] + d, to[1] + d};
+                } else {
+                    place(e, Rect{home.x + d, home.y + d, home.w, home.h}, s);
+                }
+            }
+        }
+        std::string base;
+        splitNumbered(e.name, &base);
+        if (std::any_of(cv.elements.begin(), cv.elements.end(), [&](const UIElement& o) { return o.name == e.name; }))
+            e.name = uniqueElementName(cv, base);
+        cv.elements.insert(cv.elements.begin() + at, std::move(e));
+        at++;
+    }
+    commit(doc, std::move(next), {c, at - 1});
+    return at - 1;
+}
+
 bool moveElement(Document& doc, int c, int from, int to) {
     if (!validElement(doc, c, from)) return false;
     const int n = int(doc.scene().canvases[size_t(c)].elements.size());

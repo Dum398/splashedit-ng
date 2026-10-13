@@ -395,6 +395,14 @@ std::string writeObjectsText(const std::vector<Object>& objects);
 // other JSON, a later version, an empty list, a malformed object).
 std::optional<std::vector<Object>> readObjectsText(const std::string& text);
 
+// UI elements as a self-contained JSON document, the way the scene file
+// stores them: {"splashedit-ui-elements": 1, "elements": [...]}. A marker of
+// its own, so object and UI element clipboard text never pass for each other.
+std::string writeUIElementsText(const std::vector<UIElement>& elements);
+// The elements in such a document; nullopt for anything else (object
+// clipboard text included), a later version, an empty list or a malformed element.
+std::optional<std::vector<UIElement>> readUIElementsText(const std::string& text);
+
 // Skeleton in mesh space. Joint transforms are local to the parent joint
 // (parent -1 = mesh space) and give the rest pose.
 struct Joint {

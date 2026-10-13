@@ -5132,6 +5132,68 @@ void testUiUndo() {
     CHECK((layout(back.canvases[0].elements[0], s) == Rect{5, 6, 7, 8}));
 }
 
+// Copy, cut and paste of UI elements: the clipboard text, the offset, the
+// names, one undo step each, and text of the other kind refused both ways.
+void testUiClipboard() {
+    using namespace editor::uic;
+    const Screen s;
+    editor::Document d;
+    d.reset(uiScene());
+    const std::string text = copyElementText(d, 0, 1);
+    CHECK(!text.empty() && text.find("splashedit-ui-elements") != std::string::npos);
+    CHECK(copyElementText(d, 0, 9).empty() && copyElementText(d, 5, 0).empty());
+    CHECK(d.historySize() == 0);
+    // Pasted in front of the selection, 8 px down and right, renamed.
+    int p = pasteElements(d, 0, 1, text, s);
+    CHECK(p == 2 && d.scene().canvases[0].elements[2].name == "front (2)");
+    CHECK((layout(d.scene().canvases[0].elements[2], s) == Rect{58, 28, 100, 50}));
+    CHECK((d.uiSelection() == editor::Document::UiSelection{0, 2}));
+    CHECK(d.historySize() == 1);
+    // Again: past the first copy, not on it.
+    CHECK(pasteElements(d, 0, 2, text, s) == 3 && d.scene().canvases[0].elements[3].name == "front (3)");
+    CHECK((layout(d.scene().canvases[0].elements[3], s) == Rect{66, 36, 100, 50}));
+    // One undo takes back one paste.
+    CHECK(d.undo() && d.scene().canvases[0].elements.size() == 5 && d.scene().canvases[0].elements[2].name == "front (2)");
+    CHECK(d.undo() && d.scene().canvases[0].elements.size() == 4);
+    // Cut (copy, then delete) and paste: back where it was, under its own name.
+    const std::string cut = copyElementText(d, 0, 0);
+    CHECK(deleteElement(d, 0, 0));
+    CHECK(pasteElements(d, 0, -1, cut, s) == 3);
+    const splash::UIElement& back = d.scene().canvases[0].elements[3];
+    CHECK(back.name == "back" && (layout(back, s) == Rect{0, 0, 100, 50}));
+    // Into another canvas, on top; a line moves by its endpoints.
+    CHECK(pasteElements(d, 1, -1, copyElementText(d, 0, 2), s) == 1);
+    const splash::UIElement& line = d.scene().canvases[1].elements[1];
+    CHECK(line.type == splash::UIElementType::Line && line.name == "line" && line.from[0] == 200 && line.to[1] == 200);
+    CHECK(pasteElements(d, 1, -1, copyElementText(d, 0, 2), s) == 2);
+    CHECK(d.scene().canvases[1].elements[2].from[0] == 208 && d.scene().canvases[1].elements[2].to[1] == 208);
+    // Anchored elements keep their anchors and move on screen.
+    d.reset(uiScene());
+    editElement(d, 0, 0, [](splash::UIElement& e) {
+        e.anchorMin = e.anchorMax = {1, 1};
+        e.rect = {-110, -60, 100, 50};
+    });
+    CHECK(pasteElements(d, 0, 0, copyElementText(d, 0, 0), s) == 1);
+    const splash::UIElement& anch = d.scene().canvases[0].elements[1];
+    CHECK(anch.anchorMin[0] == 1 && (layout(anch, s) == Rect{s.w - 102, s.h - 52, 100, 50}));
+    // Not ours: no change, no history.
+    const size_t steps = d.historySize();
+    CHECK(pasteElements(d, 0, -1, "hello", s) == -1);
+    CHECK(pasteElements(d, 0, -1, "{\"splashedit-ui-elements\": 2, \"elements\": [{\"type\": \"box\"}]}", s) == -1);
+    CHECK(pasteElements(d, 0, -1, "{\"splashedit-ui-elements\": 1, \"elements\": []}", s) == -1);
+    CHECK(pasteElements(d, 7, -1, text, s) == -1);
+    // Object clipboard text is not UI elements, and UI element text is not objects.
+    editor::Document objs;
+    splash::Scene withObj;
+    withObj.objects.emplace_back();
+    withObj.objects.back().name = "Crate";
+    objs.reset(withObj);
+    const std::string objText = objs.copyObject({0});
+    CHECK(!objText.empty() && pasteElements(d, 0, -1, objText, s) == -1);
+    CHECK(!splash::readObjectsText(text) && !objs.pasteObjects(text, std::nullopt));
+    CHECK(d.historySize() == steps && d.scene().canvases[0].elements.size() == 5);
+}
+
 void testUiProblems() {
     using namespace editor::uic;
     const Screen s;
@@ -5355,6 +5417,7 @@ int main(int argc, char** argv) {
     testUiSnap();
     testUiZOrder();
     testUiUndo();
+    testUiClipboard();
     testUiProblems();
     testUiRender();
     testUiMatchesRuntime();

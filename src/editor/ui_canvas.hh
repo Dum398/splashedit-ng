@@ -104,6 +104,17 @@ int addElement(Document& doc, int c, splash::UIElementType type, Screen s);
 // A copy of element `e` right in front of it, 8 px down and right, renamed. Selects it.
 int duplicateElement(Document& doc, int c, int e);
 bool deleteElement(Document& doc, int c, int e);
+// Clipboard text for element `e` of canvas `c` (splash::writeUIElementsText);
+// empty when there is no such element. Cut is this, then deleteElement.
+std::string copyElementText(const Document& doc, int c, int e);
+// Inserts the elements in clipboard `text` into canvas `c` right in front of
+// element `after` (on top of all when -1 or gone), as one undo step. Each one
+// moves 8 px down and right per copy already sitting where it would land, so
+// a paste next to its original never covers it (a cut one comes back in
+// place), and takes a name no element of the canvas has. Selects the last
+// one and returns its index; -1, with no change, for text that is not UI
+// elements or no such canvas.
+int pasteElements(Document& doc, int c, int after, const std::string& text, Screen s);
 // Moves element `from` to index `to` (draw order: higher is in front). The
 // selection follows the element.
 bool moveElement(Document& doc, int c, int from, int to);

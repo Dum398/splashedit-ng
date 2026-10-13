@@ -843,6 +843,39 @@ std::optional<std::vector<Object>> readObjectsText(const std::string& text) {
     return out;
 }
 
+namespace {
+constexpr const char* kUIElementsMarker = "splashedit-ui-elements";
+constexpr int kUIElementsVersion = 1;
+}  // namespace
+
+std::string writeUIElementsText(const std::vector<UIElement>& elements) {
+    json j;
+    j[kUIElementsMarker] = kUIElementsVersion;
+    json els = json::array();
+    for (const UIElement& e : elements) els.push_back(writeElement(e));
+    j["elements"] = els;
+    return j.dump(2);
+}
+
+std::optional<std::vector<UIElement>> readUIElementsText(const std::string& text) {
+    json j = json::parse(text, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return std::nullopt;
+    auto marker = j.find(kUIElementsMarker);
+    if (marker == j.end() || !marker->is_number_integer() || marker->get<std::int64_t>() != kUIElementsVersion) return std::nullopt;
+    auto els = j.find("elements");
+    if (els == j.end() || !els->is_array() || els->empty()) return std::nullopt;
+    std::vector<UIElement> out;
+    try {
+        for (const json& ej : *els) {
+            if (!ej.is_object()) return std::nullopt;
+            out.push_back(readElement(ej, "clipboard"));
+        }
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+    return out;
+}
+
 Bounds Mesh::bounds() const {
     if (positions.empty()) return {};
     Vec3 mn = positions[0], mx = positions[0];

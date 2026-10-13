@@ -236,5 +236,12 @@ open afterwards. Needs a display (CI runs it under `xvfb-run`).
 
     sh gamekeys.sh <splashedit> <emulator_tests>
 
+`scripteditorcheck.py` opens the courtyard example's `game_logic.lua` with Edit script, types a
+line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the
+tab before building, so the file on disk starts with the typed line; typing alone must not. Needs
+a display (CI runs it under `xvfb-run` on Linux).
+
+    python3 scripteditorcheck.py <splashedit>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

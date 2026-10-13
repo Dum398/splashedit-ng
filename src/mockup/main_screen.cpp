@@ -4000,7 +4000,9 @@ static void shortcuts(State& st, editor::Document& doc) {
     auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
     // The script editor keeps the keyboard, but Play and Run on hardware still answer.
-    if (st.scripts.hasKeyboard() && !io.WantTextInput && !st.unsavedShown && st.menuOpen < 0) {
+    // Not gated on WantTextInput: the editor asks for text input itself, so it is set.
+    if (st.scripts.hasKeyboard()) {
+        if (st.unsavedShown || st.menuOpen >= 0) return;
         if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
         return;
     }

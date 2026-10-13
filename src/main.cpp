@@ -21,6 +21,7 @@
 #include "gl.h"
 #include "mockup/main_screen.h"
 #include "ui/brand.h"
+#include "ui/splash.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
@@ -82,6 +83,7 @@ struct Args {
     const char* select = nullptr;   // object name to select at startup
     std::vector<Action> actions;
     int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
+    bool splash = false;
     // --drop <file>@x,y releases a file there after the scripted input;
     // --drag-over x,y holds a dragged file there for the whole run.
     std::string dropFile;
@@ -282,6 +284,9 @@ Args parse(int argc, char** argv) {
             const char* spec = next();
             a.padButton = SDL_GetGamepadButtonFromString(spec);
             if (a.padButton == SDL_GAMEPAD_BUTTON_INVALID) std::fprintf(stderr, "unknown gamepad button '%s'\n", spec);
+        } else if (!std::strcmp(argv[i], "--splash")) {
+            // Screenshot runs skip the startup splash unless asked; it plays silent there.
+            a.splash = true;
         } else if (!std::strcmp(argv[i], "--ctrl-held")) {
             // Holds Ctrl down for the whole run (Ctrl-snapping while dragging).
             Action act(Action::Key);
@@ -370,6 +375,7 @@ int main(int argc, char** argv) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     theme::load(assetDir.c_str());
     brand::load(assetDir.c_str());
+    if (!args.screenshot || args.splash) splash::load(assetDir.c_str(), !args.screenshot);
     ImGui_ImplSDL3_InitForOpenGL(window, ctx);
     if (args.padButton >= 0) {
         SDL_VirtualJoystickDesc desc;
@@ -469,7 +475,9 @@ int main(int argc, char** argv) {
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::NewFrame();
         ui::interactiveRects().clear();
-        g_hit.titleBar = mockup::drawMainScreen(state, doc, view, io.DisplaySize);
+        // The splash hides the editor until it starts fading out.
+        g_hit.titleBar = splash::covering() ? ImRect() : mockup::drawMainScreen(state, doc, view, io.DisplaySize);
+        splash::draw(io.DisplaySize, args.screenshot ? frame * 1000.0 / 60.0 : double(SDL_GetTicks()));
         g_hit.controls.clear();
         for (const ImRect& r : ui::interactiveRects())
             if (r.Overlaps(g_hit.titleBar)) g_hit.controls.push_back(r);
@@ -503,6 +511,7 @@ int main(int argc, char** argv) {
     }
 
     state.play.emu.stop();
+    splash::shutdown();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

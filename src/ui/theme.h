@@ -42,6 +42,23 @@ constexpr ImU32 axisY = rgb(0x7fcb55);
 constexpr ImU32 axisZ = rgb(0x4f9bef);
 }  // namespace color
 
+// Lua highlighting in the script editor.
+namespace code {
+constexpr ImU32 keyword = rgb(0xb4a6ff);
+constexpr ImU32 constant = rgb(0xf0a46a);
+constexpr ImU32 number = rgb(0xf0a46a);
+constexpr ImU32 string = rgb(0x9fd77f);
+constexpr ImU32 comment = rgb(0x6b7283);
+constexpr ImU32 function = rgb(0x7fb6ff);
+constexpr ImU32 api = rgb(0x5ccfe0);
+constexpr ImU32 apiMember = rgb(0x8fdcea);
+constexpr ImU32 op = rgb(0xa0a7b6);
+constexpr ImU32 lineNumber = rgb(0x4d5363);
+constexpr ImU32 currentLine = rgb(0xffffff, 7);
+constexpr ImU32 selection = rgb(0x8b7bff, 70);
+constexpr ImU32 match = rgb(0xf0a43a, 50);
+}  // namespace code
+
 // 4 px grid.
 namespace space {
 constexpr float xxs = 2, xs = 4, sm = 8, md = 12, lg = 16, xl = 24;
@@ -63,12 +80,14 @@ constexpr float gutter = 4;   // gap between docked panels
 // Type scale, in pixels.
 namespace type {
 constexpr float caption = 12.0f, label = 13.0f, body = 14.0f, title = 15.0f, icon = 15.0f;
+constexpr float code = 14.0f;
 }
 
 struct Fonts {
     ImFont* regular = nullptr;
     ImFont* medium = nullptr;
     ImFont* semibold = nullptr;
+    ImFont* mono = nullptr;  // the script editor
 };
 
 Fonts& fonts();

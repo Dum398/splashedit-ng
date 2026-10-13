@@ -39,6 +39,10 @@ void load(const char* assetDir) {
     f.regular = addFace(dir, "Inter-Regular.ttf");
     f.medium = addFace(dir, "Inter-Medium.ttf");
     f.semibold = addFace(dir, "Inter-SemiBold.ttf");
+    // ImGui's own scalable ProggyForever: monospaced, no file to ship.
+    ImFontConfig mono;
+    mono.SizePixels = type::code;
+    f.mono = ImGui::GetIO().Fonts->AddFontDefaultVector(&mono);
 
     ImGuiStyle& s = ImGui::GetStyle();
     s.FontSizeBase = type::body;

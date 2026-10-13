@@ -39,8 +39,11 @@ public:
     // button, then New cutscene and New animation. Returns the y under them.
     float sequenceList(ImDrawList* dl, float x0, float x1, float y, editor::Document& doc);
 
-    // The scrub head and what each track samples there. The Scene view has no
-    // preview hook yet, so this is what the panel shows in its lanes.
+    // The Scene view's preview: the sequence posed at the scrub head while
+    // the panel is open on one, else empty (the scene draws as it is). Read
+    // only; the document is never touched.
+    editor::Preview preview(const editor::Document& doc) const;
+    // The scrub head and what each track samples there, for the lane labels.
     struct Sampled {
         int track;
         splash::TrackType type;

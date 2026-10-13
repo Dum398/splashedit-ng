@@ -233,17 +233,28 @@ unsigned Ps1View::textureFor(const std::string& projectPath) {
     return id;
 }
 
+const splash::Scene* Ps1View::drawnScene() const {
+    if (m_posed) return &*m_posed;
+    return m_doc ? &m_doc->scene() : nullptr;
+}
+
 void Ps1View::rebuild() {
     m_verts.clear();
     m_batches.clear();
     m_pick.clear();
+    m_posed.reset();
     if (!m_doc) {
         // No scene: the screen-space sky fills the background on its own.
         m_built = true;
         return;
     }
 
-    const splash::Scene& scene = m_doc->scene();
+    // A preview poses a copy; picking indexes it in the same flatten order.
+    if (!m_preview.empty()) {
+        m_posed = m_doc->scene();
+        editor::applyPreview(*m_posed, m_preview);
+    }
+    const splash::Scene& scene = m_posed ? *m_posed : m_doc->scene();
     std::vector<splash::FlatObject> flats = splash::flatten(scene);
 
     // Collect geometry into per-texture buckets.
@@ -403,8 +414,9 @@ bool Ps1View::init() {
 }
 
 unsigned Ps1View::render(int panelW, int panelH, int lines) {
-    if (!m_built || (m_doc && m_doc->revision() != m_builtRevision)) {
+    if (!m_built || m_previewDirty || (m_doc && m_doc->revision() != m_builtRevision)) {
         if (m_doc) m_builtRevision = m_doc->revision();
+        m_previewDirty = false;
         rebuild();
         glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
         glBufferData(GL_ARRAY_BUFFER, m_verts.size() * sizeof(Vertex), m_verts.data(), GL_STATIC_DRAW);

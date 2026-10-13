@@ -3,6 +3,7 @@
 #include <imgui.h>
 
 #include "editor/pick.hh"
+#include "editor/timeline.hh"
 #include "scene.hh"
 
 #include <algorithm>
@@ -39,6 +40,16 @@ class Ps1View {
     bool init();
     // The scene to draw. The buffer is rebuilt when the document's revision changes.
     void setDocument(const editor::Document& doc) { m_doc = &doc; }
+    // The timeline's preview, set every frame: the view draws a copy of the
+    // document's scene posed by it (the document is never touched). An empty
+    // preview draws the document as it is.
+    void setPreview(const editor::Preview& p) {
+        if (!(p == m_preview)) m_preview = p, m_previewDirty = true;
+    }
+    const editor::Preview& preview() const { return m_preview; }
+    // The scene as drawn by the last render(): the posed copy while a preview
+    // is on, else the document's. Null without a document.
+    const splash::Scene* drawnScene() const;
     // Renders at an internal height of `lines` and returns the colour texture.
     unsigned render(int panelW, int panelH, int lines);
     // Projects a world point into a screen rect matching the panel. Returns false behind the camera.
@@ -108,6 +119,9 @@ class Ps1View {
 
     const editor::Document* m_doc = nullptr;
     unsigned m_builtRevision = 0;
+    editor::Preview m_preview;
+    bool m_previewDirty = false;
+    std::optional<splash::Scene> m_posed;  // the document's scene with m_preview applied
     bool m_built = false;
 
     std::vector<Vertex> m_verts;

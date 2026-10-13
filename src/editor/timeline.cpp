@@ -6,6 +6,7 @@
 #include <set>
 
 #include "editor/document.hh"
+#include "editor/gizmo.hh"
 
 namespace editor {
 
@@ -458,6 +459,74 @@ KeyValue sampleAt(const Document& doc, SeqRef ref, int track, float frame) {
     if (!tracks || track < 0 || track >= int(tracks->size())) return {0, 0, 0};
     const CutsceneTrack& t = (*tracks)[size_t(track)];
     return sample(t, frame, initialValue(doc, t));
+}
+
+}  // namespace editor
+
+namespace editor {
+
+Preview samplePreview(const Document& doc, SeqRef ref, float frame) {
+    Preview p;
+    const std::vector<CutsceneTrack>* tracks = seqTracks(doc, ref);
+    if (!tracks) return p;
+    for (int i = 0; i < int(tracks->size()); ++i) {
+        const CutsceneTrack& t = (*tracks)[size_t(i)];
+        if (t.keyframes.empty()) continue;  // nothing to pose: the target shows as it is
+        const KeyValue v = sampleAt(doc, ref, i, frame);
+        const splash::Vec3 v3{v[0], v[1], v[2]};
+        switch (t.type) {
+            case TrackType::ObjectPosition: p.objects[t.target].position = v3; break;
+            case TrackType::ObjectRotation: p.objects[t.target].rotation = v3; break;
+            case TrackType::ObjectActive: p.objects[t.target].active = v[0] > 0.5f; break;
+            case TrackType::CameraPosition: p.cameraPosition = v3; break;
+            case TrackType::CameraRotation: p.cameraRotation = v3; break;
+            default: break;
+        }
+    }
+    return p;
+}
+
+splash::Quat quatEuler(splash::Vec3 deg) {
+    const double h = 3.14159265358979323846 / 360.0;  // half angle, in radians per degree
+    const double cx = std::cos(deg.x * h), sx = std::sin(deg.x * h);
+    const double cy = std::cos(deg.y * h), sy = std::sin(deg.y * h);
+    const double cz = std::cos(deg.z * h), sz = std::sin(deg.z * h);
+    // qY * qX * qZ
+    return {float(cy * sx * cz + sy * cx * sz), float(sy * cx * cz - cy * sx * sz), float(cy * cx * sz - sy * sx * cz),
+            float(cy * cx * cz + sy * sx * sz)};
+}
+
+void applyPreview(splash::Scene& scene, const Preview& preview) {
+    for (const auto& [name, pose] : preview.objects) {
+        // Flattened again per target: an earlier target may be this one's parent.
+        const std::vector<splash::FlatObject> flats = splash::flatten(scene);
+        const splash::FlatObject* fo = nullptr;
+        const splash::FlatObject* parent = nullptr;
+        for (const splash::FlatObject& f : flats)
+            if (f.object->name == name) {
+                fo = &f;
+                break;
+            }
+        if (!fo) continue;
+        for (const splash::FlatObject& f : flats)
+            for (const splash::Object& c : f.object->children)
+                if (&c == fo->object) parent = &f;
+        // The scene is the caller's own copy; flatten only hands out const pointers into it.
+        splash::Object& ob = const_cast<splash::Object&>(*fo->object);
+        const splash::Quat pr = parent ? parent->worldRotation : splash::Quat{};
+        const splash::Quat prInv{-pr.x, -pr.y, -pr.z, pr.w};
+        if (pose.position) {
+            splash::Vec3 local = *pose.position;
+            if (parent) {
+                local = splash::rotate(prInv, local - parent->worldPosition);
+                const splash::Vec3 s = parent->lossyScale;
+                local = {s.x != 0 ? local.x / s.x : 0, s.y != 0 ? local.y / s.y : 0, s.z != 0 ? local.z / s.z : 0};
+            }
+            ob.transform.position = local;
+        }
+        if (pose.rotation) ob.transform.rotation = quatNormalize(quatMul(prInv, quatEuler(*pose.rotation)));
+        if (pose.active && !*pose.active) ob.mesh.reset();
+    }
 }
 
 }  // namespace editor

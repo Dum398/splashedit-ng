@@ -2914,6 +2914,84 @@ void testTimelineEdit() {
     CHECK(back.cutscenes[0].tracks[0].keyframes.size() == 3 && back.cutscenes[0].tracks[0].keyframes[2].frame == 60);
 }
 
+// The Scene view's preview: a sequence posed at a frame, drawn from a copy;
+// the document, its history and the saved scene stay as they were.
+void testTimelinePreview() {
+    using splash::TrackType;
+    auto keyed = [](TrackType type, const char* target, std::initializer_list<std::pair<int, std::array<float, 3>>> keys) {
+        splash::CutsceneTrack t;
+        t.type = type;
+        t.target = target;
+        for (auto [f, v] : keys) {
+            splash::Keyframe k;
+            k.frame = f;
+            k.value = v;
+            t.keyframes.push_back(k);
+        }
+        return t;
+    };
+    auto nearV = [](splash::Vec3 a, splash::Vec3 b) {
+        return std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.y - b.y) < 1e-3f && std::fabs(a.z - b.z) < 1e-3f;
+    };
+    auto sameRot = [](splash::Quat a, splash::Quat b) {
+        return std::fabs(std::fabs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w) - 1) < 1e-4f;
+    };
+    // Euler round trip through Quaternion.eulerAngles.
+    CHECK(nearV(splash::eulerAngles(editor::quatEuler({10, 20, 30})), {10, 20, 30}));
+
+    splash::Scene sc = sample();  // A at x 1, B at x 2 with B1 at local x 3, C at x 4
+    sc.objects[1].transform.rotation = editor::quatEuler({0, 30, 0});
+    sc.objects[1].transform.scale = {2, 2, 2};
+    sc.objects[2].mesh = splash::MeshComponent{};
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(keyed(TrackType::ObjectPosition, "A", {{0, {0, 0, 0}}, {10, {10, 0, 0}}}));
+    cs.tracks.push_back(keyed(TrackType::ObjectPosition, "B1", {{0, {1, 2, 3}}}));
+    cs.tracks.push_back(keyed(TrackType::ObjectRotation, "B1", {{0, {0, 0, 0}}, {10, {0, 90, 0}}}));
+    cs.tracks.push_back(keyed(TrackType::ObjectActive, "C", {{0, {1, 0, 0}}, {5, {0, 0, 0}}}));
+    cs.tracks.push_back(keyed(TrackType::CameraPosition, "", {{0, {0, 3, -10}}, {10, {10, 3, -10}}}));
+    cs.tracks.push_back(keyed(TrackType::CameraRotation, "", {{0, {10, 0, 0}}}));
+    cs.tracks.push_back(keyed(TrackType::ObjectPosition, "B", {}));  // keyless: B is left alone
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const std::filesystem::path dir = g_outDir / "timeline_preview";
+    std::filesystem::create_directories(dir);
+    auto bytes = [](const std::filesystem::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    splash::saveScene(d.scene(), dir / "before.scene");
+    const unsigned rev = d.revision();
+    const size_t hist = d.historySize();
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+
+    editor::Preview p = editor::samplePreview(d, ref, 5);
+    CHECK(p.objects.size() == 3 && !p.objects.count("B"));
+    CHECK(p.objects["A"].position && nearV(*p.objects["A"].position, {5, 0, 0}) && !p.objects["A"].rotation);
+    CHECK(p.objects["B1"].rotation && nearV(*p.objects["B1"].rotation, {0, 45, 0}));
+    CHECK(p.objects["C"].active == false && editor::samplePreview(d, ref, 4).objects["C"].active == true);
+    CHECK(p.cameraPosition && nearV(*p.cameraPosition, {5, 3, -10}) && p.cameraRotation && nearV(*p.cameraRotation, {10, 0, 0}));
+    CHECK(editor::samplePreview(d, ref, 5) == p && !(editor::samplePreview(d, ref, 6) == p));
+    CHECK(editor::samplePreview(d, {editor::SeqKind::Cutscene, 3}, 5).empty());
+    CHECK(editor::samplePreview(d, {editor::SeqKind::Animation, 0}, 5).empty());
+
+    // Applied to a copy: world poses as sampled, a nested target included.
+    splash::Scene posed = d.scene();
+    editor::applyPreview(posed, p);
+    std::vector<splash::FlatObject> f = splash::flatten(posed);  // A, B, B1, C
+    CHECK(f.size() == 4 && nearV(f[0].worldPosition, {5, 0, 0}));
+    CHECK(nearV(f[1].worldPosition, {2, 0, 0}) && sameRot(f[1].worldRotation, editor::quatEuler({0, 30, 0})));
+    CHECK(nearV(f[2].worldPosition, {1, 2, 3}) && sameRot(f[2].worldRotation, editor::quatEuler({0, 45, 0})));
+    CHECK(!posed.objects[2].mesh && d.scene().objects[2].mesh);
+
+    // The document is untouched: values, revision, history, dirty flag and the saved bytes.
+    CHECK(d.object({0})->transform.position.x == 1 && d.object({1, 0})->transform.position.x == 3);
+    CHECK(d.revision() == rev && d.historySize() == hist && !d.dirty() && !d.canUndo());
+    splash::saveScene(d.scene(), dir / "after.scene");
+    CHECK(bytes(dir / "before.scene") == bytes(dir / "after.scene") && !bytes(dir / "after.scene").empty());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -2940,6 +3018,7 @@ int main(int argc, char** argv) {
     testEditMany();
     testTimelineSample();
     testTimelineEdit();
+    testTimelinePreview();
     testLuaTokenize();
     testLuaBuffer();
     testLuaComplete();

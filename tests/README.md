@@ -281,5 +281,14 @@ curve, and Delete takes the key, not the object. Needs a display.
 
     python3 timelinecheck.py <splashedit>
 
+`timelinepreviewcheck.py` checks the Scene view's preview of the Timeline panel: on a copy of the
+courtyard example with a cutscene that lifts and turns the Crate, it scrubs to frame 0 and to 75 and
+compares the Scene view's pixels in the two screenshots, saves while previewing and
+compares the file byte for byte with a save made without the timeline, and drags the Crate's move
+gizmo: at frame 0 (the scene's own pose) the drag moves it, at frame 75 (posed) the gizmo is hidden
+and the same drag writes nothing. Needs a display.
+
+    python3 timelinepreviewcheck.py <splashedit>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

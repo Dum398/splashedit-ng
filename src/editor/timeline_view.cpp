@@ -154,6 +154,12 @@ std::vector<TimelinePanel::Sampled> TimelinePanel::sampled(const editor::Documen
     return out;
 }
 
+editor::Preview TimelinePanel::preview(const editor::Document& doc) const {
+    // Closed, or not yet validated against a newly loaded scene: no preview.
+    if (!open || doc.loadId() != m_loadId || !editor::valid(doc, m_ref)) return {};
+    return editor::samplePreview(doc, m_ref, m_frame);
+}
+
 void TimelinePanel::takeKeys(editor::Document& doc) {
     if (!open || !m_focused) return;
     ImGuiIO& io = ImGui::GetIO();

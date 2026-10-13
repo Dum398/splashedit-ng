@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -106,5 +107,32 @@ float applyCurve(float t, splash::Interp mode);
 KeyValue initialValue(const Document& doc, const splash::CutsceneTrack& track);
 // sample() with initialValue().
 KeyValue sampleAt(const Document& doc, SeqRef ref, int track, float frame);
+
+// The Scene view's preview: what a sequence poses at a frame. Built from a
+// const Document and drawn from a copy of the scene, so scrubbing never
+// edits the document, adds no undo step and leaves the saved scene alone.
+struct ObjectPose {
+    std::optional<splash::Vec3> position;  // world units, world space
+    std::optional<splash::Vec3> rotation;  // degrees, Quaternion.Euler, world space
+    std::optional<bool> active;
+    bool operator==(const ObjectPose&) const = default;
+};
+struct Preview {
+    std::map<std::string, ObjectPose> objects;  // by track target (object name)
+    std::optional<splash::Vec3> cameraPosition;  // world units
+    std::optional<splash::Vec3> cameraRotation;  // degrees
+    bool empty() const { return objects.empty() && !cameraPosition && !cameraRotation; }
+    bool operator==(const Preview&) const = default;
+};
+// Object position, rotation and active tracks and the camera's position and
+// rotation, sampled at `frame` with sampleAt(). Empty for an invalid sequence.
+Preview samplePreview(const Document& doc, SeqRef ref, float frame);
+// Poses a scene (a copy: the caller's, never the document's). Each target,
+// the first object of that name in flatten order, gets the sampled world
+// position and rotation, its children following; one an active track
+// switches off loses its mesh, so it draws nothing.
+void applyPreview(splash::Scene& scene, const Preview& preview);
+// Quaternion.Euler: about Z, then X, then Y (degrees).
+splash::Quat quatEuler(splash::Vec3 deg);
 
 }  // namespace editor

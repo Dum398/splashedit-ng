@@ -22,6 +22,10 @@ struct ImportedNode {
     Transform transform;
     std::string mesh;                 // project-relative .mesh in the node's own space, empty for none
     std::vector<Material> materials;  // one per submesh of `mesh`
+    // `mesh` carries a skeleton. Its space is then the baked mesh's: the
+    // transform puts the node at the model's root, as glTF ignores a skinned
+    // node's own transform.
+    bool skinned = false;
 };
 
 struct ImportedModel {
@@ -29,6 +33,8 @@ struct ImportedModel {
     std::vector<Material> materials;  // one per submesh, textures project-relative
     std::vector<ImportedNode> nodes;  // the node tree, every parent before its children
     std::vector<std::string> textures;  // every PNG written, project-relative
+    bool skinned = false;               // the baked mesh carries a skeleton
+    std::vector<std::string> clips;     // every .anim written, project-relative, in file order
     int triangles = 0;
     std::vector<std::string> warnings;
 };
@@ -87,6 +93,13 @@ std::string importName(const std::filesystem::path& file);
 // file, then the bare name in the model's folder and its textures/tex/
 // materials folders (one not found is a warning, not an error). Textures
 // larger than 256 texels on a side are scaled down to fit.
+// A skinned mesh (glTF skin, FBX skin deformer) keeps its skeleton: the joints
+// of every skin in one list in tree order, each named after its node (made
+// unique). Its geometry stays in root space whatever the skinned node's
+// transform, and each vertex keeps its four heaviest influences, normalised.
+// Every animation in the file becomes models/<stem>/<clip>.anim, channels by
+// joint name in the .mesh space and keys in seconds: glTF keys as they are
+// (cubic-spline ones by their values), FBX baked at 30 Hz.
 // `settings` then apply in the .mesh space: an up axis other than File turns
 // the model (Z up: -90 degrees about X, so +Z becomes +Y), scale multiplies
 // every position and node translation, and Recompute replaces the normals.

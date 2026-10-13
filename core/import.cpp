@@ -152,18 +152,29 @@ void collectNodes(const cgltf_node* n, std::vector<const cgltf_node*>& out) {
 }
 
 
+// The bones moving one vertex as the file gives them: (joint node, weight),
+// any number, not normalised. `skin` is -1 for a vertex no skin moves. The
+// joint is the node's index in the tree (for FBX first its ufbx typed id).
+struct Influence {
+    int skin = -1;
+    std::vector<std::pair<int, float>> weights;
+};
+
 // Builds the .mesh vertices every format ends up in. Callers pass right-handed,
 // Y-up, +Z-front world space values (what glTF gives, and what ufbx gives when
 // told to convert) with UVs already in the .mesh's bottom-left origin; X is
-// mirrored here.
+// mirrored here. Each vertex takes `influence` along.
 struct Emitter {
     Mesh& mesh;
+    std::vector<Influence>& influences;
     bool anyUv, anyColor;
+    Influence influence;
     int vertex(Vec3 w, Vec3 n, Vec2 uv, std::array<float, 4> color) {
         mesh.positions.push_back({-w.x, w.y, w.z});
         mesh.normals.push_back({-n.x, n.y, n.z});
         if (anyUv) mesh.uv.push_back(uv);
         if (anyColor) mesh.colors.push_back(color);
+        influences.push_back(influence);
         return int(mesh.positions.size() - 1);
     }
 };
@@ -199,6 +210,7 @@ struct SourceMaterial {
 // material index (the order materials are first met in the whole file).
 struct Sink {
     Mesh mesh;
+    std::vector<Influence> influences;  // one per vertex
     std::vector<int> materials;  // model material index of each submesh
     std::vector<int>& submesh(int material) {
         for (size_t i = 0; i < materials.size(); i++)
@@ -214,6 +226,87 @@ struct Sink {
     }
 };
 
+// Affine 3x4, row-major, in double: skeleton matrices compose down whole joint
+// chains before they are written.
+struct Aff {
+    double m[3][4] = {{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}};
+};
+
+Aff mul(const Aff& a, const Aff& b) {
+    Aff r;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++)
+            r.m[i][j] = a.m[i][0] * b.m[0][j] + a.m[i][1] * b.m[1][j] + a.m[i][2] * b.m[2][j] + (j == 3 ? a.m[i][3] : 0.0);
+    return r;
+}
+
+// The inverse; identity for a singular matrix.
+Aff inverse(const Aff& a) {
+    const auto& m = a.m;
+    double c00 = m[1][1] * m[2][2] - m[1][2] * m[2][1], c01 = m[1][2] * m[2][0] - m[1][0] * m[2][2],
+           c02 = m[1][0] * m[2][1] - m[1][1] * m[2][0];
+    double det = m[0][0] * c00 + m[0][1] * c01 + m[0][2] * c02;
+    Aff out;
+    if (std::fabs(det) < 1e-300) return out;
+    double id = 1.0 / det;
+    double r[3][3] = {{c00 * id, (m[0][2] * m[2][1] - m[0][1] * m[2][2]) * id, (m[0][1] * m[1][2] - m[0][2] * m[1][1]) * id},
+                      {c01 * id, (m[0][0] * m[2][2] - m[0][2] * m[2][0]) * id, (m[0][2] * m[1][0] - m[0][0] * m[1][2]) * id},
+                      {c02 * id, (m[0][1] * m[2][0] - m[0][0] * m[2][1]) * id, (m[0][0] * m[1][1] - m[0][1] * m[1][0]) * id}};
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) out.m[i][j] = r[i][j];
+        out.m[i][3] = -(r[i][0] * m[0][3] + r[i][1] * m[1][3] + r[i][2] * m[2][3]);
+    }
+    return out;
+}
+
+// From a column-major 4x4 (glTF, cgltf).
+Aff affOf(const float* c) {
+    Aff a;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++) a.m[i][j] = c[j * 4 + i];
+    return a;
+}
+
+Aff affOf(const ufbx_matrix& u) {
+    Aff a;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++) a.m[i][j] = u.cols[j].v[i];
+    return a;
+}
+
+// Translation, rotation, scale composed, as Matrix4x4.TRS.
+Aff affOf(const Transform& t) {
+    double x = t.rotation.x, y = t.rotation.y, z = t.rotation.z, w = t.rotation.w;
+    double n = std::sqrt(x * x + y * y + z * z + w * w);
+    if (n > 0) x /= n, y /= n, z /= n, w /= n;
+    const double R[3][3] = {{1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)},
+                            {2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)},
+                            {2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)}};
+    const double s[3] = {t.scale.x, t.scale.y, t.scale.z}, p[3] = {t.position.x, t.position.y, t.position.z};
+    Aff a;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) a.m[i][j] = R[i][j] * s[j];
+        a.m[i][3] = p[i];
+    }
+    return a;
+}
+
+// S M S, S the X mirror: right-handed to the .mesh space and back.
+Aff mirrored(const Aff& a) {
+    Aff r = a;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++)
+            if ((i == 0) != (j == 0)) r.m[i][j] = -r.m[i][j];
+    return r;
+}
+
+bool isIdentity(const Aff& a) {
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++)
+            if (std::fabs(a.m[i][j] - (i == j ? 1.0 : 0.0)) > 1e-9) return false;
+    return true;
+}
+
 // A node of the tree while the file is read: its transform in the .mesh space
 // and, when it has geometry, that geometry in the node's own space.
 struct NodeBuild {
@@ -221,6 +314,35 @@ struct NodeBuild {
     int parent = -1;
     Transform transform;
     std::optional<Sink> local;
+    // For skins, right-handed in root space (the file's, before the mirror):
+    // the node's rest transform, and the space its own animation keys are in
+    // (its parent's world; for FBX's top-level nodes, ufbx's root).
+    Aff world, keySpace;
+    bool joint = false;      // a joint of the skeleton
+    bool rootSpace = false;  // skinned: `local` is in root space, like the baked mesh
+};
+
+// One skin: per joint node (tree index), root space to joint space at bind,
+// right-handed. A joint it does not list binds at its rest transform.
+struct SkinSource {
+    std::map<int, Aff> inverseBind;
+};
+
+// An animation as the file has it: channels on joint nodes, keys in the
+// node's local space, right-handed.
+struct ChannelSource {
+    int node;
+    AnimChannel channel;  // `joint` unused
+};
+struct ClipSource {
+    std::string name;
+    float length = 0;
+    std::vector<ChannelSource> channels;
+};
+
+struct RigSource {
+    std::vector<SkinSource> skins;
+    std::vector<ClipSource> clips;
 };
 
 // Splits a right-handed affine matrix, basis columns c[0..2] and translation
@@ -309,6 +431,7 @@ void recomputeNormals(Mesh& mesh, float degrees) {
     const float limit = float(std::cos(double(degrees) * 3.14159265358979 / 180.0)) - 1e-5f;
     Mesh out;
     out.skin = mesh.skin;
+    if (out.skin) out.skin->vertexJoints.clear(), out.skin->vertexWeights.clear();
     std::map<std::tuple<int, float, float, float>, int> made;  // (vertex, normal) -> new vertex
     size_t t = 0;
     for (std::vector<int>& sm : mesh.submeshes) {
@@ -326,6 +449,10 @@ void recomputeNormals(Mesh& mesh, float degrees) {
                     out.normals.push_back(n);
                     if (!mesh.uv.empty()) out.uv.push_back(mesh.uv[size_t(v)]);
                     if (!mesh.colors.empty()) out.colors.push_back(mesh.colors[size_t(v)]);
+                    if (out.skin) {
+                        out.skin->vertexJoints.push_back(mesh.skin->vertexJoints[size_t(v)]);
+                        out.skin->vertexWeights.push_back(mesh.skin->vertexWeights[size_t(v)]);
+                    }
                 }
                 outSm.push_back(it->second);
             }
@@ -344,23 +471,66 @@ Quat mulQuat(Quat a, Quat b) {
 // -90 degrees about X, (x, y, z) -> (x, z, -y), which the X mirror leaves as
 // it is: the baked mesh and the top-level nodes turn. The scale multiplies the
 // baked mesh, every node translation and every node mesh, which scales the
-// composed tree by the same amount.
-void applySettings(Sink& baked, std::vector<NodeBuild>& nodes, const ImportSettings& s) {
+// composed tree by the same amount. A root-space node mesh turns with the
+// baked one. Skeletons and clips live in that space too: with A the turn and
+// scale, every joint's rest and keys become A L A^-1 and every inverse bind
+// A M A^-1, which skins A v the way the file skinned v.
+void applySettings(Sink& baked, std::vector<NodeBuild>& nodes, std::vector<AnimClip>& clips, const ImportSettings& s) {
     const bool turn = s.up == UpAxis::ZUp;
     const float k = s.scale;
     auto turned = [&](Vec3 v) { return turn ? Vec3{v.x, v.z, -v.y + 0.0f} : v; };
+    const float h = std::sqrt(0.5f);
+    auto turnedQuat = [&](Quat q) { return turn ? mulQuat(mulQuat({-h, 0, 0, h}, q), {h, 0, 0, h}) : q; };
+    auto turnedScale = [&](Vec3 v) { return turn ? Vec3{v.x, v.z, v.y} : v; };
+    auto skin = [&](Mesh& mesh) {
+        if (!mesh.skin) return;
+        for (Joint& j : mesh.skin->joints) {
+            j.position = turned(j.position) * k;
+            j.rotation = turnedQuat(j.rotation);
+            j.scale = turnedScale(j.scale);
+        }
+        // T = rows (1 0 0) (0 0 1) (0 -1 0): T L T^T, then k T t.
+        for (std::array<float, 12>& m : mesh.skin->inverseBind) {
+            if (turn) {
+                const int src[3] = {0, 2, 1};
+                const float sign[3] = {1, 1, -1};
+                std::array<float, 12> r = m;
+                for (int i = 0; i < 3; i++) {
+                    for (int j = 0; j < 3; j++) r[size_t(i * 4 + j)] = sign[i] * sign[j] * m[size_t(src[i] * 4 + src[j])] + 0.0f;
+                    r[size_t(i * 4 + 3)] = sign[i] * m[size_t(src[i] * 4 + 3)] + 0.0f;
+                }
+                m = r;
+            }
+            for (int i = 0; i < 3; i++) m[size_t(i * 4 + 3)] *= k;
+        }
+    };
     for (Vec3& p : baked.mesh.positions) p = turned(p) * k;
     for (Vec3& n : baked.mesh.normals) n = turned(n);
-    const float h = std::sqrt(0.5f);
+    skin(baked.mesh);
     for (NodeBuild& nb : nodes) {
         if (nb.parent < 0 && turn) {
             nb.transform.position = turned(nb.transform.position);
             nb.transform.rotation = mulQuat({-h, 0, 0, h}, nb.transform.rotation);
         }
         nb.transform.position = nb.transform.position * k;
-        if (nb.local)
-            for (Vec3& p : nb.local->mesh.positions) p = p * k;
+        if (!nb.local) continue;
+        for (Vec3& p : nb.local->mesh.positions) p = (nb.rootSpace ? turned(p) : p) * k;
+        if (nb.rootSpace)
+            for (Vec3& n : nb.local->mesh.normals) n = turned(n);
+        skin(nb.local->mesh);
     }
+    for (AnimClip& c : clips)
+        for (AnimChannel& ch : c.channels)
+            for (size_t i = 0; i < ch.times.size(); i++) {
+                float* v = &ch.values[i * (ch.property == AnimProperty::Rotation ? 4 : 3)];
+                if (ch.property == AnimProperty::Rotation) {
+                    Quat q = turnedQuat({v[0], v[1], v[2], v[3]});
+                    v[0] = q.x, v[1] = q.y, v[2] = q.z, v[3] = q.w;
+                } else {
+                    Vec3 p = ch.property == AnimProperty::Position ? turned({v[0], v[1], v[2]}) * k : turnedScale({v[0], v[1], v[2]});
+                    v[0] = p.x, v[1] = p.y, v[2] = p.z;
+                }
+            }
     if (s.normals == Normals::Recompute) {
         recomputeNormals(baked.mesh, s.smoothingAngle);
         for (NodeBuild& nb : nodes)
@@ -370,10 +540,205 @@ void applySettings(Sink& baked, std::vector<NodeBuild>& nodes, const ImportSetti
 
 // Applies the settings, counts triangles, then writes the textures, the baked
 // .mesh and one .mesh per node with geometry, all named after `stem`.
+// A right-handed matrix as a .mesh space transform.
+Transform trsOf(const Aff& a) {
+    double c[3][3], t[3];
+    for (int k = 0; k < 3; k++) {
+        for (int r = 0; r < 3; r++) c[k][r] = a.m[r][k];
+        t[k] = a.m[k][3];
+    }
+    return mirroredTrs(c, t);
+}
+
+constexpr size_t kMaxJoints = 64;  // SKINMESH_MAX_BONES in psxsplash skinmesh.hh
+constexpr size_t kMaxClips = 16;   // SKINMESH_MAX_CLIPS
+
+// Turns what a reader found into the .mesh space, before the settings: the
+// skeleton onto every sink whose vertices one skin moves, and the clips.
+// Joints are the joint nodes in tree order, each parented to the nearest
+// joint above it; a root joint's rest is its root-space transform. A joint's
+// keys are in its node's parent's space, so they are taken through whatever
+// lies between that and the parent joint (`prefix`).
+std::vector<AnimClip> buildRig(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes, const RigSource& rig,
+                               const ImportSettings& settings) {
+    std::vector<int> jointOf(nodes.size(), -1), jointNodes;
+    std::vector<Joint> joints;
+    std::vector<Aff> prefix;
+    std::set<std::string> names;
+    for (size_t i = 0; i < nodes.size(); i++) {
+        if (!nodes[i].joint) continue;
+        int p = nodes[i].parent;
+        while (p >= 0 && jointOf[size_t(p)] < 0) p = nodes[size_t(p)].parent;
+        Joint j;
+        const std::string base = nodes[i].name.empty() ? std::string("Joint") : nodes[i].name;
+        j.name = base;
+        for (int k = 2; names.count(j.name); k++) j.name = base + "_" + std::to_string(k);
+        names.insert(j.name);
+        j.parent = p < 0 ? -1 : jointOf[size_t(p)];
+        const Aff toParent = p < 0 ? Aff{} : inverse(nodes[size_t(p)].world);
+        const Transform t = trsOf(mul(toParent, nodes[i].world));
+        j.position = t.position, j.rotation = t.rotation, j.scale = t.scale;
+        prefix.push_back(mul(toParent, nodes[i].keySpace));
+        jointOf[i] = int(joints.size());
+        jointNodes.push_back(int(i));
+        joints.push_back(std::move(j));
+    }
+    if (joints.empty()) return {};
+    if (joints.size() > kMaxJoints)
+        out.warnings.push_back("the skeleton has " + std::to_string(joints.size()) + " joints, psxsplash draws at most " +
+                               std::to_string(kMaxJoints) + ": delete helper bones (IK targets, poles, twist bones) in the modelling tool");
+
+    // A sink takes the skeleton when one skin moves every vertex of it.
+    int blended = 0, unweighted = 0;
+    auto attach = [&](Sink& sink, bool count) {
+        if (sink.influences.empty()) return false;
+        const int s = sink.influences[0].skin;
+        if (s < 0 || size_t(s) >= rig.skins.size()) return false;
+        for (const Influence& inf : sink.influences)
+            if (inf.skin != s) return false;
+        MeshSkin sk;
+        sk.joints = joints;
+        for (int node : jointNodes) {
+            auto it = rig.skins[size_t(s)].inverseBind.find(node);
+            const Aff ib = mirrored(it != rig.skins[size_t(s)].inverseBind.end() ? it->second : inverse(nodes[size_t(node)].world));
+            std::array<float, 12> a;
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 4; c++) a[size_t(r * 4 + c)] = float(ib.m[r][c]) + 0.0f;
+            sk.inverseBind.push_back(a);
+        }
+        for (const Influence& inf : sink.influences) {
+            std::vector<std::pair<int, float>> w;  // (joint, weight), one entry per joint
+            for (auto [node, weight] : inf.weights) {
+                if (!(weight > 0) || node < 0 || size_t(node) >= nodes.size() || jointOf[size_t(node)] < 0) continue;
+                const int j = jointOf[size_t(node)];
+                auto it = std::find_if(w.begin(), w.end(), [&](const auto& e) { return e.first == j; });
+                if (it != w.end()) it->second += weight;
+                else w.push_back({j, weight});
+            }
+            std::stable_sort(w.begin(), w.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+            if (w.size() > 4) w.resize(4);
+            float sum = 0;
+            for (const auto& e : w) sum += e.second;
+            std::array<int, 4> vj{0, 0, 0, 0};
+            std::array<float, 4> vw{0, 0, 0, 0};
+            if (w.empty() || !(sum > 0)) {
+                vw[0] = 1;
+                unweighted += count;
+            } else {
+                for (size_t k = 0; k < w.size(); k++) vj[k] = w[k].first, vw[k] = w[k].second / sum;
+                blended += count && vw[1] > 0.001f;
+            }
+            sk.vertexJoints.push_back(vj);
+            sk.vertexWeights.push_back(vw);
+        }
+        sink.mesh.skin = std::move(sk);
+        return true;
+    };
+    bool anySkinned = false;
+    std::string loose;  // a mesh hanging off a joint that no skin moves
+    for (NodeBuild& nb : nodes) {
+        if (!nb.local) continue;
+        if (attach(*nb.local, true)) {
+            anySkinned = true;
+            continue;
+        }
+        int p = nb.parent;
+        while (p >= 0 && jointOf[size_t(p)] < 0) p = nodes[size_t(p)].parent;
+        if (p >= 0 && loose.empty()) loose = "'" + nb.name + "' hangs off joint '" + joints[size_t(jointOf[size_t(p)])].name + "'";
+    }
+    out.skinned = attach(baked, false);
+    if (anySkinned && !out.skinned && settings.mergeMeshes)
+        out.warnings.push_back("the merged mesh mixes skinned and unskinned parts, so it has no skeleton: turn off Merge meshes to animate it");
+    if (!loose.empty())
+        out.warnings.push_back(loose + " but no skin moves it, so it will not follow the animation: weight it to that joint");
+    if (blended)
+        out.warnings.push_back(std::to_string(blended) +
+                               " vertices are weighted to more than one joint; psxsplash skins rigidly, one bone per vertex: the heaviest "
+                               "joint wins; weight-paint to single bones for exact deformation");
+    if (unweighted)
+        out.warnings.push_back(std::to_string(unweighted) + " vertices have no bone weights and follow joint '" + joints[0].name +
+                               "': weight them in the modelling tool");
+
+    // Clips, keys mirrored and taken through the joint's prefix.
+    std::vector<AnimClip> clips;
+    bool uneven = false;
+    for (const ClipSource& cs : rig.clips) {
+        AnimClip c;
+        c.name = cs.name;
+        c.length = std::max(0.0f, cs.length);
+        for (const ChannelSource& src : cs.channels) {
+            if (src.node < 0 || size_t(src.node) >= nodes.size() || jointOf[size_t(src.node)] < 0 || src.channel.times.empty()) continue;
+            const size_t j = size_t(jointOf[size_t(src.node)]);
+            AnimChannel ch = src.channel;
+            ch.joint = joints[j].name;
+            const bool through = !isIdentity(prefix[j]);
+            const Aff x = mirrored(prefix[j]);
+            const Transform xt = trsOf(prefix[j]);
+            const float smin = std::min({std::fabs(xt.scale.x), std::fabs(xt.scale.y), std::fabs(xt.scale.z)});
+            const float smax = std::max({std::fabs(xt.scale.x), std::fabs(xt.scale.y), std::fabs(xt.scale.z)});
+            if (through && ch.property != AnimProperty::Position && smax - smin > 1e-4f * smax) uneven = true;
+            const size_t stride = ch.property == AnimProperty::Rotation ? 4 : 3;
+            for (size_t i = 0; i < ch.times.size(); i++) {
+                float* v = &ch.values[i * stride];
+                if (ch.property == AnimProperty::Position) {
+                    const double p[3] = {-v[0], v[1], v[2]};
+                    for (int r = 0; r < 3; r++)
+                        v[r] = float(through ? x.m[r][0] * p[0] + x.m[r][1] * p[1] + x.m[r][2] * p[2] + x.m[r][3] : p[r]) + 0.0f;
+                } else if (ch.property == AnimProperty::Rotation) {
+                    Quat q{v[0], -v[1] + 0.0f, -v[2] + 0.0f, v[3]};
+                    if (through) q = mulQuat(xt.rotation, q);
+                    v[0] = q.x, v[1] = q.y, v[2] = q.z, v[3] = q.w;
+                } else if (through) {
+                    v[0] *= xt.scale.x, v[1] *= xt.scale.y, v[2] *= xt.scale.z;
+                }
+            }
+            c.length = std::max(c.length, ch.times.back());
+            c.channels.push_back(std::move(ch));
+        }
+        if (c.channels.empty()) {
+            out.warnings.push_back("animation '" + cs.name + "' moves no joint and was left out: only skeleton animation is imported");
+            continue;
+        }
+        clips.push_back(std::move(c));
+    }
+    if (uneven)
+        out.warnings.push_back("a joint sits under a non-uniform scale its keys cannot carry exactly: apply the armature's scale in the modelling tool");
+    if (!anySkinned && !out.skinned) return clips;
+    if (clips.empty())
+        out.warnings.push_back("the file has no skeleton animation; psxsplash only draws a skinned mesh that has a clip, so the model gets no "
+                               "skin component and stays in its rest pose");
+    else if (clips.size() > kMaxClips)
+        out.warnings.push_back(std::to_string(clips.size()) + " animations, a skin plays at most " + std::to_string(kMaxClips) +
+                               ": the first " + std::to_string(kMaxClips) + " go on the skin component, swap in others by hand");
+    return clips;
+}
+
+// A skinned node's mesh is in root space: its transform becomes the inverse of
+// its parent's world, so it sits at the model's root, and each child keeps its
+// world. Runs on the transforms after the settings.
+void placeRootSpaceNodes(std::vector<NodeBuild>& nodes) {
+    std::vector<Aff> world(nodes.size()), placed(nodes.size());
+    for (size_t i = 0; i < nodes.size(); i++) {
+        const int p = nodes[i].parent;
+        const Aff local = affOf(nodes[i].transform);
+        world[i] = p < 0 ? local : mul(world[size_t(p)], local);
+        placed[i] = nodes[i].rootSpace ? Aff{} : world[i];
+    }
+    for (size_t i = 0; i < nodes.size(); i++) {
+        const int p = nodes[i].parent;
+        if (!nodes[i].rootSpace && (p < 0 || !nodes[size_t(p)].rootSpace)) continue;
+        // In the .mesh space; trsOf takes a right-handed matrix.
+        nodes[i].transform = trsOf(mirrored(mul(p < 0 ? Aff{} : inverse(placed[size_t(p)]), placed[i])));
+    }
+}
+
 void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes, const std::vector<SourceMaterial>& mats,
-                  const fs::path& source, const fs::path& project, const ImportSettings& settings, const std::string& stem) {
+                  const RigSource& rig, const fs::path& source, const fs::path& project, const ImportSettings& settings,
+                  const std::string& stem) {
     const std::string what = projectPath(source.filename());
-    applySettings(baked, nodes, settings);
+    std::vector<AnimClip> clips = buildRig(out, baked, nodes, rig, settings);
+    applySettings(baked, nodes, clips, settings);
+    placeRootSpaceNodes(nodes);
     const Mesh& mesh = baked.mesh;
     out.triangles = baked.triangles();
     if (out.triangles == 0) fail(what + " has no triangles to import");
@@ -419,12 +784,37 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     saveMesh(mesh, project / meshFile);
     out.mesh = projectPath(meshFile);
 
-    // The tree: models/<stem>/<node>.mesh, the folder cleared of an earlier
-    // import's meshes first.
+    // The tree: models/<stem>/<node>.mesh, and the clips beside them as
+    // models/<stem>/<clip>.anim, the folder cleared of an earlier import's
+    // meshes and clips first.
     const fs::path nodeDir = dir / stem;
     for (fs::directory_iterator it(project / nodeDir, ec), end; !ec && it != end; it.increment(ec))
-        if (it->path().extension() == ".mesh") fs::remove(it->path(), ec);
+        if (it->path().extension() == ".mesh" || it->path().extension() == ".anim") fs::remove(it->path(), ec);
     ec.clear();
+    bool madeDir = false;
+    auto makeDir = [&] {
+        if (madeDir) return;
+        fs::create_directories(project / nodeDir, ec);
+        if (ec) fail("cannot create " + projectPath(project / nodeDir) + ": " + ec.message());
+        madeDir = true;
+    };
+    // Clip names are what SkinnedAnim.Play takes: file-safe, unique, and at
+    // most 24 characters, which psxsplash keeps.
+    std::set<std::string> clipNames;
+    for (AnimClip& c : clips) {
+        const std::string base = safeName(c.name).substr(0, 24);
+        std::string name = base;
+        for (int k = 2; clipNames.count(lower(name)); k++) {
+            const std::string suffix = "_" + std::to_string(k);
+            name = base.substr(0, 24 - suffix.size()) + suffix;
+        }
+        clipNames.insert(lower(name));
+        c.name = name;
+        makeDir();
+        const fs::path file = nodeDir / (name + ".anim");
+        saveAnim(c, project / file);
+        out.clips.push_back(projectPath(file));
+    }
     std::set<std::string> taken;
     for (NodeBuild& nb : nodes) {
         ImportedNode node;
@@ -432,10 +822,8 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
         node.parent = nb.parent;
         node.transform = nb.transform;
         if (nb.local && nb.local->triangles() > 0) {
-            if (taken.empty()) {
-                fs::create_directories(project / nodeDir, ec);
-                if (ec) fail("cannot create " + projectPath(project / nodeDir) + ": " + ec.message());
-            }
+            makeDir();
+            node.skinned = nb.local->mesh.skin.has_value();
             std::string base = safeName(nb.name), name = base;
             for (int k = 2; taken.count(lower(name)); k++) name = base + "_" + std::to_string(k);
             taken.insert(lower(name));
@@ -548,14 +936,53 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         const double basis[3][3] = {{lm[0], lm[1], lm[2]}, {lm[4], lm[5], lm[6]}, {lm[8], lm[9], lm[10]}};
         const double t[3] = {lm[12], lm[13], lm[14]};
         nb.transform = mirroredTrs(basis, t);
+        float wm[16];
+        cgltf_node_transform_world(n, wm);
+        nb.world = affOf(wm);
+        if (n->parent) {
+            cgltf_node_transform_world(n->parent, wm);
+            nb.keySpace = affOf(wm);
+        }
         indexOf[n] = int(tree.size());
         tree.push_back(std::move(nb));
+    }
+
+    // Skins used by the scene's meshes; their joints make the skeleton.
+    RigSource rig;
+    std::map<const cgltf_skin*, int> skinIndex;
+    for (const cgltf_node* n : nodes) {
+        if (!n->mesh || !n->skin || skinIndex.count(n->skin)) continue;
+        const cgltf_skin* sk = n->skin;
+        SkinSource src;
+        bool inScene = true;
+        for (size_t j = 0; j < sk->joints_count; j++) {
+            auto it = indexOf.find(sk->joints[j]);
+            if (it == indexOf.end()) {
+                inScene = false;
+                break;
+            }
+            Aff ib;
+            if (sk->inverse_bind_matrices) {
+                float m[16];
+                cgltf_accessor_read_float(sk->inverse_bind_matrices, j, m, 16);
+                ib = affOf(m);
+            }
+            src.inverseBind[it->second] = ib;
+        }
+        if (!inScene || sk->joints_count == 0) {
+            out.warnings.push_back("a skin whose joints are not all in the scene was left out, its mesh stays in its rest pose");
+            skinIndex[sk] = -1;
+            continue;
+        }
+        for (auto [node, ib] : src.inverseBind) tree[size_t(node)].joint = true;
+        skinIndex[sk] = int(rig.skins.size());
+        rig.skins.push_back(std::move(src));
     }
 
     Sink baked;
     std::map<const cgltf_material*, int> materialIndex;
     std::vector<const cgltf_material*> materialOf;
-    bool anyUv = false, anyColor = false, skipped = false, skinned = false;
+    bool anyUv = false, anyColor = false, skipped = false;
     for (const cgltf_node* n : nodes)
         for (size_t pi = 0; n->mesh && pi < n->mesh->primitives_count; pi++) {
             const cgltf_primitive& p = n->mesh->primitives[pi];
@@ -564,9 +991,13 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         }
 
     // Writes one primitive into `sink` through the column-major matrix `m`.
-    auto emitPrimitive = [&](Sink& sink, int material, const float* m, const cgltf_primitive& p, const std::vector<int>& idx) {
+    // `skin` (index into rig.skins, -1 for none) moves the vertices of `node`.
+    auto emitPrimitive = [&](Sink& sink, int material, const float* m, const cgltf_primitive& p, const std::vector<int>& idx,
+                             const cgltf_node* node, int skin) {
         Mesh& mesh = sink.mesh;
-        Emitter emit{mesh, anyUv, anyColor};
+        Emitter emit{mesh, sink.influences, anyUv, anyColor, {}};
+        const Accessor joints[2] = {attribute(p, cgltf_attribute_type_joints, 0), attribute(p, cgltf_attribute_type_joints, 1)};
+        const Accessor weights[2] = {attribute(p, cgltf_attribute_type_weights, 0), attribute(p, cgltf_attribute_type_weights, 1)};
         Accessor pos = attribute(p, cgltf_attribute_type_position, 0);
         Accessor nrm = attribute(p, cgltf_attribute_type_normal, 0);
         Accessor uv = attribute(p, cgltf_attribute_type_texcoord, 0);
@@ -594,6 +1025,16 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
                 if (det < 0) t = {-t.x, -t.y, -t.z};
                 nn = unit(t);
             }
+            emit.influence.skin = skin;
+            emit.influence.weights.clear();
+            for (int set = 0; skin >= 0 && set < 2; set++) {
+                if (!joints[set].a || !weights[set].a) continue;
+                for (int k = 0; k < 4 && k < joints[set].comps; k++) {
+                    const size_t jn = size_t(joints[set].at(i, k));
+                    if (jn < node->skin->joints_count)
+                        emit.influence.weights.push_back({indexOf[node->skin->joints[jn]], weights[set].at(i, k)});
+                }
+            }
             return emit.vertex(w, nn, uv.a ? Vec2{uv.at(i, 0), 1.0f - uv.at(i, 1)} : Vec2{0, 0},
                                col.a ? std::array<float, 4>{col.at(i, 0), col.at(i, 1), col.at(i, 2), col.comps == 4 ? col.at(i, 3) : 1.0f}
                                      : std::array<float, 4>{1, 1, 1, 1});
@@ -614,10 +1055,14 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
     for (const cgltf_node* n : nodes) {
         if (!n->mesh) continue;
-        skinned |= n->skin != nullptr;
+        // A skinned node's transform is ignored (glTF 2.0, 3.7.3.3): the
+        // joints place its vertices, which are in root space.
+        const int skin = n->skin ? skinIndex[n->skin] : -1;
         float m[16];
         cgltf_node_transform_world(n, m);
+        if (skin >= 0) std::copy(identity, identity + 16, m);
         NodeBuild& nb = tree[size_t(indexOf[n])];
+        nb.rootSpace = skin >= 0;
         for (size_t pi = 0; pi < n->mesh->primitives_count; pi++) {
             const cgltf_primitive& p = n->mesh->primitives[pi];
             if (p.type != cgltf_primitive_type_triangles) {
@@ -639,13 +1084,53 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
                 materialOf.push_back(p.material);
             }
             // Baked into root space, and again in the node's own space.
-            emitPrimitive(baked, mi->second, m, p, idx);
+            emitPrimitive(baked, mi->second, m, p, idx, n, skin);
             if (!nb.local) nb.local.emplace();
-            emitPrimitive(*nb.local, mi->second, identity, p, idx);
+            emitPrimitive(*nb.local, mi->second, identity, p, idx, n, skin);
         }
     }
     if (skipped) out.warnings.push_back("points and lines were left out, only triangles are imported");
-    if (skinned) out.warnings.push_back("the skeleton was left out, the model is imported in its rest pose");
+
+    // Animations: the channels on joints. Cubic-spline samplers keep their
+    // values (the middle of each in-tangent, value, out-tangent triple).
+    bool cubic = false, morph = false;
+    for (size_t a = 0; a < data->animations_count; a++) {
+        const cgltf_animation& an = data->animations[a];
+        ClipSource clip;
+        clip.name = an.name && *an.name ? an.name : "Clip" + std::to_string(a + 1);
+        for (size_t c = 0; c < an.channels_count; c++) {
+            const cgltf_animation_channel& ch = an.channels[c];
+            auto it = ch.target_node ? indexOf.find(ch.target_node) : indexOf.end();
+            if (ch.target_path == cgltf_animation_path_type_weights) morph = true;
+            if (it == indexOf.end() || !tree[size_t(it->second)].joint || !ch.sampler) continue;
+            ChannelSource src;
+            src.node = it->second;
+            AnimChannel& out_ = src.channel;
+            if (ch.target_path == cgltf_animation_path_type_translation) out_.property = AnimProperty::Position;
+            else if (ch.target_path == cgltf_animation_path_type_rotation) out_.property = AnimProperty::Rotation;
+            else if (ch.target_path == cgltf_animation_path_type_scale) out_.property = AnimProperty::Scale;
+            else continue;
+            const cgltf_animation_sampler& sm = *ch.sampler;
+            const bool spline = sm.interpolation == cgltf_interpolation_type_cubic_spline;
+            cubic |= spline;
+            out_.interp = sm.interpolation == cgltf_interpolation_type_step ? AnimInterp::Step : AnimInterp::Linear;
+            const int stride = out_.property == AnimProperty::Rotation ? 4 : 3;
+            const size_t keys = sm.input->count;
+            if (sm.output->count < keys * (spline ? 3 : 1)) continue;
+            for (size_t k = 0; k < keys; k++) {
+                float t = 0, v[4] = {0, 0, 0, 1};
+                cgltf_accessor_read_float(sm.input, k, &t, 1);
+                cgltf_accessor_read_float(sm.output, spline ? k * 3 + 1 : k, v, size_t(stride));
+                if (!out_.times.empty() && t < out_.times.back()) t = out_.times.back();
+                out_.times.push_back(std::max(0.0f, t));
+                out_.values.insert(out_.values.end(), v, v + stride);
+            }
+            if (!out_.times.empty()) clip.channels.push_back(std::move(src));
+        }
+        rig.clips.push_back(std::move(clip));
+    }
+    if (cubic) out.warnings.push_back("cubic-spline keys were read by their values only and play linearly: bake the animation to linear keys for its exact curve");
+    if (morph) out.warnings.push_back("morph target (shape key) animation was left out, psxsplash has no morph targets");
 
     std::vector<SourceMaterial> mats;
     for (const cgltf_material* mat : materialOf) {
@@ -667,7 +1152,7 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         }
         mats.push_back(std::move(sm));
     }
-    finishImport(out, baked, tree, mats, source, project, settings, stem);
+    finishImport(out, baked, tree, mats, rig, source, project, settings, stem);
     return out;
 }
 
@@ -695,7 +1180,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     Sink baked;
     std::map<const ufbx_material*, int> materialIndex;
     std::vector<const ufbx_material*> materialOf;
-    bool anyUv = false, anyColor = false, skipped = false, skinned = false;
+    bool anyUv = false, anyColor = false, skipped = false;
     for (const ufbx_node* n : scene->nodes)
         if (n->mesh) {
             anyUv |= n->mesh->vertex_uv.exists;
@@ -705,10 +1190,13 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     // Writes the node's mesh into `sink` through `toSpace`. ufbx_matrix_for_normals
     // already flips normals under a negative determinant.
     std::vector<uint32_t> tri;
-    auto emitMesh = [&](Sink& sink, const ufbx_node* n, const ufbx_matrix& toSpace) {
+    // With `skin` (index into rig.skins) set, each vertex takes the weights of
+    // the mesh's first skin deformer, joints by ufbx typed id.
+    auto emitMesh = [&](Sink& sink, const ufbx_node* n, const ufbx_matrix& toSpace, int skin) {
         const ufbx_mesh* me = n->mesh;
         Mesh& mesh = sink.mesh;
-        Emitter emit{mesh, anyUv, anyColor};
+        Emitter emit{mesh, sink.influences, anyUv, anyColor, {}};
+        const ufbx_skin_deformer* deformer = skin >= 0 ? me->skin_deformers.data[0] : nullptr;
         ufbx_matrix forNormals = ufbx_matrix_for_normals(&toSpace);
         bool reverse = ufbx_matrix_determinant(&toSpace) >= 0;
         tri.resize(me->max_face_triangles * 3);
@@ -749,6 +1237,17 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
                     ufbx_vec4 c = me->vertex_color.values.data[me->vertex_color.indices.data[ix]];
                     col = {float(c.x), float(c.y), float(c.z), float(c.w)};
                 }
+                emit.influence.skin = skin;
+                emit.influence.weights.clear();
+                const uint32_t vi = me->vertex_indices.data[ix];
+                if (deformer && vi < deformer->vertices.count) {
+                    const ufbx_skin_vertex& sv = deformer->vertices.data[vi];
+                    for (uint32_t k = 0; k < sv.num_weights; k++) {
+                        const ufbx_skin_weight& sw = deformer->weights.data[sv.weight_begin + k];
+                        const ufbx_node* bone = deformer->clusters.data[sw.cluster_index]->bone_node;
+                        if (bone) emit.influence.weights.push_back({int(bone->typed_id), float(sw.weight)});
+                    }
+                }
                 return emit.vertex(w, nn, uv, col);
             };
             uint32_t count = ufbx_triangulate_face(tri.data(), tri.size(), me, face);
@@ -766,6 +1265,8 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     // conversion) goes into each top-level node. Every instance is baked into
     // root space, and written again in its node's own space.
     std::vector<NodeBuild> tree;
+    std::vector<int> treeOf(scene->nodes.count, -1);  // by typed id
+    std::vector<const ufbx_node*> skinnedNodes;       // by skin index
     std::function<void(const ufbx_node*, int)> walk = [&](const ufbx_node* n, int parent) {
         NodeBuild nb;
         nb.name.assign(n->name.data, n->name.length);
@@ -776,13 +1277,22 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
             for (int r = 0; r < 3; r++) basis[c][r] = local.cols[c].v[r];
         for (int r = 0; r < 3; r++) t[r] = local.cols[3].v[r];
         nb.transform = mirroredTrs(basis, t);
+        nb.world = affOf(n->node_to_world);
+        if (n->parent) nb.keySpace = affOf(n->parent->node_to_world);
         if (n->mesh) {
-            skinned |= n->mesh->skin_deformers.count > 0;
-            emitMesh(baked, n, n->geometry_to_world);
+            // A skinned mesh stays in root space, where its bones put it.
+            int skin = -1;
+            if (n->mesh->skin_deformers.count > 0 && n->mesh->skin_deformers.data[0]->clusters.count > 0) {
+                skin = int(skinnedNodes.size());
+                skinnedNodes.push_back(n);
+            }
+            emitMesh(baked, n, n->geometry_to_world, skin);
             nb.local.emplace();
-            emitMesh(*nb.local, n, n->geometry_to_node);
+            nb.rootSpace = skin >= 0;
+            emitMesh(*nb.local, n, skin >= 0 ? n->geometry_to_world : n->geometry_to_node, skin);
         }
         int self = int(tree.size());
+        treeOf[n->typed_id] = self;
         tree.push_back(std::move(nb));
         for (const ufbx_node* c : n->children) walk(c, self);
     };
@@ -791,7 +1301,74 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     else
         for (const ufbx_node* c : scene->root_node->children) walk(c, -1);
     if (skipped) out.warnings.push_back("points and lines were left out, only triangles are imported");
-    if (skinned) out.warnings.push_back("the skeleton was left out, the model is imported in its rest pose");
+
+    // The skeleton: every bone a skin uses, and the bones above it. Each
+    // skin binds root space through the mesh's geometry_to_world.
+    RigSource rig;
+    for (const ufbx_node* n : skinnedNodes) {
+        SkinSource src;
+        const Aff toGeometry = inverse(affOf(n->geometry_to_world));
+        for (const ufbx_skin_cluster* c : n->mesh->skin_deformers.data[0]->clusters) {
+            if (!c->bone_node || treeOf[c->bone_node->typed_id] < 0) continue;
+            for (const ufbx_node* b = c->bone_node; b && treeOf[b->typed_id] >= 0 && (b == c->bone_node || b->bone); b = b->parent)
+                tree[size_t(treeOf[b->typed_id])].joint = true;
+            src.inverseBind[treeOf[c->bone_node->typed_id]] = mul(affOf(c->geometry_to_bone), toGeometry);
+        }
+        rig.skins.push_back(std::move(src));
+    }
+    auto remap = [&](Sink& sink) {
+        for (Influence& inf : sink.influences)
+            for (auto& w : inf.weights) w.first = w.first >= 0 && size_t(w.first) < treeOf.size() ? treeOf[size_t(w.first)] : -1;
+    };
+    remap(baked);
+    for (NodeBuild& nb : tree)
+        if (nb.local) remap(*nb.local);
+
+    // Animation stacks, baked by ufbx to linear keys at 30 Hz or less.
+    if (!skinnedNodes.empty())
+        for (const ufbx_anim_stack* stack : scene->anim_stacks) {
+            ufbx_bake_opts bo{};
+            bo.resample_rate = 30;
+            bo.trim_start_time = true;
+            ufbx_error berr;
+            ufbx_baked_anim* bakedAnim = ufbx_bake_anim(scene.get(), stack->anim, &bo, &berr);
+            if (!bakedAnim) {
+                out.warnings.push_back("animation '" + std::string(stack->name.data, stack->name.length) +
+                                       "' could not be read: " + std::string(berr.description.data, berr.description.length));
+                continue;
+            }
+            std::unique_ptr<ufbx_baked_anim, void (*)(ufbx_baked_anim*)> guard(bakedAnim, ufbx_free_baked_anim);
+            ClipSource clip;
+            clip.name.assign(stack->name.data, stack->name.length);
+            if (clip.name.empty()) clip.name = "Clip" + std::to_string(rig.clips.size() + 1);
+            clip.length = float(std::max(0.0, bakedAnim->playback_duration));
+            for (const ufbx_baked_node& bn : bakedAnim->nodes) {
+                const int node = bn.typed_id < treeOf.size() ? treeOf[bn.typed_id] : -1;
+                if (node < 0 || !tree[size_t(node)].joint) continue;
+                auto vec3s = [&](const ufbx_baked_vec3_list& keys, AnimProperty prop) {
+                    ChannelSource src;
+                    src.node = node;
+                    src.channel.property = prop;
+                    for (const ufbx_baked_vec3& k : keys) {
+                        src.channel.times.push_back(float(std::max(0.0, k.time)));
+                        src.channel.values.insert(src.channel.values.end(), {float(k.value.x), float(k.value.y), float(k.value.z)});
+                    }
+                    if (!src.channel.times.empty()) clip.channels.push_back(std::move(src));
+                };
+                vec3s(bn.translation_keys, AnimProperty::Position);
+                vec3s(bn.scale_keys, AnimProperty::Scale);
+                ChannelSource rot;
+                rot.node = node;
+                rot.channel.property = AnimProperty::Rotation;
+                for (const ufbx_baked_quat& k : bn.rotation_keys) {
+                    rot.channel.times.push_back(float(std::max(0.0, k.time)));
+                    rot.channel.values.insert(rot.channel.values.end(),
+                                              {float(k.value.x), float(k.value.y), float(k.value.z), float(k.value.w)});
+                }
+                if (!rot.channel.times.empty()) clip.channels.push_back(std::move(rot));
+            }
+            rig.clips.push_back(std::move(clip));
+        }
 
     std::vector<SourceMaterial> mats;
     for (const ufbx_material* mat : materialOf) {
@@ -820,7 +1397,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
         }
         mats.push_back(std::move(sm));
     }
-    finishImport(out, baked, tree, mats, source, project, settings, stem);
+    finishImport(out, baked, tree, mats, rig, source, project, settings, stem);
     return out;
 }
 

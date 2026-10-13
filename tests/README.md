@@ -245,5 +245,12 @@ a display (CI runs it under `xvfb-run` on Linux).
 
     python3 scripteditorcheck.py <splashedit>
 
+`exportflipcheck.py` lets the viewport draw the courtyard example, then exports a disc with
+Ctrl+B and compares its `SCENE_0.{SPK,VRM,SPU}` with those of `splashpack-cli disc` byte for
+byte. The viewport loads its textures bottom row first; export must still decode them top row
+first. Needs a display (CI runs it under `xvfb-run` on Linux).
+
+    python3 exportflipcheck.py <splashedit> <splashpack-cli>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

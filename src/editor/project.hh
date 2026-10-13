@@ -49,14 +49,23 @@ AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesys
 // game_logic, "script" when nothing is left), written as scripts/<name>.lua,
 // numbered (<name>_2.lua) when that is taken: an existing file is never
 // overwritten. The text names the psxsplash callbacks a script of its kind
-// gets: onCreate for an object, onSceneCreationStart/End for a scene.
+// gets: onCreate for an object, onSceneCreationStart/End for a scene,
+// onTriggerEnter/Exit for a Trigger component's script, whose file is
+// <name>_trigger.lua.
+enum class ScriptKind { Object, Scene, Trigger };
 std::string scriptFileStem(const std::string& name);
-std::string scriptTemplate(const std::string& name, bool scene);
+std::string scriptTemplate(const std::string& name, ScriptKind kind);
+inline std::string scriptTemplate(const std::string& name, bool scene) {
+    return scriptTemplate(name, scene ? ScriptKind::Scene : ScriptKind::Object);
+}
 struct NewScript {
     std::string path;   // project-relative, '/'-separated; empty on failure
     std::string error;  // empty on success
 };
-NewScript createScript(const std::filesystem::path& project, const std::string& name, bool scene);
+NewScript createScript(const std::filesystem::path& project, const std::string& name, ScriptKind kind);
+inline NewScript createScript(const std::filesystem::path& project, const std::string& name, bool scene) {
+    return createScript(project, name, scene ? ScriptKind::Scene : ScriptKind::Object);
+}
 
 // The objects an imported model becomes, the top one named `name`. A model of
 // one node, or any model with `settings.mergeMeshes`, is one object drawing

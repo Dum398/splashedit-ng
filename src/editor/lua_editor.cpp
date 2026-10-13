@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
@@ -345,6 +346,100 @@ void Buffer::insert(std::string_view s) {
 
 void Buffer::deleteSelection() { replace(selStart(), selEnd(), ""); }
 
+// --- Auto-closing brackets and quotes ------------------------------------------
+
+static char closerOf(char c) {
+    switch (c) {
+        case '(': return ')';
+        case '[': return ']';
+        case '{': return '}';
+        case '"': return '"';
+        case '\'': return '\'';
+        default: return 0;
+    }
+}
+
+int Buffer::autoClosers() const { return m_closerRevision == m_revision ? (int)m_closers.size() : 0; }
+
+void Buffer::dropStaleClosers() {
+    if (m_closerRevision != m_revision) {
+        m_closers.clear();
+        return;
+    }
+    // The cursor left the pair: off the line, or past the closer.
+    while (!m_closers.empty() && (m_closers.back().line != m_cursor.line || m_closers.back() < m_cursor)) m_closers.pop_back();
+}
+
+// Moves the closers on `line` at or after `col` by `by` bytes.
+static void shiftClosers(std::vector<Pos>& closers, int line, int col, int by) {
+    for (Pos& p : closers)
+        if (p.line == line && p.col >= col) p.col += by;
+}
+
+void Buffer::type(std::string_view s) {
+    dropStaleClosers();
+    const char c = s.size() == 1 ? s[0] : 0;
+    const std::string& l = m_lines[m_cursor.line];
+    // Over a closer type() put there: step over it.
+    if (c && !hasSelection() && !m_closers.empty() && m_closers.back() == m_cursor && m_cursor.col < (int)l.size() &&
+        l[m_cursor.col] == c) {
+        m_closers.pop_back();
+        moveTo(Pos{m_cursor.line, m_cursor.col + 1});
+        return;
+    }
+    const char close = closerOf(c);
+    if (close && hasSelection() && selStart().line == selEnd().line) {
+        // Wraps the selection, which stays selected inside.
+        Pos a = selStart();
+        std::string inner = selectedText();
+        replace(a, selEnd(), std::string(1, c) + inner + close);
+        select(Pos{a.line, a.col + 1}, Pos{a.line, a.col + 1 + (int)inner.size()});
+        m_closers.clear();
+        return;
+    }
+    if (close && !hasSelection()) {
+        const int col = m_cursor.col;
+        const char next = col < (int)l.size() ? l[col] : 0;
+        bool pair = !next || std::strchr(" \t;:.,=)]}>", next);
+        if (pair && (c == '"' || c == '\'')) {
+            // Not after a word ("don't"), nor in a string or a comment.
+            if (col > 0 && (isIdent(l[col - 1]) || ((unsigned char)l[col - 1] & 0x80))) pair = false;
+            int level = -1;  // no long string or comment open
+            bool comment = false;
+            for (int i = 0; pair && i <= m_cursor.line; ++i) {
+                std::vector<Token> toks = tokenizeLine(m_lines[i], &level, &comment);
+                if (i < m_cursor.line) continue;
+                for (const Token& t : toks) {
+                    if (t.kind != Tok::String && t.kind != Tok::Comment && t.kind != Tok::Error) continue;
+                    // At a token's end the cursor is still in it when the token
+                    // runs on: a comment, an unfinished string, a long string.
+                    const bool runsOn = t.col + t.len == (int)l.size() && (t.kind != Tok::String || level >= 0);
+                    if (col > t.col && (col < t.col + t.len || (runsOn && col == t.col + t.len))) pair = false;
+                }
+            }
+        }
+        if (pair) {
+            Pos at = m_cursor;
+            shiftClosers(m_closers, at.line, at.col, 2);
+            insert(std::string{c, close});
+            m_cursor = m_anchor = Pos{at.line, at.col + 1};
+            m_undo.back().cursorAfter = m_cursor;
+            m_closers.push_back(m_cursor);
+            m_closerRevision = m_revision;
+            return;
+        }
+    }
+    const bool sel = hasSelection();
+    const Pos at = m_cursor;
+    insert(s);
+    if (!sel && s.find('\n') == std::string_view::npos) {
+        shiftClosers(m_closers, at.line, at.col, (int)s.size());
+        m_closerRevision = m_revision;
+    } else {
+        m_closers.clear();
+    }
+}
+
 static bool opensBlock(const std::string& line) {
     std::string t = line;
     size_t c = t.find("--");
@@ -400,6 +495,19 @@ void Buffer::newline() {
 void Buffer::backspace() {
     if (hasSelection()) return deleteSelection();
     if (m_cursor == Pos()) return;
+    dropStaleClosers();
+    {
+        // Between an opener and its auto-inserted closer: both go.
+        const std::string& l = m_lines[m_cursor.line];
+        const int col = m_cursor.col;
+        if (!m_closers.empty() && m_closers.back() == m_cursor && col > 0 && col < (int)l.size() && closerOf(l[col - 1]) == l[col]) {
+            m_closers.pop_back();
+            shiftClosers(m_closers, m_cursor.line, col, -2);
+            replace(Pos{m_cursor.line, col - 1}, Pos{m_cursor.line, col + 1}, "");
+            m_closerRevision = m_revision;
+            return;
+        }
+    }
     bool open = m_mergeOpen;
     Pos to = m_cursor, from = m_cursor;
     const std::string& l = m_lines[m_cursor.line];
@@ -420,6 +528,11 @@ void Buffer::backspace() {
     m_undo.pop_back();
     last.merge = 2;
     record(std::move(last));
+    // Typing fixes inside a pair keep its closer.
+    if (from.line == to.line) {
+        shiftClosers(m_closers, to.line, to.col, from.col - to.col);
+        m_closerRevision = m_revision;
+    }
 }
 
 void Buffer::del() {
@@ -562,6 +675,55 @@ std::optional<std::pair<Pos, Pos>> Buffer::find(std::string_view needle, Pos fro
         hit = it == hits.rend() ? hits.back() : *it;
     }
     return std::make_pair(hit, Pos{hit.line, hit.col + (int)needle.size()});
+}
+
+bool Buffer::selectionMatches(std::string_view needle, bool matchCase) const {
+    if (!hasSelection() || selStart().line != selEnd().line) return false;
+    std::string t = selectedText();
+    return t.size() == needle.size() && findIn(t, needle, 0, matchCase) == 0;
+}
+
+bool Buffer::replaceNext(std::string_view needle, std::string_view with, bool matchCase) {
+    if (needle.empty()) return false;
+    const bool did = selectionMatches(needle, matchCase);
+    if (did) replace(selStart(), selEnd(), with);
+    // After the replacement, so `with` containing `needle` is not found again.
+    if (auto m = find(needle, did ? m_cursor : selStart(), true, matchCase)) select(m->first, m->second);
+    return did;
+}
+
+int Buffer::replaceAll(std::string_view needle, std::string_view with, bool matchCase) {
+    if (needle.empty() || needle.find('\n') != std::string_view::npos) return 0;
+    int n = 0, first = -1, last = -1;
+    std::vector<std::string> out(m_lines.size());
+    std::vector<char> changed(m_lines.size(), 0);
+    for (int l = 0; l < lineCount(); ++l) {
+        const std::string& line = m_lines[l];
+        size_t at = 0;
+        bool any = false;
+        for (size_t hit; (hit = findIn(line, needle, at, matchCase)) != std::string::npos; at = hit + needle.size()) {
+            out[l].append(line, at, hit - at);
+            out[l] += with;
+            ++n;
+            any = true;
+        }
+        if (!any) continue;
+        out[l].append(line, at, std::string::npos);
+        changed[l] = 1;
+        if (first < 0) first = l;
+        last = l;
+    }
+    if (!n) return 0;
+    std::string text;
+    for (int l = first; l <= last; ++l) {
+        if (l > first) text += '\n';
+        text += changed[l] ? out[l] : m_lines[l];
+    }
+    const Pos keep = m_cursor;
+    replace(Pos{first, 0}, Pos{last, (int)m_lines[last].size()}, text);
+    m_cursor = m_anchor = clamp(keep);
+    m_undo.back().cursorAfter = m_cursor;
+    return n;
 }
 
 int Buffer::countMatches(std::string_view needle, bool matchCase) const {
@@ -1115,23 +1277,116 @@ Completions complete(const std::vector<std::string>& lines, Pos p, bool force) {
 
 // --- Script -----------------------------------------------------------------
 
+Script::Stamp Script::stamp() const {
+    Stamp s;
+    std::error_code ec;
+    s.time = std::filesystem::last_write_time(m_path, ec);
+    if (ec) return Stamp();
+    s.size = std::filesystem::file_size(m_path, ec);
+    s.exists = !ec;
+    return s;
+}
+
+bool Script::read(std::string* text, std::string* error) const {
+    std::ifstream in(m_path, std::ios::binary);
+    if (!in) {
+        if (error) *error = "cannot read " + m_path.filename().string();
+        return false;
+    }
+    text->assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
+}
+
+// The buffer's text for a file's: no byte order mark, no carriage returns.
+static std::string bufferText(std::string text, bool* crlf) {
+    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
+    *crlf = text.find("\r\n") != std::string::npos;
+    text.erase(std::remove(text.begin(), text.end(), '\r'), text.end());
+    return text;
+}
+
 bool Script::open(const std::filesystem::path& file, std::string* error) {
     m_path = file;
     std::error_code ec;
     std::string text;
+    m_diskText.clear();
+    m_stamp = Stamp();
     if (std::filesystem::exists(file, ec)) {
-        std::ifstream in(file, std::ios::binary);
-        if (!in) {
-            if (error) *error = "cannot read " + file.filename().string();
-            return false;
-        }
-        text.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-        if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) text.erase(0, 3);
-        m_crlf = text.find("\r\n") != std::string::npos;
+        m_stamp = stamp();
+        if (!read(&m_diskText, error)) return false;
+        text = bufferText(m_diskText, &m_crlf);
     }
     buffer.setText(text);
     m_savedRevision = std::filesystem::exists(file, ec) ? buffer.revision() : 0;
     m_checkedRevision = m_tokenRevision = 0;
+    return true;
+}
+
+bool Script::changedOnDisk() {
+    const Stamp now = stamp();
+    if (!now.exists || now == m_stamp) return false;
+    std::string text;
+    if (!read(&text, nullptr)) return false;
+    if (text == m_diskText) {
+        m_stamp = now;  // touched, or written back the same
+        return false;
+    }
+    return true;
+}
+
+void Script::keepMine() {
+    const Stamp now = stamp();
+    std::string text;
+    if (now.exists && read(&text, nullptr)) {
+        m_stamp = now;
+        m_diskText = std::move(text);
+    }
+}
+
+bool Script::reload(std::string* error) {
+    const Stamp now = stamp();
+    std::string raw;
+    if (!read(&raw, error)) return false;
+    bool crlf = false;
+    const std::string text = bufferText(raw, &crlf);
+    const std::string old = buffer.text();
+    if (text != old) {
+        // Only the part that differs is replaced, so the cursor can stay put.
+        size_t pre = 0, suf = 0;
+        const size_t n = std::min(old.size(), text.size());
+        while (pre < n && old[pre] == text[pre]) ++pre;
+        while (suf < n - pre && old[old.size() - 1 - suf] == text[text.size() - 1 - suf]) ++suf;
+        while (pre > 0 && isCont(old[pre])) --pre;
+        while (suf > 0 && isCont(old[old.size() - suf])) --suf;
+        auto posOf = [&](size_t off) {
+            Pos p;
+            for (size_t i = 0; i < off; ++i) {
+                if (old[i] == '\n') ++p.line, p.col = 0;
+                else ++p.col;
+            }
+            return p;
+        };
+        auto offOf = [&](Pos p) {
+            size_t off = 0;
+            for (int l = 0; l < p.line; ++l) off += buffer.line(l).size() + 1;
+            return off + p.col;
+        };
+        size_t cur = offOf(buffer.cursor());
+        const long delta = (long)text.size() - (long)old.size();
+        if (cur >= old.size() - suf) cur += delta;
+        else if (cur > pre) cur = std::min(cur, text.size() - suf);
+        buffer.replace(posOf(pre), posOf(old.size() - suf), std::string_view(text).substr(pre, text.size() - suf - pre));
+        Pos at;
+        for (size_t i = 0; i < cur && i < text.size(); ++i) {
+            if (text[i] == '\n') ++at.line, at.col = 0;
+            else ++at.col;
+        }
+        buffer.moveTo(buffer.clamp(at));
+    }
+    m_crlf = crlf;
+    m_stamp = now;
+    m_diskText = std::move(raw);
+    m_savedRevision = buffer.revision();
     return true;
 }
 
@@ -1165,6 +1420,8 @@ bool Script::save(std::string* error) {
         return false;
     }
     m_savedRevision = buffer.revision();
+    m_diskText = std::move(text);
+    m_stamp = stamp();
     return true;
 }
 

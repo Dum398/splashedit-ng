@@ -75,9 +75,15 @@ public:
 
     // Edits. Each replaces the selection when there is one and records undo.
     void insert(std::string_view s);
+    // Typed text. ( [ { " and ' insert their closer too (quotes not inside a
+    // word, a string or a comment; brackets only before a blank, the line's
+    // end or punctuation), and wrap a selection on one line. Typing a closer
+    // over one inserted that way steps over it. Anything else is insert().
+    void type(std::string_view s);
     // Enter: a newline that keeps the indentation, one level deeper after an
     // opening line (`then`, `do`, `function (...)`, `{`, ...).
     void newline();
+    // Between an opener and the closer type() put after it, deletes both.
     void backspace();
     void del();
     // Tab and Shift+Tab: indent or outdent the selected lines, or insert
@@ -102,6 +108,14 @@ public:
     // Next match of `needle` from `from` (wrapping around), or nothing.
     std::optional<std::pair<Pos, Pos>> find(std::string_view needle, Pos from, bool forward, bool matchCase) const;
     int countMatches(std::string_view needle, bool matchCase) const;
+    // Replace: with a match of `needle` selected, puts `with` there; then
+    // selects the next match. True when it replaced one.
+    bool replaceNext(std::string_view needle, std::string_view with, bool matchCase);
+    // Every match (left to right, not overlapping) as one undo step; the
+    // cursor stays where it was. Returns how many.
+    int replaceAll(std::string_view needle, std::string_view with, bool matchCase);
+    // Closers type() inserted that typing over still steps over, for tests.
+    int autoClosers() const;
 
     static constexpr int kTab = 4;
 
@@ -118,6 +132,8 @@ private:
     Pos endOf(Pos at, std::string_view s) const;
     void record(Edit e);
     void deleteSelection();
+    bool selectionMatches(std::string_view needle, bool matchCase) const;
+    void dropStaleClosers();
 
     std::vector<std::string> m_lines;
     Pos m_cursor, m_anchor;
@@ -125,6 +141,10 @@ private:
     std::vector<Edit> m_undo, m_redo;
     bool m_mergeOpen = false;
     uint64_t m_revision = 1, m_nextRevision = 2;
+    // Closers type() inserted, innermost last, valid while the text is at
+    // m_closerRevision (any other edit forgets them).
+    std::vector<Pos> m_closers;
+    uint64_t m_closerRevision = 0;
 };
 
 // --- Highlighting -----------------------------------------------------------
@@ -230,10 +250,34 @@ public:
     // Highlight tokens, cached per revision.
     const std::vector<std::vector<Token>>& tokens();
 
+    // Whether the file on disk changed since it was opened, saved or
+    // reloaded: its time or size moved and its text is not what was last
+    // read or written. A file that went missing is not a change (a save
+    // elsewhere may be replacing it); one that appears is.
+    bool changedOnDisk();
+    // Reads the file again. The new text replaces the old as one undo step,
+    // so Ctrl+Z gets the old text back; the cursor stays on its line (moved
+    // with the lines when the change was above it). Not dirty afterwards.
+    bool reload(std::string* error);
+    // Keep mine: this change on disk is no longer reported; saving
+    // overwrites it.
+    void keepMine();
+
     Buffer buffer;
 
 private:
+    struct Stamp {
+        bool exists = false;
+        std::filesystem::file_time_type time{};
+        uintmax_t size = 0;
+        friend bool operator==(const Stamp& a, const Stamp& b) { return a.exists == b.exists && a.time == b.time && a.size == b.size; }
+    };
+    Stamp stamp() const;
+    bool read(std::string* text, std::string* error) const;
+
     std::filesystem::path m_path;
+    Stamp m_stamp;
+    std::string m_diskText;  // as last read or written, line endings and all
     bool m_crlf = false;  // written back with the line endings it had
     uint64_t m_savedRevision = 0, m_checkedRevision = 0, m_tokenRevision = 0;
     Diagnostic m_diag;

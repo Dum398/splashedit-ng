@@ -192,10 +192,10 @@ static int resizeString(ImGuiInputTextCallbackData* d) {
     return 0;
 }
 
-bool searchField(const char* id, ImRect r, const char* placeholder, const char* shortcut, std::string* query, bool focus) {
+bool searchField(const char* id, ImRect r, const char* placeholder, const char* shortcut, std::string* query, bool focus, bool searchIcon) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float textX = r.Min.x + space::sm + 22;
+    const float textX = r.Min.x + space::sm + (searchIcon ? 22 : 0);
     // The clear button registers first so it wins over the field.
     const bool hasText = query && !query->empty();
     ImRect clear(ImVec2(r.Max.x - space::xs - 22, r.Min.y + 3), ImVec2(r.Max.x - space::xs, r.Max.y - 3));
@@ -218,8 +218,9 @@ bool searchField(const char* id, ImRect r, const char* placeholder, const char* 
     dl->AddRectFilled(r.Min, r.Max, color::field, radius::field + 1);
     dl->AddRect(r.Min, r.Max, editing ? color::accent : lerpColor(color::border, color::borderStrong, hovered ? 1.0f : h.hover),
                 radius::field + 1);
-    text(dl, ImVec2(r.Min.x + space::sm, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1,
-         hasText || editing ? color::textDim : color::textFaint, icon::search);
+    if (searchIcon)
+        text(dl, ImVec2(r.Min.x + space::sm, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1,
+             hasText || editing ? color::textDim : color::textFaint, icon::search);
     if (query) {
         const float right = hasText ? clear.Min.x : r.Max.x - space::sm;
         float padY = centerY(f.regular, type::body, r.Min.y, r.Max.y) - r.Min.y;

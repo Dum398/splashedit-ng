@@ -942,18 +942,23 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
 }
 
 // The inspector's New script: writes scripts/<name>.lua from a template, sets
-// it on the object's Script component (the scene's script when `object` is
-// null) as one undo step and opens it in the script editor.
-static void newScript(State& st, editor::Document& doc, const editor::ObjectPath* object) {
+// it on the object's Script component (its Trigger component with `trigger`,
+// the scene's script when `object` is null) as one undo step and opens it in
+// the script editor.
+static void newScript(State& st, editor::Document& doc, const editor::ObjectPath* object, bool trigger = false) {
     const splash::Object* o = object ? doc.object(*object) : nullptr;
-    if (object && (!o || !o->script)) return;
-    editor::NewScript ns = editor::createScript(doc.projectRoot(), o ? o->name : doc.sceneStem(), !o);
+    if (object && (!o || !(trigger ? o->trigger.has_value() : o->script.has_value()))) return;
+    const editor::ScriptKind kind = !o ? editor::ScriptKind::Scene : trigger ? editor::ScriptKind::Trigger : editor::ScriptKind::Object;
+    editor::NewScript ns = editor::createScript(doc.projectRoot(), o ? o->name : doc.sceneStem(), kind);
     if (!ns.error.empty()) {
         notify(st, "Cannot create a script: " + ns.error, true);
         return;
     }
     if (o) {
-        doc.edit(*object, [&](splash::Object& ob) { ob.script->lua = ns.path; });
+        doc.edit(*object, [&](splash::Object& ob) {
+            if (trigger) ob.trigger->lua = ns.path;
+            else ob.script->lua = ns.path;
+        });
         doc.endMerge();
     } else {
         doc.editSettings([&](splash::SceneSettings& s) { s.script = ns.path; });
@@ -4118,8 +4123,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             if (button("edittlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::fileCode, found ? "Edit script" : "Create script",
                        ButtonKind::Secondary, nullptr, "Opens the file in the script editor, beside the Scene."))
                 openScript(st, doc, tr.lua);
-            y += size::field + space::sm;
+        } else if (button("newtlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::plus, "New script", ButtonKind::Secondary,
+                          nullptr, "Writes scripts/<object name>_trigger.lua with onTriggerEnter and onTriggerExit, and opens it.")) {
+            newScript(st, doc, &path, true);
         }
+        y += size::field + space::sm;
         sectionEnd(top);
     }
     if (o->interactable) {

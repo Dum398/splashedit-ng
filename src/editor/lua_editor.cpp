@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <map>
 #include <set>
@@ -751,7 +752,7 @@ Diagnostic check(const std::string& source) {
             char* end = nullptr;
             long line = std::strtol(msg.c_str() + 7, &end, 10);
             if (end && *end == ':') {
-                d.line = std::max(0L, line - 1);
+                d.line = (int)std::max(0L, line - 1);
                 d.message = trim(std::string(end + 1));
             }
         }
@@ -980,7 +981,7 @@ static int matchScore(std::string_view label, std::string_view prefix) {
     size_t i = 0;
     for (char c : l)
         if (i < p.size() && c == p[i]) ++i;
-    return i == p.size() && p.size() >= 2 ? 3 : -1;
+    return i == p.size() && p.size() >= 3 ? 3 : -1;
 }
 
 static ItemKind kindOf(const ApiSymbol& s) {
@@ -1100,8 +1101,12 @@ Completions complete(const std::vector<std::string>& lines, Pos p, bool force) {
         int sx = matchScore(x.label, out.prefix), sy = matchScore(y.label, out.prefix);
         if (sx != sy) return sx < sy;
         if (kindRank(x.kind) != kindRank(y.kind)) return kindRank(x.kind) < kindRank(y.kind);
-        if (x.label.size() != y.label.size() && sx <= 1) return x.label.size() < y.label.size();
-        return x.label < y.label;
+        // Alphabetical, ignoring case, like a word list.
+        for (size_t i = 0; i < x.label.size() && i < y.label.size(); ++i) {
+            int a = std::tolower((unsigned char)x.label[i]), b = std::tolower((unsigned char)y.label[i]);
+            if (a != b) return a < b;
+        }
+        return x.label.size() < y.label.size();
     });
     // Only the word itself, already typed: nothing to offer.
     if (out.items.size() == 1 && out.items[0].label == out.prefix) out.items.clear();

@@ -2521,6 +2521,95 @@ void testEditMany() {
     CHECK(d.editMany({}, [](splash::Object&) {}) == 0);
 }
 
+// Copy, cut and paste of objects as clipboard text.
+void testClipboard() {
+    editor::Document d;
+    d.reset(sample());
+    const std::string text = d.copyObject({1});  // B with child B1
+    CHECK(!text.empty());
+    CHECK(d.copyObject({9}).empty());
+
+    // Paste after the original: numbered, children carried, selected, one undo step.
+    size_t hist = d.historySize();
+    auto p = d.pasteObjects(text, editor::ObjectPath{1});
+    CHECK(p && *p == editor::ObjectPath({2}));
+    CHECK(d.historySize() == hist + 1);
+    CHECK(d.selection() == p);
+    const splash::Object* pasted = d.object({2});
+    CHECK(pasted && pasted->name == "B (2)");
+    CHECK(pasted && pasted->children.size() == 1 && pasted->children[0].name == "B1");
+    CHECK(d.object({3}) && d.object({3})->name == "C");
+    CHECK(d.objectCount() == 6);
+    if (pasted) {
+        splash::Object same = *pasted;
+        same.name = "B";
+        CHECK(splash::writeObjectsText({same}) == text);  // equal to the original but for the name
+    }
+    CHECK(d.undo());
+    CHECK(d.scene().objects.size() == 3 && d.object({2})->name == "C" && d.objectCount() == 4);
+    CHECK(d.redo() && d.object({2})->name == "B (2)" && d.object({2, 0}));
+    CHECK(d.undo());
+
+    // Several objects at the end of the top level: a free name is kept, a
+    // taken one numbered, and the whole paste undoes as one step.
+    splash::Object z = named("Z", 7);
+    z.children.push_back(named("Z1"));
+    auto q = d.pasteObjects(splash::writeObjectsText({named("A"), z}), std::nullopt);
+    CHECK(q && *q == editor::ObjectPath({4}));
+    CHECK(d.scene().objects.size() == 5 && d.object({3})->name == "A (2)" && d.object({4})->name == "Z");
+    CHECK(d.object({4, 0}) && d.object({4, 0})->name == "Z1");
+    CHECK(d.selection() == q);
+    CHECK(d.undo());
+    CHECK(d.scene().objects.size() == 3 && d.objectCount() == 4);
+    CHECK(!d.canUndo());
+
+    // Into a child level, after B1; asset paths stay as they were.
+    splash::Object m = named("B1");
+    m.mesh = splash::MeshComponent{};
+    m.mesh->mesh = "meshes/crate.mesh";
+    m.script = splash::ScriptComponent{};
+    m.script->lua = "scripts/crate.lua";
+    auto r = d.pasteObjects(splash::writeObjectsText({m}), editor::ObjectPath{1, 0});
+    CHECK(r && *r == editor::ObjectPath({1, 1}));
+    const splash::Object* mo = d.object({1, 1});
+    CHECK(mo && mo->name == "B1 (2)" && mo->mesh && mo->mesh->mesh == "meshes/crate.mesh");
+    CHECK(mo && mo->script && mo->script->lua == "scripts/crate.lua");
+    CHECK(d.undo());
+
+    // Text that is not ours changes nothing.
+    const unsigned rev = d.revision();
+    hist = d.historySize();
+    d.select(editor::ObjectPath{0});
+    const std::string truncated = text.substr(0, text.size() / 2);
+    for (const std::string& t : {std::string(), std::string("Crate"), std::string("{}"), std::string("[1, 2]"),
+                                 std::string(R"({"splashedit-objects": 2, "objects": [{"name": "X"}]})"),
+                                 std::string(R"({"splashedit-objects": "1", "objects": [{"name": "X"}]})"),
+                                 std::string(R"({"splashedit-objects": 1, "objects": []})"),
+                                 std::string(R"({"splashedit-objects": 1, "objects": [{"nom": "X"}]})"),
+                                 std::string(R"({"splashedit-objects": 1, "objects": [{"name": "X"}, 3]})"),
+                                 std::string(R"({"format": "splashedit-ng/scene", "objects": [{"name": "X"}]})"),
+                                 truncated})
+        CHECK(!d.pasteObjects(t, editor::ObjectPath{0}));
+    CHECK(d.revision() == rev && d.historySize() == hist);
+    CHECK(d.scene().objects.size() == 3 && d.objectCount() == 4);
+    CHECK(d.selection() == editor::ObjectPath({0}));
+
+    // Cut: the copy's text, the object gone in one step; undo brings it back.
+    d.reset(sample());
+    d.select(editor::ObjectPath{1});
+    CHECK(d.cutObject({1}) == text);
+    CHECK(d.scene().objects.size() == 2 && d.object({1})->name == "C" && !d.selection());
+    CHECK(d.historySize() == 1);
+    CHECK(d.undo());
+    CHECK(d.object({1})->name == "B" && d.object({1, 0}) && d.object({1, 0})->name == "B1");
+    CHECK(!d.canUndo());
+    CHECK(d.cutObject({9}).empty() && d.historySize() == 1);
+    // Cut and paste elsewhere keeps the name when it is free there.
+    CHECK(d.redo());
+    auto s = d.pasteObjects(text, editor::ObjectPath{1});
+    CHECK(s && *s == editor::ObjectPath({2}) && d.object({2})->name == "B" && d.object({2, 0}));
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -2563,6 +2652,7 @@ int main(int argc, char** argv) {
     testHardwareRun();
     runHardwarePsxmon(0x0007);
     runHardwarePsxmon(0x0001);
+    testClipboard();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

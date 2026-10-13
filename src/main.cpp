@@ -77,6 +77,7 @@ struct Args {
     int width = 1600, height = 960;
     float mouseX = -1, mouseY = -1;
     int frames = 30;
+    int shotAt = -1;  // screenshot frame, overriding the padding after actions
     int viewMode = 0;
     const char* project = nullptr;  // project root; default: the bundled example
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
@@ -230,6 +231,7 @@ Args parse(int argc, char** argv) {
             a.dropFile = v.substr(0, at);
         }
         else if (!std::strcmp(argv[i], "--frames")) a.frames = std::atoi(next());
+        else if (!std::strcmp(argv[i], "--shot-at")) a.shotAt = std::atoi(next());
         else if (!std::strcmp(argv[i], "--clean")) a.viewMode = 1;
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
@@ -436,6 +438,8 @@ int main(int argc, char** argv) {
         timelineEnd += actionFrames(a);
     }
     if (args.screenshot && !args.actions.empty()) args.frames = std::max(args.frames, timelineEnd + 30);
+    // --shot-at: the exact frame, even mid-script (actions start at frame 5).
+    if (args.shotAt >= 0) args.frames = args.shotAt + 1;
 
     int frame = 0;
     bool running = true;

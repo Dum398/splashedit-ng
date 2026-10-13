@@ -4496,7 +4496,9 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.scriptsProject = doc.projectRoot();
     }
     const ImRect body = st.scripts.tabStrip(dl, st.timeline.dock(mid));
-    // The Scene draws the timeline's pose at the scrub head (empty when closed).
+    // The timeline takes this frame's scrub first, so the Scene draws the
+    // pose at the new scrub head now rather than a frame late (empty when closed).
+    st.timeline.draw(dl, doc);
     view.setPreview(st.timeline.preview(doc));
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
@@ -4506,7 +4508,6 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.viewportRect = ImRect();
         if (st.scripts.hasKeyboard()) st.play.gameFocus = false;
     }
-    st.timeline.draw(dl, doc);
     if (!st.scripts.notice.empty()) {
         notify(st, st.scripts.notice, st.scripts.noticeBad);
         st.scripts.notice.clear();

@@ -283,7 +283,8 @@ curve, and Delete takes the key, not the object. Needs a display.
 
 `timelinepreviewcheck.py` checks the Scene view's preview of the Timeline panel: on a copy of the
 courtyard example with a cutscene that lifts and turns the Crate, it scrubs to frame 0 and to 75 and
-compares the Scene view's pixels in the two screenshots, saves while previewing and
+compares the Scene view's pixels in the two screenshots, takes one more (`--shot-at 6`) on the very
+frame the scrub click presses and expects the frame 75 pose already there, saves while previewing and
 compares the file byte for byte with a save made without the timeline, and drags the Crate's move
 gizmo: at frame 0 (the scene's own pose) the drag moves it, at frame 75 (posed) the gizmo is hidden
 and the same drag writes nothing. Needs a display.

@@ -703,7 +703,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         }
     }
     // The compile error: a squiggle under the offending text, the message after the line.
-    std::string errText;
+    bool errorCard = false;  // the error's card is up; the name card waits
     if (!diag.ok() && diag.line < b.lineCount()) {
         const std::string& line = b.line(diag.line);
         int a = (int)line.find_first_not_of(" \t"), e = (int)line.size();
@@ -719,14 +719,13 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         float y = yOf(diag.line) + lineH - 3;
         if (diag.line >= first && diag.line <= last) {
             squiggle(dl, x0, x1, y, color::bad);
-            errText = diag.message;
             float mx = xOf(diag.line, (int)line.size()) + charW * 3;
             dl->AddRectFilled(ImVec2(mx - charW, yOf(diag.line) + 2), ImVec2(body.Max.x, yOf(diag.line) + lineH - 2), rgb(0xef5a6f, 22), 3);
             dl->AddText(f.regular, type::label, ImVec2(mx, yOf(diag.line) + (lineH - type::label) * 0.5f - 1), rgb(0xef5a6f, 220),
                         diag.message.c_str());
         }
         // Hovering the squiggle shows the whole message.
-        if (hovered && ImRect(ImVec2(x0, yOf(diag.line)), ImVec2(x1, yOf(diag.line) + lineH)).Contains(mouse))
+        if (hovered && ImRect(ImVec2(x0, yOf(diag.line)), ImVec2(x1, yOf(diag.line) + lineH)).Contains(mouse) && (errorCard = true))
             infoCard(ImVec2(mouse.x, yOf(diag.line) + lineH + 2), false, "Line " + std::to_string(diag.line + 1), diag.message);
     }
     // The caret blinks, solid just after input.
@@ -944,7 +943,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     }
     // Resting the mouse on a name shows what it is.
     if (overText && (t.hover.def || t.hover.api) && now - t.hoverSince > 0.45 && !ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
-        errText.empty())
+        !errorCard)
         infoCard(ImVec2(xOf(t.hover.start.line, t.hover.start.col), yOf(t.hover.start.line) + lineH + 2), false, signatureOf(t.hover),
                  docOf(t.hover));
 

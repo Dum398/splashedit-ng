@@ -596,6 +596,14 @@ std::optional<int> Ps1View::pick(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
     return hit->object;
 }
 
+std::optional<Vec3> Ps1View::pickPoint(ImVec2 screen, ImVec2 mn, ImVec2 sz) const {
+    Vec3 o, d;
+    ray(screen, mn, sz, &o, &d);
+    std::optional<editor::PickHit> hit = editor::pickNearest({{o.x, o.y, -o.z}, {d.x, d.y, -d.z}}, m_pick);
+    if (!hit) return std::nullopt;
+    return Vec3{o.x + d.x * hit->t, o.y + d.y * hit->t, o.z + d.z * hit->t};
+}
+
 bool Ps1View::sceneBounds(Vec3* lo, Vec3* hi) const {
     if (!m_haveSceneBounds) return false;
     splash::Vec3 a = m_sceneBounds.min(), b = m_sceneBounds.max();

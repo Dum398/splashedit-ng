@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+#include "editor/document.hh"
+#include "import.hh"
+
 namespace editor {
 
 // The first .scene directly in `project`, by name; empty when there is none.
@@ -38,6 +41,26 @@ struct AdoptedAsset {
     std::string error;  // empty on success
 };
 AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesystem::path& file, const std::string& folder);
+
+// The objects an imported model becomes, the top one named `name`. A model of
+// one node is one object drawing the baked mesh. With more, the top object is
+// an empty holding an object per node, the file's tree kept: each with the
+// node's local transform and, if it has one, its mesh and materials.
+splash::Object modelObject(const splash::ImportedModel& model, const std::string& name);
+
+// A model file dropped on or picked in the editor. It is adopted into the
+// project's models/ folder and imported. With `replace` naming an object that
+// has a mesh, that object's model and materials are swapped for the baked
+// mesh; otherwise modelObject() is inserted at `at` (the parent's path plus
+// the index), named after the file and unique among its siblings, at
+// `position` in the parent's space. Either way it is one undo step.
+struct PlacedModel {
+    std::string error;  // empty on success
+    splash::ImportedModel model;
+    ObjectPath path;  // the object placed or changed
+};
+PlacedModel placeModel(Document& doc, const std::filesystem::path& file, const std::optional<ObjectPath>& replace,
+                       const ObjectPath& at, splash::Vec3 position);
 
 // Recently opened scenes, newest first, as absolute paths. Stored one per line.
 class RecentScenes {

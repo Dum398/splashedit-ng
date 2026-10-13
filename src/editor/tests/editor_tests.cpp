@@ -957,6 +957,104 @@ void testAdoptAsset() {
     CHECK(doc.fileExists("anims/walk.anim") && doc.fileExists("scripts/new.lua"));
 }
 
+// Dropping a model: the file's node tree becomes objects in one undo step,
+// the file is adopted into models/, and composing the objects' transforms
+// over the per-node meshes lands every vertex where the baked mesh has it.
+void testPlaceModel() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "placemodel";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    // Body (moved 1 along X) holding Arm (moved, turned 90 degrees about Y),
+    // each drawing the triangle (0,0,0) (1,0,0) (0,1,0).
+    std::ofstream(outside / "robot.gltf") << R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Body","mesh":0,"translation":[1,0,0],"children":[1]},
+ {"name":"Arm","mesh":0,"translation":[0.5,1,2],"rotation":[0,0.70710678,0,0.70710678]}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
+"bufferViews":[{"buffer":0,"byteLength":36}],
+"buffers":[{"byteLength":36,"uri":"data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}]})";
+    std::ofstream(outside / "tri.obj") << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+
+    splash::Scene sc;
+    splash::Object a = named("A");
+    a.mesh.emplace();
+    sc.objects.push_back(a);
+    editor::Document doc;
+    doc.reset(sc, proj, "game");
+
+    // On the viewport: a new top-level object at the drop point.
+    editor::PlacedModel p = editor::placeModel(doc, outside / "robot.gltf", std::nullopt, {1}, {4, 5, 6});
+    CHECK(p.error.empty() && p.path == editor::ObjectPath{1});
+    CHECK(doc.historySize() == 1 && doc.scene().objects.size() == 2);
+    const splash::Object* root = doc.object({1});
+    CHECK(root && root->name == "robot" && !root->mesh && root->children.size() == 1);
+    CHECK(root && near(root->transform.position.x, 4) && near(root->transform.position.y, 5) && near(root->transform.position.z, 6));
+    const splash::Object* body = doc.object({1, 0});
+    const splash::Object* arm = doc.object({1, 0, 0});
+    CHECK(body && body->name == "Body" && body->mesh && body->mesh->mesh == "models/robot/Body.mesh" && body->mesh->materials.size() == 1);
+    CHECK(body && near(body->transform.position.x, -1));
+    CHECK(arm && arm->name == "Arm" && arm->mesh && arm->mesh->mesh == "models/robot/Arm.mesh" && arm->children.empty());
+    CHECK(arm && near(arm->transform.position.x, -0.5f) && near(arm->transform.position.y, 1) && near(arm->transform.position.z, 2));
+    CHECK(arm && near(arm->transform.rotation.y, -0.70710678f) && near(arm->transform.rotation.w, 0.70710678f));
+    CHECK(fs::is_regular_file(proj / "models" / "robot.gltf"));  // adopted
+    const editor::MeshInfo* mi = doc.mesh("models/robot/Arm.mesh");
+    CHECK(mi && mi->status == editor::AssetStatus::Ok && mi->triangles == 1);
+    // The editor's own composition over the node meshes gives the baked mesh, placed.
+    {
+        splash::Mesh baked = splash::loadMesh(proj / "models" / "robot.mesh");
+        std::vector<splash::Vec3> got;
+        splash::Mat34 rootWorld;
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+            if (fo.object == root) rootWorld = fo.localToWorld;
+            if (!fo.object->mesh || fo.object == doc.object({0})) continue;
+            for (const splash::Vec3& v : splash::loadMesh(proj / fo.object->mesh->mesh).positions) got.push_back(fo.localToWorld.point(v));
+        }
+        bool same = got.size() == baked.positions.size() && got.size() == 6;
+        for (size_t i = 0; same && i < got.size(); ++i) {
+            splash::Vec3 w = rootWorld.point(baked.positions[i]);
+            same = std::fabs(w.x - got[i].x) < 1e-4f && std::fabs(w.y - got[i].y) < 1e-4f && std::fabs(w.z - got[i].z) < 1e-4f;
+        }
+        CHECK(same);
+    }
+    // One undo takes the whole tree away, redo brings it back.
+    CHECK(doc.undo());
+    CHECK(doc.scene().objects.size() == 1 && !doc.canUndo());
+    CHECK(doc.redo());
+    CHECK(doc.object({1, 0, 0}) && doc.object({1, 0, 0})->name == "Arm");
+
+    // On a scene tree row: a child of that row's object, at its origin.
+    p = editor::placeModel(doc, outside / "robot.gltf", std::nullopt, {0, 0}, {0, 0, 0});
+    CHECK(p.error.empty() && doc.historySize() == 2);
+    CHECK(doc.object({0, 0}) && doc.object({0, 0})->name == "robot" && doc.object({0, 0, 0, 0}) &&
+          doc.object({0, 0, 0, 0})->name == "Arm");
+    CHECK(doc.undo() && doc.object({0})->children.empty());
+
+    // A second drop at the top level is named apart from the first.
+    p = editor::placeModel(doc, outside / "robot.gltf", std::nullopt, {2}, {0, 0, 0});
+    CHECK(doc.object({2}) && doc.object({2})->name == "robot (2)");
+    CHECK(doc.undo());
+
+    // On the Model field: the object's model is replaced by the baked mesh.
+    p = editor::placeModel(doc, outside / "robot.gltf", editor::ObjectPath{0}, {}, {});
+    CHECK(p.error.empty() && doc.object({0})->mesh->mesh == "models/robot.mesh" && doc.object({0})->children.empty());
+    CHECK(doc.undo() && doc.object({0})->mesh->mesh.empty());
+
+    // A model of one node is one object drawing the baked mesh.
+    p = editor::placeModel(doc, outside / "tri.obj", std::nullopt, {2}, {0, 0, 0});
+    CHECK(p.error.empty() && doc.object({2}) && doc.object({2})->mesh && doc.object({2})->mesh->mesh == "models/tri.mesh" &&
+          doc.object({2})->children.empty());
+
+    // A file that does not import changes nothing.
+    std::ofstream(outside / "junk.glb") << "junk";
+    size_t before = doc.historySize();
+    p = editor::placeModel(doc, outside / "junk.glb", std::nullopt, {3}, {0, 0, 0});
+    CHECK(!p.error.empty() && doc.historySize() == before && !fs::exists(proj / "models" / "junk.glb"));
+}
+
 }  // namespace
 
 // Reparenting keeps the object where it is in the world, follows the paths
@@ -1885,6 +1983,7 @@ int main(int argc, char** argv) {
     testPlay();
     testProject();
     testAdoptAsset();
+    testPlaceModel();
     testUnirom();
     testPsxmon();
     testHardwareRun();

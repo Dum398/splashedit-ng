@@ -137,10 +137,17 @@ and unknown keys survive. Bad versions and malformed mesh arrays must fail to lo
 ## Model import
 
 `importcheck.py` builds small glTF files (a .glb with an embedded texture, a .gltf with a data-URI
-buffer, an external texture, no normals and a mirrored node), imports them with
+buffer, an external texture, no normals and a mirrored node), an OBJ+MTL whose texture is found by
+bare name in a Textures/ folder (and a missing one that only warns) and an ASCII FBX in Z-up
+centimetres (texture found in tex/), imports them with
 `splashpack-cli import` and checks the .mesh: X mirrored, winding reversed to match the courtyard
-meshes, V flipped, node transforms baked, colours read, textures kept top row first and scaled to
-256 when larger. A scene using the imports must export.
+meshes, V flipped for glTF and kept for OBJ/FBX (their V already starts at the bottom), node
+transforms baked, colours read, textures kept top row first and scaled to
+256 when larger. The node tree is checked too, on a .gltf with a parent, two children with
+colliding names and a matrix grandchild, OBJs with two `o` objects and two `g` groups, and the
+FBX: each node's transform (X mirrored, rotation (x, y, z, w) -> (x, -y, -z, w)) composed down
+the tree over its own models/<stem>/<node>.mesh must give the baked mesh within 1e-4. A scene
+using the imports must export.
 
     python3 importcheck.py <splashpack-cli>
 

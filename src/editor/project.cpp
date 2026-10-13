@@ -6,6 +6,7 @@
 #include <iterator>
 #include <system_error>
 
+#include "editor/catalog.hh"
 #include "scene.hh"
 
 namespace fs = std::filesystem;
@@ -123,6 +124,91 @@ AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std
         r.copied = true;
     }
     r.path = genericUtf8(dest.lexically_relative(root));
+    return r;
+}
+
+splash::Object modelObject(const splash::ImportedModel& model, const std::string& name) {
+    splash::Object root;
+    root.name = name;
+    if (model.nodes.size() <= 1) {
+        root.mesh.emplace();
+        root.mesh->mesh = model.mesh;
+        root.mesh->materials = model.materials;
+        return root;
+    }
+    std::vector<splash::Object> objs(model.nodes.size());
+    for (size_t i = 0; i < objs.size(); ++i) {
+        const splash::ImportedNode& n = model.nodes[i];
+        objs[i].name = n.name;
+        objs[i].transform = n.transform;
+        if (!n.mesh.empty()) {
+            objs[i].mesh.emplace();
+            objs[i].mesh->mesh = n.mesh;
+            objs[i].mesh->materials = n.materials;
+        }
+    }
+    // Parents come before their children, so walking backwards finishes every
+    // object's subtree before it moves into its parent (at the front, which
+    // keeps the file's order).
+    for (size_t i = objs.size(); i-- > 0;) {
+        const int p = model.nodes[i].parent;
+        if (p >= 0 && static_cast<size_t>(p) < i)
+            objs[static_cast<size_t>(p)].children.insert(objs[static_cast<size_t>(p)].children.begin(), std::move(objs[i]));
+    }
+    for (size_t i = 0; i < objs.size(); ++i) {
+        const int p = model.nodes[i].parent;
+        if (p < 0 || static_cast<size_t>(p) >= i) root.children.push_back(std::move(objs[i]));
+    }
+    return root;
+}
+
+PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<ObjectPath>& replace, const ObjectPath& at,
+                       splash::Vec3 position) {
+    PlacedModel r;
+    if (doc.projectRoot().empty()) {
+        r.error = "no project is open";
+        return r;
+    }
+    // Imported from where it was found, so a .gltf's buffers and textures
+    // beside it are still at hand; adopted once it has imported, so a file
+    // that is not a model never lands in the project.
+    try {
+        r.model = splash::importModel(file, doc.projectRoot());
+    } catch (const std::exception& e) {
+        r.error = e.what();
+        return r;
+    }
+    AdoptedAsset adopted = adoptAsset(doc.projectRoot(), file, "models");
+    if (!adopted.error.empty()) {
+        r.error = adopted.error;
+        return r;
+    }
+    std::vector<std::string> written = r.model.textures;
+    written.push_back(r.model.mesh);
+    for (const splash::ImportedNode& n : r.model.nodes)
+        if (!n.mesh.empty()) written.push_back(n.mesh);
+    doc.refreshAssets(written);
+
+    const splash::Object* target = replace ? doc.object(*replace) : nullptr;
+    if (target && target->mesh) {
+        doc.edit(*replace, [&](splash::Object& o) {
+            o.mesh->mesh = r.model.mesh;
+            o.mesh->materials = r.model.materials;
+        });
+        doc.endMerge();
+        r.path = *replace;
+        return r;
+    }
+    const ObjectPath parentPath = at.empty() ? ObjectPath{} : ObjectPath(at.begin(), at.end() - 1);
+    const splash::Object* parent = doc.object(parentPath);
+    if (at.empty() || (!parentPath.empty() && !parent)) {
+        r.error = "there is no object to put it in";
+        return r;
+    }
+    splash::Object obj = modelObject(r.model, uniqueName(utf8(file.stem()), parent ? parent->children : doc.scene().objects));
+    obj.transform.position = position;
+    doc.insertObject(at, std::move(obj));
+    r.path = at;
     return r;
 }
 

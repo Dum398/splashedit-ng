@@ -1129,8 +1129,6 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         }
         rig.clips.push_back(std::move(clip));
     }
-    if (cubic) out.warnings.push_back("cubic-spline keys were read by their values only and play linearly: bake the animation to linear keys for its exact curve");
-    if (morph) out.warnings.push_back("morph target (shape key) animation was left out, psxsplash has no morph targets");
 
     std::vector<SourceMaterial> mats;
     for (const cgltf_material* mat : materialOf) {
@@ -1153,6 +1151,9 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         mats.push_back(std::move(sm));
     }
     finishImport(out, baked, tree, mats, rig, source, project, settings, stem);
+    // After the skeleton's warnings, which matter more.
+    if (cubic) out.warnings.push_back("cubic-spline keys were read by their values only and play linearly: bake the animation to linear keys for its exact curve");
+    if (morph) out.warnings.push_back("morph target (shape key) animation was left out, psxsplash has no morph targets");
     return out;
 }
 

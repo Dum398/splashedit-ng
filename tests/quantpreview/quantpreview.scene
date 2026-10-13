@@ -1,0 +1,146 @@
+{
+ "format": "splashedit-ng/scene",
+ "version": 1,
+ "settings": {
+  "gteScaling": 100.0,
+  "sceneType": "exterior",
+  "fog": {
+   "enabled": false,
+   "color": [
+    0,
+    0,
+    0
+   ],
+   "density": 5
+  },
+  "networkId": ""
+ },
+ "objects": [
+  {
+   "name": "Grad4",
+   "active": true,
+   "transform": {
+    "position": [
+     -2.2,
+     0.0,
+     5.0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "mesh",
+     "mesh": "../../examples/courtyard/meshes/crate.mesh",
+     "materials": [
+      {
+       "texture": "gradient.png",
+       "color": [
+        1,
+        1,
+        1,
+        1
+       ]
+      }
+     ],
+     "bitDepth": 4,
+     "vertexColors": "flat"
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Grad8",
+   "active": true,
+   "transform": {
+    "position": [
+     0.0,
+     0.0,
+     5.0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "mesh",
+     "mesh": "../../examples/courtyard/meshes/crate.mesh",
+     "materials": [
+      {
+       "texture": "gradient.png",
+       "color": [
+        1,
+        1,
+        1,
+        1
+       ]
+      }
+     ],
+     "bitDepth": 8,
+     "vertexColors": "flat"
+    }
+   ],
+   "children": []
+  },
+  {
+   "name": "Grad16",
+   "active": true,
+   "transform": {
+    "position": [
+     2.2,
+     0.0,
+     5.0
+    ],
+    "rotation": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "scale": [
+     1,
+     1,
+     1
+    ]
+   },
+   "components": [
+    {
+     "type": "mesh",
+     "mesh": "../../examples/courtyard/meshes/crate.mesh",
+     "materials": [
+      {
+       "texture": "gradient.png",
+       "color": [
+        1,
+        1,
+        1,
+        1
+       ]
+      }
+     ],
+     "bitDepth": 16,
+     "vertexColors": "flat"
+    }
+   ],
+   "children": []
+  }
+ ]
+}

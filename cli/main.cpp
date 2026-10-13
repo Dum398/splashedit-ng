@@ -45,7 +45,8 @@ static int usage() {
                  "                              [--lua-bytecode] [--stats]\n"
                  "  --project defaults to the directory holding the scene file\n"
                  "  --lua-bytecode stores Lua scripts compiled (as luac_psx would) instead of as source\n"
-                 "  --order-from (parity tests) orders objects like the name table of ref\n"                 "  --stats prints what the export takes in VRAM, SPU RAM and main RAM\n"
+                 "  --order-from (parity tests) orders objects like the name table of ref\n"                 "  --stats prints what the export takes in VRAM, SPU RAM and main RAM,\n"
+                 "    and a texture line per packed texture with its VRAM and CLUT position\n"
                  "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
                  "  converts one image the way export does and prints its error against the source\n"
                  "usage: splashpack-cli audio <in.wav> -o <out.adpcm> [--rate <hz>] [--loop] [--trim]\n"
@@ -375,6 +376,9 @@ int main(int argc, char** argv) {
                         st.clutBytes, st.fontBytes, st.vramBytes(), st.spuEnd, st.triangles);
             std::printf("ram=%zu ordering_table=%u bump=%u\n", splash::ramBudget(st).used, st.orderingTableSize,
                         st.bumpAllocatorSize);
+            for (const auto& t : st.textures)
+                std::printf("texture bpp=%d cutout=%d size=%dx%d vram=%d,%d clut=%d,%d,%d %s\n", t.bitDepth, t.cutout ? 1 : 0,
+                            t.width, t.height, t.x, t.y, t.clutX, t.clutY, t.clutLength, t.source.c_str());
             if (st.navWanted)
                 std::printf("nav regions=%d cell=%g (asked %g) extent=%gx%g\n", st.navRegions, double(st.navCellSize),
                             double(st.navCellSizeAsked), double(st.navExtentX), double(st.navExtentZ));

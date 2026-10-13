@@ -59,6 +59,17 @@ struct ExportStats {
     // (Renderer::ReserveVisibleTriangles).
     uint32_t bvhTriangleRefs = 0;
     size_t visibleListBytes() const { return 4 * size_t(bvhTriangleRefs); }
+    // Where each packed texture lands in VRAM (deduplicated, placement
+    // order). x and clutX are in 16-bit words, absolute.
+    struct TexturePlacement {
+        std::string source;
+        int bitDepth = 0;
+        bool cutout = false;
+        int width = 0, height = 0;
+        int x = 0, y = 0;
+        int clutX = 0, clutY = 0, clutLength = 0;  // clutLength 0: no CLUT (16 bpp)
+    };
+    std::vector<TexturePlacement> textures;
     // Game objects in the file, streaming's cut pieces included. psxsplash
     // allocates per object when the scene loads (objectLoadBytes, budget.hh).
     int gameObjects = 0;

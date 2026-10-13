@@ -10,12 +10,14 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <tuple>
 
 #include <nlohmann/json.hpp>
 
+#include "blend.hh"
 #include "cgltf.h"
 #include "ufbx.h"
 #include "unitymath.hh"
@@ -1402,20 +1404,45 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     return out;
 }
 
+// Blender exports the .blend as a GLB into a fresh temporary folder, removed
+// again whatever happens, and that is imported under the .blend's name.
+ImportedModel importBlend(const fs::path& source, const fs::path& project, const ImportSettings& settings,
+                          const std::string& stem) {
+    std::error_code ec;
+    fs::path tmp;
+    for (unsigned n = 0;; ++n) {
+        tmp = fs::temp_directory_path(ec) / ("splashedit-blend-" + std::to_string(std::random_device{}()));
+        if (!ec && fs::create_directory(tmp, ec) && !ec) break;
+        if (n == 16) fail(projectPath(source.filename()) + ": could not make a temporary folder for Blender's export");
+    }
+    struct Remove {
+        fs::path dir;
+        ~Remove() {
+            std::error_code e;
+            fs::remove_all(dir, e);
+        }
+    } remove{tmp};
+    const fs::path glb = tmp / (source.filename().u8string() + u8".glb");
+    exportBlend(source, glb);
+    return importGltf(glb, project, settings, stem);
+}
+
 }  // namespace
 
 bool canImportModel(const fs::path& file) {
     std::string e = lower(projectPath(file.extension()));
-    return e == ".gltf" || e == ".glb" || e == ".fbx" || e == ".obj";
+    return e == ".gltf" || e == ".glb" || e == ".fbx" || e == ".obj" || e == ".blend";
 }
 
 std::string importName(const fs::path& file) { return safeStem(file); }
 
 ImportedModel importModel(const fs::path& source, const fs::path& project, const ImportSettings& settings, const fs::path& as) {
-    if (!canImportModel(source)) fail(projectPath(source.filename()) + ": only .glb, .gltf, .fbx and .obj models can be imported");
+    if (!canImportModel(source))
+        fail(projectPath(source.filename()) + ": only .glb, .gltf, .fbx, .obj and .blend models can be imported");
     if (!(settings.scale > 0) || !std::isfinite(settings.scale)) fail("the import scale must be above 0");
     std::string e = lower(projectPath(source.extension()));
     const std::string stem = safeStem(as.empty() ? source : as);
+    if (e == ".blend") return importBlend(source, project, settings, stem);
     return e == ".fbx" || e == ".obj" ? importUfbx(source, project, settings, stem) : importGltf(source, project, settings, stem);
 }
 

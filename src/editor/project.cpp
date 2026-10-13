@@ -262,7 +262,7 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
         return r;
     }
     if (!splash::canImportModel(file)) {
-        r.error = utf8(file.filename()) + ": only .glb, .gltf, .fbx and .obj models can be imported";
+        r.error = utf8(file.filename()) + ": only .glb, .gltf, .fbx, .obj and .blend models can be imported";
         return r;
     }
     // Adopted first so the outputs are named after the copy, but imported

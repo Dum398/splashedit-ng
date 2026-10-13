@@ -52,7 +52,7 @@ static int usage() {
                  "    [--pcm <src.wav>] [--decoded <out.wav>]\n"
                  "  encodes one clip the way export does and prints its SNR against the source;\n"
                  "  --pcm writes the 16-bit mono WAV the encoder starts from, before resampling\n"
-                 "usage: splashpack-cli import <model.glb|model.gltf|model.fbx|model.obj> --project <dir>\n"
+                 "usage: splashpack-cli import <model.glb|model.gltf|model.fbx|model.obj|model.blend> --project <dir>\n"
                  "    [--scale <f>] [--up file|y|z] [--normals import|recompute] [--smoothing <deg>] [--merge]\n"
                  "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
                  "  the settings start from <model>.import.json beside the model when there is one\n"

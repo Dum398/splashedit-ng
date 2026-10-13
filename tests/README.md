@@ -151,6 +151,14 @@ using the imports must export.
 
     python3 importcheck.py <splashpack-cli>
 
+`blendcheck.py` imports a .blend through a mock Blender (a Python script on PATH or named by
+SPLASHEDIT_BLENDER) that writes a GLB made from `skinimport/rig.gltf` where the export script
+asks, and checks the import writes the same files as that GLB imported directly, that a sidecar
+beside the .blend applies, and the errors when Blender fails, writes nothing or is not found. The
+mock arms print SKIP on Windows, where a shebang script cannot run.
+
+    python3 blendcheck.py <splashpack-cli>
+
 ## Lua compiler
 
 `luacheck.py` compiles every `lua/*.lua` with `splashpack-cli luac` and compares the result with

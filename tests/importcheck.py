@@ -486,7 +486,7 @@ check('single-node model: one node', len(nodes) == 1 and nodes[0]['mesh'] == 'mo
 # 5. Refusals carry a message.
 open(os.path.join(tmp, 'x.dae'), 'w').write('<COLLADA/>\n')
 r = run('import', os.path.join(tmp, 'x.dae'), '--project', proj)
-check('.dae refused with a reason', r.returncode == 1 and 'only .glb, .gltf, .fbx and .obj' in r.stderr, r.stderr)
+check('.dae refused with a reason', r.returncode == 1 and 'only .glb, .gltf, .fbx, .obj and .blend' in r.stderr, r.stderr)
 open(os.path.join(tmp, 'junk.glb'), 'wb').write(b'not a model at all')
 r = run('import', os.path.join(tmp, 'junk.glb'), '--project', proj)
 check('garbage refused with a reason', r.returncode == 1 and 'junk.glb:' in r.stderr, r.stderr)

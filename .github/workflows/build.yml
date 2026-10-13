@@ -76,6 +76,7 @@ jobs:
           "$py" tests/interactcheck.py "$cli"
           "$py" tests/memcardcheck.py "$cli"
           "$py" tests/importcheck.py "$cli"
+          "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure

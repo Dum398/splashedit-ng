@@ -16,8 +16,14 @@
 #include <fstream>
 #include <iterator>
 #include <vector>
+#include <set>
 #include <string>
 #include <system_error>
+#ifndef _WIN32
+#include <csignal>
+#include <cstdlib>
+#include <sys/types.h>
+#endif
 
 #include "editor/catalog.hh"
 #include "editor/document.hh"
@@ -33,6 +39,7 @@
 #include "editor/serial.hh"
 #include "editor/timeline.hh"
 #include "editor/unirom.hh"
+#include "blend.hh"
 #include "budget.hh"
 #include "navregion.hh"
 #include "splashpack.hh"
@@ -3145,6 +3152,85 @@ void testImportWarnings() {
     CHECK(doc.importWarnings("models/rig.gltf").empty());
 }
 
+// splash::BlendExport with a mock Blender (a shell script that starts a
+// sleeping child and waits for it): the constructor returns at once, cancel()
+// kills the script and its child, get() then throws BlendCancelled, nothing
+// is written and the temporary folder is gone. Destroying a job that is still
+// running cancels it the same way.
+void testBlendCancel() {
+#ifdef _WIN32
+    std::printf("SKIP testBlendCancel: the mock Blender is a shell script\n");
+#else
+    namespace fs = std::filesystem;
+    using clock = std::chrono::steady_clock;
+    using namespace std::chrono_literals;
+    const fs::path dir = g_outDir / "blendcancel";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir);
+    const fs::path mock = dir / "blender", blend = dir / "crate.blend", pids = dir / "pids";
+    std::ofstream(blend) << "BLENDER-v300 not really";
+    std::ofstream(mock) << "#!/bin/sh\nsleep 10 &\necho $$ $! > '" << pids.string() << ".tmp'\nmv '" << pids.string()
+                        << ".tmp' '" << pids.string() << "'\nwait\n";
+    fs::permissions(mock, fs::perms::owner_all, fs::perm_options::add);
+    setenv("SPLASHEDIT_BLENDER", mock.c_str(), 1);
+    auto temps = [] {
+        std::set<std::string> s;
+        std::error_code e;
+        for (fs::directory_iterator d(fs::temp_directory_path(e), e), end; !e && d != end; d.increment(e))
+            if (d->path().filename().string().rfind("splashedit-blend-", 0) == 0) s.insert(d->path().filename().string());
+        return s;
+    };
+    // Gone, or a zombie left for init to reap.
+    auto alive = [](int pid) {
+        if (pid <= 0 || kill(pid, 0) != 0) return false;
+        std::ifstream st("/proc/" + std::to_string(pid) + "/stat");
+        std::string line;
+        std::getline(st, line);
+        return line.find(") Z ") == std::string::npos;
+    };
+    auto waitFor = [](auto cond, std::chrono::milliseconds limit) {
+        const auto t = clock::now();
+        while (!cond() && clock::now() - t < limit) std::this_thread::sleep_for(10ms);
+        return cond();
+    };
+    const std::set<std::string> before = temps();
+    for (int destroy = 0; destroy < 2; ++destroy) {
+        fs::remove(pids, ec);
+        int shell = 0, child = 0;
+        const auto t0 = clock::now();
+        {
+            splash::BlendExport job(blend);
+            CHECK(clock::now() - t0 < 2s);  // Blender runs on the worker thread
+            CHECK(waitFor([&] { return fs::exists(pids); }, 5000ms));
+            std::ifstream(pids) >> shell >> child;
+            CHECK(shell > 0 && child > 0);
+            CHECK(!job.done());
+            CHECK(temps().size() == before.size() + 1);
+            if (!destroy) {
+                const auto c0 = clock::now();
+                job.cancel();
+                CHECK(waitFor([&] { return job.done(); }, 5000ms));
+                CHECK(clock::now() - c0 < 2s);
+                bool cancelled = false;
+                try {
+                    job.get();
+                } catch (const splash::BlendCancelled&) {
+                    cancelled = true;
+                } catch (const std::exception&) {
+                }
+                CHECK(cancelled);
+            }
+        }
+        CHECK(clock::now() - t0 < 5s);
+        CHECK(waitFor([&] { return !alive(shell) && !alive(child); }, 2000ms));
+        CHECK(temps() == before);
+    }
+    unsetenv("SPLASHEDIT_BLENDER");
+    fs::remove_all(dir, ec);
+#endif
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -3179,6 +3265,7 @@ int main(int argc, char** argv) {
     testLuaCheck();
     testLuaScriptFile();
     testLiveExport();
+    testBlendCancel();
     testPlay();
     testProject();
     testAdoptAsset();

@@ -291,6 +291,13 @@ and the same drag writes nothing. Needs a display.
 
     python3 timelinepreviewcheck.py <splashedit>
 
+`pasteoffsetcheck.py` copies the courtyard example's Crate and pastes it three times: each copy
+must land one grid step (0.25 m) further along X, none on the original. A pasted group steps off
+its original with its children in place; Cut then Paste keeps the object where it was; Ctrl+Z
+takes a paste back. Reads the saved scene. Needs a display (CI runs it under `xvfb-run` on Linux).
+
+    python3 pasteoffsetcheck.py <splashedit> [screenshot.png]
+
 `importwarningscheck.py` drops `skinimport/rig.gltf` (blended skin weights and cubic-spline keys,
 two import warnings) on the courtyard example's viewport. The status bar must count the warnings
 and point at the inspector, and the inspector's Import settings must list both: the editor prints

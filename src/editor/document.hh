@@ -110,6 +110,11 @@ public:
     bool edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey = {});
     // Runs `fn` on each object in `paths` as one undo step. Returns how many it changed.
     int editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn);
+    // Puts each object, children included, in place of the one at its path,
+    // as one undo step. The paths must not lie inside one another. A
+    // selection or pin inside a replaced object that no longer resolves moves
+    // to the object itself. Returns how many it replaced.
+    int replaceTrees(std::vector<std::pair<ObjectPath, splash::Object>> trees);
     // Same for the scene's own settings (fog, render buffers, ...).
     void editSettings(const std::function<void(splash::SceneSettings&)>& fn, const std::string& mergeKey = {});
     // Closes the open merge, so the next edit starts a new undo step.

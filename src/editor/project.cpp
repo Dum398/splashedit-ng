@@ -4,6 +4,7 @@
 #include <exception>
 #include <fstream>
 #include <iterator>
+#include <set>
 #include <system_error>
 
 #include "editor/catalog.hh"
@@ -127,25 +128,26 @@ AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std
     return r;
 }
 
-splash::Object modelObject(const splash::ImportedModel& model, const std::string& name) {
-    splash::Object root;
-    root.name = name;
-    if (model.nodes.size() <= 1) {
-        root.mesh.emplace();
-        root.mesh->mesh = model.mesh;
-        root.mesh->materials = model.materials;
-        return root;
-    }
+// A mesh component for an object made from a model.
+static splash::MeshComponent modelMesh(const std::string& mesh, const std::vector<splash::Material>& materials,
+                                       const splash::ImportSettings& settings) {
+    splash::MeshComponent m;
+    m.mesh = mesh;
+    m.materials = materials;
+    m.bitDepth = settings.bitDepth;
+    m.dynamicLighting = settings.lighting;
+    return m;
+}
+
+// An object per node, each holding its children: the model's top-level nodes
+// in file order.
+static std::vector<splash::Object> nodeObjects(const splash::ImportedModel& model, const splash::ImportSettings& settings) {
     std::vector<splash::Object> objs(model.nodes.size());
     for (size_t i = 0; i < objs.size(); ++i) {
         const splash::ImportedNode& n = model.nodes[i];
         objs[i].name = n.name;
         objs[i].transform = n.transform;
-        if (!n.mesh.empty()) {
-            objs[i].mesh.emplace();
-            objs[i].mesh->mesh = n.mesh;
-            objs[i].mesh->materials = n.materials;
-        }
+        if (!n.mesh.empty()) objs[i].mesh = modelMesh(n.mesh, n.materials, settings);
     }
     // Parents come before their children, so walking backwards finishes every
     // object's subtree before it moves into its parent (at the front, which
@@ -155,10 +157,22 @@ splash::Object modelObject(const splash::ImportedModel& model, const std::string
         if (p >= 0 && static_cast<size_t>(p) < i)
             objs[static_cast<size_t>(p)].children.insert(objs[static_cast<size_t>(p)].children.begin(), std::move(objs[i]));
     }
+    std::vector<splash::Object> top;
     for (size_t i = 0; i < objs.size(); ++i) {
         const int p = model.nodes[i].parent;
-        if (p < 0 || static_cast<size_t>(p) >= i) root.children.push_back(std::move(objs[i]));
+        if (p < 0 || static_cast<size_t>(p) >= i) top.push_back(std::move(objs[i]));
     }
+    return top;
+}
+
+splash::Object modelObject(const splash::ImportedModel& model, const std::string& name, const splash::ImportSettings& settings) {
+    splash::Object root;
+    root.name = name;
+    if (model.nodes.size() <= 1 || settings.mergeMeshes) {
+        root.mesh = modelMesh(model.mesh, model.materials, settings);
+        return root;
+    }
+    root.children = nodeObjects(model, settings);
     return root;
 }
 
@@ -169,19 +183,40 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
         r.error = "no project is open";
         return r;
     }
-    // Imported from where it was found, so a .gltf's buffers and textures
-    // beside it are still at hand; adopted once it has imported, so a file
-    // that is not a model never lands in the project.
-    try {
-        r.model = splash::importModel(file, doc.projectRoot());
-    } catch (const std::exception& e) {
-        r.error = e.what();
+    if (!splash::canImportModel(file)) {
+        r.error = utf8(file.filename()) + ": only .glb, .gltf, .fbx and .obj models can be imported";
         return r;
     }
+    // Adopted first so the outputs are named after the copy, but imported
+    // from where it was found, so a .gltf's buffers and textures beside it
+    // are still at hand. A copy that does not import is taken out again, so a
+    // file that is not a model never lands in the project.
     AdoptedAsset adopted = adoptAsset(doc.projectRoot(), file, "models");
     if (!adopted.error.empty()) {
         r.error = adopted.error;
         return r;
+    }
+    const fs::path copy = doc.projectRoot() / fromUtf8(adopted.path);
+    std::error_code ec;
+    const bool inside = fs::equivalent(file, copy, ec);
+    const bool hadSidecar = fs::exists(splash::importSettingsPath(copy), ec);
+    splash::ImportSettings settings;
+    try {
+        settings = splash::loadImportSettings(copy);
+        r.model = splash::importModel(file, doc.projectRoot(), settings, copy);
+    } catch (const std::exception& e) {
+        if (adopted.copied) fs::remove(copy, ec);
+        r.error = e.what();
+        return r;
+    }
+    const std::string source = inside ? std::string() : utf8(fs::absolute(file, ec));
+    if (!hadSidecar || (!inside && settings.source != source)) {
+        settings.source = source;
+        try {
+            splash::saveImportSettings(copy, settings);
+        } catch (const std::exception& e) {
+            r.model.warnings.push_back(std::string("the import settings were not saved: ") + e.what());
+        }
     }
     std::vector<std::string> written = r.model.textures;
     written.push_back(r.model.mesh);
@@ -205,11 +240,246 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
         r.error = "there is no object to put it in";
         return r;
     }
-    splash::Object obj = modelObject(r.model, uniqueName(utf8(file.stem()), parent ? parent->children : doc.scene().objects));
+    splash::Object obj = modelObject(r.model, uniqueName(utf8(file.stem()), parent ? parent->children : doc.scene().objects), settings);
     obj.transform.position = position;
     doc.insertObject(at, std::move(obj));
     r.path = at;
     return r;
+}
+
+fs::path modelOfMesh(const fs::path& project, const std::string& mesh) {
+    fs::path rel = fromUtf8(mesh);
+    auto it = rel.begin();
+    if (project.empty() || it == rel.end() || *it != "models" || rel.extension() != ".mesh") return {};
+    ++it;
+    if (it == rel.end()) return {};
+    const fs::path first = *it;
+    const size_t depth = static_cast<size_t>(std::distance(rel.begin(), rel.end()));
+    if (depth != 2 && depth != 3) return {};
+    const std::string name = utf8(depth == 2 ? first.stem() : first);
+    fs::path best;
+    std::error_code ec;
+    for (fs::directory_iterator d(project / "models", ec), end; !ec && d != end; d.increment(ec)) {
+        const fs::path& p = d->path();
+        if (!splash::canImportModel(p) || splash::importName(p) != name || (!best.empty() && p > best)) continue;
+        std::error_code sec;
+        if (fs::is_regular_file(p, sec) && fs::exists(splash::importSettingsPath(p), sec)) best = p;
+    }
+    return best;
+}
+
+static bool sameMaterials(const std::vector<splash::Material>& a, const std::vector<splash::Material>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (a[i].texture != b[i].texture || a[i].color != b[i].color) return false;
+    return true;
+}
+static bool sameTransform(const splash::Transform& a, const splash::Transform& b) {
+    return a.position == b.position && a.scale == b.scale && a.rotation.x == b.rotation.x && a.rotation.y == b.rotation.y &&
+           a.rotation.z == b.rotation.z && a.rotation.w == b.rotation.w;
+}
+
+namespace {
+
+// Brings the scene's objects in line with a model imported again.
+struct Resync {
+    const splash::ImportedModel& model;
+    const splash::ImportSettings& settings;
+    std::string nodePrefix;  // models/<name>/
+    bool toMerged = false, toTree = false;
+    std::map<std::string, size_t> nodeOfMesh;
+    std::vector<std::vector<size_t>> childNodes;  // per node; the last entry holds the top-level nodes
+
+    Resync(const splash::ImportedModel& m, const splash::ImportSettings& s, std::string prefix)
+        : model(m), settings(s), nodePrefix(std::move(prefix)) {
+        childNodes.assign(model.nodes.size() + 1, {});
+        for (size_t i = 0; i < model.nodes.size(); ++i) {
+            const int p = model.nodes[i].parent;
+            childNodes[p < 0 ? model.nodes.size() : static_cast<size_t>(p)].push_back(i);
+            if (!model.nodes[i].mesh.empty()) nodeOfMesh[model.nodes[i].mesh] = i;
+        }
+    }
+
+    // The children of `o` standing for `nodes`, matched by name in order;
+    // nothing when one is missing.
+    std::optional<std::vector<size_t>> match(const splash::Object& o, const std::vector<size_t>& nodes) const {
+        std::vector<size_t> found;
+        size_t from = 0;
+        for (size_t n : nodes) {
+            size_t k = from;
+            while (k < o.children.size() && o.children[k].name != model.nodes[n].name) ++k;
+            if (k == o.children.size()) return std::nullopt;
+            found.push_back(k);
+            from = k + 1;
+        }
+        return found;
+    }
+    bool drawsNodeMesh(const splash::Object& o) const {
+        if (o.mesh && o.mesh->mesh.rfind(nodePrefix, 0) == 0) return true;
+        for (const splash::Object& c : o.children)
+            if (drawsNodeMesh(c)) return true;
+        return false;
+    }
+    // The top object of an instance of the node tree: its children are the
+    // model's top-level nodes and something below draws a node mesh.
+    std::optional<std::vector<size_t>> instanceTop(const splash::Object& o) const {
+        if (model.nodes.size() <= 1 || (o.mesh && o.mesh->mesh == model.mesh)) return std::nullopt;
+        auto m = match(o, childNodes.back());
+        if (!m) return std::nullopt;
+        for (size_t k : *m)
+            if (drawsNodeMesh(o.children[k])) return m;
+        return std::nullopt;
+    }
+    bool setMaterials(splash::MeshComponent& m, const std::vector<splash::Material>& mats) {
+        if (sameMaterials(m.materials, mats)) return false;
+        m.materials = mats;
+        return true;
+    }
+    // An object made from node `n`: transform, mesh and materials, then its
+    // children by name.
+    bool syncNode(splash::Object& o, size_t n) {
+        const splash::ImportedNode& node = model.nodes[n];
+        bool changed = false;
+        if (!sameTransform(o.transform, node.transform)) o.transform = node.transform, changed = true;
+        if (!node.mesh.empty()) {
+            if (!o.mesh) o.mesh = modelMesh(node.mesh, node.materials, settings), changed = true;
+            if (o.mesh->mesh != node.mesh) o.mesh->mesh = node.mesh, changed = true;
+            changed |= setMaterials(*o.mesh, node.materials);
+        }
+        std::vector<bool> matched(o.children.size());
+        if (auto m = match(o, childNodes[n]))
+            for (size_t i = 0; i < m->size(); ++i) {
+                changed |= syncNode(o.children[(*m)[i]], childNodes[n][i]);
+                matched[(*m)[i]] = true;
+            }
+        for (size_t k = 0; k < o.children.size(); ++k)
+            if (!matched[k]) changed |= walk(o.children[k]);
+        return changed;
+    }
+    bool walk(splash::Object& o) {
+        bool changed = false;
+        std::vector<bool> handled(o.children.size());
+        if (auto top = instanceTop(o)) {
+            if (toMerged) {
+                for (auto k = top->rbegin(); k != top->rend(); ++k) o.children.erase(o.children.begin() + static_cast<std::ptrdiff_t>(*k));
+                o.mesh = modelMesh(model.mesh, model.materials, settings);
+                handled.assign(o.children.size(), false);
+                changed = true;
+            } else {
+                for (size_t i = 0; i < top->size(); ++i) {
+                    changed |= syncNode(o.children[(*top)[i]], childNodes.back()[i]);
+                    handled[(*top)[i]] = true;
+                }
+            }
+        } else if (o.mesh && o.mesh->mesh == model.mesh) {
+            if (toTree && model.nodes.size() > 1) {
+                o.mesh.reset();
+                std::vector<splash::Object> made = nodeObjects(model, settings);
+                o.children.insert(o.children.begin(), std::make_move_iterator(made.begin()), std::make_move_iterator(made.end()));
+                handled.assign(o.children.size(), false);
+                for (size_t i = 0; i < made.size(); ++i) handled[i] = true;
+                changed = true;
+            } else {
+                changed |= setMaterials(*o.mesh, model.materials);
+            }
+        } else if (o.mesh) {
+            auto it = nodeOfMesh.find(o.mesh->mesh);
+            if (it != nodeOfMesh.end()) changed |= setMaterials(*o.mesh, model.nodes[it->second].materials);
+        }
+        for (size_t k = 0; k < o.children.size(); ++k)
+            if (!handled[k]) changed |= walk(o.children[k]);
+        return changed;
+    }
+};
+
+}  // namespace
+
+Reimported reimportModel(Document& doc, const fs::path& model, std::optional<bool> wasMerged) {
+    Reimported r;
+    if (doc.projectRoot().empty()) {
+        r.error = "no project is open";
+        return r;
+    }
+    const fs::path file = model.is_absolute() ? model : doc.projectRoot() / model;
+    splash::ImportSettings settings;
+    try {
+        settings = splash::loadImportSettings(file);
+        fs::path from = file;
+        std::error_code ec;
+        if (!settings.source.empty() && fs::is_regular_file(fromUtf8(settings.source), ec)) from = fromUtf8(settings.source);
+        r.model = splash::importModel(from, doc.projectRoot(), settings, file);
+    } catch (const std::exception& e) {
+        r.error = e.what();
+        return r;
+    }
+    std::vector<std::string> written = r.model.textures;
+    written.push_back(r.model.mesh);
+    for (const splash::ImportedNode& n : r.model.nodes)
+        if (!n.mesh.empty()) written.push_back(n.mesh);
+    doc.refreshAssets(written);
+
+    Resync sync(r.model, settings, "models/" + splash::importName(file) + "/");
+    sync.toMerged = wasMerged && !*wasMerged && settings.mergeMeshes;
+    sync.toTree = wasMerged && *wasMerged && !settings.mergeMeshes;
+    std::vector<std::pair<ObjectPath, splash::Object>> trees;
+    for (size_t i = 0; i < doc.scene().objects.size(); ++i) {
+        splash::Object copy = doc.scene().objects[i];
+        if (sync.walk(copy)) trees.push_back({ObjectPath{int(i)}, std::move(copy)});
+    }
+    r.objects = doc.replaceTrees(std::move(trees));
+    return r;
+}
+
+std::vector<fs::path> ModelWatcher::poll(const fs::path& project) {
+    if (project != m_project) {
+        m_seen.clear();
+        m_project = project;
+    }
+    std::vector<fs::path> changed;
+    if (project.empty()) return changed;
+    std::set<fs::path> present;
+    std::error_code ec;
+    for (fs::directory_iterator d(project / "models", ec), end; !ec && d != end; d.increment(ec)) {
+        const fs::path p = d->path();
+        std::error_code sec;
+        if (!splash::canImportModel(p) || !d->is_regular_file(sec)) continue;
+        const fs::file_time_type sidecar = fs::last_write_time(splash::importSettingsPath(p), sec);
+        if (sec) continue;  // no sidecar, not an imported model
+        present.insert(p);
+        const bool first = !m_seen.count(p);
+        Seen& seen = m_seen[p];
+        if (first || sidecar != seen.sidecar) {
+            seen.sidecar = sidecar;
+            std::string source;
+            try {
+                source = splash::loadImportSettings(p).source;
+            } catch (const std::exception&) {
+                source = seen.sourcePath;  // a sidecar being written; read it next time
+            }
+            if (source != seen.sourcePath) {
+                seen.sourcePath = source;
+                seen.source = source.empty() ? fs::file_time_type{} : fs::last_write_time(fromUtf8(source), sec);
+            }
+        }
+        bool report = false;
+        if (!seen.sourcePath.empty()) {
+            const fs::file_time_type t = fs::last_write_time(fromUtf8(seen.sourcePath), sec);
+            if (!sec && t != seen.source) {
+                seen.source = t;
+                std::error_code cec;
+                if (!first) fs::copy_file(fromUtf8(seen.sourcePath), p, fs::copy_options::overwrite_existing, cec);
+                report = !first && !cec;
+            }
+        }
+        const fs::file_time_type t = fs::last_write_time(p, sec);
+        if (!sec && t != seen.model) {
+            report |= !first;
+            seen.model = t;
+        }
+        if (report) changed.push_back(p);
+    }
+    for (auto it = m_seen.begin(); it != m_seen.end();) it = present.count(it->first) ? std::next(it) : m_seen.erase(it);
+    return changed;
 }
 
 void RecentScenes::load() {

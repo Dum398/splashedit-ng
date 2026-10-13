@@ -1055,6 +1055,201 @@ void testPlaceModel() {
     CHECK(!p.error.empty() && doc.historySize() == before && !fs::exists(proj / "models" / "junk.glb"));
 }
 
+// A robot like testPlaceModel's: Body (moved 1 along X) holding Arm, each
+// drawing one triangle, with a material of the given colour.
+std::string robotGltf(float red, bool twoTriangles = false) {
+    const char* buf = twoTriangles ? "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AACAPwAAAAAAAIA/AAAAAAAAgD8AAIA/"
+                                   : "AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA";
+    const int n = twoTriangles ? 6 : 3;
+    return std::string(R"({"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+"nodes":[{"name":"Body","mesh":0,"translation":[1,0,0],"children":[1]},
+ {"name":"Arm","mesh":0,"translation":[0.5,1,2],"rotation":[0,0.70710678,0,0.70710678]}],
+"materials":[{"pbrMetallicRoughness":{"baseColorFactor":[)") +
+           std::to_string(red) + R"(,1,1,1]}}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":)" + std::to_string(n) +
+           R"(,"type":"VEC3","min":[0,0,0],"max":[1,1,)" + (twoTriangles ? "1" : "0") + R"(]}],
+"bufferViews":[{"buffer":0,"byteLength":)" + std::to_string(n * 12) + R"(}],
+"buffers":[{"byteLength":)" + std::to_string(n * 12) + R"(,"uri":"data:application/octet-stream;base64,)" + buf + R"("}]})";
+}
+
+void testImportSettings() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "importsettings";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj / "models", ec);
+    fs::create_directories(outside, ec);
+
+    // The sidecar: defaults without one, every field and an unknown key kept.
+    fs::path model = proj / "models" / "crate.fbx";
+    CHECK(splash::importSettingsPath(model) == proj / "models" / "crate.fbx.import.json");
+    splash::ImportSettings d = splash::loadImportSettings(model);
+    CHECK(d.scale == 1 && d.up == splash::UpAxis::File && d.normals == splash::Normals::Import && d.smoothingAngle == 60 &&
+          !d.mergeMeshes && d.bitDepth == splash::MeshComponent{}.bitDepth && d.lighting == splash::MeshComponent{}.dynamicLighting &&
+          d.source.empty());
+    std::ofstream(splash::importSettingsPath(model)) << R"({"scale": 0.5, "up": "z", "later": [1, 2]})";
+    splash::ImportSettings s = splash::loadImportSettings(model);
+    CHECK(s.scale == 0.5f && s.up == splash::UpAxis::ZUp && s.extra.size() == 1 && s.extra[0].first == "later");
+    s.normals = splash::Normals::Recompute;
+    s.smoothingAngle = 30;
+    s.mergeMeshes = true;
+    s.bitDepth = splash::BitDepth::Bpp4;
+    s.lighting = splash::DynamicLighting::Off;
+    s.source = "/somewhere/crate.fbx";
+    splash::saveImportSettings(model, s);
+    splash::ImportSettings back = splash::loadImportSettings(model);
+    CHECK(back.scale == 0.5f && back.up == splash::UpAxis::ZUp && back.normals == splash::Normals::Recompute &&
+          back.smoothingAngle == 30 && back.mergeMeshes && back.bitDepth == splash::BitDepth::Bpp4 &&
+          back.lighting == splash::DynamicLighting::Off && back.source == "/somewhere/crate.fbx");
+    CHECK(back.extra.size() == 1 && back.extra[0].first == "later" && back.extra[0].second == "[1,2]");
+    std::ofstream(splash::importSettingsPath(model)) << R"({"up": "sideways"})";
+    bool threw = false;
+    try {
+        splash::loadImportSettings(model);
+    } catch (const std::exception& e) {
+        threw = std::string(e.what()).find("crate.fbx.import.json") != std::string::npos;
+    }
+    CHECK(threw);
+    fs::remove(splash::importSettingsPath(model), ec);
+
+    // modelObject: the settings' bit depth and lighting on every mesh
+    // component; merged, one object drawing the baked mesh.
+    splash::ImportedModel two;
+    two.mesh = "models/two.mesh";
+    two.materials.resize(1);
+    two.nodes.resize(2);
+    two.nodes[0].name = "P";
+    two.nodes[0].mesh = "models/two/P.mesh";
+    two.nodes[0].materials.resize(1);
+    two.nodes[1].name = "Q";
+    two.nodes[1].parent = 0;
+    two.nodes[1].mesh = "models/two/Q.mesh";
+    two.nodes[1].materials.resize(1);
+    splash::ImportSettings ms;
+    ms.bitDepth = splash::BitDepth::Bpp16;
+    ms.lighting = splash::DynamicLighting::Smooth;
+    splash::Object tree = editor::modelObject(two, "two", ms);
+    CHECK(!tree.mesh && tree.children.size() == 1 && tree.children[0].children.size() == 1);
+    CHECK(tree.children.size() == 1 && tree.children[0].mesh && tree.children[0].mesh->bitDepth == splash::BitDepth::Bpp16 &&
+          tree.children[0].mesh->dynamicLighting == splash::DynamicLighting::Smooth);
+    CHECK(tree.children.size() == 1 && tree.children[0].children.size() == 1 && tree.children[0].children[0].mesh &&
+          tree.children[0].children[0].mesh->bitDepth == splash::BitDepth::Bpp16);
+    ms.mergeMeshes = true;
+    splash::Object merged = editor::modelObject(two, "two", ms);
+    CHECK(merged.children.empty() && merged.mesh && merged.mesh->mesh == "models/two.mesh" &&
+          merged.mesh->bitDepth == splash::BitDepth::Bpp16 && merged.mesh->dynamicLighting == splash::DynamicLighting::Smooth);
+
+    // placeModel writes the sidecar: defaults, and where the file came from.
+    std::ofstream(outside / "robot.gltf") << robotGltf(0.5f);
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    editor::PlacedModel p = editor::placeModel(doc, outside / "robot.gltf", std::nullopt, {0}, {0, 0, 0});
+    const fs::path robot = proj / "models" / "robot.gltf";
+    CHECK(p.error.empty() && fs::is_regular_file(splash::importSettingsPath(robot)));
+    splash::ImportSettings rs = splash::loadImportSettings(robot);
+    CHECK(rs.scale == 1 && !rs.mergeMeshes && rs.source == std::string(reinterpret_cast<const char*>(fs::absolute(outside / "robot.gltf").u8string().c_str())));
+    // A model already in the project has no source.
+    fs::create_directories(proj / "art", ec);
+    std::ofstream(proj / "art" / "tri.obj") << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    p = editor::placeModel(doc, proj / "art" / "tri.obj", std::nullopt, {1}, {0, 0, 0});
+    CHECK(p.error.empty() && fs::is_regular_file(splash::importSettingsPath(proj / "art" / "tri.obj")) &&
+          splash::loadImportSettings(proj / "art" / "tri.obj").source.empty());
+    // The mesh paths lead back to the model.
+    CHECK(editor::modelOfMesh(proj, "models/robot.mesh") == robot);
+    CHECK(editor::modelOfMesh(proj, "models/robot/Arm.mesh") == robot);
+    CHECK(editor::modelOfMesh(proj, "meshes/robot.mesh").empty() && editor::modelOfMesh(proj, "models/other.mesh").empty());
+
+    // Reimport with scale 2: same paths, node translations doubled, the baked
+    // mesh doubled on disk, one undo step for the scene change.
+    const splash::Object* body = doc.object({0, 0});
+    const splash::Object* arm = doc.object({0, 0, 0});
+    CHECK(body && arm && near(body->transform.position.x, -1) && near(arm->transform.position.y, 1));
+    CHECK(body && body->mesh && body->mesh->materials.size() == 1 && near(body->mesh->materials[0].color[0], 0.5f));
+    const float bakedY = splash::loadMesh(proj / "models" / "robot.mesh").positions[5].y;
+    rs.scale = 2;
+    splash::saveImportSettings(robot, rs);
+    size_t steps = doc.historySize();
+    unsigned assets = doc.assetsId();
+    editor::Reimported re = editor::reimportModel(doc, robot);
+    body = doc.object({0, 0});
+    arm = doc.object({0, 0, 0});
+    CHECK(re.error.empty() && re.objects == 1 && doc.historySize() == steps + 1 && doc.assetsId() != assets);
+    CHECK(body && body->mesh && body->mesh->mesh == "models/robot/Body.mesh" && near(body->transform.position.x, -2));
+    CHECK(arm && arm->mesh && arm->mesh->mesh == "models/robot/Arm.mesh" && near(arm->transform.position.x, -1) &&
+          near(arm->transform.position.y, 2) && near(arm->transform.position.z, 4));
+    CHECK(near(splash::loadMesh(proj / "models" / "robot.mesh").positions[5].y, 2 * bakedY));
+    CHECK(near(splash::loadMesh(proj / "models" / "robot" / "Arm.mesh").positions[2].y, 2));
+    CHECK(doc.undo() && doc.object({0, 0}) && near(doc.object({0, 0})->transform.position.x, -1));
+    CHECK(doc.redo());
+
+    // Merge meshes turned on: the instance becomes one object drawing the
+    // baked mesh with the settings' bit depth; off again, the tree is back.
+    rs.mergeMeshes = true;
+    rs.bitDepth = splash::BitDepth::Bpp4;
+    splash::saveImportSettings(robot, rs);
+    steps = doc.historySize();
+    re = editor::reimportModel(doc, robot, false);
+    const splash::Object* top = doc.object({0});
+    CHECK(re.error.empty() && doc.historySize() == steps + 1);
+    CHECK(top && top->name == "robot" && top->children.empty() && top->mesh && top->mesh->mesh == "models/robot.mesh" &&
+          top->mesh->bitDepth == splash::BitDepth::Bpp4);
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(robot, rs);
+    re = editor::reimportModel(doc, robot, true);
+    top = doc.object({0});
+    CHECK(top && !top->mesh && top->children.size() == 1 && doc.object({0, 0, 0}) && doc.object({0, 0, 0})->name == "Arm" &&
+          doc.object({0, 0, 0})->mesh->bitDepth == splash::BitDepth::Bpp4 && near(doc.object({0, 0, 0})->transform.position.y, 2));
+    // Without wasMerged nothing is restructured, even when the setting differs.
+    rs.mergeMeshes = true;
+    splash::saveImportSettings(robot, rs);
+    re = editor::reimportModel(doc, robot);
+    CHECK(re.error.empty() && doc.object({0}) && !doc.object({0})->mesh && doc.object({0})->children.size() == 1);
+    rs.mergeMeshes = false;
+    splash::saveImportSettings(robot, rs);
+
+    // Recomputed normals are written to the same paths and reach the views.
+    rs.normals = splash::Normals::Recompute;
+    splash::saveImportSettings(robot, rs);
+    assets = doc.assetsId();
+    re = editor::reimportModel(doc, robot);
+    CHECK(re.error.empty() && doc.assetsId() != assets && doc.object({0, 0})->mesh->mesh == "models/robot/Body.mesh");
+
+    // The watcher: the first poll only notes; a touched model is reported once.
+    editor::ModelWatcher watch;
+    CHECK(watch.poll(proj).empty());
+    CHECK(watch.poll(proj).empty());
+    fs::last_write_time(robot, fs::last_write_time(robot) + std::chrono::seconds(5));
+    std::vector<fs::path> hits = watch.poll(proj);
+    CHECK(hits.size() == 1 && hits[0] == robot);
+    CHECK(watch.poll(proj).empty());
+    // The source changes outside the project (a second triangle, a new
+    // colour): copied over the model, which is reported; reimported, the
+    // references stay and the triangle count and materials follow.
+    const fs::path src = outside / "robot.gltf";
+    std::ofstream(src) << robotGltf(0.25f, true);
+    fs::last_write_time(src, fs::last_write_time(src) + std::chrono::seconds(10));
+    hits = watch.poll(proj);
+    CHECK(hits.size() == 1 && hits[0] == robot);
+    {
+        std::ifstream a(robot, std::ios::binary), b(src, std::ios::binary);
+        std::string sa((std::istreambuf_iterator<char>(a)), {}), sb((std::istreambuf_iterator<char>(b)), {});
+        CHECK(sa == sb);
+    }
+    CHECK(watch.poll(proj).empty());
+    for (const fs::path& h : hits) re = editor::reimportModel(doc, h);
+    body = doc.object({0, 0});
+    CHECK(re.error.empty() && re.model.triangles == 4);
+    CHECK(body && body->mesh && body->mesh->mesh == "models/robot/Body.mesh" && body->mesh->materials.size() == 1 &&
+          near(body->mesh->materials[0].color[0], 0.25f));
+    const editor::MeshInfo* mi = doc.mesh("models/robot/Body.mesh");
+    CHECK(mi && mi->status == editor::AssetStatus::Ok && mi->triangles == 2);
+    // Saving the sidecar alone is not a change of the model.
+    splash::saveImportSettings(robot, rs);
+    CHECK(watch.poll(proj).empty());
+}
+
 }  // namespace
 
 // Reparenting keeps the object where it is in the world, follows the paths
@@ -1984,6 +2179,7 @@ int main(int argc, char** argv) {
     testProject();
     testAdoptAsset();
     testPlaceModel();
+    testImportSettings();
     testUnirom();
     testPsxmon();
     testHardwareRun();

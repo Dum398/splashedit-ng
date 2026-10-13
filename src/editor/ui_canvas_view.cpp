@@ -6,7 +6,12 @@
 #include <cstdio>
 #include <functional>
 
+#include <SDL3/SDL_dialog.h>
+
+#include <mutex>
+
 #include "editor/document.hh"
+#include "editor/project.hh"
 #include "gl.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
@@ -25,6 +30,17 @@ bool CanvasView::reportLayout = false;
 namespace {
 
 constexpr ImU32 kGuide = rgb(0xff4fd8);
+
+// The texture file dialog answers on its own thread; draw() applies it.
+std::mutex g_texMutex;
+std::string g_texPicked;
+int g_texCanvas = -1, g_texElement = -1;
+
+void SDLCALL onTexturePicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_texMutex);
+    g_texPicked = files[0];
+}
 constexpr const char* kDragKey = "uicanvas-drag";
 
 float centerY(ImFont* font, float size, float y0, float y1) {
@@ -183,6 +199,24 @@ CanvasView::~CanvasView() {
 
 void CanvasView::draw(ImDrawList* dl, ImRect r, editor::Document& doc) {
     m_screen = uic::screenOf(splash::VramSettings{});
+    // A texture picked for an image element: adopted into the project, then set.
+    {
+        std::string picked;
+        int pc = -1, pe = -1;
+        {
+            std::lock_guard<std::mutex> lock(g_texMutex);
+            picked.swap(g_texPicked);
+            pc = g_texCanvas, pe = g_texElement;
+        }
+        if (!picked.empty()) {
+            editor::AdoptedAsset a = editor::adoptAsset(doc.projectRoot(), std::filesystem::path(std::u8string(picked.begin(), picked.end())),
+                                                        "textures");
+            if (!a.path.empty()) {
+                uic::editElement(doc, pc, pe, [&](UIElement& el) { el.texture = a.path; });
+                if (a.copied) doc.refreshAssets({a.path});
+            }
+        }
+    }
     m_assets.refresh(doc.projectRoot(), doc.assetsId());
     const editor::Document::UiSelection sel = validSelection(doc);
     if (!(sel == doc.uiSelection())) doc.selectUi(sel);
@@ -838,9 +872,37 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
             rows.y += 16;
         }
         if (e.type == UIElementType::Image) {
-            ImRect pf = rows.row("ltex", "Texture", "A project-relative image file.");
+            ImRect pf = rows.row("ltex", "Texture", "A project-relative image file. Browse copies one from outside into textures/.");
             std::string p;
-            if (textField("tex", pf, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
+            ImRect tfield(pf.Min, ImVec2(pf.Max.x - size::field - space::xs, pf.Max.y));
+            if (textField("tex", tfield, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
+            if (iconButton("texbrowse", ImRect(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max), icon::folderOpen, false, "Pick an image")) {
+                {
+                    std::lock_guard<std::mutex> lock(g_texMutex);
+                    g_texCanvas = c, g_texElement = ei;
+                }
+                static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
+                SDL_ShowOpenFileDialog(onTexturePicked, nullptr, nullptr, images, 1, nullptr, false);
+            }
+            if (!e.texture.empty()) {
+                const uic::Assets::Texture& t = m_assets.texture(e.texture, e.bitDepth, e.cutout);
+                if (t.error.empty() && t.width > 0) {
+                    char info[64];
+                    std::snprintf(info, sizeof info, "%d x %d texels", t.width, t.height);
+                    text(dl, ImVec2(x0 + space::sm + rows.lw, rows.y - 4), f.regular, type::caption, color::textFaint, info);
+                    const uic::Rect lr = uic::layout(e, s);
+                    if ((lr.w != t.width || lr.h != t.height) &&
+                        button("native", ImVec2(x1 - space::sm - 120, rows.y - 8), nullptr, "Native size", ButtonKind::Ghost, nullptr,
+                               "Sets the size to the texture's, one texel per screen pixel."))
+                        uic::editElement(doc, c, ei, [&](UIElement& el) {
+                            uic::Rect q = uic::layout(el, m_screen);
+                            q.w = t.width;
+                            q.h = t.height;
+                            uic::place(el, q, m_screen);
+                        });
+                    rows.y += 22;
+                }
+            }
             ImRect bf = rows.row("lbpp", "Bit depth", "4 and 8 bpp use a palette (16 and 256 colours) and less VRAM.");
             const int cur = e.bitDepth == splash::BitDepth::Bpp4 ? 0 : e.bitDepth == splash::BitDepth::Bpp8 ? 1 : 2;
             const int picked = dropdownMenu("bpp", bf, nullptr, cur == 0 ? "4 bpp" : cur == 1 ? "8 bpp" : "16 bpp", {"4 bpp", "8 bpp", "16 bpp"}, cur);

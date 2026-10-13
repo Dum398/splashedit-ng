@@ -87,6 +87,7 @@ struct Args {
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
     const char* timeline = nullptr; // cutscene or animation to open in the Timeline at startup
+    bool ui = false;                // --ui: start on the UI tab and print its layout (scripted tests)
     std::vector<Action> actions;
     int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
     bool splash = false;
@@ -99,7 +100,7 @@ struct Args {
     float dragX = -1, dragY = -1;
 };
 
-// "ctrl+shift+z", "delete", "f2", "w", "enter", "escape", "up", "down".
+// "ctrl+shift+z", "delete", "f2", "w", "enter", "escape", "up", "down", "left", "right", "[", "]".
 bool parseKey(const char* spec, Action& a) {
     std::string s = spec;
     for (char& c : s) c = (char)std::tolower((unsigned char)c);
@@ -125,6 +126,8 @@ bool parseKey(const char* spec, Action& a) {
     else if (s == "home") a.key = ImGuiKey_Home;
     else if (s == "end") a.key = ImGuiKey_End;
     else if (s == "tab") a.key = ImGuiKey_Tab;
+    else if (s == "[") a.key = ImGuiKey_LeftBracket;
+    else if (s == "]") a.key = ImGuiKey_RightBracket;
     else if (s == "ctrl") a.key = ImGuiKey_LeftCtrl, a.ctrl = true;
     else if (s == "shift") a.key = ImGuiKey_LeftShift, a.shift = true;
     else if (s == "alt") a.key = ImGuiKey_LeftAlt, a.alt = true;
@@ -266,6 +269,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
         else if (!std::strcmp(argv[i], "--timeline")) a.timeline = next();
+        else if (!std::strcmp(argv[i], "--ui")) a.ui = true;
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
@@ -538,6 +542,10 @@ int main(int argc, char** argv) {
         for (const editor::SeqRef ref : editor::allSequences(doc))
             if (!state.timeline.open && *editor::seqName(doc, ref) == args.timeline) state.timeline.show(doc, ref);
         if (!state.timeline.open) std::fprintf(stderr, "no cutscene or animation named '%s' in the scene\n", args.timeline);
+    }
+    if (args.ui) {
+        state.scripts.showUi();
+        ui::CanvasView::reportLayout = true;
     }
     // A project named on the command line joins File > Recent like one opened from the menu.
     if (args.project && !args.screenshot && std::filesystem::is_regular_file(doc.scenePath()))

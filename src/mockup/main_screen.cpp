@@ -3914,6 +3914,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     Fonts& f = fonts();
     panel(dl, r);
     float y = panelHeader(dl, r, "Inspector", nullptr);
+    // The UI tab inspects its canvas and elements.
+    if (st.scripts.uiShown()) {
+        st.canvasView.inspector(dl, r, y, doc);
+        return;
+    }
     // The lock pins what the inspector shows; selecting other objects leaves it there.
     const bool pinned = doc.pinned().has_value();
     if (iconButton("lockinsp", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::lock, pinned,
@@ -4900,9 +4905,11 @@ static void shortcuts(State& st, editor::Document& doc) {
         if (pressed(ImGuiKey_E)) st.tool = 2;
         if (pressed(ImGuiKey_R)) st.tool = 3;
     }
-    // Object commands on the selection; while the Project panel has the
-    // keyboard, Delete and F2 are its own.
-    if (const std::optional<editor::ObjectPath> sel = doc.selection(); sel && !(st.assets.focused() && !timelineInFront(st))) {
+    // Object commands on the selection; the UI tab takes these keys for its
+    // elements, and while the Project panel has the keyboard, Delete and F2 are its own.
+    const bool uiTab = st.scripts.uiShown();
+    const bool assetKeys = st.assets.focused() && !timelineInFront(st);
+    if (const std::optional<editor::ObjectPath> sel = (uiTab || assetKeys) ? std::nullopt : doc.selection()) {
         if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_C)) copySelection(st, doc, *sel);
@@ -4913,7 +4920,7 @@ static void shortcuts(State& st, editor::Document& doc) {
             st.renamePath = *sel;
         }
     }
-    if (ctrl && !shift && pressed(ImGuiKey_V)) pasteClipboard(st, doc, doc.selection());
+    if (ctrl && !shift && !uiTab && pressed(ImGuiKey_V)) pasteClipboard(st, doc, doc.selection());
     if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
     if (ctrl && !shift && pressed(ImGuiKey_F)) st.focusTreeFilter = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
@@ -5059,6 +5066,9 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;
+    } else if (st.scripts.uiShown()) {
+        st.canvasView.draw(dl, body, doc);
+        st.viewportRect = ImRect();
     } else {
         st.scripts.draw(dl, body);
         st.viewportRect = ImRect();

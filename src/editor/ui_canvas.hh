@@ -115,10 +115,16 @@ bool deleteCanvas(Document& doc, int c);
 std::string uniqueElementName(const splash::UICanvas& cv, const std::string& base);
 const char* typeName(splash::UIElementType t);
 
-// ---- Problems, each saying how to fix it.
+// ---- Problems, each saying how to fix it, some with a one-click fix.
+enum class Fix { None, MoveOnScreen, TrimText, AsciiText, SystemFont, HalveColour, NeutralTint, ClampValue };
 struct Problem {
     std::string title, body;
+    Fix fix = Fix::None;
 };
+// The button text for a fix.
+const char* fixLabel(Fix f);
+// Applies `fix` to element `e` of canvas `c` as one undo step.
+bool applyFix(Document& doc, int c, int e, Fix fix, Screen s);
 // What is wrong with element `e` of canvas `c`: off screen or cut by the
 // screen edge, over the runtime's element budget, text the export cuts or
 // cannot draw, a missing font or texture, colours the GPU saturates.

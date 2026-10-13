@@ -575,7 +575,8 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
         } else if (r.right() <= 0 || r.bottom() <= 0 || r.x >= s.w || r.y >= s.h) {
             const int nx = clampi(r.x, 0, std::max(0, s.w - r.w)), ny = clampi(r.y, 0, std::max(0, s.h - r.h));
             out.push_back({"Off screen", "It is entirely outside the " + scr + " screen and never shows. Drag it back on, or "
-                                         "move it to " + std::to_string(nx) + ", " + std::to_string(ny) + "."});
+                                         "move it to " + std::to_string(nx) + ", " + std::to_string(ny) + ".",
+                           Fix::MoveOnScreen});
         } else {
             if (r.x < 0 || r.y < 0) {
                 const bool l = r.x < 0;
@@ -584,7 +585,8 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
                                std::string("It starts ") + std::to_string(by) + " px past the " + (l ? "left" : "top") +
                                    " edge, so psxsplash draws it " + std::to_string(by) + " px " + (l ? "narrower" : "shorter") +
                                    (e.type == UIElementType::Image ? " and squashes the whole image into what is left" : "") +
-                                   ". Move it " + std::to_string(by) + " px " + (l ? "right" : "down") + "."});
+                                   ". Move it " + std::to_string(by) + " px " + (l ? "right" : "down") + ".",
+                               Fix::MoveOnScreen});
             }
             if (r.right() > s.w || r.bottom() > s.h) {
                 const bool rt = r.right() > s.w;
@@ -592,7 +594,8 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
                 out.push_back({rt ? "Past the right edge" : "Past the bottom edge",
                                std::to_string(by) + " px of it lie past the " + (rt ? "right" : "bottom") + " edge of the " + scr +
                                    " screen and are cut off. Move it " + std::to_string(by) + " px " + (rt ? "left" : "up") +
-                                   " or make it " + std::to_string(by) + " px " + (rt ? "narrower" : "shorter") + "."});
+                                   " or make it " + std::to_string(by) + " px " + (rt ? "narrower" : "shorter") + ".",
+                               Fix::MoveOnScreen});
             }
         }
     }
@@ -603,13 +606,15 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
             std::string kept = truncateBytes(e.text, kTextMax);
             out.push_back({"Text too long", "The export keeps the first " + std::to_string(kTextMax) + " bytes and drops \"" +
                                                 e.text.substr(kept.size()) + "\". Shorten it by " +
-                                                std::to_string(e.text.size() - kept.size()) + " characters."});
+                                                std::to_string(e.text.size() - kept.size()) + " characters.",
+                           Fix::TrimText});
         }
         for (unsigned char ch : e.text)
             if (ch < 0x20 || ch > 0x7E) {
                 out.push_back({"Characters it cannot draw",
                                "psxsplash draws ASCII only (letters, digits, punctuation); anything else shows as '?'. "
-                               "Replace accented letters and symbols."});
+                               "Replace accented letters and symbols.",
+                               Fix::AsciiText});
                 break;
             }
         const splash::UIFont* font = nullptr;
@@ -617,7 +622,8 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
             if (f.name == e.font) font = &f;
         if (!e.font.empty() && !font)
             out.push_back({"No such font", "The scene has no font named '" + e.font +
-                                               "', so the export fails. Pick one of the scene's fonts, or System."});
+                                               "', so the export fails. Pick one of the scene's fonts, or System.",
+                           Fix::SystemFont});
         if (font) {
             // Custom-font glyphs are white tinted by colour/128: channels above half clip.
             const uint8_t r8 = byteOf(e.color[0]), g8 = byteOf(e.color[1]), b8 = byteOf(e.color[2]);
@@ -628,7 +634,8 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
                                "psxsplash tints the white glyphs of a custom font by colour/128, which doubles it: this "
                                "text shows as " + hexOf(shown(r8), shown(g8), shown(b8)) + ", not " + hexOf(r8, g8, b8) +
                                    ". For " + hexOf(r8, g8, b8) + " set Colour to " +
-                                   hexOf(uint8_t((r8 + 1) / 2), uint8_t((g8 + 1) / 2), uint8_t((b8 + 1) / 2)) + "."});
+                                   hexOf(uint8_t((r8 + 1) / 2), uint8_t((g8 + 1) / 2), uint8_t((b8 + 1) / 2)) + ".",
+                               Fix::HalveColour});
         }
     }
     if (e.type == UIElementType::Image) {
@@ -643,16 +650,70 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
         auto off = [](uint8_t c) { return std::abs(int(c) - 128) > 2; };
         if (off(r8) || off(g8) || off(b8))
             out.push_back({"Tinted", "psxsplash multiplies the texture by colour/128: 50% grey (#808080) shows it as it is, "
-                                     "white doubles it. Set Colour to #808080 for the texture's own colours."});
+                                     "white doubles it. Set Colour to #808080 for the texture's own colours.",
+                           Fix::NeutralTint});
     }
     if (e.type == UIElementType::Progress && (e.value < 0 || e.value > 100))
         out.push_back({"Value out of range", "Value " + std::to_string(e.value) +
                                                  " is outside 0..100; the game reads it as " +
-                                                 std::to_string(uint8_t(e.value)) + ". Set it between 0 and 100."});
+                                                 std::to_string(uint8_t(e.value)) + ". Set it between 0 and 100.",
+                           Fix::ClampValue});
     if (utf16Units(e.name) > 24)
         out.push_back({"Long name", "The game keeps the first 24 characters of the name, so UI.FindElement must use those. "
                                     "Shorten it to 24."});
     return out;
+}
+
+const char* fixLabel(Fix f) {
+    switch (f) {
+        case Fix::MoveOnScreen: return "Move onto the screen";
+        case Fix::TrimText: return "Cut to 63 bytes";
+        case Fix::AsciiText: return "Replace with '?'";
+        case Fix::SystemFont: return "Use the system font";
+        case Fix::HalveColour: return "Halve the colour";
+        case Fix::NeutralTint: return "Set to #808080";
+        case Fix::ClampValue: return "Clamp to 0..100";
+        case Fix::None: break;
+    }
+    return "";
+}
+
+bool applyFix(Document& doc, int c, int e, Fix fix, Screen s) {
+    return editElement(doc, c, e, [&](UIElement& el) {
+        switch (fix) {
+            case Fix::MoveOnScreen: {
+                if (el.type == UIElementType::Line) {
+                    for (auto* p : {&el.from, &el.to}) *p = {clampi((*p)[0], 0, s.w - 1), clampi((*p)[1], 0, s.h - 1)};
+                    break;
+                }
+                Rect r = layout(el, s);
+                r.w = clampi(r.w, 1, s.w);
+                r.h = clampi(r.h, 1, s.h);
+                r.x = clampi(r.x, 0, s.w - r.w);
+                r.y = clampi(r.y, 0, s.h - r.h);
+                place(el, r, s);
+                break;
+            }
+            case Fix::TrimText: el.text = truncateBytes(el.text, kTextMax); break;
+            case Fix::AsciiText: {
+                std::string t;
+                for (size_t i = 0; i < el.text.size(); i++) {
+                    unsigned char ch = uint8_t(el.text[i]);
+                    if (ch >= 0x20 && ch <= 0x7E) t += char(ch);
+                    else if ((ch & 0xC0) != 0x80) t += '?';  // one '?' per character, not per byte
+                }
+                el.text = t;
+                break;
+            }
+            case Fix::SystemFont: el.font.clear(); break;
+            case Fix::HalveColour:
+                for (float& ch : el.color) ch = float((byteOf(ch) + 1) / 2) / 255.f;
+                break;
+            case Fix::NeutralTint: el.color = {128 / 255.f, 128 / 255.f, 128 / 255.f}; break;
+            case Fix::ClampValue: el.value = clampi(el.value, 0, 100); break;
+            case Fix::None: break;
+        }
+    });
 }
 
 std::vector<Problem> canvasProblems(const Document& doc, int c) {

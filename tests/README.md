@@ -293,6 +293,18 @@ the glyph sheet export builds and prints its cell size and VRAM cost.
 
 `ui/ui.scene` booted with `boot/boot.sh` at frame 300 shows both Inter fonts, the system font, the
 progress bar, the image, a line ending at x 311 and the full-width bar, at the positions above.
+That frame is kept as `ui/ui-runtime.png` (psxsplash 669fb6b): `editor_tests` renders the scene
+with the UI tab's preview and requires the same pixels in 15-bit colour.
+
+`uicanvascheck.py` drives the UI tab (the canvas editor) on a copy of `ui/ui.scene`, started with
+`--ui`, which opens the tab and prints where the canvas and the element list are. It drags an
+element on the canvas (and to 2 px from the screen edge, where it must snap onto it), resizes one
+by its corner handle, nudges with the arrows (Shift: 8 px), brings one forward with Ctrl+],
+reorders by dragging a list row, duplicates, deletes, hides the canvas with its eye and clicks
+empty canvas to deselect, then saves and reads the scene back. One Ctrl+Z must take back one
+whole drag. Needs a display (CI runs it under `xvfb-run` on Linux).
+
+    python3 uicanvascheck.py <splashedit>
 
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
 `SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in

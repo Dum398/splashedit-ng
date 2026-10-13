@@ -21,6 +21,7 @@
 #include "editor/model_import.hh"
 #include "editor/texture_preview.hh"
 #include "editor/lua_editor_view.hh"
+#include "editor/ui_canvas_view.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
 #include "editor/timeline_view.hh"
@@ -223,8 +224,10 @@ struct State {
         float shown = 0;  // the value the drag label shows (degrees or factor)
     } gizmo;
 
-    // Lua files open in the script editor, as tabs beside the Scene.
+    // Lua files open in the script editor, as tabs beside the Scene and UI.
     ui::ScriptTabs scripts;
+    // The UI tab: the canvas editor.
+    ui::CanvasView canvasView;
     std::filesystem::path scriptsProject;  // the project they belong to
     unsigned scriptsAssets = 0;            // doc.assetsId() the tabs last matched disk at
 

@@ -5161,6 +5161,17 @@ void testUiProblems() {
     CHECK(titles(elementProblems(d, 0, 6, s)) == "Cut by the left edge;");
     CHECK(titles(elementProblems(d, 0, 7, s)) == "Text too long;No such font;");
     CHECK(elementProblems(d, 0, 7, s)[0].body.find("by 7") != std::string::npos);
+    // The one-click fixes, one undo step each.
+    CHECK(off[0].fix == Fix::MoveOnScreen && applyFix(d, 0, 4, off[0].fix, s));
+    CHECK((layout(d.scene().canvases[0].elements[4], s) == Rect{300, 10, 20, 20}));
+    CHECK(elementProblems(d, 0, 4, s).empty());
+    CHECK(applyFix(d, 0, 6, Fix::MoveOnScreen, s) && layout(d.scene().canvases[0].elements[6], s).x == 0);
+    CHECK(applyFix(d, 0, 7, Fix::TrimText, s) && d.scene().canvases[0].elements[7].text.size() == 63);
+    CHECK(applyFix(d, 0, 7, Fix::SystemFont, s) && elementProblems(d, 0, 7, s).empty());
+    CHECK(!applyFix(d, 0, 7, Fix::SystemFont, s));  // nothing left to fix: no step
+    CHECK(d.historySize() == 4 && d.undo() && d.scene().canvases[0].elements[7].font == "nope");
+    editElement(d, 0, 7, [](splash::UIElement& e) { e.text = "caf\xc3\xa9!"; });
+    CHECK(applyFix(d, 0, 7, Fix::AsciiText, s) && d.scene().canvases[0].elements[7].text == "caf?!");
     // Over the 256-element budget: the elements past it say so, and the canvas.
     sc = uiScene();
     for (int i = 0; i < 260; i++) sc.canvases[1].elements.push_back(uiBox("n", 0, 0, 4, 4));
@@ -5237,6 +5248,36 @@ void testUiRender() {
     std::vector<uint32_t> dim = render(isc, {true}, s, assets, bg);
     CHECK(dim[10 * 320 + 10] == 0xff00007bu);
     CHECK(textWidth(sc, assets, "", "Hello") == 40);
+}
+
+// tests/ui/ui.scene as psxsplash draws it: tests/ui/ui-runtime.png is frame
+// 300 of tests/boot/boot.sh (pcsx-redux, psxsplash 669fb6b). The preview must
+// match it pixel for pixel in 15-bit colour: both Inter fonts (the body text
+// lighter than its colour, the GPU's tint doubling), the system font, the
+// progress bar, the image, the line and the anchored boxes.
+void testUiMatchesRuntime() {
+    using namespace editor::uic;
+    const std::filesystem::path dir = std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "ui";
+    splash::Scene sc = splash::loadScene(dir / "ui.scene");
+    Assets assets;
+    assets.refresh(dir, 0);
+    std::vector<uint32_t> px = render(sc, {true}, Screen{}, assets, 0xff000000u);
+    splash::Image ref = splash::loadImage(dir / "ui-runtime.png");
+    CHECK(ref.width == 320 && ref.height == 240);
+    if (ref.width != 320 || ref.height != 240) return;
+    int differ = 0, lit = 0;
+    for (int y = 0; y < 240; y++)
+        for (int x = 0; x < 320; x++) {
+            const splash::Image::Px& p = ref.pixels[size_t(239 - y) * 320 + size_t(x)];  // rows bottom-up
+            const uint32_t e = px[size_t(y) * 320 + size_t(x)];
+            const int want[3] = {int(std::lround(p.r * 31)), int(std::lround(p.g * 31)), int(std::lround(p.b * 31))};
+            const int got[3] = {int(e & 0xff) >> 3, int((e >> 8) & 0xff) >> 3, int((e >> 16) & 0xff) >> 3};
+            if (want[0] != got[0] || want[1] != got[1] || want[2] != got[2]) differ++;
+            if (got[0] || got[1] || got[2]) lit++;
+        }
+    CHECK(differ == 0);
+    CHECK(lit > 10000);
+    if (differ) std::fprintf(stderr, "UI preview: %d pixels differ from the runtime frame\n", differ);
 }
 
 int main(int argc, char** argv) {
@@ -5316,6 +5357,7 @@ int main(int argc, char** argv) {
     testUiUndo();
     testUiProblems();
     testUiRender();
+    testUiMatchesRuntime();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -23,8 +23,12 @@ public:
     bool open(const std::filesystem::path& file, std::string* error);
     bool empty() const { return m_tabs.empty(); }
     // The Scene tab (the viewport) is showing.
-    bool sceneShown() const { return m_active < 0; }
-    // The tab strip over `r` while scripts are open; returns the rest of `r`.
+    bool sceneShown() const { return m_active == kScene; }
+    // The UI tab (the canvas editor) is showing.
+    bool uiShown() const { return m_active == kUi; }
+    void showUi() { m_active = kUi; }
+    // The tab strip over `r`: Scene, UI, then a tab per open script.
+    // Returns the rest of `r`.
     ImRect tabStrip(ImDrawList* dl, ImRect r);
     // The editor of the script showing, in `r`.
     void draw(ImDrawList* dl, ImRect r);
@@ -62,8 +66,9 @@ private:
     void closePrompt();
     void pollDisk();
     double m_polledAt = -1;
+    static constexpr int kScene = -1, kUi = -2;
     std::vector<std::unique_ptr<Tab>> m_tabs;
-    int m_active = -1;
+    int m_active = kScene;  // a script tab's index, or kScene / kUi
     int m_closing = -1;  // a changed tab waiting on the save prompt
     bool m_openClosePrompt = false;
     std::vector<std::filesystem::path> m_saved;

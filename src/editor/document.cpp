@@ -323,6 +323,30 @@ private:
     bool m_insert;
 };
 
+// Swaps one object with its subtree for another.
+class TreeCommand : public Command {
+public:
+    TreeCommand(ObjectPath path, splash::Object before, splash::Object after)
+        : m_path(std::move(path)), m_before(std::move(before)), m_after(std::move(after)) {}
+    void apply(Document& doc) override { set(doc, m_after); }
+    void revert(Document& doc) override { set(doc, m_before); }
+
+private:
+    void set(Document& doc, const splash::Object& v) {
+        splash::Object* o = doc.objectMut(m_path);
+        if (!o) return;
+        *o = v;
+        for (std::optional<ObjectPath> p : {doc.selection(), doc.pinned()}) {
+            if (!p || p->size() <= m_path.size() || !std::equal(m_path.begin(), m_path.end(), p->begin()) || doc.object(*p)) continue;
+            if (p == doc.selection()) doc.select(m_path);
+            if (p == doc.pinned()) doc.pin(m_path);
+        }
+        doc.recount();
+    }
+    ObjectPath m_path;
+    splash::Object m_before, m_after;
+};
+
 // Moves one object with its subtree from `from` to `to` (a path in the tree
 // as it is once the object has been taken out), swapping its transform.
 class MoveCommand : public Command {
@@ -461,6 +485,19 @@ int Document::editMany(const std::vector<ObjectPath>& paths, const std::function
         fn(after);
         after.children.clear();
         parts.push_back(std::make_unique<EditCommand>(path, std::move(before), std::move(after), std::string()));
+    }
+    if (parts.empty()) return 0;
+    const int n = int(parts.size());
+    execute(std::make_unique<GroupCommand>(std::move(parts)));
+    return n;
+}
+
+int Document::replaceTrees(std::vector<std::pair<ObjectPath, splash::Object>> trees) {
+    std::vector<std::unique_ptr<Command>> parts;
+    for (auto& [path, obj] : trees) {
+        const splash::Object* o = object(path);
+        if (!o) continue;
+        parts.push_back(std::make_unique<TreeCommand>(path, *o, std::move(obj)));
     }
     if (parts.empty()) return 0;
     const int n = int(parts.size());

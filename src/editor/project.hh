@@ -4,6 +4,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -43,13 +44,18 @@ struct AdoptedAsset {
 AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesystem::path& file, const std::string& folder);
 
 // The objects an imported model becomes, the top one named `name`. A model of
-// one node is one object drawing the baked mesh. With more, the top object is
-// an empty holding an object per node, the file's tree kept: each with the
-// node's local transform and, if it has one, its mesh and materials.
-splash::Object modelObject(const splash::ImportedModel& model, const std::string& name);
+// one node, or any model with `settings.mergeMeshes`, is one object drawing
+// the baked mesh. Otherwise the top object is an empty holding an object per
+// node, the file's tree kept: each with the node's local transform and, if it
+// has one, its mesh and materials. Every mesh component gets the settings'
+// bit depth and lighting.
+splash::Object modelObject(const splash::ImportedModel& model, const std::string& name,
+                           const splash::ImportSettings& settings = {});
 
 // A model file dropped on or picked in the editor. It is adopted into the
-// project's models/ folder and imported. With `replace` naming an object that
+// project's models/ folder and imported, named after the copy, with the
+// settings in the copy's sidecar; the sidecar is written (defaults and the
+// file it came from) when there is none. With `replace` naming an object that
 // has a mesh, that object's model and materials are swapped for the baked
 // mesh; otherwise modelObject() is inserted at `at` (the parent's path plus
 // the index), named after the file and unique among its siblings, at
@@ -61,6 +67,46 @@ struct PlacedModel {
 };
 PlacedModel placeModel(Document& doc, const std::filesystem::path& file, const std::optional<ObjectPath>& replace,
                        const ObjectPath& at, splash::Vec3 position);
+
+// The model in `project`'s models/ folder that wrote the project-relative
+// `mesh` (models/<name>.mesh or models/<name>/<node>.mesh): the file with a
+// sidecar whose importName is <name>. Empty when there is none.
+std::filesystem::path modelOfMesh(const std::filesystem::path& project, const std::string& mesh);
+
+// Imports `model` (a file in the project's models/ folder) again with the
+// settings in its sidecar, read from the sidecar's source while that file is
+// there (so files beside it are found) and from the copy otherwise. The same
+// .mesh and .png paths are rewritten, so every reference keeps working; the
+// views reload them. Objects drawing one of its meshes take its new
+// materials, and the objects of each instance of it as modelObject made them
+// (matched by name) take the new node transforms. When `wasMerged` is given
+// and differs from the sidecar's mergeMeshes, the top object of each instance
+// is rebuilt the other way: the node objects swapped for the baked mesh or
+// back, the rest of the object kept. The scene changes are one undo step.
+struct Reimported {
+    std::string error;  // empty on success
+    splash::ImportedModel model;
+    int objects = 0;  // top-level objects whose tree changed
+};
+Reimported reimportModel(Document& doc, const std::filesystem::path& model, std::optional<bool> wasMerged = std::nullopt);
+
+// Notices model files that changed on disk. Each poll stats the models in the
+// project's models/ folder that have a sidecar, and each one's source; a
+// source newer than at the last poll is copied over the model first.
+class ModelWatcher {
+  public:
+    // The models (absolute paths) whose file or source changed since the
+    // last poll of this project. A model seen for the first time is only noted.
+    std::vector<std::filesystem::path> poll(const std::filesystem::path& project);
+
+  private:
+    struct Seen {
+        std::filesystem::file_time_type model, source, sidecar;
+        std::string sourcePath;
+    };
+    std::filesystem::path m_project;
+    std::map<std::filesystem::path, Seen> m_seen;
+};
 
 // Recently opened scenes, newest first, as absolute paths. Stored one per line.
 class RecentScenes {

@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <future>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -151,6 +152,27 @@ struct State {
     bool openUnsaved = false;
     bool unsavedShown = false;   // the prompt is up; document shortcuts wait
     bool quitRequested = false;  // window close: asks first when there are changes
+
+    // The inspector's Import settings: the model the shown object's mesh came
+    // from and its sidecar, looked up again about once a second. `editing`
+    // holds a scrub until it is released.
+    struct ImportPanel {
+        std::string mesh;             // the mesh the model was looked up for
+        std::filesystem::path model;  // empty: not from an imported model
+        splash::ImportSettings settings;
+        std::string error;  // the sidecar could not be read
+        double checked = -1;
+        std::optional<splash::ImportSettings> editing;
+    } importPanel;
+    // Models to import again next frame (a reimport can rebuild the object the
+    // inspector is drawing), and the watcher polled about once a second.
+    struct Reimport {
+        std::filesystem::path model;
+        std::optional<bool> wasMerged;
+    };
+    std::vector<Reimport> reimports;
+    editor::ModelWatcher watcher;
+    double watchedAt = -1;
 
     // Gizmo drag in progress, for the tool in `tool`. Move: handle 0..2 =
     // X/Y/Z arrow, 3 = XZ plane. Rotate: 0..2 = X/Y/Z ring. Scale: 0..2 =

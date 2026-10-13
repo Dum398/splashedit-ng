@@ -3210,6 +3210,160 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     commit(fe, "scl", [&](splash::Object& ob) { ob.transform.scale = {scl[0], scl[1], scl[2]}; });
     sectionEnd(top);
 
+    // Import settings of the model the object's mesh came from; for the top
+    // of a placed model, the first mesh below it.
+    {
+        std::function<const splash::Object*(const splash::Object&)> withMesh = [&](const splash::Object& ob) -> const splash::Object* {
+            if (ob.mesh && !ob.mesh->mesh.empty()) return &ob;
+            for (const splash::Object& c : ob.children)
+                if (const splash::Object* found = withMesh(c)) return found;
+            return nullptr;
+        };
+        const splash::Object* drawn = withMesh(*o);
+        State::ImportPanel& ip = st.importPanel;
+        const std::string mesh = drawn ? drawn->mesh->mesh : std::string();
+        const double now = ImGui::GetTime();
+        if (ip.editing && mesh != ip.mesh) ip.editing.reset();  // a scrub left unfinished on another object
+        if (!ip.editing && (mesh != ip.mesh || ip.checked < 0 || now - ip.checked > 1.0)) {
+            ip.mesh = mesh;
+            ip.checked = now;
+            ip.model = mesh.empty() ? std::filesystem::path() : editor::modelOfMesh(doc.projectRoot(), mesh);
+            ip.error.clear();
+            if (!ip.model.empty()) {
+                try {
+                    ip.settings = splash::loadImportSettings(ip.model);
+                } catch (const std::exception& ex) {
+                    ip.error = ex.what();
+                }
+            }
+        }
+        if (!ip.model.empty()) {
+            top = y;
+            const ImRect head(ImVec2(x0, y), ImVec2(x1, y + 34));
+            fold(section("s_import", head, icon::box, kind::mesh, "Import settings", true, true, false));
+            if (!folded) {
+                const std::string file = utf8(ip.model.filename());
+                ImVec2 ts = measure(f.semibold, type::body, "Import settings");
+                const float fx = head.Min.x + space::sm + 41 + ts.x + space::md, fr = head.Max.x - space::sm;
+                ImGui::PushClipRect(ImVec2(fx, head.Min.y), ImVec2(fr, head.Max.y), true);
+                ImVec2 fsz = measure(f.regular, type::caption, file.c_str());
+                text(dl, ImVec2(std::max(fx, fr - fsz.x), centerY(f.regular, type::caption, head.Min.y, head.Max.y)), f.regular, type::caption,
+                     color::textFaint, file.c_str());
+                ImGui::PopClipRect();
+                interact("s_import#file", ImRect(ImVec2(std::max(fx, fr - fsz.x), head.Min.y), ImVec2(fr, head.Max.y)));
+                tooltip(("Imported from models/" + file + (ip.settings.source.empty() ? std::string() : ", copied from " + ip.settings.source) +
+                         ". These settings are kept in " + file + ".import.json beside it.")
+                            .c_str());
+            }
+            y += 34 + space::xs;
+            // Rows with room for the longer labels.
+            auto irow = [&](const char* id, const char* label, const char* tip) {
+                ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
+                y += rowH;
+                return property(id, rr, 150, label, tip);
+            };
+            if (!ip.error.empty()) {
+                if (card("fiximport", "Import settings could not be read", ip.error, "Read again")) ip.checked = -1;
+            } else {
+                const splash::ImportSettings& cur = ip.editing ? *ip.editing : ip.settings;
+                // Saved, and the model imported again next frame.
+                auto apply = [&](splash::ImportSettings next) {
+                    ip.editing.reset();
+                    const bool was = ip.settings.mergeMeshes;
+                    try {
+                        splash::saveImportSettings(ip.model, next);
+                    } catch (const std::exception& ex) {
+                        notify(st, std::string("Import settings not saved: ") + ex.what(), true);
+                        return;
+                    }
+                    ip.settings = next;
+                    st.reimports.push_back({ip.model, was != next.mergeMeshes ? std::optional<bool>(was) : std::nullopt});
+                };
+                // A scrub shows its value as it goes and applies on release.
+                auto scrub = [&](const FieldEdit& fe, float v, const std::function<void(splash::ImportSettings&, float)>& set) {
+                    if (fe.changed) {
+                        if (!ip.editing) ip.editing = ip.settings;
+                        set(*ip.editing, v);
+                    }
+                    if (fe.done && ip.editing) apply(*ip.editing);
+                };
+                float sv = cur.scale;
+                FieldEdit sfe = numberField("iscale", irow("liscale", "Scale",
+                                                           "Multiplies the model's size: every position in it and every part's offset. "
+                                                           "1 keeps the size in the file, in metres."),
+                                            fmtShort(cur.scale).c_str(), nullptr, 0, nullptr, &sv);
+                scrub(sfe, sv, [](splash::ImportSettings& s, float v) { s.scale = splash::clampv(v, 0.001f, 1000.0f); });
+                const splash::UpAxis ups[3] = {splash::UpAxis::File, splash::UpAxis::YUp, splash::UpAxis::ZUp};
+                const char* upNames[3] = {"From file", "Y up", "Z up"};
+                int upCur = (int)(std::find(std::begin(ups), std::end(ups), cur.up) - std::begin(ups));
+                int upPick = dropdownMenu("iup", irow("liup", "Up axis",
+                                                      "Which way is up in the file. From file believes what the file says; Y up or Z up "
+                                                      "overrides it, for a model that comes in lying on its back."),
+                                          nullptr, upNames[upCur], {"From file", "Y up", "Z up"}, upCur);
+                if (upPick >= 0 && ups[upPick] != cur.up) {
+                    splash::ImportSettings next = ip.settings;
+                    next.up = ups[upPick];
+                    apply(next);
+                }
+                const bool recompute = cur.normals == splash::Normals::Recompute;
+                int nPick = dropdownMenu("inormals", irow("linormals", "Normals",
+                                                          "Import keeps the file's normals (flat shading where it has none). Recompute works "
+                                                          "them out from the faces, smoothing edges gentler than the smoothing angle."),
+                                         nullptr, recompute ? "Recompute" : "Import", {"Import", "Recompute"}, recompute ? 1 : 0);
+                if (nPick >= 0 && (nPick == 1) != recompute) {
+                    splash::ImportSettings next = ip.settings;
+                    next.normals = nPick == 1 ? splash::Normals::Recompute : splash::Normals::Import;
+                    apply(next);
+                }
+                // Only used with Recompute; editable either way, dimmed when unused.
+                const float angleTop = y;
+                float av = cur.smoothingAngle;
+                FieldEdit afe = numberField("ismooth", irow("lismooth", "Smoothing angle",
+                                                            recompute ? "Faces meeting at less than this many degrees are shaded smooth across "
+                                                                        "the edge; sharper edges stay hard."
+                                                                      : "Not used: set Normals to Recompute first. Faces meeting at less than "
+                                                                        "this many degrees are shaded smooth across the edge."),
+                                            fmtShort(cur.smoothingAngle).c_str(), "deg", 0, nullptr, &av);
+                scrub(afe, av, [](splash::ImportSettings& s, float v) { s.smoothingAngle = splash::clampv(v, 0.0f, 180.0f); });
+                if (!recompute) dl->AddRectFilled(ImVec2(x0 + space::sm, angleTop), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150));
+                ImRect mv = irow("limerge", "Merge meshes",
+                                 "On makes each placed copy of the model one object drawing a single mesh. Off keeps the file's parts as "
+                                 "child objects. Changing it rebuilds the copies already in the scene.");
+                if (toggle("imerge", ImRect(ImVec2(mv.Min.x, mv.GetCenter().y - 8), ImVec2(mv.Min.x + 30, mv.GetCenter().y + 8)),
+                           cur.mergeMeshes)) {
+                    splash::ImportSettings next = ip.settings;
+                    next.mergeMeshes = !next.mergeMeshes;
+                    apply(next);
+                }
+                const splash::BitDepth depths[3] = {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8, splash::BitDepth::Bpp16};
+                int dCur = (int)(std::find(std::begin(depths), std::end(depths), cur.bitDepth) - std::begin(depths));
+                int dPick = dropdownMenu("idepth", irow("lidepth", "Bit depth for new objects",
+                                                        "Texture bit depth of the objects made from this model from now on, including "
+                                                        "ones Merge meshes rebuilds. Objects already placed keep theirs."),
+                                         nullptr, bppLabel(cur.bitDepth), {"4 bpp", "8 bpp", "16 bpp"}, dCur);
+                if (dPick >= 0 && depths[dPick] != cur.bitDepth) {
+                    splash::ImportSettings next = ip.settings;
+                    next.bitDepth = depths[dPick];
+                    apply(next);
+                }
+                const splash::DynamicLighting lights[4] = {splash::DynamicLighting::Auto, splash::DynamicLighting::On,
+                                                           splash::DynamicLighting::Off, splash::DynamicLighting::Smooth};
+                const char* lightNames[4] = {"Auto", "On", "Off", "Smooth"};
+                int lCur = (int)(std::find(std::begin(lights), std::end(lights), cur.lighting) - std::begin(lights));
+                int lPick = dropdownMenu("ilight", irow("lilight", "Lighting for new objects",
+                                                        "Runtime lighting of the objects made from this model from now on. Auto: lit by "
+                                                        "runtime lights that reach it. Objects already placed keep theirs."),
+                                         nullptr, lightNames[lCur], {"Auto", "On", "Off", "Smooth"}, lCur);
+                if (lPick >= 0 && lights[lPick] != cur.lighting) {
+                    splash::ImportSettings next = ip.settings;
+                    next.lighting = lights[lPick];
+                    apply(next);
+                }
+            }
+            sectionEnd(top);
+        }
+    }
+
     // Mesh.
     if (o->mesh) {
         const splash::MeshComponent& m = *o->mesh;
@@ -3827,12 +3981,36 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (ctrl && !shift && pressed(ImGuiKey_Q)) request(st, doc, State::Pending::Quit);
 }
 
+// Imports models again: the ones the inspector's Import settings changed last
+// frame, and, about once a second, the ones whose file changed on disk.
+static void updateModels(State& st, editor::Document& doc) {
+    std::vector<State::Reimport> todo;
+    todo.swap(st.reimports);
+    const double now = ImGui::GetTime();
+    if (st.watchedAt < 0 || now - st.watchedAt >= 1.0) {
+        st.watchedAt = now;
+        for (const std::filesystem::path& m : st.watcher.poll(doc.projectRoot())) todo.push_back({m, std::nullopt});
+    }
+    for (const State::Reimport& r : todo) {
+        editor::Reimported re = editor::reimportModel(doc, r.model, r.wasMerged);
+        if (!re.error.empty()) {
+            notify(st, "Reimport failed: " + re.error, true);
+            continue;
+        }
+        std::string msg = "Reimported " + utf8(r.model.filename());
+        if (!re.model.warnings.empty()) msg += ". Note: " + re.model.warnings.front();
+        notify(st, msg, false);
+        st.importPanel.checked = -1;
+    }
+}
+
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     filesPending(st, doc);
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
     updatePlay(st, doc);
     updateExport(st);
+    updateModels(st, doc);
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(size);
     ImGui::Begin("##main", nullptr,

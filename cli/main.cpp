@@ -53,7 +53,9 @@ static int usage() {
                  "  encodes one clip the way export does and prints its SNR against the source;\n"
                  "  --pcm writes the 16-bit mono WAV the encoder starts from, before resampling\n"
                  "usage: splashpack-cli import <model.glb|model.gltf|model.fbx|model.obj> --project <dir>\n"
-                 "  writes models/<name>.mesh and its textures into the project, as the editor does\n"
+                 "    [--scale <f>] [--up file|y|z] [--normals import|recompute] [--smoothing <deg>] [--merge]\n"
+                 "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
+                 "  the settings start from <model>.import.json beside the model when there is one\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
@@ -184,9 +186,36 @@ static int resave(int argc, char** argv) {
 }
 
 static int importCmd(int argc, char** argv) {
-    if (argc != 5 || std::strcmp(argv[3], "--project") != 0) return usage();
+    if (argc < 5) return usage();
     try {
-        splash::ImportedModel m = splash::importModel(argv[2], argv[4]);
+        const fs::path model = argv[2];
+        splash::ImportSettings s = splash::loadImportSettings(model);
+        std::string project;
+        for (int i = 3; i < argc; i++) {
+            std::string a = argv[i];
+            const bool more = i + 1 < argc;
+            if (a == "--project" && more) project = argv[++i];
+            else if (a == "--scale" && more) s.scale = std::strtof(argv[++i], nullptr);
+            else if (a == "--smoothing" && more) s.smoothingAngle = std::strtof(argv[++i], nullptr);
+            else if (a == "--merge") s.mergeMeshes = true;
+            else if (a == "--up" && more) {
+                std::string v = argv[++i];
+                if (v == "file") s.up = splash::UpAxis::File;
+                else if (v == "y") s.up = splash::UpAxis::YUp;
+                else if (v == "z") s.up = splash::UpAxis::ZUp;
+                else return usage();
+            } else if (a == "--normals" && more) {
+                std::string v = argv[++i];
+                if (v == "import") s.normals = splash::Normals::Import;
+                else if (v == "recompute") s.normals = splash::Normals::Recompute;
+                else return usage();
+            } else return usage();
+        }
+        if (project.empty()) return usage();
+        static const char* const ups[] = {"file", "y", "z"};
+        std::printf("settings scale %g up %s normals %s smoothing %g merge %s\n", s.scale, ups[int(s.up)],
+                    s.normals == splash::Normals::Recompute ? "recompute" : "import", s.smoothingAngle, s.mergeMeshes ? "yes" : "no");
+        splash::ImportedModel m = splash::importModel(model, project, s);
         std::printf("mesh %s (%d triangles)\n", m.mesh.c_str(), m.triangles);
         for (size_t i = 0; i < m.materials.size(); i++) {
             const splash::Material& mat = m.materials[i];

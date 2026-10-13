@@ -102,6 +102,17 @@ static std::filesystem::path playDir() {
     return (ec ? std::filesystem::path(".") : tmp) / "splashedit-play";
 }
 
+static void notify(State& st, std::string msg, bool bad);
+
+// A build reads scripts from disk, so the script editor's unsaved tabs are
+// saved first: what runs is what is on screen. False if one could not be.
+static bool saveScriptsForBuild(State& st) {
+    std::string err;
+    if (st.scripts.saveAll(&err)) return true;
+    notify(st, "Cannot save a script: " + err, true);
+    return false;
+}
+
 // F5 and the Play button: start, or stop what is running.
 static void togglePlay(State& st, const editor::Document& doc) {
     State::Play& p = st.play;
@@ -110,6 +121,7 @@ static void togglePlay(State& st, const editor::Document& doc) {
         return;
     }
     if (p.build.valid()) return;
+    if (!saveScriptsForBuild(st)) return;
     if (p.reload.valid()) p.reload.wait();  // a live edit still writing the folder
     p.message.clear();
     p.peak.reset();
@@ -145,6 +157,7 @@ static void toggleRun(State& st, const editor::Document& doc) {
         return;
     }
     if (p.hwBuild.valid()) return;
+    if (!saveScriptsForBuild(st)) return;
     p.message.clear();
     if (!editor::missingHardwareTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
@@ -3983,10 +3996,15 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
 // Document-wide shortcuts. Skipped while a text field has the keyboard.
 static void shortcuts(State& st, editor::Document& doc) {
     ImGuiIO& io = ImGui::GetIO();
-    if (io.WantTextInput || st.unsavedShown || st.menuOpen >= 0 || st.scripts.hasKeyboard()) return;
     auto pressed = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, false); };
     auto repeat = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift;
+    // The script editor keeps the keyboard, but Play and Run on hardware still answer.
+    if (st.scripts.hasKeyboard() && !io.WantTextInput && !st.unsavedShown && st.menuOpen < 0) {
+        if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
+        return;
+    }
+    if (io.WantTextInput || st.unsavedShown || st.menuOpen >= 0) return;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
     if (st.play.gameFocus && st.play.game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);

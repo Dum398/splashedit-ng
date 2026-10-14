@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #endif
 
+#include "editor/asset_browser.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/hardware.hh"
@@ -3755,14 +3756,20 @@ static splash::Image busyImage() {
 
 void testQuantizer() {
     splash::Image img = busyImage();
-    // Speed: the brute-force k-means took 8.4 s on this image in an optimised
-    // build and over 40 s unoptimised; the bounded one well under 2 s. The
-    // bound is loose for slow CI machines.
+    // Speed: the brute-force k-means took 5-8 s on this image in an optimised
+    // build and over 40 s unoptimised; the bounded one 0.5 s and 1.6 s. Each
+    // build type gets its own bound, loose for slow CI machines, so a CI
+    // (Release) build still catches the old quantizer.
     auto t0 = std::chrono::steady_clock::now();
     splash::PsxTexture t8 = splash::convertTexture(img, splash::BitDepth::Bpp8);
     double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr, "quantizer: 256x256 8 bpp in %.2f s\n", sec);
-    CHECK(sec < 10.0);
+#ifdef NDEBUG
+    const double limit = 3.0;
+#else
+    const double limit = 12.0;
+#endif
+    CHECK(sec < limit);
     // Quality: the same as the brute-force quantizer's (its output is
     // byte-identical on x86-64: deltaE 1.716 / 4.827, blurred 0.462 / 2.129).
     // The headroom only allows for other platforms' float maths (a perturbed
@@ -3959,6 +3966,336 @@ void testTexturePreview() {
     }
 }
 
+// The Project panel's model: listing, classification, filters, references
+// across scenes and the rename/delete rules.
+void testAssetBrowser() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path proj = g_outDir / "assetbrowser" / "game";
+    fs::remove_all(proj.parent_path(), ec);
+    for (const char* d : {"textures", "scripts", "meshes", "models", ".git"}) fs::create_directories(proj / d, ec);
+    auto write = [&](const char* rel, const std::string& text) { std::ofstream(proj / rel, std::ios::binary) << text; };
+    write("textures/brick.png", "x");
+    write("textures/Spare Brick.png", "xy");
+    write("scripts/logic.lua", "-- logic\n");
+    write("scripts/unused.lua", "-- unused\n");
+    write("meshes/crate.mesh", "{}");
+    write("music.wav", "RIFF");
+    write("notes.txt", "hello");
+    write(".hidden", "h");
+    write(".git/HEAD", "ref");
+    // An imported model: its sidecar (hidden) and what its import wrote.
+    write("models/robot.gltf", "{}");
+    write("models/robot.gltf.import.json", "{}");
+    write("models/robot.mesh", "{}");
+    write("models/robot_0.png", "p");
+    fs::create_directories(proj / "models" / "robot", ec);
+    write("models/robot/Arm.mesh", "{}");
+    write("models/robot/walk.anim", "{}");
+    write("models/loose.obj", "v 0 0 0\n");  // no sidecar: never imported
+
+    // The open scene uses the brick texture, the crate mesh, the logic script
+    // and the robot's arm; another scene on disk uses the wav.
+    splash::Scene sc;
+    splash::Object wall = named("Wall");
+    wall.mesh.emplace();
+    wall.mesh->mesh = "meshes/crate.mesh";
+    wall.mesh->materials.push_back({"textures/brick.png", {1, 1, 1, 1}, {}});
+    splash::Object logic = named("Logic");
+    logic.script.emplace();
+    logic.script->lua = "scripts/logic.lua";
+    splash::Object robot = named("Robot");
+    splash::Object arm = named("Arm");
+    arm.mesh.emplace();
+    arm.mesh->mesh = "models/robot/Arm.mesh";
+    robot.children.push_back(arm);
+    sc.objects = {wall, logic, robot};
+    splash::saveScene(sc, proj / "game.scene");
+    splash::Scene other;
+    splash::Object amb = named("Ambience");
+    amb.audio.emplace();
+    amb.audio->clip = "music.wav";
+    other.objects.push_back(amb);
+    splash::saveScene(other, proj / "other.scene");
+
+    editor::AssetIndex index;
+    CHECK(index.scan(proj));
+    const unsigned gen = index.generation();
+    {
+        // On a mismatch, name the entries that differ between two scans.
+        const std::vector<editor::AssetEntry> before = index.entries();
+        const bool again = index.scan(proj);
+        CHECK(!again && index.generation() == gen);  // nothing changed
+        if (again) {
+            const auto& after = index.entries();
+            std::fprintf(stderr, "rescan: %zu entries before, %zu after\n", before.size(), after.size());
+            for (size_t i = 0; i < std::max(before.size(), after.size()); ++i) {
+                const editor::AssetEntry* x = i < before.size() ? &before[i] : nullptr;
+                const editor::AssetEntry* y = i < after.size() ? &after[i] : nullptr;
+                if (x && y && x->path == y->path && x->size == y->size && x->mtime == y->mtime && x->type == y->type &&
+                    x->madeBy == y->madeBy)
+                    continue;
+                auto show = [](const char* tag, const editor::AssetEntry* e) {
+                    if (!e) return std::fprintf(stderr, "  %s (none)\n", tag), void();
+                    std::fprintf(stderr, "  %s %s size %llu mtime %lld type %d madeBy %s\n", tag, e->path.c_str(),
+                                 (unsigned long long)e->size, (long long)e->mtime.time_since_epoch().count(), int(e->type),
+                                 e->madeBy.c_str());
+                };
+                show("before", x);
+                show("after ", y);
+            }
+        }
+    }
+    CHECK(!index.find(".hidden") && !index.find(".git") && !index.find(".git/HEAD"));
+    CHECK(!index.find("models/robot.gltf.import.json"));
+    using T = editor::AssetType;
+    auto type = [&](const char* p) { return index.find(p) ? index.find(p)->type : T::Other; };
+    CHECK(index.find("textures") && type("textures") == T::Folder);
+    CHECK(type("textures/brick.png") == T::Texture && type("scripts/logic.lua") == T::Script && type("meshes/crate.mesh") == T::Mesh);
+    CHECK(type("music.wav") == T::Audio && type("game.scene") == T::Scene && type("models/robot.gltf") == T::Model);
+    CHECK(type("models/robot/walk.anim") == T::Animation && type("notes.txt") == T::Other);
+    CHECK(editor::classifyAsset("A.PNG") == T::Texture && editor::classifyAsset("x.GLB") == T::Model);
+    // The model's outputs know it; a model without a sidecar has none.
+    CHECK(index.find("models/robot.mesh") && index.find("models/robot.mesh")->madeBy == "models/robot.gltf");
+    CHECK(index.find("models/robot_0.png")->madeBy == "models/robot.gltf");
+    CHECK(index.find("models/robot/Arm.mesh")->madeBy == "models/robot.gltf");
+    CHECK(index.find("models/robot")->madeBy == "models/robot.gltf");
+    CHECK(index.find("models/loose.obj")->madeBy.empty() && index.find("textures/brick.png")->madeBy.empty());
+    // Root: folders first, then files, by name ignoring case.
+    {
+        std::vector<std::string> names;
+        for (const editor::AssetEntry* e : index.children("")) names.push_back(e->name);
+        CHECK((names == std::vector<std::string>{"meshes", "models", "scripts", "textures", "game.scene", "music.wav", "notes.txt",
+                                                 "other.scene"}));
+        std::vector<std::string> folders = index.folders();
+        CHECK(folders.size() == 6 && folders[0].empty() && folders[1] == "meshes" && folders[3] == "models/robot");
+    }
+
+    // Filters: the folder alone lists it; a search covers every folder below,
+    // all words (any case); a type filter lists only that type.
+    {
+        editor::AssetFilter f;
+        f.folder = "textures";
+        CHECK(editor::filterAssets(index, f).size() == 2);
+        f.folder = "";
+        f.query = "BRICK";
+        auto hits = editor::filterAssets(index, f);
+        CHECK(hits.size() == 2 && hits[0]->path == "textures/brick.png" && hits[1]->path == "textures/Spare Brick.png");
+        f.query = "spare brick";
+        CHECK(editor::filterAssets(index, f).size() == 1);
+        f.query = "brick";
+        f.folder = "scripts";
+        CHECK(editor::filterAssets(index, f).empty());
+        f.folder = "";
+        f.query.clear();
+        f.types = 1u << unsigned(T::Script);
+        hits = editor::filterAssets(index, f);
+        CHECK(hits.size() == 2 && hits[0]->type == T::Script && hits[1]->type == T::Script);
+        f.types |= 1u << unsigned(T::Mesh);
+        CHECK(editor::filterAssets(index, f).size() == 5);  // + crate, robot, Arm
+        f.query = "zzz";
+        CHECK(editor::filterAssets(index, f).empty());
+    }
+
+    // References: the open document's scene from memory, other scenes from disk.
+    editor::Document doc;
+    doc.reset(sc, proj, "game");
+    editor::AssetReferences refs;
+    refs.update(index, doc.scene(), "game.scene", doc.revision());
+    auto brickRefs = refs.to(index, "textures/brick.png");
+    CHECK(brickRefs.size() == 1 && brickRefs[0].object == "Wall" && brickRefs[0].field == "Texture" &&
+          brickRefs[0].scene == "game.scene" && brickRefs[0].path == editor::ObjectPath{0});
+    CHECK(refs.to(index, "textures/Spare Brick.png").empty());
+    auto wavRefs = refs.to(index, "music.wav");
+    CHECK(wavRefs.size() == 1 && wavRefs[0].scene == "other.scene" && wavRefs[0].field == "Audio clip");
+    auto armRefs = refs.to(index, "models/robot.gltf");  // through its outputs
+    CHECK(armRefs.size() == 1 && armRefs[0].object == "Robot/Arm" && (armRefs[0].path == editor::ObjectPath{2, 0}));
+    CHECK(refs.to(index, "textures").size() == 1 && refs.to(index, "scripts").size() == 1 && refs.to(index, "notes.txt").empty());
+    // An unsaved edit counts at once.
+    doc.edit({1}, [](splash::Object& o) { o.script->lua = "scripts/unused.lua"; });
+    refs.update(index, doc.scene(), "game.scene", doc.revision());
+    CHECK(refs.to(index, "scripts/logic.lua").empty() && refs.to(index, "scripts/unused.lua").size() == 1);
+    doc.undo();
+    refs.update(index, doc.scene(), "game.scene", doc.revision());
+    CHECK(refs.to(index, "scripts/logic.lua").size() == 1);
+
+    // Every rename, move and delete below goes through the document's history.
+    auto rescan = [&] {
+        index.scan(proj);
+        refs.update(index, doc.scene(), "game.scene", doc.revision());
+    };
+    auto run = [&](const editor::AssetPlan& plan) {
+        editor::AssetOp o = editor::applyAssetPlan(doc, index, "game.scene", plan);
+        rescan();
+        return o;
+    };
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    auto wallTexture = [&] { return doc.object({0})->mesh->materials[0].texture; };
+
+    // Rename a referenced file: the file moves and the open scene's reference
+    // follows, as one undo step; undo puts both back, redo does it again.
+    editor::AssetOp op = run(editor::planRename(index, refs, "textures/brick.png", "wall", "game.scene"));
+    CHECK(op.error.empty() && op.path == "textures/wall.png" && op.references == 1 && op.scenes.empty());
+    CHECK(fs::exists(proj / "textures" / "wall.png") && !fs::exists(proj / "textures" / "brick.png"));
+    CHECK(wallTexture() == "textures/wall.png" && doc.canUndo() && !doc.canRedo());
+    CHECK(refs.to(index, "textures/wall.png").size() == 1);
+    CHECK(doc.undo() && wallTexture() == "textures/brick.png");
+    CHECK(fs::exists(proj / "textures" / "brick.png") && !fs::exists(proj / "textures" / "wall.png"));
+    CHECK(doc.redo() && wallTexture() == "textures/wall.png" && fs::exists(proj / "textures" / "wall.png"));
+    CHECK(editor::takeAssetHistoryError().empty());
+    rescan();
+    // An unused one is renamed, keeping its extension.
+    op = run(editor::planRename(index, refs, "textures/Spare Brick.png", "spare", "game.scene"));
+    CHECK(op.error.empty() && op.path == "textures/spare.png" && op.references == 0);
+    CHECK(fs::exists(proj / "textures" / "spare.png") && !fs::exists(proj / "textures" / "Spare Brick.png"));
+    CHECK(std::find(op.touched.begin(), op.touched.end(), "textures/spare.png") != op.touched.end());
+    CHECK(index.find("textures/spare.png") && !index.find("textures/Spare Brick.png"));
+    // Names: another extension, separators, a taken name, a hidden name.
+    CHECK(editor::planRename(index, refs, "textures/spare.png", "spare.jpg", "game.scene").error.find("extension") != std::string::npos);
+    CHECK(!editor::planRename(index, refs, "textures/spare.png", "../spare", "game.scene").error.empty());
+    CHECK(editor::planRename(index, refs, "textures/spare.png", "wall.png", "game.scene").error.find("already exists") != std::string::npos);
+    CHECK(!editor::planRename(index, refs, "textures/spare.png", ".spare", "game.scene").error.empty());
+    CHECK(!editor::planRename(index, refs, "textures/spare.png", "  ", "game.scene").error.empty());
+    {
+        editor::AssetPlan same = editor::planRename(index, refs, "textures/spare.png", "spare.png", "game.scene");
+        CHECK(same.error.empty() && same.moves.empty());  // unchanged: nothing to do
+    }
+    // Still refused, saying why: the open scene (the document keeps its name)
+    // and a model's output (the next import writes it again).
+    CHECK(editor::planRename(index, refs, "game.scene", "level", "game.scene").error.find("Save As") != std::string::npos);
+    CHECK(editor::planRename(index, refs, "models/robot.mesh", "bot", "game.scene").error.find("rename the model") != std::string::npos);
+
+    // A folder holding a used file: the references under it follow.
+    op = run(editor::planRename(index, refs, "textures", "images", "game.scene"));
+    CHECK(op.error.empty() && wallTexture() == "images/wall.png" && fs::exists(proj / "images" / "wall.png") && !fs::exists(proj / "textures"));
+    CHECK(doc.undo() && wallTexture() == "textures/wall.png" && fs::exists(proj / "textures" / "wall.png") && !fs::exists(proj / "images"));
+    rescan();
+
+    // A file another scene uses on disk: that scene file is rewritten, and
+    // undo puts its bytes back exactly.
+    const std::string otherBefore = slurp(proj / "other.scene");
+    op = run(editor::planRename(index, refs, "music.wav", "theme", "game.scene"));
+    CHECK(op.error.empty() && op.references == 1 && op.scenes == std::vector<std::string>{"other.scene"});
+    CHECK(splash::loadScene(proj / "other.scene").objects[0].audio->clip == "theme.wav" && fs::exists(proj / "theme.wav"));
+    CHECK(doc.undo() && slurp(proj / "other.scene") == otherBefore && fs::exists(proj / "music.wav") && !fs::exists(proj / "theme.wav"));
+    CHECK(doc.redo() && splash::loadScene(proj / "other.scene").objects[0].audio->clip == "theme.wav");
+    rescan();
+    CHECK(refs.to(index, "theme.wav").size() == 1 && refs.to(index, "music.wav").empty());
+    // A scene that is not open may be renamed; its references move with it.
+    op = run(editor::planRename(index, refs, "other.scene", "second", "game.scene"));
+    CHECK(op.error.empty() && fs::exists(proj / "second.scene"));
+    auto wavRefs2 = refs.to(index, "theme.wav");
+    CHECK(wavRefs2.size() == 1 && wavRefs2[0].scene == "second.scene");
+
+    // Lua scripts: an object's Script and Trigger, and a scene's own script,
+    // in the open scene and in a saved one, are references like any other.
+    {
+        splash::Scene lua;
+        lua.settings.script = "scripts/logic.lua";
+        splash::Object door = named("Door");
+        door.trigger.emplace();
+        door.trigger->lua = "./scripts/logic.lua";  // spelled another way, still the same file
+        lua.objects.push_back(door);
+        lua.settings.memCard.icons = {"textures/spare.png"};
+        splash::saveScene(lua, proj / "lua.scene");
+    }
+    rescan();
+    {
+        auto luaRefs = refs.to(index, "scripts/logic.lua");
+        int script = 0, trigger = 0, sceneScript = 0;
+        for (const editor::AssetRef& r : luaRefs) {
+            script += r.field == "Script";
+            trigger += r.field == "Trigger script";
+            sceneScript += r.field == "Scene script";
+        }
+        CHECK(luaRefs.size() == 3 && script == 1 && trigger == 1 && sceneScript == 1);
+        auto icon = refs.to(index, "textures/spare.png");
+        CHECK(icon.size() == 1 && icon[0].field == "Memory card icon" && icon[0].scene == "lua.scene");
+    }
+    editor::takeAssetMoves();
+    op = run(editor::planRename(index, refs, "scripts/logic.lua", "brain", "game.scene"));
+    CHECK(op.error.empty() && op.references == 3 && op.scenes == std::vector<std::string>{"lua.scene"});
+    CHECK(doc.object({1})->script->lua == "scripts/brain.lua");
+    {
+        splash::Scene lua = splash::loadScene(proj / "lua.scene");
+        CHECK(lua.settings.script == "scripts/brain.lua" && lua.objects[0].trigger->lua == "scripts/brain.lua");
+        // Open script tabs hear of the move (done, then undone).
+        auto moved = editor::takeAssetMoves();
+        CHECK(moved.size() == 1 && moved[0].first == proj / "scripts/logic.lua" && moved[0].second == proj / "scripts/brain.lua");
+    }
+
+    // Move: drag into another folder, the same reference update.
+    op = run(editor::planMove(index, refs, "textures/wall.png", "meshes", "game.scene"));
+    CHECK(op.error.empty() && op.path == "meshes/wall.png" && wallTexture() == "meshes/wall.png" && fs::exists(proj / "meshes" / "wall.png"));
+    CHECK(doc.undo() && wallTexture() == "textures/wall.png" && fs::exists(proj / "textures" / "wall.png"));
+    rescan();
+    op = run(editor::planMove(index, refs, "textures/spare.png", "", "game.scene"));  // to the project root, the icon follows
+    CHECK(op.error.empty() && op.path == "spare.png" && splash::loadScene(proj / "lua.scene").settings.memCard.icons[0] == "spare.png");
+    CHECK(editor::planMove(index, refs, "textures", "textures", "game.scene").error.find("inside itself") != std::string::npos);
+    CHECK(editor::planMove(index, refs, "notes.txt", "nowhere", "game.scene").error.find("not a folder") != std::string::npos);
+    CHECK(editor::planMove(index, refs, "notes.txt", "", "game.scene").moves.empty());  // already there
+    CHECK(editor::planMove(index, refs, "models/robot.gltf", "meshes", "game.scene").error.find("in place") != std::string::npos);
+    CHECK(editor::planMove(index, refs, "game.scene", "meshes", "game.scene").error.find("open scene") != std::string::npos);
+
+    // A scene that cannot be read: a file it names cannot be renamed (its
+    // reference could not be updated); one it does not name can.
+    write("broken.scene", "{\"objects\": [{\"name\": \"x\", \"mesh\": {\"mesh\": \"meshes/crate.mesh\"");
+    rescan();
+    CHECK(refs.unreadable().count("broken.scene") == 1);
+    {
+        const std::string why = editor::planRename(index, refs, "meshes/crate.mesh", "box", "game.scene").error;
+        CHECK(why.find("broken.scene") != std::string::npos && why.find("could not be read") != std::string::npos);
+        CHECK(editor::planRename(index, refs, "notes.txt", "readme", "game.scene").error.empty());
+    }
+    fs::remove(proj / "broken.scene", ec);
+    rescan();
+
+    // A referenced model takes its sidecar and outputs along, and the
+    // references to its outputs follow.
+    op = run(editor::planRename(index, refs, "models/robot.gltf", "bot", "game.scene"));
+    CHECK(op.error.empty() && op.path == "models/bot.gltf" && doc.object({2, 0})->mesh->mesh == "models/bot/Arm.mesh");
+    CHECK(fs::exists(proj / "models" / "bot.gltf") && fs::exists(proj / "models" / "bot.gltf.import.json"));
+    CHECK(fs::exists(proj / "models" / "bot.mesh") && fs::exists(proj / "models" / "bot_0.png"));
+    CHECK(fs::exists(proj / "models" / "bot" / "Arm.mesh") && fs::exists(proj / "models" / "bot" / "walk.anim"));
+    CHECK(!fs::exists(proj / "models" / "robot.mesh") && !fs::exists(proj / "models" / "robot"));
+    CHECK(index.find("models/bot/walk.anim") && index.find("models/bot/walk.anim")->madeBy == "models/bot.gltf");
+
+    // Delete: refused while used, listing the users, and for the open scene.
+    CHECK(editor::planDelete(index, refs, "scripts/brain.lua", "game.scene").error.find("Logic in game.scene") != std::string::npos);
+    CHECK(!editor::planDelete(index, refs, "game.scene", "game.scene").error.empty());
+    // Unused: into .trash/<n>/ with its paths, sidecar and outputs along;
+    // undo brings it all back and leaves no empty trash folder.
+    doc.edit({2, 0}, [](splash::Object& o) { o.mesh->mesh = "meshes/crate.mesh"; });
+    rescan();
+    std::vector<std::string> set = editor::deletionSet(index, "models/bot.gltf");
+    CHECK(set.size() == 7);  // model, sidecar, bot.mesh, bot_0.png, bot/, bot/Arm.mesh, bot/walk.anim
+    op = run(editor::planDelete(index, refs, "models/bot.gltf", "game.scene"));
+    CHECK(op.error.empty() && op.path == ".trash/1/models/bot.gltf");
+    CHECK(!fs::exists(proj / "models" / "bot.gltf") && !fs::exists(proj / "models" / "bot.gltf.import.json"));
+    CHECK(!fs::exists(proj / "models" / "bot") && !fs::exists(proj / "models" / "bot.mesh") && fs::exists(proj / "models" / "loose.obj"));
+    CHECK(fs::exists(proj / ".trash" / "1" / "models" / "bot" / "walk.anim") && fs::exists(proj / ".trash" / "1" / "models" / "bot.gltf.import.json"));
+    CHECK(!index.find(".trash") && !index.find("models/bot.gltf"));  // the trash is hidden
+    CHECK(doc.undo() && fs::exists(proj / "models" / "bot.gltf") && fs::exists(proj / "models" / "bot" / "walk.anim"));
+    CHECK(fs::exists(proj / "models" / "bot.gltf.import.json") && !fs::exists(proj / ".trash" / "1"));
+    CHECK(doc.redo() && !fs::exists(proj / "models" / "bot.gltf") && fs::exists(proj / ".trash" / "1" / "models" / "bot.gltf"));
+    rescan();
+    op = run(editor::planDelete(index, refs, "scripts/unused.lua", "game.scene"));
+    CHECK(op.error.empty() && !fs::exists(proj / "scripts" / "unused.lua") && fs::exists(proj / ".trash" / "2" / "scripts" / "unused.lua"));
+    CHECK((op.touched == std::vector<std::string>{"scripts/unused.lua", ".trash/2/scripts/unused.lua"}));
+    CHECK(editor::takeAssetHistoryError().empty());
+    // The scan notices a file written behind its back.
+    write("textures/new.png", "n");
+    CHECK(index.scan(proj) && index.find("textures/new.png"));
+
+    // file:// URLs for the file manager.
+    CHECK(editor::fileUrl("/tmp/a b/c#.png") == "file:///tmp/a%20b/c%23.png");
+    CHECK(editor::fileUrl("C:/x") == "file:///C:/x");
+    CHECK(editor::sizeLabel(10) == "10 B" && editor::sizeLabel(2048) == "2 KB" && editor::sizeLabel(3 * 1024 * 1024) == "3.0 MB");
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -4020,6 +4357,7 @@ int main(int argc, char** argv) {
     testImportWarnings();
     testQuantizer();
     testTexturePreview();
+    testAssetBrowser();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

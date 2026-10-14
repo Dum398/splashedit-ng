@@ -71,6 +71,7 @@ endif()
 # The editor's document model (history, picking): no SDL or GL, so it builds
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
+    src/editor/asset_browser.cpp
     src/editor/catalog.cpp
     src/editor/memcard.cpp
     src/editor/document.cpp
@@ -173,7 +174,8 @@ add_executable(splashedit
     src/viewport/ps1view.cpp
     src/mockup/main_screen.cpp
     src/editor/lua_editor_view.cpp
-    src/editor/timeline_view.cpp)
+    src/editor/timeline_view.cpp
+    src/editor/asset_browser_view.cpp)
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(splashedit PRIVATE imgui splasheditdoc splashcore)

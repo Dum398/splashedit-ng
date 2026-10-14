@@ -115,6 +115,7 @@ void diamond(ImDrawList* dl, ImVec2 c, float s, ImU32 fill, ImU32 edge, float th
 
 void TimelinePanel::show(const editor::Document& doc, SeqRef ref) {
     open = true;
+    ++shows;
     m_ref = ref;
     m_loadId = doc.loadId();
     m_frame = 0;
@@ -269,15 +270,20 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
     dl->AddLine(ImVec2(r.Min.x, r.Max.y - 0.5f), ImVec2(r.Max.x, r.Max.y - 0.5f), color::border);
     const float cy = r.GetCenter().y;
     float x = r.Min.x + space::md;
-    textCentered(dl, ImRect(ImVec2(x, r.Min.y), ImVec2(x + 18, r.Max.y)), f.medium, type::icon, color::accentHover, icon::layers);
-    x += 18 + space::sm;
-    text(dl, ImVec2(x, cy - 9), f.semibold, type::title, color::text, "Timeline");
-    x += measure(f.semibold, type::title, "Timeline").x + space::lg;
+    if (tabs) {
+        tabs(dl, ImRect(r.Min, ImVec2(r.Min.x + tabsWidth, r.Max.y)));
+        x = r.Min.x + tabsWidth + space::md;
+    } else {
+        textCentered(dl, ImRect(ImVec2(x, r.Min.y), ImVec2(x + 18, r.Max.y)), f.medium, type::icon, color::accentHover, icon::layers);
+        x += 18 + space::sm;
+        text(dl, ImVec2(x, cy - 9), f.semibold, type::title, color::text, "Timeline");
+        x += measure(f.semibold, type::title, "Timeline").x + space::lg;
+    }
 
     // The sequence: a dropdown of every cutscene and animation.
     const bool have = editor::valid(doc, m_ref);
     {
-        const ImRect dd(ImVec2(x, cy - 13), ImVec2(x + 210, cy + 13));
+        const ImRect dd(ImVec2(x, cy - 13), ImVec2(x + (tabs ? 176 : 210), cy + 13));
         std::string label = have ? *editor::seqName(doc, m_ref) : std::string("No cutscenes");
         const char* kindLabel = !have ? "" : m_ref.kind == SeqKind::Cutscene ? "CUTSCENE" : "ANIM";
         const float kw = measure(f.medium, type::caption, kindLabel).x;
@@ -370,7 +376,7 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
     char tm[64];
     std::snprintf(tm, sizeof tm, "%.2f s / %.2f s", m_frame / editor::kTimelineFps, float(len) / editor::kTimelineFps);
-    text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textDim, tm);
+    const float tmX = x;  // drawn once the right side is placed, where it fits
 
     // Right side: fit and add track.
     float rx = r.Max.x - 34 - space::sm;
@@ -385,6 +391,11 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
                full ? "This sequence has the runtime's 8 tracks" : "A track drives one property of one target") &&
         !full)
         ImGui::OpenPopup("##addtrack");
+    // The time in seconds where it fits left of Add track (the dock's tabs
+    // take room on a narrow window): scrub and length, else the scrub alone.
+    if (tmX + measure(f.regular, type::label, tm).x > rx - aw - space::md)
+        std::snprintf(tm, sizeof tm, "%.2f s", m_frame / editor::kTimelineFps);  // the scrub's time alone
+    if (tmX + measure(f.regular, type::label, tm).x <= rx - aw - space::md) text(dl, ImVec2(tmX, cy - 9), f.regular, type::label, color::textDim, tm);
     ImGui::SetNextWindowPos(ImVec2(rx - aw, cy - 19), ImGuiCond_Always, ImVec2(0, 1));
     addTrackPopup(doc);
 }

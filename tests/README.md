@@ -371,5 +371,20 @@ UV offset track (pixels at frame 0 against frame 75) without touching the scene 
 
     python3 timelineeditcheck.py <splashedit>
 
+`assetbrowsercheck.py` drives the Project panel on copies of the courtyard example. Searching
+narrows the grid to the matching files from every folder. A model dragged from the panel onto the
+viewport is imported and added as one object, and one Ctrl+Z takes it back; a .mesh dragged onto a
+scene tree row becomes that object's child with the material of the objects already drawing it; a
+texture dragged onto the inspector's Texture field is set on that object only. F2 on brick.png,
+which the walls use, renames it and the walls follow, in the open scene and in a second scene
+file on disk (`level2.scene`); one Ctrl+Z puts the file, the scene and `level2.scene` (byte for
+byte) back. Renaming `game_logic.lua` points the Game Logic object's Script at the new name. A
+file dragged onto a folder of the panel's tree moves there with the same reference update, and
+Ctrl+Z moves it back. Delete is refused on a used file and moves an unused one into the
+project's `.trash/1/` after the prompt; Ctrl+Z brings it back. Needs a display (CI runs it under
+`xvfb-run` on Linux).
+
+    python3 assetbrowsercheck.py <splashedit>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

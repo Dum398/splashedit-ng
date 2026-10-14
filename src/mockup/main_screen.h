@@ -15,6 +15,7 @@
 #include "blend.hh"
 #include "disc.hh"
 #include "unitymath.hh"
+#include "editor/asset_browser_view.hh"
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
 #include "editor/texture_preview.hh"
@@ -249,6 +250,22 @@ struct State {
         unsigned shownGen = 0;            // previewer generation on the GPU
         bool compare = false;             // one big pane to flick instead of two
     } texPreview;
+
+    // The bottom dock under the middle panel holds the Project panel and,
+    // while it is open, the Timeline as tabs; one shows at a time.
+    enum class BottomTab { Project, Timeline } bottomTab = BottomTab::Project;
+    bool timelineWasOpen = false;  // to raise the Timeline tab when something opens it
+    unsigned timelineShows = 0;
+    // The Project panel under the middle panel, and the inspector's asset
+    // fields drawn this frame, clipped to what shows: an asset dragged from
+    // the panel and released on one of them is assigned to it.
+    ui::AssetBrowser assets;
+    struct AssetSlotTarget {
+        ImRect rect;
+        int slot;  // main_screen's AssetSlot, or -1 for the Model field
+        std::vector<int> path;
+    };
+    std::vector<AssetSlotTarget> assetSlots;
 };
 
 // Draws the main screen for `doc` filling `size`. Returns the title-bar

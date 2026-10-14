@@ -121,6 +121,20 @@ void ScriptTabs::closeAll() {
     m_closing = -1;
 }
 
+void ScriptTabs::moved(const std::filesystem::path& from, const std::filesystem::path& to) {
+    const std::filesystem::path f = from.lexically_normal(), t = to.lexically_normal();
+    for (std::unique_ptr<Tab>& tab : m_tabs) {
+        const std::filesystem::path p = tab->script.path().lexically_normal();
+        if (p == f) {
+            tab->script.setPath(t);
+            continue;
+        }
+        // Under a moved folder: the same place under its new path.
+        const std::filesystem::path rel = p.lexically_relative(f);
+        if (!rel.empty() && *rel.begin() != "..") tab->script.setPath(t / rel);
+    }
+}
+
 std::vector<std::filesystem::path> ScriptTabs::takeSaved() {
     std::vector<std::filesystem::path> out;
     out.swap(m_saved);

@@ -197,6 +197,22 @@ want = original + 'f(x)\ns = "hi"\ng\nh(1)\n-- don\'t'
 check('typed brackets and quotes close themselves, step over and delete in pairs', lua == want,
       repr((lua or '')[len(original):]) + ' | ' + out[-200:])
 
+# --- Completion follows Lua scope ---
+# A function with a local in it; Tab on its prefix inside the body completes
+# the local. After the function's end the local is out of scope: no list, so
+# Tab indents to the next stop and the prefix stays as typed.
+lines = [['function zzf()'], ['local zzinner = 1'], ['zzinn', 'tab'], ['end'], ['zzinn', 'tab']]
+args = ['--key', 'ctrl+end']
+for i, line in enumerate(lines):
+    if i: args += ['--key', 'escape', '--key', 'end', '--key', 'enter']
+    args += ['--text', line[0]] + sum((['--key', k] for k in line[1:]), [])
+lua, out = run_args(args + ['--key', 'escape', '--key', 'ctrl+s'])
+inside = original + 'function zzf()\n    local zzinner = 1\n    zzinner\nend\n'
+check('Tab completes a local inside its function', (lua or '').startswith(inside),
+      repr((lua or '')[len(original):]) + ' | ' + out[-200:])
+check('completion leaves out a local after its function ends', lua == inside + 'zzinn   ',
+      repr((lua or '')[len(original):]) + ' | ' + out[-200:])
+
 # --- Changed on disk ---
 def changed_run(args):
     """The file's text afterwards (None when it is gone), the editor's output

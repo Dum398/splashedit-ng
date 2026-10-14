@@ -2595,6 +2595,78 @@ void testLuaDefinitions() {
     CHECK(!r.def && !r.api);
 }
 
+void testLuaScopes() {
+    std::vector<std::string> l = luaLines(
+        "function a() local x = 1 end\n"                                                   // 0
+        "function b() return x end\n"                                                      // 1
+        "function c(p) return p end\n"                                                     // 2
+        "function d() return p end\n"                                                      // 3
+        "for i = 1, 3 do print(i) end\n"                                                   // 4
+        "print(i)\n"                                                                       // 5
+        "local v = 1\n"                                                                    // 6
+        "do\n"                                                                             // 7
+        "  local v = v + 1\n"                                                              // 8
+        "  print(v)\n"                                                                     // 9
+        "end\n"                                                                            // 10
+        "print(v)\n"                                                                       // 11
+        "local function fact(n) if n < 2 then return 1 end return n * fact(n - 1) end\n"  // 12
+        "repeat local done = true until done\n"                                            // 13
+        "if v then local w = 1 else print(w) end\n");                                     // 14
+    // The nth whole-word `w` on line `line`.
+    auto at = [&](int line, const std::string& w, int nth = 0) {
+        const std::string& s = l[line];
+        auto ident = [](char ch) { return std::isalnum((unsigned char)ch) || ch == '_'; };
+        for (size_t c = s.find(w); c != std::string::npos; c = s.find(w, c + 1))
+            if ((c == 0 || !ident(s[c - 1])) && (c + w.size() >= s.size() || !ident(s[c + w.size()])) && nth-- == 0)
+                return lua::Pos{line, (int)c};
+        return lua::Pos{line, -1};
+    };
+    lua::Lookup r = lua::lookup(l, at(1, "x"));  // b's x: not a()'s local
+    CHECK(!r.def);
+    r = lua::lookup(l, at(2, "p", 1));
+    CHECK(r.def && r.def->pos == (lua::Pos{2, 11}) && r.def->kind == lua::DefKind::Parameter);
+    r = lua::lookup(l, at(3, "p"));  // c's parameter, not d's
+    CHECK(!r.def);
+    r = lua::lookup(l, at(4, "i", 1));
+    CHECK(r.def && r.def->pos == (lua::Pos{4, 4}));
+    r = lua::lookup(l, at(5, "i"));  // past the loop
+    CHECK(!r.def);
+    r = lua::lookup(l, at(8, "v", 1));  // local v = v + 1: the outer v
+    CHECK(r.def && r.def->pos.line == 6);
+    r = lua::lookup(l, at(8, "v"));  // the declaration itself
+    CHECK(r.def && r.def->pos == at(8, "v"));
+    r = lua::lookup(l, at(9, "v"));  // shadowed inside the do
+    CHECK(r.def && r.def->pos.line == 8);
+    r = lua::lookup(l, at(11, "v"));  // back to the outer one after `end`
+    CHECK(r.def && r.def->pos.line == 6);
+    r = lua::lookup(l, at(12, "fact", 1));  // recursion
+    CHECK(r.def && r.def->pos == at(12, "fact") && r.def->kind == lua::DefKind::LocalFunction);
+    r = lua::lookup(l, at(13, "done", 1));  // until sees the body's locals
+    CHECK(r.def && r.def->pos == at(13, "done"));
+    r = lua::lookup(l, at(14, "w", 1));  // the else branch does not see the then branch's local
+    CHECK(!r.def);
+    // A global assigned at file level, with the same name as another function's local.
+    std::vector<std::string> g = luaLines("function a() local x = 1 end\nfunction b() return x end\nx = 5\n");
+    r = lua::lookup(g, {1, 20});
+    CHECK(r.def && r.def->pos == (lua::Pos{2, 0}) && r.def->kind == lua::DefKind::Global);
+    // A statement after a local's: the local is in scope there.
+    g = luaLines("local t = {}\nfunction t.go() return t end\nlocal f = function() return 1 end\nprint(f)\n");
+    r = lua::lookup(g, {1, 23});
+    CHECK(r.def && r.def->pos == (lua::Pos{0, 6}));
+    r = lua::lookup(g, {3, 6});
+    CHECK(r.def && r.def->pos == (lua::Pos{2, 6}));
+    // Completion offers only the locals in scope.
+    using K = lua::ItemKind;
+    std::vector<std::string> cl = luaLines("function a(param) local secret = 1 end\nfunction b() return sec par end\n");
+    lua::Completions c = lua::complete(cl, {1, 23});
+    CHECK(!hasItem(c, "secret", K::Local) && !hasItem(c, "secret", K::Function));
+    c = lua::complete(cl, {1, 27});
+    CHECK(!hasItem(c, "param", K::Local) && !hasItem(c, "param", K::Function));
+    cl = luaLines("function a(param) local secret = 1 return sec par end\n");
+    CHECK(hasItem(lua::complete(cl, {0, 45}), "secret", K::Local));
+    CHECK(hasItem(lua::complete(cl, {0, 49}), "param", K::Local));
+}
+
 void testLuaCheck() {
     lua::Diagnostic d = lua::check("local a = 1\nlocal b = = 2\nreturn a\n");
     CHECK(!d.ok() && d.line == 1);
@@ -5891,6 +5963,7 @@ int main(int argc, char** argv) {
     testLuaBuffer();
     testLuaComplete();
     testLuaDefinitions();
+    testLuaScopes();
     testLuaCheck();
     testLuaScriptFile();
     testLuaReplace();

@@ -1131,6 +1131,15 @@ bool isName(const Lex& t) {
 
 bool isOp(const Lex& t, const char* op) { return t.kind == Tok::Operator && t.text == op; }
 
+Definition def(std::string name, Pos pos, DefKind kind, std::string signature = "") {
+    Definition d;
+    d.name = std::move(name);
+    d.pos = pos;
+    d.kind = kind;
+    d.signature = std::move(signature);
+    return d;
+}
+
 // Parameters from the `(` at k; returns the index after `)`.
 size_t params(const std::vector<Lex>& t, size_t k, std::vector<Definition>* defs, std::string* sig) {
     if (k >= t.size() || !isOp(t[k], "(")) return k;
@@ -1142,7 +1151,7 @@ size_t params(const std::vector<Lex>& t, size_t k, std::vector<Definition>* defs
             if (!first) *sig += ", ";
             *sig += t[k].text;
             first = false;
-            if (isName(t[k])) defs->push_back({t[k].text, t[k].pos, DefKind::Parameter, ""});
+            if (isName(t[k])) defs->push_back(def(t[k].text, t[k].pos, DefKind::Parameter));
         }
         ++k;
     }
@@ -1150,37 +1159,133 @@ size_t params(const std::vector<Lex>& t, size_t k, std::vector<Definition>* defs
     return k < t.size() ? k + 1 : k;
 }
 
+// Where the expression list from k ends: the index of the next statement's
+// first token (or t.size()). A function body inside it is skipped whole.
+size_t statementEnd(const std::vector<Lex>& t, size_t k) {
+    int depth = 0, blocks = 0;
+    bool operand = false;  // the last token ends an operand
+    for (; k < t.size(); ++k) {
+        const std::string& s = t[k].text;
+        bool kw = t[k].kind == Tok::Keyword;
+        if (kw && (s == "function" || s == "if" || s == "do" || s == "repeat")) {
+            if (blocks == 0 && (s != "function" || operand)) return k;  // `function` after an operand: a new statement
+            ++blocks;
+            continue;
+        }
+        if (kw && (s == "end" || s == "until")) {
+            if (blocks == 0) return k;
+            operand = --blocks == 0;
+            continue;
+        }
+        if (blocks > 0) continue;
+        if (t[k].kind == Tok::Operator) {
+            if (s == "(" || s == "[" || s == "{") ++depth;
+            else if (s == ")" || s == "]" || s == "}") {
+                if (depth == 0) return k;
+                --depth;
+                operand = true;
+                continue;
+            } else if (s == ";" && depth == 0) return k;
+            operand = false;
+            continue;
+        }
+        if (depth > 0) continue;
+        bool op = kw && (s == "and" || s == "or" || s == "not");
+        if (kw && !op) return k;  // return, local, if, ...
+        if (operand && !op && t[k].kind != Tok::String) return k;  // a name after an operand: a new statement
+        operand = !op;
+    }
+    return k;
+}
+
+bool scoped(DefKind k) { return k == DefKind::Local || k == DefKind::LocalFunction || k == DefKind::Parameter; }
+
 }  // namespace
 
 std::vector<Definition> definitions(const std::vector<std::string>& lines) {
     std::vector<Definition> defs;
     std::vector<Lex> t = lexAll(lines);
-    std::set<std::string> known;
+    const Pos eof{1 << 30, 0};
+    auto posOf = [&](size_t k) { return k < t.size() ? t[k].pos : eof; };
+    std::set<std::string> known;  // functions and globals
+    // The open blocks, each with the locals that end with it.
+    struct Block {
+        std::string opener;
+        std::vector<size_t> defs;
+    };
+    std::vector<Block> blocks(1);
+    std::vector<size_t> loopVars;  // a `for`'s names, until its `do`
+    auto declare = [&](Definition d, Pos from, std::vector<size_t>* into) {
+        d.from = from;
+        into->push_back(defs.size());
+        defs.push_back(std::move(d));
+    };
+    auto close = [&](Pos at) {
+        for (size_t i : blocks.back().defs) defs[i].to = at;
+        blocks.back().defs.clear();
+    };
+    // A function's block and parameters, from the `function` token's next
+    // `(` at k; returns the index after `)`.
+    auto body = [&](size_t k, std::string* sig) {
+        blocks.push_back({"function", {}});
+        size_t first = defs.size();
+        size_t after = params(t, k, &defs, sig);
+        for (size_t i = first; i < defs.size(); ++i) {
+            defs[i].from = defs[i].pos;
+            blocks.back().defs.push_back(i);
+        }
+        return after;
+    };
     for (size_t k = 0; k < t.size(); ++k) {
         const Lex& tk = t[k];
-        bool local = tk.kind == Tok::Keyword && tk.text == "local";
+        bool kw = tk.kind == Tok::Keyword;
+        if (kw && (tk.text == "do" || tk.text == "if" || tk.text == "repeat")) {
+            blocks.push_back({tk.text, {}});
+            if (tk.text == "do") {
+                for (size_t i : loopVars) defs[i].from = tk.pos;
+                blocks.back().defs = std::move(loopVars);
+                loopVars.clear();
+            }
+            continue;
+        }
+        if (kw && (tk.text == "elseif" || tk.text == "else") && blocks.back().opener == "if") {
+            close(tk.pos);
+            continue;
+        }
+        if (kw && (tk.text == "end" || tk.text == "until")) {
+            if (blocks.size() == 1) continue;
+            // until's condition still sees the body's locals.
+            close(tk.text == "until" ? posOf(statementEnd(t, k + 1)) : tk.pos);
+            blocks.pop_back();
+            continue;
+        }
+        bool local = kw && tk.text == "local";
         if (local && k + 2 < t.size() && t[k + 1].text == "function" && isName(t[k + 2])) {
-            Definition d{t[k + 2].text, t[k + 2].pos, DefKind::LocalFunction, "function " + t[k + 2].text};
-            size_t at = defs.size();
-            defs.push_back(d);
-            std::string sig;  // params() appends to defs
-            params(t, k + 3, &defs, &sig);
+            // Visible from its name on, so inside its own body too.
+            declare(def(t[k + 2].text, t[k + 2].pos, DefKind::LocalFunction, "function " + t[k + 2].text), t[k + 2].pos,
+                    &blocks.back().defs);
+            size_t at = defs.size() - 1;
+            std::string sig;  // body() appends the parameters to defs
+            body(k + 3, &sig);
             defs[at].signature += sig;
-            known.insert(d.name);
             k += 2;
             continue;
         }
         if (local) {
+            std::vector<size_t> names;
             size_t j = k + 1;
             while (j < t.size() && isName(t[j])) {
-                defs.push_back({t[j].text, t[j].pos, DefKind::Local, ""});
-                known.insert(t[j].text);
+                names.push_back(j);
                 if (j + 1 < t.size() && isOp(t[j + 1], ",")) j += 2;
                 else break;
             }
+            // `local x = x`: the right side's x is the outer one.
+            size_t next = names.empty() ? k + 1 : names.back() + 1;
+            if (next < t.size() && isOp(t[next], "=")) next = statementEnd(t, next + 1);
+            for (size_t n : names) declare(def(t[n].text, t[n].pos, DefKind::Local), posOf(next), &blocks.back().defs);
             continue;
         }
-        if (tk.kind == Tok::Keyword && tk.text == "function") {
+        if (kw && tk.text == "function") {
             size_t j = k + 1;
             std::string name;
             Pos pos = tk.pos;
@@ -1197,29 +1302,34 @@ std::vector<Definition> definitions(const std::vector<std::string>& lines) {
             }
             size_t at = defs.size();
             if (!name.empty()) {
-                defs.push_back({name, pos, DefKind::Function, "function " + name});
+                defs.push_back(def(name, pos, DefKind::Function, "function " + name));
                 known.insert(name);
             }
             std::string sig;
-            params(t, j, &defs, &sig);
+            body(j, &sig);
             if (!name.empty()) defs[at].signature += sig;
             continue;
         }
-        if (tk.kind == Tok::Keyword && tk.text == "for") {
+        if (kw && tk.text == "for") {
             size_t j = k + 1;
             while (j < t.size() && isName(t[j])) {
-                defs.push_back({t[j].text, t[j].pos, DefKind::Local, ""});
+                loopVars.push_back(defs.size());
+                defs.push_back(def(t[j].text, t[j].pos, DefKind::Local));
                 if (j + 1 < t.size() && isOp(t[j + 1], ",")) j += 2;
                 else break;
             }
             continue;
         }
-        // name = ... at the start of a statement: a global, the first time.
+        // name = ... at the start of a statement, with no local of that name
+        // in scope: a global, the first time.
         if (isName(tk) && k + 1 < t.size() && isOp(t[k + 1], "=") && !known.count(tk.text)) {
             bool statement = k == 0 || t[k - 1].pos.line < tk.pos.line || isOp(t[k - 1], ";");
             bool member = k > 0 && (isOp(t[k - 1], ".") || isOp(t[k - 1], ":"));
-            if (statement && !member) {
-                defs.push_back({tk.text, tk.pos, DefKind::Global, ""});
+            bool shadowed = std::any_of(defs.begin(), defs.end(), [&](const Definition& d) {
+                return scoped(d.kind) && d.name == tk.text && d.visibleAt(tk.pos);
+            });
+            if (statement && !member && !shadowed) {
+                defs.push_back(def(tk.text, tk.pos, DefKind::Global));
                 known.insert(tk.text);
             }
         }
@@ -1262,8 +1372,8 @@ Lookup lookup(const std::vector<std::string>& lines, Pos p) {
     for (const Definition& d : defs) {
         std::string dn = d.name;
         std::replace(dn.begin(), dn.end(), ':', '.');
-        if (dn != full) continue;
-        // The last one at or before p, else the first one after.
+        if (dn != full || !d.visibleAt(r.start)) continue;
+        // In scope: the last one at or before p, else the first one after.
         if (d.pos <= r.start) best = &d;
         else if (!best) best = &d;
     }
@@ -1413,13 +1523,21 @@ Completions complete(const std::vector<std::string>& lines, Pos p, bool force) {
             while (k > 0 && isSpace(l[k - 1])) --k;
             afterFunction = k >= 8 && l.compare(k - 8, 8, "function") == 0 && (k == 8 || !isIdent(l[k - 9]));
         }
-        for (const Definition& d : definitions(lines))
-            if (d.name.find_first_of(".:") == std::string::npos && !(d.pos.line == p.line && d.pos.col == a))
+        std::vector<Definition> defs = definitions(lines);
+        const Pos at{p.line, a};
+        for (const Definition& d : defs)
+            if (d.name.find_first_of(".:") == std::string::npos && d.pos != at && d.visibleAt(at))
                 add(d.name, d.kind == DefKind::Function || d.kind == DefKind::LocalFunction ? ItemKind::Function : ItemKind::Local,
                     d.signature, nullptr);
+        // Other words in the file, but not the locals out of scope here.
+        auto outOfScope = [&](const Lex& t) {
+            return std::any_of(defs.begin(), defs.end(), [&](const Definition& d) {
+                return d.name == t.text && d.visibleAt(t.pos) && !d.visibleAt(at);
+            });
+        };
         for (const Lex& t : toks)
-            if ((t.kind == Tok::Identifier || t.kind == Tok::Function) && !typing(t) &&
-                !(found.count(t.text)))
+            if ((t.kind == Tok::Identifier || t.kind == Tok::Function) && !typing(t) && !found.count(t.text) &&
+                !outOfScope(t))
                 add(t.text, t.kind == Tok::Function ? ItemKind::Function : ItemKind::Local, "", nullptr);
         for (const ApiSymbol& s : api()) {
             bool global = !*s.table || !*s.name;

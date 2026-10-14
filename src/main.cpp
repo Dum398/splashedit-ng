@@ -580,6 +580,10 @@ int main(int argc, char** argv) {
     // The end screenshot waits (up to 90 s, since when) for a model import still
     // running, so a --drop has landed in it; --shot-at keeps its exact frame.
     std::optional<std::chrono::steady_clock::time_point> endHeldSince;
+    // --click-import-cancel holding for the status bar to settle, since when;
+    // and where the frame before last drew the Cancel.
+    std::optional<std::chrono::steady_clock::time_point> aimSince;
+    ImRect cancelSeen;
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -598,16 +602,34 @@ int main(int argc, char** argv) {
         }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+        bool aimHeld = false;
         if (args.screenshot) {
             io.DeltaTime = 1.0f / 60.0f;
+            // The import Cancel where the last two frames drew it: settled once
+            // they agree and the budget measurement beside it is in. Under load
+            // that measurement can land mid-click and move the button away.
+            const ImRect cancelNow = state.importCancel;
+            const bool cancelSettled = cancelNow.GetWidth() > 0 && cancelNow.Min.x == cancelSeen.Min.x &&
+                                       cancelNow.Max.x == cancelSeen.Max.x && cancelNow.Min.y == cancelSeen.Min.y &&
+                                       state.live.result() && !state.live.busy();
+            cancelSeen = cancelNow;
             for (size_t i = 0; i < args.actions.size(); ++i) {
                 Action& a = args.actions[i];
                 if (actionStart[i] < 0) {
                     if (frame == 0) io.AddKeyEvent(ImGuiMod_Ctrl, true);
                     continue;
                 }
-                if (a.importCancel && frame == actionStart[i] && state.importCancel.GetWidth() > 0)
-                    a.x0 = state.importCancel.GetCenter().x, a.y0 = state.importCancel.GetCenter().y;
+                if (a.importCancel && frame == actionStart[i] && !held) {
+                    // Holds the script (up to 90 s) while an import runs and the bar settles.
+                    const auto now = std::chrono::steady_clock::now();
+                    if (!cancelSettled && state.importBusy()) {
+                        if (!aimSince) aimSince = now;
+                        aimHeld = now - *aimSince < std::chrono::seconds(90);
+                        if (!aimHeld) std::fprintf(stderr, "--click-import-cancel: the status bar still moving after 90 s\n");
+                    }
+                    if (!aimHeld) aimSince.reset();
+                    if (cancelNow.GetWidth() > 0) a.x0 = cancelNow.GetCenter().x, a.y0 = cancelNow.GetCenter().y;
+                }
                 if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
                 if (frame != actionStart[i] || held) continue;
                 if (a.kind == Action::Drop) state.drop.files.push_back({a.text, ImVec2(a.x0, a.y0)});
@@ -667,7 +689,7 @@ int main(int argc, char** argv) {
             endHeld = now - *endHeldSince < std::chrono::seconds(90);
             if (!endHeld) std::fprintf(stderr, "--screenshot: still importing after 90 s\n");
         }
-        if (args.screenshot && !held && !endHeld && ++frame >= args.frames) {
+        if (args.screenshot && !held && !aimHeld && !endHeld && ++frame >= args.frames) {
             if (!writeShot(window, args.screenshot)) return 1;
             // For scripted checks: menus and pickers left open by the input.
             std::printf("popups open: %s\n", ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ? "yes" : "no");

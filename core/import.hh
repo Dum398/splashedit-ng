@@ -2,8 +2,10 @@
 // file turned into a project .mesh plus the PNG textures its materials use.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -105,10 +107,24 @@ std::string importName(const std::filesystem::path& file);
 // every position and node translation, and Recompute replaces the normals.
 // The outputs are named after `as` (see importName) when it is given, so a
 // model read from where it was dropped is named after its copy in the project.
+// With `progress`, importModel reports how far it is (`fraction`, 0 to 1, as
+// it parses, converts each mesh and writes the outputs) and checks `cancel`
+// between those steps (and every few thousand triangles of a large mesh):
+// once it is set, importModel throws ImportCancelled, leaving what it wrote
+// so far for the caller to remove. Either may be read or set from another
+// thread while it runs.
 // A .blend is first exported as a GLB by Blender run in the background (see
 // blend.hh), into a temporary folder, and that GLB is imported as above.
 // Throws std::runtime_error with a message for the user.
+struct ImportProgress {
+    std::atomic<bool> cancel{false};
+    std::atomic<float> fraction{0};
+};
+struct ImportCancelled : std::runtime_error {
+    ImportCancelled() : std::runtime_error("the import was cancelled") {}
+};
 ImportedModel importModel(const std::filesystem::path& source, const std::filesystem::path& project,
-                          const ImportSettings& settings = {}, const std::filesystem::path& as = {});
+                          const ImportSettings& settings = {}, const std::filesystem::path& as = {},
+                          ImportProgress* progress = nullptr);
 
 }  // namespace splash

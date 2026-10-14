@@ -4243,6 +4243,220 @@ void testModelImports() {
     CHECK(importTemps() == tempsBefore);
 }
 
+// A wavy n x n grid (2 n^2 triangles) with normals, as a GLB: large enough
+// at a few hundred a side to take a while to import.
+static void writeGridGlb(const std::filesystem::path& path, int n) {
+    std::string bin;
+    auto put = [&](const void* p, size_t size) { bin.append(static_cast<const char*>(p), size); };
+    for (int j = 0; j <= n; j++)
+        for (int i = 0; i <= n; i++) {
+            const float x = float(i) / float(n) * 4 - 2, z = float(j) / float(n) * 4 - 2;
+            const float v[3] = {x, 0.2f * std::sin(x * 5) * std::cos(z * 5), z};
+            put(v, sizeof v);
+        }
+    const size_t posBytes = bin.size();
+    for (int k = 0; k < (n + 1) * (n + 1); k++) {
+        const float v[3] = {0, 1, 0};
+        put(v, sizeof v);
+    }
+    const size_t norBytes = bin.size() - posBytes;
+    for (int j = 0; j < n; j++)
+        for (int i = 0; i < n; i++) {
+            const uint32_t a = uint32_t(j * (n + 1) + i), w = uint32_t(n + 1);
+            const uint32_t t[6] = {a, a + w, a + 1, a + 1, a + w, a + w + 1};
+            put(t, sizeof t);
+        }
+    const size_t idxBytes = bin.size() - posBytes - norBytes;
+    const int nv = (n + 1) * (n + 1);
+    std::string js = "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0]}],\"nodes\":[{\"name\":\"Grid\",\"mesh\":0}],"
+                     "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0,\"NORMAL\":1},\"indices\":2}]}],"
+                     "\"buffers\":[{\"byteLength\":" + std::to_string(bin.size()) + "}],\"bufferViews\":["
+                     "{\"buffer\":0,\"byteOffset\":0,\"byteLength\":" + std::to_string(posBytes) + "},"
+                     "{\"buffer\":0,\"byteOffset\":" + std::to_string(posBytes) + ",\"byteLength\":" + std::to_string(norBytes) + "},"
+                     "{\"buffer\":0,\"byteOffset\":" + std::to_string(posBytes + norBytes) + ",\"byteLength\":" + std::to_string(idxBytes) + "}],"
+                     "\"accessors\":["
+                     "{\"bufferView\":0,\"componentType\":5126,\"count\":" + std::to_string(nv) + ",\"type\":\"VEC3\",\"min\":[-2,-0.2,-2],\"max\":[2,0.2,2]},"
+                     "{\"bufferView\":1,\"componentType\":5126,\"count\":" + std::to_string(nv) + ",\"type\":\"VEC3\"},"
+                     "{\"bufferView\":2,\"componentType\":5125,\"count\":" + std::to_string(n * n * 6) + ",\"type\":\"SCALAR\"}]}";
+    while (js.size() % 4) js += ' ';
+    while (bin.size() % 4) bin += '\0';
+    std::ofstream out(path, std::ios::binary);
+    auto u32 = [&](uint32_t v) { out.write(reinterpret_cast<const char*>(&v), 4); };
+    u32(0x46546C67), u32(2), u32(uint32_t(28 + js.size() + bin.size()));
+    u32(uint32_t(js.size())), u32(0x4E4F534A);
+    out.write(js.data(), std::streamsize(js.size()));
+    u32(uint32_t(bin.size())), u32(0x004E4942);
+    out.write(bin.data(), std::streamsize(bin.size()));
+}
+
+// What PR #84's queue left open: a cancelled build stops within a moment
+// (and the next import waits for it), a model whose name is taken in models/
+// while it imports gets the next free name, folders a killed editor left in
+// the temp folder are swept, and the build says how far it is.
+void testModelImportsGaps() {
+    namespace fs = std::filesystem;
+    using Outcome = editor::ModelImports::Outcome;
+    using clock = std::chrono::steady_clock;
+    using ms = std::chrono::milliseconds;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "modelimportsgaps";
+    fs::remove_all(dir, ec);
+    const fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    const ScopedTmpdir scopedTmp(dir / "tmp");
+    writeGridGlb(outside / "terrain.glb", 300);  // 180000 triangles
+    std::ofstream(outside / "tri.obj") << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    std::ofstream(outside / "rock.obj") << "v 0 0 0\nv 2 0 0\nv 0 2 0\nf 1 2 3\n";
+    std::ofstream(outside / "robot.gltf") << robotGltf(0.5f);
+    const std::set<std::string> tempsBefore = importTemps();
+    splash::Scene sc;
+    sc.objects.push_back(named("A"));
+    editor::Document doc;
+    doc.reset(sc, proj, "game");
+
+    // Built to the end: the fraction climbs to 1. The time it takes is what
+    // a cancel must cut short.
+    float seenMid = -1;
+    const auto t0 = clock::now();
+    {
+        editor::StagedBuild b(editor::stagePlace(doc, outside / "terrain.glb"));
+        float last = 0;
+        bool monotonic = true;
+        while (!b.wait(ms(5))) {
+            const float f = b.fraction();
+            monotonic = monotonic && f >= last;
+            last = f;
+            if (f > 0 && f < 1) seenMid = f;
+        }
+        CHECK(monotonic);
+        CHECK(b.fraction() == 1.0f);
+        editor::StagedModel s = b.take();
+        CHECK(s.error.empty() && s.model.triangles == 180000);
+        editor::discardStaged(s);
+    }
+    const auto full = std::chrono::duration_cast<ms>(clock::now() - t0);
+    std::printf("  terrain.glb builds in %lld ms\n", (long long)full.count());
+    CHECK(seenMid > 0 && seenMid < 1);
+
+    // Cancelled once it is under way: done within a bound well short of the
+    // whole build, with nothing left in the temp folder.
+    {
+        editor::StagedBuild b(editor::stagePlace(doc, outside / "terrain.glb"));
+        while (b.fraction() <= 0 && !b.done()) std::this_thread::sleep_for(ms(1));
+        CHECK(!b.done());
+        const auto c0 = clock::now();
+        b.cancel();
+        const bool stopped = b.wait(ms(10000));
+        const auto took = std::chrono::duration_cast<ms>(clock::now() - c0);
+        std::printf("  a cancelled build stops %lld ms after the cancel\n", (long long)took.count());
+        CHECK(stopped);
+        // At most a quarter of the whole build, and never above 2 s.
+        CHECK(took.count() * 4 <= full.count() && took.count() < 2000);
+    }
+    for (int i = 0; i < 1000 && importTemps() != tempsBefore; ++i) std::this_thread::sleep_for(ms(10));
+    CHECK(importTemps() == tempsBefore);
+
+    // Through the queue: the next import does not start while the cancelled
+    // build is still stopping, and the running import reports its fraction.
+    {
+        editor::ModelImports q;
+        auto request = [&](const fs::path& file) {
+            editor::ModelImports::Request r;
+            r.file = file;
+            r.to.at = splash::Vec3{0, 0, 0};
+            r.loadId = doc.loadId();
+            return r;
+        };
+        q.add(request(outside / "terrain.glb"));
+        q.add(request(outside / "tri.obj"));
+        CHECK(q.fraction() < 0);
+        q.update(doc);
+        while (q.fraction() <= 0 && !q.finishing()) std::this_thread::sleep_for(ms(1));
+        CHECK(q.fraction() > 0 && q.fraction() < 1);
+        q.cancel();
+        bool overlapped = false;
+        std::vector<Outcome::Kind> kinds;
+        const auto until = clock::now() + std::chrono::seconds(30);
+        while (q.busy() && clock::now() < until) {
+            for (Outcome& o : q.update(doc)) {
+                kinds.push_back(o.kind);
+                if (o.kind == Outcome::Ready) editor::discardStaged(o.staged);
+            }
+            if (q.current() && q.current()->file == outside / "tri.obj" && q.stopping() > 0) overlapped = true;
+        }
+        CHECK((kinds == std::vector<Outcome::Kind>{Outcome::Cancelled, Outcome::Ready}));
+        CHECK(!overlapped);
+    }
+
+    // The name taken while it imported: a different file of the same name
+    // (or the baked mesh's name) appeared in models/. The copy takes the next
+    // free name, the outputs follow it, and what appeared is left alone.
+    auto placeWith = [&](const fs::path& file, auto meanwhile) {
+        editor::StagedModel s = editor::stagePlace(doc, file);
+        editor::buildStaged(s);
+        meanwhile();
+        const editor::ObjectPath at{int(doc.scene().objects.size())};
+        return editor::applyPlace(doc, s, std::nullopt, at, splash::Vec3{});
+    };
+    fs::create_directories(proj / "models", ec);
+    editor::PlacedModel p = placeWith(outside / "tri.obj", [&] { std::ofstream(proj / "models" / "tri.obj", std::ios::binary) << "# mine\n"; });
+    CHECK(p.error.empty() && p.renamed == "models/tri_2.obj");
+    CHECK(fileBytes(proj / "models" / "tri.obj") == "# mine\n" && !fs::exists(proj / "models" / "tri.obj.import.json"));
+    CHECK(fs::exists(proj / "models" / "tri_2.obj") && fs::exists(proj / "models" / "tri_2.mesh"));
+    CHECK(fs::exists(proj / "models" / "tri_2.obj.import.json") && !fs::exists(proj / "models" / "tri.mesh"));
+    CHECK(p.model.mesh == "models/tri_2.mesh");
+    CHECK(doc.object(p.path) && doc.object(p.path)->mesh && doc.object(p.path)->mesh->mesh == "models/tri_2.mesh");
+
+    p = placeWith(outside / "rock.obj", [&] { std::ofstream(proj / "models" / "rock.mesh") << "mine"; });
+    CHECK(p.error.empty() && p.renamed == "models/rock_2.obj");
+    CHECK(fileBytes(proj / "models" / "rock.mesh") == "mine" && !fs::exists(proj / "models" / "rock.obj"));
+    CHECK(fs::exists(proj / "models" / "rock_2.mesh") && fs::exists(proj / "models" / "rock_2.obj"));
+
+    // A node tree: its folder follows the name too.
+    p = placeWith(outside / "robot.gltf", [&] { std::ofstream(proj / "models" / "robot.gltf") << "{}"; });
+    CHECK(p.error.empty() && p.renamed == "models/robot_2.gltf");
+    CHECK(fs::exists(proj / "models" / "robot_2" / "Body.mesh") && !fs::exists(proj / "models" / "robot"));
+    bool nodesFollow = !p.model.nodes.empty();
+    for (const splash::ImportedNode& n : p.model.nodes)
+        nodesFollow = nodesFollow && (n.mesh.empty() || n.mesh.rfind("models/robot_2/", 0) == 0);
+    CHECK(nodesFollow);
+    CHECK(fileBytes(proj / "models" / "robot.gltf") == "{}");
+
+    // Nothing appeared: the name it was staged with, no note.
+    p = placeWith(outside / "tri.obj", [] {});
+    CHECK(p.error.empty() && p.renamed.empty());
+    for (int i = 0; i < 1000 && importTemps() != tempsBefore; ++i) std::this_thread::sleep_for(ms(10));
+    CHECK(importTemps() == tempsBefore);
+
+    // Stale folders: only splashedit-import-* folders older than the age,
+    // and not one a staged import in this process still holds.
+    const fs::path tmp = dir / "sweep";
+    fs::create_directories(tmp, ec);
+    const auto old = fs::file_time_type::clock::now() - std::chrono::hours(2);
+    auto folder = [&](const std::string& name, bool aged) {
+        fs::create_directories(tmp / name / "models", ec);
+        std::ofstream(tmp / name / "models" / "x.mesh") << "x";
+        if (aged) fs::last_write_time(tmp / name, old, ec);
+    };
+    folder("splashedit-import-1-0", true);
+    folder("splashedit-import-2-0", false);
+    folder("other-import-3-0", true);
+    folder("splashedit-import-held", true);
+    std::ofstream(tmp / "splashedit-import-file") << "not a folder";
+    fs::last_write_time(tmp / "splashedit-import-file", old, ec);
+    editor::StagingFolder held;
+    held.reset(tmp / "splashedit-import-held");
+    const int removed = editor::sweepStaleImportFolders(std::chrono::hours(1), tmp);
+    CHECK(removed == 1);
+    CHECK(!fs::exists(tmp / "splashedit-import-1-0"));
+    CHECK(fs::exists(tmp / "splashedit-import-2-0") && fs::exists(tmp / "other-import-3-0"));
+    CHECK(fs::exists(tmp / "splashedit-import-held") && fs::is_regular_file(tmp / "splashedit-import-file"));
+    held.reset();
+    CHECK(editor::sweepStaleImportFolders(std::chrono::hours(1), tmp) == 0);  // the held one went with its owner
+    CHECK(!fs::exists(tmp / "splashedit-import-held"));
+}
+
 // splash::BlendExport with a mock Blender (a shell script that starts a
 // sleeping child and waits for it): the constructor returns at once, cancel()
 // kills the script and its child, get() then throws BlendCancelled, nothing
@@ -5523,6 +5737,7 @@ int main(int argc, char** argv) {
     testPlaceSkinnedModel();
     testImportSettings();
     testModelImports();
+    testModelImportsGaps();
     testUnirom();
     testPsxmon();
     testHardwareRun();

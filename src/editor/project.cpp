@@ -6,6 +6,7 @@
 #include <exception>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <set>
 #include <system_error>
 
@@ -283,6 +284,15 @@ static std::vector<std::string> writtenFiles(const splash::ImportedModel& m) {
     return written;
 }
 
+// Whether an import of `copy` would write over something in models/: its
+// baked mesh or its node folder is there.
+static bool outputsAt(const fs::path& project, const fs::path& copy) {
+    std::error_code ec;
+    const fs::path models = project / "models";
+    const std::string name = splash::importName(copy);
+    return fs::exists(models / fromUtf8(name + ".mesh"), ec) || fs::exists(models / fromUtf8(name), ec);
+}
+
 StagedModel stagePlace(const Document& doc, const fs::path& file, const fs::path& converted) {
     StagedModel s;
     s.project = doc.projectRoot();
@@ -310,6 +320,7 @@ StagedModel stagePlace(const Document& doc, const fs::path& file, const fs::path
     std::error_code ec;
     s.inside = !s.adopt && fs::equivalent(file, s.copy, ec);
     s.hadSidecar = fs::exists(splash::importSettingsPath(s.copy), ec);
+    s.outputsThere = outputsAt(s.project, s.copy);
     try {
         s.settings = splash::loadImportSettings(s.copy);
     } catch (const std::exception& e) {
@@ -339,7 +350,7 @@ StagedModel stageReimport(const Document& doc, const fs::path& model, const fs::
     return s;
 }
 
-void buildStaged(StagedModel& s) {
+void buildStaged(StagedModel& s, splash::ImportProgress* progress) {
     if (!s.error.empty()) return;
     static std::atomic<unsigned> counter{0};
     std::error_code ec;
@@ -356,7 +367,7 @@ void buildStaged(StagedModel& s) {
         return;
     }
     try {
-        s.model = splash::importModel(s.read, s.staging.path(), s.settings, s.copy);
+        s.model = splash::importModel(s.read, s.staging.path(), s.settings, s.copy, progress);
     } catch (const std::exception& e) {
         s.error = e.what();
     }
@@ -372,12 +383,49 @@ StagingFolder& StagingFolder::operator=(StagingFolder&& o) noexcept {
     return *this;
 }
 
+// The staging folders held in this process, which sweepStaleImportFolders leaves.
+static std::mutex g_stagingMutex;
+static std::set<fs::path> g_staging;
+
 void StagingFolder::reset(fs::path p) {
     if (!m_path.empty()) {
         std::error_code ec;
         fs::remove_all(m_path, ec);
+        std::lock_guard<std::mutex> lock(g_stagingMutex);
+        g_staging.erase(m_path);
     }
     m_path = std::move(p);
+    if (!m_path.empty()) {
+        std::lock_guard<std::mutex> lock(g_stagingMutex);
+        g_staging.insert(m_path);
+    }
+}
+
+int sweepStaleImportFolders(std::chrono::seconds age, const fs::path& dir) {
+    std::error_code ec;
+    const fs::path tmp = dir.empty() ? fs::temp_directory_path(ec) : dir;
+    if (ec || tmp.empty()) return 0;
+    const auto before = fs::file_time_type::clock::now() - age;
+    std::vector<fs::path> stale;
+    for (fs::directory_iterator it(tmp, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code e;
+        const std::u8string name = it->path().filename().u8string();
+        const std::u8string prefix = u8"splashedit-import-";
+        if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0) continue;
+        // Only a real folder: not a file, not a link to somewhere else.
+        if (it->is_symlink(e) || !it->is_directory(e)) continue;
+        const fs::file_time_type written = fs::last_write_time(it->path(), e);
+        if (e || written > before) continue;
+        stale.push_back(it->path());
+    }
+    int removed = 0;
+    std::lock_guard<std::mutex> lock(g_stagingMutex);
+    for (const fs::path& p : stale) {
+        if (g_staging.count(p)) continue;
+        std::error_code e;
+        if (fs::remove_all(p, e) > 0 && !e) ++removed;
+    }
+    return removed;
 }
 
 void discardStaged(StagedModel& s) { s.staging.reset(); }
@@ -412,6 +460,63 @@ static std::string commitStaged(const StagedModel& s) {
     return {};
 }
 
+// The outputs staged under `s.copy`'s name moved to `copy`'s (another name
+// in models/): the files in the staging folder and the paths in the model.
+static std::string restage(StagedModel& s, const fs::path& copy) {
+    const std::string from = "models/" + splash::importName(s.copy), to = "models/" + splash::importName(copy);
+    auto renamed = [&](std::string& rel) {
+        // Every output is models/<name>.mesh, models/<name>[_<n>].png or under models/<name>/.
+        if (rel.compare(0, from.size(), from) == 0 && rel.size() > from.size() &&
+            (rel[from.size()] == '.' || rel[from.size()] == '_' || rel[from.size()] == '/'))
+            rel = to + rel.substr(from.size());
+    };
+    std::error_code ec;
+    for (const std::string& rel : writtenFiles(s.model)) {
+        std::string next = rel;
+        renamed(next);
+        const fs::path a = s.staging.path() / fromUtf8(rel), b = s.staging.path() / fromUtf8(next);
+        fs::create_directories(b.parent_path(), ec);
+        ec.clear();
+        fs::rename(a, b, ec);
+        if (ec) return "could not rename " + rel + ": " + ec.message();
+    }
+    splash::ImportedModel& m = s.model;
+    renamed(m.mesh);
+    for (std::string& t : m.textures) renamed(t);
+    for (std::string& c : m.clips) renamed(c);
+    for (splash::Material& mat : m.materials) renamed(mat.texture);
+    for (splash::ImportedNode& n : m.nodes) {
+        if (!n.mesh.empty()) renamed(n.mesh);
+        for (splash::Material& mat : n.materials) renamed(mat.texture);
+    }
+    s.copy = copy;
+    return {};
+}
+
+// For a placed model whose name was taken in models/ while it imported (the
+// file or its outputs appeared there): the next free name, as adoptAsset
+// picks one, with the file copied there and the outputs renamed to match.
+// Returns the error, empty when it worked or there was no need.
+static std::string takeFreeName(StagedModel& s, std::string& renamed) {
+    std::error_code ec;
+    const bool fileTaken = fs::exists(s.copy, ec) && !sameBytes(s.file, s.copy);
+    if (!fileTaken && (s.outputsThere || !outputsAt(s.project, s.copy))) return {};
+    const fs::path dir = s.copy.parent_path();
+    const std::string stem = utf8(s.file.stem()), ext = utf8(s.file.extension());
+    fs::path copy;
+    for (int n = 2;; ++n) {
+        copy = dir / fromUtf8(stem + "_" + std::to_string(n) + ext);
+        if (!fs::exists(copy, ec) && !outputsAt(s.project, copy) && !fs::exists(splash::importSettingsPath(copy), ec)) break;
+    }
+    if (std::string e = restage(s, copy); !e.empty()) return e;
+    fs::copy_file(s.file, copy, ec);
+    if (ec) return "could not copy " + utf8(s.file.filename()) + ": " + ec.message();
+    s.adopt = false;
+    s.hadSidecar = false;
+    renamed = genericUtf8(copy.lexically_relative(s.project));
+    return {};
+}
+
 PlacedModel applyPlace(Document& doc, StagedModel& s, const std::optional<ObjectPath>& replace, const ObjectPath& at,
                        splash::Vec3 position) {
     PlacedModel r;
@@ -423,6 +528,12 @@ PlacedModel applyPlace(Document& doc, StagedModel& s, const std::optional<Object
     if (doc.projectRoot() != s.project) {
         r.error = "another project was opened";
         return r;
+    }
+    if (s.adopt) {
+        if (std::string e = takeFreeName(s, r.renamed); !e.empty()) {
+            r.error = e;
+            return r;
+        }
     }
     if (s.adopt) {
         const AdoptedAsset adopted = adoptAsset(s.project, s.file, "models");

@@ -4,7 +4,10 @@
 # once it is built the model is placed (and saved with Ctrl+S). Cancel places
 # nothing, adopts nothing and leaves the saved scene as it was, with no
 # temporary folder left. Two models dropped one after the other both land, in
-# the order dropped, though the second is quicker to import. Drives the editor
+# the order dropped, though the second is quicker to import. While the build
+# runs the status bar shows the share done beside the seconds (the --shot
+# report adds "import progress: N%"), and a stale temporary folder left by a
+# killed editor is swept at the first import. Drives the editor
 # headless on copies of the courtyard example.
 # usage: python3 asyncimportcheck.py <splashedit> [screenshot.png]   (needs a display: xvfb-run -a)
 import json, math, os, re, shutil, struct, subprocess, sys, tempfile, time
@@ -83,12 +86,14 @@ def temps(name):
     return sorted(n for n in os.listdir(d) if n.startswith('splashedit-import-')) if os.path.isdir(d) else []
 
 
-def run(name, script):
+def run(name, script, seed=None):
     """Runs the editor on a fresh copy of the courtyard with `script`. Returns
     (project, output, top-level object names of the saved scene, scene bytes)."""
     project = os.path.join(tmp, name, 'courtyard')
     shutil.copytree(example, project)
     os.makedirs(tempdir(name))
+    if seed:
+        seed(tempdir(name))
     cmd = [editor, '--size', '1600x960', '--project', project] + script + ['--screenshot', os.path.join(project, 'end.png')]
     try:
         out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=dict(ENV, TMPDIR=tempdir(name)), timeout=240).stdout.strip()
@@ -106,26 +111,52 @@ def shot_lines(out):
             for m in re.finditer(r'model import: (\w+), (\d+) frames drawn while it ran, (\d+) queued', out)]
 
 
+def progress_lines(out):
+    """The share done each --shot saw, in order: N for "import progress: N%" after
+    the shot's model import line, None when the status bar showed no progress."""
+    r = []
+    for block in re.split(r'(?=model import: )', out)[1:]:
+        m = re.search(r'^import progress: (\d+)%$', block, re.M)
+        r.append(int(m.group(1)) if m else None)
+    return r
+
+
 models = lambda p: sorted(os.listdir(os.path.join(p, 'models'))) if os.path.isdir(os.path.join(p, 'models')) else []
 
 # Three frames after the drop the import must still be running and the
 # editor drawing; once it is done (--wait-import) it reports how many frames
 # it drew meanwhile, and the model is placed and saved.
+def stale(d):
+    """What a killed editor leaves: an import folder two hours old, beside a
+    folder of the same age that is not the editor's."""
+    for n in ('splashedit-import-1-0', 'not-splashedit-import'):
+        os.makedirs(os.path.join(d, n, 'models'))
+        open(os.path.join(d, n, 'models', 'x.mesh'), 'w').write('x')
+        old = time.time() - 2 * 3600
+        os.utime(os.path.join(d, n), (old, old))
+
+
 mid = os.path.join(tmp, 'mid.png')
 t0 = time.time()
 project, out, names, _ = run('place', ['--drop-now', terrain + '@' + DROP, '--wait', '3', '--shot', mid, '--wait-import',
                                        '--wait', '2', '--shot', os.path.join(tmp, 'after.png'), '--wait', '5', '--key', 'ctrl+s',
-                                       '--wait', '10'])
+                                       '--wait', '10'], seed=stale)
 shots = shot_lines(out)
 check('both screenshots reported', len(shots) == 2, out[-400:])
+progress = progress_lines(out)
 if len(shots) == 2:
     check('the import is still running 3 frames after the drop', shots[0][0] == 'running', shots)
+    check('the status bar shows the share done while it builds', len(progress) == 2 and progress[0] is not None and
+          0 <= progress[0] <= 100, progress)
+    check('and none once it is done', len(progress) == 2 and progress[1] is None, progress)
     check('the editor drew frames while it imported', shots[1][0] == 'idle' and shots[1][1] >= 10, shots)
     print('     (%d frames drawn while terrain.glb imported)' % shots[1][1])
 check('once it is built the model is placed and saved', 'terrain' in names, str(names) + ' | ' + out[-300:])
 check('the model is adopted and imported', 'terrain.glb' in models(project) and 'terrain.mesh' in models(project), models(project))
 check('the status bar says it was imported', 'status: Imported terrain.glb, 80000 triangles' in out, out[-300:])
-check('no temporary folder is left', not temps('place'), temps('place'))
+check('no temporary folder is left (the stale one swept too)', not temps('place'), temps('place'))
+check('a folder not the editor\'s is left alone', os.path.isdir(os.path.join(tempdir('place'), 'not-splashedit-import')),
+      os.listdir(tempdir('place')))
 
 # The scene as a run with no import saves it, to compare Cancel against.
 _, _, plain, plainData = run('plain', ['--wait', '5', '--key', 'ctrl+s', '--wait', '10'])

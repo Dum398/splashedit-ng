@@ -33,7 +33,8 @@ struct ModelTarget {
 };
 
 // buildStaged on a worker thread. Destroying or cancelling it never waits:
-// a cancelled build finishes on its own and removes what it wrote.
+// a cancelled build stops at its next step (see splash::ImportProgress),
+// soon after, and removes what it wrote.
 class StagedBuild {
   public:
     // `keep` is held until the build is over (the BlendExport whose GLB it reads).
@@ -46,6 +47,8 @@ class StagedBuild {
     // Waits up to `timeout` for done(); false when it is still running.
     bool wait(std::chrono::milliseconds timeout) const;
     void cancel();
+    // How far the build is, 0 to 1.
+    float fraction() const;
     // Once done() and not cancelled: the built model, to apply or discard.
     StagedModel take();
 
@@ -82,9 +85,11 @@ class ModelImports {
     // Advances the import at the front, starting it when it is new; call
     // once a frame on the UI thread. Returns what ended this call, in order.
     std::vector<Outcome> update(const Document& doc);
-    // Stops the running import: Blender is killed, a build is left to finish
-    // on its own and thrown away. update() reports it Cancelled, nothing applied.
-    // Destroying the queue waits up to 10 s for such builds to clean up.
+    // Stops the running import: Blender is killed, a build stops at its next
+    // step and is thrown away. update() reports it Cancelled, nothing applied.
+    // The next import starts once the cancelled build has stopped, so two
+    // builds never run at once. Destroying the queue waits up to 10 s for
+    // cancelled builds to clean up.
     void cancel();
 
     bool busy() const { return !m_queue.empty(); }
@@ -98,6 +103,11 @@ class ModelImports {
     double seconds() const;
     int frames() const { return m_frames; }
     bool finishing() const;
+    // How far the running build is, 0 to 1; below 0 while that is not known
+    // (Blender converting a .blend, or nothing running).
+    float fraction() const;
+    // Cancelled builds that have not stopped yet.
+    size_t stopping() const { return m_abandoned.size(); }
 
   private:
     struct Item;

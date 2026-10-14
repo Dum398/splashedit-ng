@@ -3,6 +3,7 @@
 // This half has no SDL; the dialogs live in the app.
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -92,6 +93,9 @@ struct PlacedModel {
     std::string error;  // empty on success
     splash::ImportedModel model;
     ObjectPath path;  // the object placed or changed
+    // Set when the name the copy was to have was taken in models/ while it
+    // imported: the copy's project path under the free name it got instead.
+    std::string renamed;
 };
 PlacedModel placeModel(Document& doc, const std::filesystem::path& file, const std::optional<ObjectPath>& replace,
                        const ObjectPath& at, splash::Vec3 position, const std::filesystem::path& converted = {});
@@ -158,6 +162,7 @@ struct StagedModel {
     bool adopt = false;             // `file` is copied to `copy` when applied
     bool inside = false;            // `file` is in the project already
     bool hadSidecar = false;
+    bool outputsThere = false;      // models/<name>.mesh or models/<name>/ was there when it was staged
     splash::ImportSettings settings;
     StagingFolder staging;          // the temporary folder; empty when there is none
     std::string error;              // empty while it is going well
@@ -165,11 +170,19 @@ struct StagedModel {
 };
 StagedModel stagePlace(const Document& doc, const std::filesystem::path& file, const std::filesystem::path& converted = {});
 StagedModel stageReimport(const Document& doc, const std::filesystem::path& model, const std::filesystem::path& converted = {});
-void buildStaged(StagedModel& staged);
+// With `progress`, the build can be followed and cancelled from another
+// thread (see splash::importModel); cancelled, it ends with an error.
+void buildStaged(StagedModel& staged, splash::ImportProgress* progress = nullptr);
 void discardStaged(StagedModel& staged);
 PlacedModel applyPlace(Document& doc, StagedModel& staged, const std::optional<ObjectPath>& replace, const ObjectPath& at,
                        splash::Vec3 position);
 Reimported applyReimport(Document& doc, StagedModel& staged, std::optional<bool> wasMerged = std::nullopt);
+
+// Removes the temporary folders a build left in `dir` (the system temp folder
+// when empty) when the editor was killed while importing: folders named
+// splashedit-import-*, last written longer than `age` ago and held by no
+// import in this process. Nothing else is touched. Returns how many went.
+int sweepStaleImportFolders(std::chrono::seconds age = std::chrono::hours(1), const std::filesystem::path& dir = {});
 
 // The file reimportModel reads for `model` (absolute, or relative to the
 // project): its sidecar's source while that file is there, else the copy.

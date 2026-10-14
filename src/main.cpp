@@ -657,6 +657,7 @@ int main(int argc, char** argv) {
                         state.importFrames(), state.imports.size());
             if (state.importCancel.GetWidth() > 0)
                 std::printf("cancel button at %d,%d\n", (int)state.importCancel.GetCenter().x, (int)state.importCancel.GetCenter().y);
+            if (state.importProgress >= 0) std::printf("import progress: %d%%\n", (int)(state.importProgress * 100));
             shotDue.clear();
         }
         bool endHeld = false;

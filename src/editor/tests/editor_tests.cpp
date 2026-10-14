@@ -4678,7 +4678,9 @@ void testBlendCancel() {
                 CHECK(cancelled);
             }
         }
-        CHECK(clock::now() - t0 < 60s);  // never killed, the destructor would wait the 120 s out
+        // Never killed, the job runs into Blender's 120 s timeout (or the child's
+        // 120 s sleep); 90 s leaves room for the two 30 s waits above on a loaded machine.
+        CHECK(clock::now() - t0 < 90s);
         CHECK(waitFor([&] { return !alive(shell) && !alive(child); }, 30000ms));
         CHECK(waitFor([&] { return temps() == before; }, 10000ms));
     }

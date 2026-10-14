@@ -2,8 +2,9 @@
 # keys on several lanes (Ctrl adds a second box), drag one selected key to
 # move them all, Delete them all, each one undo step; copy and paste keys at
 # the scrub head; and the audio lane: add an event from the clip menu, drag
-# it, delete it, undo each. Each run saves with Ctrl+S and the check reads
-# the saved scene.
+# it, delete it, undo each. A key drag or a box held past the lanes' right or
+# left edge scrolls the view along. Each run saves with Ctrl+S and the check
+# reads the saved scene.
 # usage: python3 timelineselectcheck.py <splashedit>   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -43,7 +44,7 @@ def key(frame, value):
     return {'frame': frame, 'value': value}
 
 
-def project_copy():
+def project_copy(far=False):
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     scene = os.path.join(project, 'courtyard.scene')
@@ -61,14 +62,16 @@ def project_copy():
         {'type': 'objectRotation', 'target': 'Crate', 'keyframes': [key(30, [0, 0, 0]), key(120, [0, 90, 0])]}],
         'audioEvents': [{'frame': 20, 'clip': 'bell', 'volume': 100, 'pan': 64},
                         {'frame': 75, 'clip': 'gong', 'volume': 90, 'pan': 30}]}]
+    if far:  # a rotation key past what the fitted view shows
+        s['cutscenes'][0]['tracks'][2]['keyframes'].append(key(400, [0, 0, 0]))
     json.dump(s, open(scene, 'w', encoding='utf-8'), indent=2)
     return project
 
 
-def run(args):
+def run(args, far=False):
     """Runs the editor on a fresh copy with the timeline open on intro, then
     `args` and Ctrl+S; returns the saved cutscene and the editor's output."""
-    project = project_copy()
+    project = project_copy(far)
     cmd = [editor, '--size', '1600x960', '--project', project, '--timeline', 'intro'] + args + [
         '--key', 'ctrl+s', '--wait', '10', '--screenshot', os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
@@ -150,6 +153,32 @@ cs, out = run(DELETE)
 check('Delete removes the selected audio event', events(cs) == [(20, 'bell')] and frames(cs) == START, f'{events(cs)} | ' + out[-200:])
 cs, out = run(DELETE + ['--key', 'ctrl+z', '--wait', '3'])
 check('Ctrl+Z brings the deleted audio event back', events(cs) == START_AUDIO, f'{events(cs)} | ' + out[-200:])
+
+# Auto-scroll. The lanes end at x 1236 (the inspector is right of them) and
+# start at 520 (the labels are left). Scripted frames are 1/60 s apart, so a
+# hold of 120 frames is 2 s of scrolling at 240 px/s and up.
+PAST_RIGHT, PAST_LEFT = 1300, 500
+
+
+def hold(x0, y0, x1, y1, frames=120):
+    return ['--mousedown', f'{x0},{y0}', '--wait', '3', '--move', f'{x1},{y1}', '--wait', str(frames), '--mouseup', '0', '--wait', '3']
+
+
+# Drag the key at 90 past the right edge and hold: the view scrolls and the
+# key goes with it, well past frame 174 where the edge alone would leave it.
+cs, out = run(hold(fx(90), lane(0), PAST_RIGHT, lane(0)))
+check('a key held past the right edge scrolls the view and moves on with it',
+      len(frames(cs)[0]) == 3 and frames(cs)[0][:2] == [0, 45] and frames(cs)[0][2] > 300, str(frames(cs)) + ' | ' + out[-200:])
+# A box held past the right edge reaches the key at 400 the fitted view does not show; Delete removes it.
+cs, out = run(hold(fx(130), lane(2) - 15, PAST_RIGHT, lane(2) + 15) + ['--key', 'delete', '--wait', '3'], far=True)
+check('a box held past the right edge scrolls the view and selects what it reaches',
+      frames(cs) == START, str(frames(cs)) + ' | ' + out[-200:])
+# Shift+wheel pans the view 27 frames on; the key at 120 dragged past the
+# left edge and held follows the view back to frame 0 (the edge alone: 20).
+PAN = ['--keydown', 'shift', '--wait', '2', '--wheel', f'900,{lane(1)},-3', '--wait', '3', '--keyup', 'shift', '--wait', '2']
+cs, out = run(PAN + hold(round(fx(120) - 3 * 40), lane(2), PAST_LEFT, lane(2)))
+check('a key held past the left edge scrolls the view back and moves on with it',
+      frames(cs)[2] == [0, 30], str(frames(cs)) + ' | ' + out[-200:])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

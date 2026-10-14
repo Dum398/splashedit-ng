@@ -115,6 +115,10 @@ std::vector<std::string> audioClips(const Document& doc);
 // Active objects with a mesh and a skin component, clip names read from their
 // .anim files (one that does not load is left out).
 std::vector<SkinTarget> skinTargets(const Document& doc);
+// Why the export refuses skin event `e` against `targets` (skinTargets()), or
+// empty when it plays: no skinned object of that name (deleted, renamed,
+// inactive or its skin removed), two of them, or no clip of that name on it.
+std::string skinEventProblem(const std::vector<SkinTarget>& targets, const splash::SkinAnimEvent& e);
 
 // Edits. Each is one undo step; a refused edit changes nothing and adds no
 // step. Keys stay sorted by frame within a track, and no two share a frame.
@@ -186,11 +190,13 @@ int deleteSelection(Document& doc, SeqRef ref, const Selection& sel);
 // The selection's keys and events, frames relative to the earliest.
 TimelineClipboard copySelection(const Document& doc, SeqRef ref, const Selection& sel);
 // Pastes `clip` with its earliest item at `frame`, one step. A key goes to the
-// track with its type and target (replacing a key already on that frame) and
-// is skipped when there is none; audio events are skipped in an animation.
-// Refused (nullopt, no step) when nothing would land, an item would pass
-// kMaxTimelineFrame, or a track or an event list would pass the runtime's
-// limits. `skipped` gets how many items had nowhere to go.
+// track with its type and target (replacing a key already on that frame); when
+// the sequence has none, the same step adds one (at the end, as addTrack()).
+// A key whose track type the sequence cannot hold (camera in an animation) is
+// skipped, and so are audio events in an animation. Refused (nullopt, no
+// step) when nothing would land, an item would pass kMaxTimelineFrame, or the
+// tracks, a track's keys or an event list would pass the runtime's limits.
+// `skipped` gets how many items had nowhere to go.
 std::optional<Selection> pasteClipboard(Document& doc, SeqRef ref, const TimelineClipboard& clip, int frame,
                                         int* skipped = nullptr);
 // An audio event of `clip` at `frame` (clamped to 0..kMaxTimelineFrame),
@@ -234,9 +240,13 @@ KeyValue sampleFixed(const splash::CutsceneTrack& track, float frame, const KeyV
 // The curve psxsplash applies to a 0..1 segment position.
 float applyCurve(float t, splash::Interp mode);
 // The target's state when playback starts, as far as the editor knows it:
-// an object's world position or its start-active flag, a UI element's
-// on-screen position (splash::uiPositionTrackStart); zero otherwise
-// (object rotation starts from 0,0,0 in the runtime too).
+// an object's world position or its start-active flag, a canvas's or UI
+// element's visible flag, a UI element's on-screen position
+// (splash::uiPositionTrackStart), its progress value (0..100) and its colour
+// (0..1, the fill of a progress bar), as psxsplash's CutscenePlayer reads them
+// from the UI system when the track starts; zero otherwise (object rotation
+// starts from 0,0,0 in the runtime too). So the first key added to an empty
+// track takes the target's current value.
 KeyValue initialValue(const Document& doc, const splash::CutsceneTrack& track);
 // sampleFixed() with initialValue() and the scene's GTE scaling: what the
 // console shows at that frame.

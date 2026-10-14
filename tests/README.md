@@ -424,8 +424,10 @@ a display (CI runs it under `xvfb-run` on Linux).
 with two cutscenes: renaming one in the scene inspector (double-click the name) and from the
 timeline's sequence picker, undo of a rename, a taken name and a 25-character one refused, deleting
 one from the inspector and undoing it, pointing a track at another object from its lane menu (and
-undoing that), each read back from the saved scene; and the Scene view previewing a light track and a
-UV offset track (pixels at frame 0 against frame 75) without touching the scene file:
+undoing that), each read back from the saved scene; the Scene view previewing a light track and a
+UV offset track (pixels at frame 0 against frame 75) without touching the scene file; and, with
+`tests/skin`'s arm added, a skin clip event naming a clip the arm does not have drawn red in the skin
+lane while one naming its `raise` clip stays blue:
 
     python3 timelineeditcheck.py <splashedit>
 
@@ -448,8 +450,11 @@ project's `.trash/1/` after the prompt; Ctrl+Z brings it back. Needs a display (
 courtyard example with two audio clips: a box dragged over empty lane space selecting keys on two
 lanes (Ctrl adding a second box), one key dragged moving them all, Delete removing them all, one
 Ctrl+Z taking each back; a box over a key and an audio event moving both; Ctrl+C / Ctrl+V pasting a
-key at the scrub head; and an audio event added from the lane's clip menu, dragged and deleted, each
-undone, all read back from the saved scene:
+key at the scrub head; an audio event added from the lane's clip menu, dragged and deleted, each
+undone; and auto-scroll: a key dragged past the lanes' right edge and held moving on past what the
+edge alone reaches, a box held there reaching a key at frame 400 the fitted view does not show (Delete
+removes it), and after Shift+wheel pans the view, a key held past the left edge following it back to
+frame 0. All read back from the saved scene:
 
     python3 timelineselectcheck.py <splashedit>
 

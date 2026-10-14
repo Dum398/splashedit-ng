@@ -189,6 +189,20 @@ std::vector<SkinTarget> skinTargets(const Document& doc) {
     return out;
 }
 
+std::string skinEventProblem(const std::vector<SkinTarget>& targets, const splash::SkinAnimEvent& e) {
+    // As writeSequences resolves it (splashpack.cpp resolveSkin).
+    const SkinTarget* found = nullptr;
+    for (const SkinTarget& t : targets)
+        if (t.object == e.object) {
+            if (found) return "Two skinned objects are named '" + e.object + "': the export refuses it";
+            found = &t;
+        }
+    if (!found) return "No active skinned object is named '" + e.object + "': the export refuses it";
+    if (std::find(found->clips.begin(), found->clips.end(), e.clip) == found->clips.end())
+        return "'" + e.object + "' has no clip named '" + e.clip + "': the export refuses it";
+    return {};
+}
+
 // Edits. Every one snapshots the scene's cutscenes and animations before and
 // after; they are small (the runtime caps them at 16 x 8 tracks x 64 keys).
 
@@ -804,8 +818,17 @@ std::optional<Selection> pasteClipboard(Document& doc, SeqRef ref, const Timelin
             auto t = std::find_if(m.tracks->begin(), m.tracks->end(),
                                   [&](const CutsceneTrack& tr) { return tr.type == ck.type && tr.target == ck.target; });
             if (t == m.tracks->end()) {
-                ++skip;
-                continue;
+                // No track drives it here: add one, as addTrack() would.
+                if (!allowedIn(ref.kind, ck.type) || (needsTarget(ck.type) && ck.target.empty())) {
+                    ++skip;
+                    continue;
+                }
+                if (int(m.tracks->size()) >= kMaxTimelineTracks) return false;
+                CutsceneTrack tr;
+                tr.type = ck.type;
+                tr.target = needsTarget(ck.type) ? ck.target : std::string();
+                m.tracks->push_back(std::move(tr));
+                t = m.tracks->end() - 1;
             }
             Keyframe k = ck.key;
             k.frame += frame;
@@ -1214,17 +1237,30 @@ KeyValue initialValue(const Document& doc, const CutsceneTrack& track) {
             for (const splash::UICanvas& c : doc.scene().canvases)
                 if (c.name == track.target) return {c.visible ? 1.0f : 0.0f, 0, 0};
             break;
-        case TrackType::UIPosition: {
-            // The element where it sits on screen (its anchor's pixel plus its
-            // offset), in the units the exporter packs keys from.
+        case TrackType::UIElementVisible:
+        case TrackType::UIProgress:
+        case TrackType::UIPosition:
+        case TrackType::UIColor: {
+            // The element as the scene ships it ("canvas/element", as the exporter finds it).
             const size_t slash = track.target.find('/');
             if (slash == std::string::npos) break;
             for (const splash::UICanvas& c : doc.scene().canvases)
                 if (c.name == track.target.substr(0, slash))
                     for (const splash::UIElement& e : c.elements)
                         if (e.name == track.target.substr(slash + 1)) {
-                            const std::array<int, 2> p = splash::uiPositionTrackStart(e);
-                            return {float(p[0]), float(p[1]), 0};
+                            switch (track.type) {
+                                case TrackType::UIElementVisible: return {e.visible ? 1.0f : 0.0f, 0, 0};
+                                // UISystem::getProgress: a progress bar's value, 0 for any other element.
+                                case TrackType::UIProgress:
+                                    return {e.type == splash::UIElementType::Progress ? float(e.value) : 0.0f, 0, 0};
+                                case TrackType::UIColor: return {e.color[0], e.color[1], e.color[2]};
+                                default: {
+                                    // Where it sits on screen (its anchor's pixel plus its
+                                    // offset), in the units the exporter packs keys from.
+                                    const std::array<int, 2> p = splash::uiPositionTrackStart(e);
+                                    return {float(p[0]), float(p[1]), 0};
+                                }
+                            }
                         }
             break;
         }

@@ -419,6 +419,12 @@ display.
 
     python3 scenefogcheck.py <splashedit>
 
+`scripttabscheck.py` clicks the centre panel's tabs by name (`@tab.scene`, `@tab.ui`, `@tab.0`) on copies of
+the courtyard example: back to Scene from an open script and from UI, and UI, the script and Scene in turn.
+The editor prints `scripttabs: active <tab>` each time a click brings a tab to the front. Needs a display.
+
+    python3 scripttabscheck.py <splashedit>
+
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
 ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is

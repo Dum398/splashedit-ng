@@ -293,7 +293,8 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     dl->AddRectFilled(strip.Min, strip.Max, color::panel, radius::window);
     ImGui::PushID("scripttabs");
     float x = strip.Min.x + space::xs;
-    int pick = -3, closeIt = -1;
+    // -3 is "none" for both: -1 and -2 are the Scene and UI tabs.
+    int pick = -3, closeIt = -3;
     std::vector<int> order = {kScene, kUi};
     for (int i = 0; i < (int)m_tabs.size(); ++i) order.push_back(i);
     for (int i : order) {
@@ -305,6 +306,7 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         const float w = space::md + iw + space::sm - 2 + tw + (scene ? space::md : 28);
         ImRect tr(ImVec2(x, strip.Min.y + space::xs), ImVec2(x + w, strip.Max.y));
         ImGui::PushID(i);
+        nameRect(i == kScene ? std::string("tab.scene") : i == kUi ? std::string("tab.ui") : "tab." + std::to_string(i), tr);
         Hit hit = interact("tab", tr);
         const bool active = i == m_active;
         if (active) dl->AddRectFilled(tr.Min, tr.Max, color::raised, radius::button, ImDrawFlags_RoundCornersTop);
@@ -337,6 +339,12 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         for (auto& t : m_tabs) t->focused = false;
         m_active = pick;
         if (m_active >= 0) m_tabs[m_active]->focused = true;
+        if (namedRectsOn()) {
+            // Scripted tests: which tab a click brought to the front.
+            std::printf("scripttabs: active %s\n",
+                        m_active == kScene ? "Scene" : m_active == kUi ? "UI" : m_tabs[m_active]->script.title().c_str());
+            std::fflush(stdout);
+        }
     }
     if (closeIt >= 0) close(closeIt);
     return ImRect(ImVec2(r.Min.x, strip.Max.y), r.Max);

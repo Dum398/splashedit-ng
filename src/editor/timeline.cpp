@@ -1,10 +1,15 @@
 #include "editor/timeline.hh"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <set>
+#include <span>
 
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
@@ -349,13 +354,243 @@ std::string seqNameProblem(const Document& doc, SeqRef ref, const std::string& n
     return {};
 }
 
-bool renameSequence(Document& doc, SeqRef ref, const std::string& name) {
+namespace {
+
+bool identChar(char c) { return std::isalnum(uint8_t(c)) || c == '_'; }
+bool spaceChar(char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v'; }
+
+// Past a long bracket's opening `[==[` at `i`: the level, or -1 when it is not one.
+int longOpen(const std::string& s, size_t i, size_t* after) {
+    if (i >= s.size() || s[i] != '[') return -1;
+    size_t j = i + 1;
+    while (j < s.size() && s[j] == '=') ++j;
+    if (j >= s.size() || s[j] != '[') return -1;
+    *after = j + 1;
+    return int(j - i - 1);
+}
+
+size_t longClose(const std::string& s, size_t from, int level) {
+    const std::string close = "]" + std::string(size_t(level), '=') + "]";
+    const size_t at = s.find(close, from);
+    return at == std::string::npos ? s.size() : at + close.size();
+}
+
+// A Lua quoted string literal holding `name`.
+std::string quoteLua(const std::string& name, char q) {
+    std::string out;
+    for (char c : name) {
+        if (c == '\\' || c == q) out += '\\';
+        if (c == '\n') {
+            out += "\\n";
+            continue;
+        }
+        if (c == '\r') {
+            out += "\\r";
+            continue;
+        }
+        out += c;
+    }
+    return out;
+}
+
+std::optional<std::string> readFile(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return std::nullopt;
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Written beside and renamed over, as lua::Script::save, so a failed write leaves the old file.
+bool writeFile(const std::filesystem::path& p, const std::string& text) {
+    std::filesystem::path tmp = p;
+    tmp += ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out.write(text.data(), std::streamsize(text.size()));
+        if (!out) return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, p, ec);
+    if (ec) std::filesystem::remove(tmp, ec);
+    return !ec;
+}
+
+// The rename and the scripts it rewrote, one step. A file goes back (or
+// forward again) only while it holds what this step left in it.
+class RenameCommand : public Command {
+public:
+    struct File {
+        std::string path;  // project relative
+        std::string before, after;
+    };
+    RenameCommand(TimelineCommand seq, std::vector<File> files) : m_seq(std::move(seq)), m_files(std::move(files)) {}
+    void apply(Document& doc) override {
+        m_seq.apply(doc);
+        write(doc, false);
+    }
+    void revert(Document& doc) override {
+        m_seq.revert(doc);
+        write(doc, true);
+    }
+    std::vector<std::string> written, failed;  // by the last apply or revert
+
+private:
+    void write(Document& doc, bool back) {
+        written.clear();
+        failed.clear();
+        for (const File& f : m_files) {
+            const std::filesystem::path p = doc.resolve(f.path);
+            const std::optional<std::string> now = readFile(p);
+            if (!now || *now != (back ? f.after : f.before)) {
+                failed.push_back(f.path);
+                continue;
+            }
+            (writeFile(p, back ? f.before : f.after) ? written : failed).push_back(f.path);
+        }
+        if (!written.empty()) doc.refreshAssets(written);  // open script tabs reload from this
+    }
+    TimelineCommand m_seq;
+    std::vector<File> m_files;
+};
+
+void collectScripts(const std::vector<splash::Object>& objs, std::vector<std::string>& out) {
+    auto add = [&](const std::string& p) {
+        if (!p.empty() && std::find(out.begin(), out.end(), p) == out.end()) out.push_back(p);
+    };
+    for (const splash::Object& o : objs) {
+        if (o.script) add(o.script->lua);
+        if (o.trigger) add(o.trigger->lua);
+        collectScripts(o.children, out);
+    }
+}
+
+}  // namespace
+
+std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string& from, const std::string& to, int* count) {
+    static const char* const cutsceneFns[] = {"Play"};
+    static const char* const animationFns[] = {"Play", "Stop", "IsPlaying"};
+    const bool cs = kind == SeqKind::Cutscene;
+    const std::string table = cs ? "Cutscene" : "Animation";
+    std::string out;
+    size_t copied = 0;  // s[copied..] is not in `out` yet
+    int n = 0;
+    auto skipSpace = [&](size_t i) {
+        while (i < s.size() && spaceChar(s[i])) ++i;
+        return i;
+    };
+    size_t i = 0;
+    while (i < s.size()) {
+        const char c = s[i];
+        size_t after = 0;
+        if (c == '-' && i + 1 < s.size() && s[i + 1] == '-') {
+            const int level = longOpen(s, i + 2, &after);
+            if (level >= 0) {
+                i = longClose(s, after, level);
+            } else {
+                const size_t nl = s.find('\n', i);
+                i = nl == std::string::npos ? s.size() : nl + 1;
+            }
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            for (++i; i < s.size() && s[i] != c && s[i] != '\n'; ++i)
+                if (s[i] == '\\') ++i;
+            ++i;
+            continue;
+        }
+        if (c == '[') {
+            const int level = longOpen(s, i, &after);
+            i = level >= 0 ? longClose(s, after, level) : i + 1;
+            continue;
+        }
+        if (!identChar(c) || std::isdigit(uint8_t(c))) {
+            if (std::isdigit(uint8_t(c)))
+                while (i < s.size() && (identChar(s[i]) || s[i] == '.')) ++i;
+            else
+                ++i;
+            continue;
+        }
+        size_t end = i;
+        while (end < s.size() && identChar(s[end])) ++end;
+        const std::string word = s.substr(i, end - i);
+        // Not a field of something else (x.Cutscene, x:Cutscene).
+        size_t back = i;
+        while (back > 0 && spaceChar(s[back - 1])) --back;
+        const bool member = back > 0 && (s[back - 1] == ':' || (s[back - 1] == '.' && (back < 2 || s[back - 2] != '.')));
+        i = end;
+        if (word != table || member) continue;
+        size_t j = skipSpace(end);
+        if (j >= s.size() || s[j] != '.') continue;
+        j = skipSpace(j + 1);
+        size_t fe = j;
+        while (fe < s.size() && identChar(s[fe])) ++fe;
+        const std::string fn = s.substr(j, fe - j);
+        bool known = false;
+        for (const char* f : cs ? std::span<const char* const>(cutsceneFns) : std::span<const char* const>(animationFns))
+            known |= fn == f;
+        if (!known) continue;
+        j = skipSpace(fe);
+        if (j < s.size() && s[j] == '(') j = skipSpace(j + 1);  // Cutscene.Play "intro" is a call too
+        if (j >= s.size() || (s[j] != '"' && s[j] != '\'')) continue;
+        const char q = s[j];
+        size_t k = j + 1;
+        while (k < s.size() && s[k] != q && s[k] != '\\' && s[k] != '\n') ++k;
+        if (k >= s.size() || s[k] != q) continue;  // escapes or unfinished: the scanner above takes it
+        if (s.compare(j + 1, k - j - 1, from) == 0 && k - j - 1 == from.size()) {
+            out.append(s, copied, j + 1 - copied);
+            out += quoteLua(to, q);
+            copied = k;
+            ++n;
+        }
+        i = k + 1;
+    }
+    out.append(s, copied, std::string::npos);
+    if (count) *count = n;
+    return out;
+}
+
+std::vector<std::string> sceneScripts(const Document& doc) {
+    std::vector<std::string> out;
+    collectScripts(doc.scene().objects, out);
+    const std::string& scene = doc.scene().settings.script;
+    if (!scene.empty() && std::find(out.begin(), out.end(), scene) == out.end()) out.push_back(scene);
+    return out;
+}
+
+bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRenames* scripts) {
     if (!valid(doc, ref) || *seqName(doc, ref) == name || !seqNameProblem(doc, ref, name).empty()) return false;
+    const std::string old = *seqName(doc, ref);
     std::vector<splash::Cutscene> cs = doc.scene().cutscenes;
     std::vector<splash::Animation> as = doc.scene().animations;
     (ref.kind == SeqKind::Cutscene ? cs[size_t(ref.index)].name : as[size_t(ref.index)].name) = name;
-    doc.execute(std::make_unique<TimelineCommand>(doc.scene().cutscenes, doc.scene().animations, std::move(cs), std::move(as),
-                                                  std::string()));
+    ScriptRenames result;
+    std::vector<RenameCommand::File> files;
+    std::map<std::string, int> refs;
+    // An unsaved scene has no project to find its scripts in.
+    if (!doc.projectRoot().empty())
+        for (const std::string& p : sceneScripts(doc)) {
+            const std::filesystem::path abs = doc.resolve(p);
+            std::error_code ec;
+            if (!std::filesystem::is_regular_file(abs, ec)) continue;  // missing: the inspector warns already
+            const std::optional<std::string> text = readFile(abs);
+            if (!text) {
+                result.failed.push_back(p);
+                continue;
+            }
+            int n = 0;
+            std::string after = renameSeqInLua(*text, ref.kind, old, name, &n);
+            if (!n) continue;
+            refs[p] = n;
+            files.push_back({p, *text, std::move(after)});
+        }
+    auto cmd = std::make_unique<RenameCommand>(
+        TimelineCommand(doc.scene().cutscenes, doc.scene().animations, std::move(cs), std::move(as), std::string()),
+        std::move(files));
+    RenameCommand* raw = cmd.get();
+    doc.execute(std::move(cmd));
+    result.files = raw->written;
+    for (const std::string& f : raw->written) result.refs += refs[f];
+    for (const std::string& f : raw->failed) result.failed.push_back(f);
+    if (scripts) *scripts = std::move(result);
     return true;
 }
 

@@ -504,10 +504,23 @@ void TimelinePanel::note(std::string msg) {
 void TimelinePanel::rename(editor::Document& doc, SeqRef ref, const std::string& name) {
     if (!editor::valid(doc, ref) || name == *editor::seqName(doc, ref)) return;
     const std::string why = editor::seqNameProblem(doc, ref, name);
-    if (!why.empty())
+    if (!why.empty()) {
         note("Not renamed: " + why);
+        return;
+    }
+    const std::string old = *editor::seqName(doc, ref);
+    editor::ScriptRenames sr;
+    if (!editor::renameSequence(doc, ref, name, &sr)) return;
+    // Scripts play it by name: say what changed with it, and what could not.
+    std::string msg = "Renamed '" + old + "' to '" + name + "'";
+    if (sr.refs)
+        msg += ", " + std::to_string(sr.refs) + " script reference" + (sr.refs == 1 ? "" : "s") + " updated in " +
+               std::to_string(sr.files.size()) + " file" + (sr.files.size() == 1 ? "" : "s") + " (Ctrl+Z undoes both)";
     else
-        editor::renameSequence(doc, ref, name);
+        msg += ", no script references to update";
+    for (const std::string& f : sr.failed) msg += "; could not update " + f;
+    note(msg);
+    m_renamed = Renamed{ref.kind, old, name, msg};
 }
 
 void TimelinePanel::remove(editor::Document& doc, SeqRef ref) {

@@ -6,6 +6,7 @@
 #include <imgui_internal.h>
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,6 +39,15 @@ public:
     // Files moved on disk (absolute; a folder moves what is under it): the
     // tabs showing them follow.
     void moved(const std::filesystem::path& from, const std::filesystem::path& to);
+
+    // Something rewrote script files on disk (a sequence rename, its undo):
+    // each tab without unsaved changes whose file now reads differently
+    // reloads it, the cursor kept where it can be.
+    void reloadFromDisk();
+    // Runs `fn` over the text of each tab of `files` with unsaved changes, as
+    // one edit of that tab (undoable there). Returns how many tabs changed.
+    int rewriteUnsaved(const std::vector<std::filesystem::path>& files,
+                       const std::function<std::string(const std::string&)>& fn);
 
     // Files written since the last call, for the caller to refresh.
     std::vector<std::filesystem::path> takeSaved();

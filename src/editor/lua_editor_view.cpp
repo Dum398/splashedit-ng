@@ -135,6 +135,43 @@ void ScriptTabs::moved(const std::filesystem::path& from, const std::filesystem:
     }
 }
 
+void ScriptTabs::reloadFromDisk() {
+    for (auto& t : m_tabs) {
+        if (t->script.dirty()) continue;
+        lua::Script fresh;
+        if (!fresh.open(t->script.path(), nullptr) || fresh.buffer.text() == t->script.buffer.text()) continue;
+        const lua::Pos at = t->script.buffer.cursor();
+        if (!t->script.open(t->script.path(), nullptr)) continue;
+        t->script.buffer.moveTo(t->script.buffer.clamp(at));
+        t->script.diagnose();
+    }
+}
+
+int ScriptTabs::rewriteUnsaved(const std::vector<std::filesystem::path>& files,
+                               const std::function<std::string(const std::string&)>& fn) {
+    auto canon = [](const std::filesystem::path& p) {
+        std::error_code ec;
+        std::filesystem::path c = std::filesystem::weakly_canonical(p, ec);
+        return ec ? p : c;
+    };
+    std::vector<std::filesystem::path> want;
+    for (const auto& f : files) want.push_back(canon(f));
+    int n = 0;
+    for (auto& t : m_tabs) {
+        if (!t->script.dirty() || std::find(want.begin(), want.end(), canon(t->script.path())) == want.end()) continue;
+        lua::Buffer& b = t->script.buffer;
+        const std::string before = b.text(), after = fn(before);
+        if (after == before) continue;
+        const lua::Pos at = b.cursor();
+        b.breakUndoMerge();
+        b.replace({0, 0}, {b.lineCount() - 1, (int)b.line(b.lineCount() - 1).size()}, after);
+        b.breakUndoMerge();
+        b.moveTo(b.clamp(at));
+        ++n;
+    }
+    return n;
+}
+
 std::vector<std::filesystem::path> ScriptTabs::takeSaved() {
     std::vector<std::filesystem::path> out;
     out.swap(m_saved);

@@ -56,10 +56,20 @@ def project_copy(tracks=None):
     return project
 
 
-def run(args, tracks=None, save=True):
+LOGIC = os.path.join('scripts', 'game_logic.lua')  # Game Logic's script
+script_after = None  # with `lua`: the script as the run left it
+
+
+def run(args, tracks=None, save=True, lua=None):
     """Runs the editor on a fresh copy with `args` (then Ctrl+S when `save`);
-    returns the scene file's bytes, the screenshot path and the output."""
+    returns the scene file's bytes, the screenshot path and the output. With
+    `lua`, Game Logic's script gets it appended first and script_after its
+    text after the run."""
+    global script_after
     project = project_copy(tracks)
+    if lua is not None:
+        with open(os.path.join(project, LOGIC), 'a', encoding='utf-8', newline='') as f:
+            f.write(lua)
     shot = os.path.join(project, 'shot.png')
     cmd = [editor, '--size', '1600x960', '--project', project] + args
     if save:
@@ -67,6 +77,8 @@ def run(args, tracks=None, save=True):
     cmd += ['--screenshot', shot]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
     data = open(os.path.join(project, 'courtyard.scene'), 'rb').read()
+    if lua is not None:
+        script_after = open(os.path.join(project, LOGIC), encoding='utf-8', newline='').read()
     return data, shot, (r.stdout + r.stderr).strip()
 
 
@@ -147,6 +159,18 @@ saved, _, out = run(rename_in_inspector('outro'))
 check('a taken name is refused', names(saved) == ['intro', 'outro'], str(names(saved)) + ' | ' + out[-200:])
 saved, _, out = run(rename_in_inspector('x' * 25))
 check('a name past 24 characters is refused', names(saved) == ['intro', 'outro'], str(names(saved)) + ' | ' + out[-200:])
+
+# Scripts play it by name: the rename rewrites Cutscene.Play("intro") in the
+# scene's scripts on disk (not "outro", not Animation.Play), and the same
+# Ctrl+Z puts both back.
+PLAYS = '\nCutscene.Play("intro")\nCutscene.Play("outro")\nAnimation.Play("intro")\n'
+saved, _, out = run(rename_in_inspector('opening'), lua=PLAYS)
+check('the rename updates the scripts that play it', names(saved) == ['opening', 'outro'] and
+      script_after.endswith('\nCutscene.Play("opening")\nCutscene.Play("outro")\nAnimation.Play("intro")\n'),
+      str(names(saved)) + ' | ' + script_after[-120:] + ' | ' + out[-200:])
+saved, _, out = run(rename_in_inspector('opening') + ['--key', 'ctrl+z', '--wait', '3'], lua=PLAYS)
+check('undo puts the scripts back with the name', names(saved) == ['intro', 'outro'] and script_after.endswith(PLAYS),
+      str(names(saved)) + ' | ' + script_after[-120:] + ' | ' + out[-200:])
 
 # Rename from the timeline's sequence picker.
 saved, _, out = run(['--timeline', 'intro', '--click', PICKER, '--wait', '3', '--click', PICKER_RENAME, '--wait', '3', '--key', 'ctrl+a',

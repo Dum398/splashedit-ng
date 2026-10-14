@@ -57,6 +57,7 @@ constexpr ImU32 lineNumber = rgb(0x4d5363);
 constexpr ImU32 currentLine = rgb(0xffffff, 7);
 constexpr ImU32 selection = rgb(0x8b7bff, 70);
 constexpr ImU32 match = rgb(0xf0a43a, 50);
+constexpr ImU32 scope = rgb(0x5ccfe0, 16);  // the range find-in-selection searches
 }  // namespace code
 
 // 4 px grid.

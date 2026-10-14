@@ -4,7 +4,8 @@
 # and on an object's empty Script component it writes scripts/<name>.lua,
 # sets it (one undo step) and opens it; on a Trigger component it writes
 # scripts/<name>_trigger.lua. Then the editor itself: Replace all (Ctrl+H) and
-# its single undo step, brackets and quotes closing as they are typed, and a
+# its single undo step, the Regex, Preserve case and In selection toggles,
+# brackets and quotes closing as they are typed, and a
 # script changed on disk by another program: reloaded when the tab has no
 # edits, else the Reload / Keep mine bar; one deleted on disk: "(deleted)" on
 # its tab and a Save / Close bar. Drives the editor headless on copies of the
@@ -21,8 +22,9 @@ EDIT_SCRIPT = '1410,419'  # Game Logic's "Edit script" / "New script" button at 
 NEW_SCENE_SCRIPT = '1428,221'  # the scene inspector's "New script"
 OUTLINER = '140,750'  # empty Scene panel: takes the keyboard from the script editor
 CODE = '700,500'  # the script editor's text, below a short script
-REPLACE_ALL = '1132,132'  # the Replace row's "Replace all"
-MATCH_CASE = '1124,103'  # the find row's "Aa"
+REPLACE_ALL = '1075,132'  # the Replace row's "Replace all"
+PRESERVE_CASE = '970,132'  # the Replace row's "AB"
+MATCH_CASE, REGEX, IN_SELECTION = '1046,103', '1100,103', '1181,103'  # the find row's "Aa", ".*" and in-selection toggles
 RELOAD, KEEP_MINE = '1105,100', '1186,100'  # the changed-on-disk bar
 SAVE_DELETED, CLOSE_DELETED = '1138,100', '1200,100'  # the deleted-on-disk bar
 BAR = (52, 45, 39)  # either bar's background
@@ -167,6 +169,22 @@ check('one Ctrl+Z undoes the whole Replace all', (lua or '') == TYPED + original
 
 lua, out = run_args(FIND + ['--key', 'enter', '--key', 'enter', '--click', CODE, '--key', 'ctrl+s'])
 check('Enter in Replace replaces one match at a time', (lua or '').startswith('yy = yy + zzq '), repr((lua or '')[:40]) + ' | ' + out[-200:])
+
+lua, out = run_args(['--text', 'zzq1 = zzq2 + zzq3 ', '--key', 'ctrl+h', '--text', 'zzq(\\d)', '--key', 'tab', '--text', 'v$1',
+                     '--click', REGEX, '--click', REPLACE_ALL, '--click', CODE, '--key', 'ctrl+s'])
+check('with Regex on, Replace all puts each match\'s $1 in', (lua or '').startswith('v1 = v2 + v3 ') and 'zzq' not in (lua or ''),
+      repr((lua or '')[:40]) + ' | ' + out[-200:])
+
+lua, out = run_args(['--text', 'zzq = Zzq + ZZQ '] + FIND[2:] + ['--click', PRESERVE_CASE, '--click', REPLACE_ALL, '--click', CODE,
+                                                                 '--key', 'ctrl+s'])
+check('with Preserve case on, Replace all keeps each match\'s case', (lua or '').startswith('yy = Yy + YY '),
+      repr((lua or '')[:40]) + ' | ' + out[-200:])
+
+# Select from the second zzq to the line's end in the code, then In selection.
+SELECT = ['--click', CODE, '--key', 'ctrl+home'] + ['--key', 'right'] * 6 + ['--key', 'shift+end']
+lua, out = run_args(FIND + SELECT + ['--click', IN_SELECTION, '--click', REPLACE_ALL, '--click', CODE, '--key', 'ctrl+s'])
+check('with In selection on, Replace all only replaces inside the selection', (lua or '').startswith('zzq = yy + yy '),
+      repr((lua or '')[:40]) + ' | ' + out[-200:])
 
 # --- Brackets and quotes ---
 lines = [['f(x'], ['s = "hi'], ['g(', 'backspace'], ['h(1)'], ["-- don't"]]

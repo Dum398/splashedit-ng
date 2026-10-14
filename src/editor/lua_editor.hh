@@ -43,6 +43,27 @@ struct Pos {
     friend bool operator<=(Pos a, Pos b) { return !(b < a); }
 };
 
+// How Find and Replace match.
+struct FindOptions {
+    bool matchCase = false;
+    // Only matches with no identifier character just outside them (where the
+    // match itself starts or ends with one).
+    bool wholeWord = false;
+    // The needle is an ECMAScript regular expression, matched within each line;
+    // the replacement may use $1, $& and $$. Zero-length matches are skipped.
+    bool regex = false;
+    // Replacing keeps the match's case: "health" -> "hp" turns "Health" into
+    // "Hp" and "HEALTH" into "HP".
+    bool preserveCase = false;
+    // Only inside the buffer's findScope().
+    bool inSelection = false;
+};
+
+// Why `needle` is not a valid pattern under `o` (a short message), or empty.
+std::string findError(std::string_view needle, const FindOptions& o);
+// `with` in the case of `matched`: all upper, all lower or capitalized.
+std::string preserveCase(std::string_view matched, std::string_view with);
+
 class Buffer {
 public:
     Buffer() : m_lines(1) {}
@@ -106,14 +127,22 @@ public:
     uint64_t revision() const { return m_revision; }
 
     // Next match of `needle` from `from` (wrapping around), or nothing.
-    std::optional<std::pair<Pos, Pos>> find(std::string_view needle, Pos from, bool forward, bool matchCase) const;
-    int countMatches(std::string_view needle, bool matchCase) const;
+    std::optional<std::pair<Pos, Pos>> find(std::string_view needle, Pos from, bool forward, const FindOptions& o) const;
+    int countMatches(std::string_view needle, const FindOptions& o) const;
+    // Every match, in order and not overlapping.
+    std::vector<std::pair<Pos, Pos>> matches(std::string_view needle, const FindOptions& o) const;
     // Replace: with a match of `needle` selected, puts `with` there; then
     // selects the next match. True when it replaced one.
-    bool replaceNext(std::string_view needle, std::string_view with, bool matchCase);
+    bool replaceNext(std::string_view needle, std::string_view with, const FindOptions& o);
     // Every match (left to right, not overlapping) as one undo step; the
     // cursor stays where it was. Returns how many.
-    int replaceAll(std::string_view needle, std::string_view with, bool matchCase);
+    int replaceAll(std::string_view needle, std::string_view with, const FindOptions& o);
+    // The range FindOptions::inSelection searches. Edits move it along with
+    // the text: an insertion at its start stays outside, one at its end
+    // inside. setText() drops it.
+    void setFindScope(Pos a, Pos b);
+    void clearFindScope() { m_scope.reset(); }
+    const std::optional<std::pair<Pos, Pos>>& findScope() const { return m_scope; }
     // Closers type() inserted that typing over still steps over, for tests.
     int autoClosers() const;
 
@@ -132,7 +161,11 @@ private:
     Pos endOf(Pos at, std::string_view s) const;
     void record(Edit e);
     void deleteSelection();
-    bool selectionMatches(std::string_view needle, bool matchCase) const;
+    struct Match {
+        Pos a, b;
+        std::string with;  // the replacement for this match, when asked for
+    };
+    std::vector<Match> scan(std::string_view needle, const FindOptions& o, const std::string_view* with) const;
     void dropStaleClosers();
 
     std::vector<std::string> m_lines;
@@ -145,6 +178,7 @@ private:
     // m_closerRevision (any other edit forgets them).
     std::vector<Pos> m_closers;
     uint64_t m_closerRevision = 0;
+    std::optional<std::pair<Pos, Pos>> m_scope;
 };
 
 // --- Highlighting -----------------------------------------------------------

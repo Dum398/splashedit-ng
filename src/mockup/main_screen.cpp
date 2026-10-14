@@ -3808,124 +3808,6 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     }
 }
 
-// Uploads an RGBA8 top-down image into `tex` (created on first use), nearest
-// filtering so a magnified PS1 texel stays a hard square.
-static void uploadPreview(unsigned& tex, int w, int h, const std::vector<uint8_t>& rgba) {
-    if (!tex) glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-    glBindTexture(GL_TEXTURE_2D, 0);
-}
-
-// Source next to what the console will show, at the same zoom. A click on the
-// strip (or the Compare button) flicks the whole strip to one pane; holding
-// the mouse there shows the source, to A/B the dithering. Returns the height.
-static float texturePreview(State& st, ImDrawList* dl, float x0, float x1, float y, editor::Document& doc,
-                            const std::string& texPath, splash::BitDepth depth, bool cutout) {
-    Fonts& f = fonts();
-    const float top = y;
-    State::TexPreview& tp = st.texPreview;
-    editor::TexturePreviewKey key{doc.resolve(texPath), depth, cutout};
-    tp.previewer.request(key);
-    std::shared_ptr<const editor::TexturePreview> p = tp.previewer.latest();
-
-    // Upload the newest result once; keep the old one on the GPU meanwhile.
-    if (p && p->error.empty() && tp.previewer.generation() != tp.shownGen) {
-        uploadPreview(tp.srcTex, p->width, p->height, p->source);
-        uploadPreview(tp.ps1Tex, p->width, p->height, p->ps1);
-        tp.shownGen = tp.previewer.generation();
-    }
-    const bool haveShown = p && p->error.empty() && p->key == key && tp.srcTex && tp.ps1Tex;
-
-    const float gap = space::sm;
-    const float stripY = y + 18;
-    const float maxH = 150;
-    // Fit to the panel width at a whole-pixel zoom, same for both panes.
-    float paneW = tp.compare ? (x1 - x0) : (x1 - x0 - gap) / 2;
-    float imgW = p && p->width > 0 ? float(p->width) : 64;
-    float imgH = p && p->height > 0 ? float(p->height) : 64;
-    float zoom = std::min(paneW / imgW, maxH / imgH);
-    if (zoom < 1) zoom = std::max(zoom, 0.01f);
-    float drawW = imgW * zoom, drawH = imgH * zoom;
-
-    if (p && !p->error.empty()) {
-        text(dl, ImVec2(x0, stripY), f.regular, type::caption, color::warn, p->error.c_str());
-        return stripY + 18 - top;
-    }
-    if (!haveShown) {
-        text(dl, ImVec2(x0, stripY), f.regular, type::caption, color::textFaint,
-             tp.previewer.busy() ? "Converting preview..." : "Preview...");
-        return stripY + 18 - top;
-    }
-
-    // Labels.
-    text(dl, ImVec2(x0, y), f.regular, type::caption, color::textFaint, "Source");
-    if (!tp.compare) text(dl, ImVec2(x0 + paneW + gap, y), f.regular, type::caption, color::accent, "PS1");
-
-    auto pane = [&](float px, unsigned tex, const char* badge, ImU32 badgeCol) {
-        ImRect box(ImVec2(px, stripY), ImVec2(px + drawW, stripY + drawH));
-        dl->AddRectFilled(box.Min - ImVec2(1, 1), box.Max + ImVec2(1, 1), color::field, radius::field);
-        dl->AddImage((ImTextureID)(intptr_t)tex, box.Min, box.Max);
-        dl->AddRect(box.Min, box.Max, color::border, 0);
-        if (badge) text(dl, ImVec2(box.Min.x + 3, box.Min.y + 2), f.semibold, type::caption, badgeCol, badge);
-        return box;
-    };
-
-    float panesBottom;
-    if (tp.compare) {
-        // One pane: PS1 by default, Source while the mouse is held on it.
-        ImRect box(ImVec2(x0, stripY), ImVec2(x0 + drawW, stripY + drawH));
-        Hit h = interact("texcompare", box);
-        bool showSrc = h.held;
-        pane(x0, showSrc ? tp.srcTex : tp.ps1Tex, showSrc ? "SOURCE" : "PS1", showSrc ? color::textFaint : color::accent);
-        tooltip("Hold to show the source; release for the PS1 image");
-        panesBottom = box.Max.y;
-    } else {
-        ImRect a = pane(x0, tp.srcTex, nullptr, 0);
-        ImRect b = pane(x0 + paneW + gap, tp.ps1Tex, nullptr, 0);
-        // Holding the mouse on the PS1 pane swaps in the source, in place.
-        Hit h = interact("texflick", b);
-        if (h.held) pane(x0 + paneW + gap, tp.srcTex, "SOURCE", color::textFaint);
-        tooltip("Hold to show the source here");
-        panesBottom = std::max(a.Max.y, b.Max.y);
-    }
-    y = panesBottom + space::sm;
-
-    // Numbers: bit depth, palette size and used, colours, mean OKLab error.
-    char line[160];
-    if (depth == splash::BitDepth::Bpp16)
-        std::snprintf(line, sizeof line, "%s  \xc2\xb7  %d colours  \xc2\xb7  \xce\x94" "E %.2f", bppLabel(depth), p->ps1Colors,
-                      p->deltaE);
-    else
-        std::snprintf(line, sizeof line, "%s  \xc2\xb7  palette %d (%d used)  \xc2\xb7  %d colours  \xc2\xb7  \xce\x94" "E %.2f",
-                      bppLabel(depth), p->paletteSize, p->paletteUsed, p->ps1Colors, p->deltaE);
-    text(dl, ImVec2(x0, y), f.regular, type::caption, color::textDim, line);
-    y += 16;
-    char src[96];
-    std::snprintf(src, sizeof src, "source %d colours  \xc2\xb7  %.1f KB VRAM", p->sourceColors, p->vramBytes / 1024.0);
-    text(dl, ImVec2(x0, y), f.regular, type::caption, color::textFaint, src);
-
-    // Compare toggle, right-aligned on the shorter source row (on the numbers
-    // row it covered the deltaE figure at the inspector's default width).
-    const char* cmp = tp.compare ? "Split" : "Compare";
-    float cw = measure(f.medium, type::caption, cmp).x + 16;
-    ImRect cb(ImVec2(x1 - cw, y - 1), ImVec2(x1, y + 17));
-    Hit hc = interact("texcomparebtn", cb);
-    dl->AddRectFilled(cb.Min, cb.Max, hc.hovered ? color::hover : color::raised, radius::button);
-    textCentered(dl, cb, f.medium, type::caption, color::textDim, cmp);
-    if (hc.clicked) tp.compare = !tp.compare;
-    tooltip(tp.compare ? "Show Source and PS1 side by side" : "Flick between Source and PS1 in one pane");
-
-    if (tp.previewer.busy()) text(dl, ImVec2(x0, y + 16), f.regular, type::caption, color::textFaint, "re-quantizing...");
-    y += 16;
-    return y - top;
-}
-
 static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
     Fonts& f = fonts();
     panel(dl, r);
@@ -4293,7 +4175,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         // What the console will show, next to the source. Mesh textures are
         // not cutout (that is a UI-image setting), so cutout = false.
         if (!folded && texSt == editor::AssetStatus::Ok && !texPath.empty())
-            y += texturePreview(st, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, false) + space::sm;
+            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, false) + space::sm;
         // Menu order follows the labels' enum: Baked vertex, Flat, Mesh colours.
         const splash::VertexColorMode modes[3] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
                                                   splash::VertexColorMode::Mesh};

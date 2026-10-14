@@ -178,7 +178,8 @@ add_executable(splashedit
     src/editor/lua_editor_view.cpp
     src/editor/timeline_view.cpp
     src/editor/asset_browser_view.cpp
-    src/editor/ui_canvas_view.cpp)
+    src/editor/ui_canvas_view.cpp
+    src/editor/texture_preview_view.cpp)
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(splashedit PRIVATE imgui splasheditdoc splashcore)

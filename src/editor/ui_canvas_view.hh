@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "editor/texture_preview_view.hh"
 #include "editor/ui_canvas.hh"
 
 namespace editor {
@@ -129,6 +130,10 @@ private:
     void layoutCanvas();
     ImVec2 toScreen(float x, float y) const { return ImVec2(m_origin.x + x * m_scale, m_origin.y + y * m_scale); }
     ImVec2 toCanvas(ImVec2 p) const { return ImVec2((p.x - m_origin.x) / m_scale, (p.y - m_origin.y) / m_scale); }
+
+    // The Image inspector's Source vs PS1 preview, and what it last reported.
+    TexturePreviewView m_texPreview;
+    std::string m_texPreviewReported;
 
     std::string m_notice;
     bool m_noticeBad = false;

@@ -23,6 +23,14 @@ constexpr int kMaxTimelineFrame = 8191;  // 13 bits of the packed key
 // The exporter's name check (splashpack.cpp writeSequences): 1..24 UTF-16
 // code units, as Lua plays a sequence by name.
 constexpr int kMaxSeqName = 24;
+// writeSequences' event limits: a cutscene's audio events, a sequence's skin
+// clip events. Each packs the frame as u16 (unchecked); the editor holds them
+// to kMaxTimelineFrame like keys. Volume and pan pack as u8: the runtime reads
+// volume 0..128 and pan 0..127.
+constexpr int kMaxAudioEvents = 64;
+constexpr int kMaxSkinEvents = 16;
+constexpr int kMaxEventVolume = 128;
+constexpr int kMaxEventPan = 127;
 
 enum class SeqKind { Cutscene, Animation };
 
@@ -42,6 +50,38 @@ struct KeyRef {
 };
 
 using KeyValue = std::array<float, 3>;
+
+// What the timeline has selected: keys, and events by index (audio events
+// only in cutscenes). Event indices stay put when events move.
+struct Selection {
+    std::vector<KeyRef> keys;
+    std::vector<int> audio;
+    std::vector<int> skin;
+    bool empty() const { return keys.empty() && audio.empty() && skin.empty(); }
+    size_t size() const { return keys.size() + audio.size() + skin.size(); }
+    bool operator==(const Selection&) const = default;
+};
+
+// Copied keys and events, frames relative to the earliest of them. Keys
+// remember their track by type and target, so they paste into the track that
+// drives the same thing (in this sequence or another).
+struct TimelineClipboard {
+    struct Key {
+        splash::TrackType type;
+        std::string target;
+        splash::Keyframe key;
+    };
+    std::vector<Key> keys;
+    std::vector<splash::CutsceneAudioEvent> audio;
+    std::vector<splash::SkinAnimEvent> skin;
+    bool empty() const { return keys.empty() && audio.empty() && skin.empty(); }
+};
+
+// A skinned object the export can address, with its clips' names in clip order.
+struct SkinTarget {
+    std::string object;
+    std::vector<std::string> clips;
+};
 
 // Track type facts.
 // "Object Position", "Light Color", ...
@@ -65,6 +105,16 @@ const std::vector<splash::CutsceneTrack>* seqTracks(const Document& doc, SeqRef 
 const splash::Keyframe* key(const Document& doc, SeqRef ref, KeyRef k);
 // Every cutscene, then every animation.
 std::vector<SeqRef> allSequences(const Document& doc);
+// A cutscene's audio events (null for an animation: it has none) and a
+// sequence's skin clip events, in file order.
+const std::vector<splash::CutsceneAudioEvent>* seqAudio(const Document& doc, SeqRef ref);
+const std::vector<splash::SkinAnimEvent>* seqSkin(const Document& doc, SeqRef ref);
+// The export's audio clip table: the clip names of the active objects with an
+// audio component, in flatten order (unnamed ones left out).
+std::vector<std::string> audioClips(const Document& doc);
+// Active objects with a mesh and a skin component, clip names read from their
+// .anim files (one that does not load is left out).
+std::vector<SkinTarget> skinTargets(const Document& doc);
 
 // Edits. Each is one undo step; a refused edit changes nothing and adds no
 // step. Keys stay sorted by frame within a track, and no two share a frame.
@@ -104,6 +154,35 @@ std::optional<std::vector<KeyRef>> moveKeys(Document& doc, SeqRef ref, const std
                                             const std::string& mergeKey = {});
 // Removes every key in `keys`. Returns how many it removed.
 int deleteKeys(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys);
+// The same for a whole selection, keys and events by one delta, one step.
+// Refused when a key would be refused by moveKeys() or an event would leave
+// 0..kMaxTimelineFrame. Returns the selection's new addresses.
+std::optional<Selection> moveSelection(Document& doc, SeqRef ref, const Selection& sel, int delta,
+                                       const std::string& mergeKey = {});
+// Removes every key and event in `sel`, one step. Returns how many it removed.
+int deleteSelection(Document& doc, SeqRef ref, const Selection& sel);
+// The selection's keys and events, frames relative to the earliest.
+TimelineClipboard copySelection(const Document& doc, SeqRef ref, const Selection& sel);
+// Pastes `clip` with its earliest item at `frame`, one step. A key goes to the
+// track with its type and target (replacing a key already on that frame) and
+// is skipped when there is none; audio events are skipped in an animation.
+// Refused (nullopt, no step) when nothing would land, an item would pass
+// kMaxTimelineFrame, or a track or an event list would pass the runtime's
+// limits. `skipped` gets how many items had nowhere to go.
+std::optional<Selection> pasteClipboard(Document& doc, SeqRef ref, const TimelineClipboard& clip, int frame,
+                                        int* skipped = nullptr);
+// An audio event of `clip` at `frame` (clamped to 0..kMaxTimelineFrame),
+// volume 100, centre pan. Its index, or -1: an animation, an empty clip name,
+// or kMaxAudioEvents already.
+int addAudioEvent(Document& doc, SeqRef ref, int frame, const std::string& clip);
+// Replaces event `index`: frame clamped as above, volume to 0..kMaxEventVolume,
+// pan to 0..kMaxEventPan. Refused for an empty clip or no change.
+bool setAudioEvent(Document& doc, SeqRef ref, int index, splash::CutsceneAudioEvent ev, const std::string& mergeKey = {});
+// A skin clip event: plays `clip` on skinned object `object` from `frame`.
+// Its index, or -1: an empty object or clip, or kMaxSkinEvents already.
+int addSkinEvent(Document& doc, SeqRef ref, int frame, const std::string& object, const std::string& clip, bool loop = false);
+// Replaces skin event `index`, frame clamped. Refused for an empty object or clip or no change.
+bool setSkinEvent(Document& doc, SeqRef ref, int index, splash::SkinAnimEvent ev, const std::string& mergeKey = {});
 bool setKeyValue(Document& doc, SeqRef ref, KeyRef k, KeyValue value, const std::string& mergeKey = {});
 bool setKeyInterp(Document& doc, SeqRef ref, KeyRef k, splash::Interp interp);
 // Clamped to 1..kMaxTimelineFrame. Keys past the end stay (the runtime stops

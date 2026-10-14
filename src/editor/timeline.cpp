@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <set>
 
@@ -143,6 +144,45 @@ std::vector<SeqRef> allSequences(const Document& doc) {
     return out;
 }
 
+const std::vector<splash::CutsceneAudioEvent>* seqAudio(const Document& doc, SeqRef ref) {
+    if (!valid(doc, ref) || ref.kind != SeqKind::Cutscene) return nullptr;
+    return &doc.scene().cutscenes[size_t(ref.index)].audioEvents;
+}
+
+const std::vector<splash::SkinAnimEvent>* seqSkin(const Document& doc, SeqRef ref) {
+    if (!valid(doc, ref)) return nullptr;
+    return ref.kind == SeqKind::Cutscene ? &doc.scene().cutscenes[size_t(ref.index)].skinEvents
+                                         : &doc.scene().animations[size_t(ref.index)].skinEvents;
+}
+
+std::vector<std::string> audioClips(const Document& doc) {
+    // splashpack.cpp: audio sources are the active (in hierarchy) objects with an audio component.
+    std::vector<std::string> out;
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+        if (fo.activeInHierarchy && fo.object->active && fo.object->audio && !fo.object->audio->clipName.empty() &&
+            std::find(out.begin(), out.end(), fo.object->audio->clipName) == out.end())
+            out.push_back(fo.object->audio->clipName);
+    return out;
+}
+
+std::vector<SkinTarget> skinTargets(const Document& doc) {
+    std::vector<SkinTarget> out;
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+        const splash::Object& o = *fo.object;
+        if (!fo.activeInHierarchy || !o.active || !o.mesh || !o.skin) continue;
+        SkinTarget t{o.name, {}};
+        for (const std::string& path : o.skin->clips) {
+            try {
+                const std::string n = splash::loadAnim(doc.resolve(path)).name;
+                if (!n.empty()) t.clips.push_back(n);
+            } catch (const std::exception&) {
+            }
+        }
+        out.push_back(std::move(t));
+    }
+    return out;
+}
+
 // Edits. Every one snapshots the scene's cutscenes and animations before and
 // after; they are small (the runtime caps them at 16 x 8 tracks x 64 keys).
 
@@ -176,10 +216,12 @@ private:
     std::string m_key;
 };
 
-// The fields a timeline edits, the same for both kinds.
+// The fields a timeline edits; `audio` is null for an animation.
 struct SeqMut {
     int* length;
     std::vector<CutsceneTrack>* tracks;
+    std::vector<splash::CutsceneAudioEvent>* audio;
+    std::vector<splash::SkinAnimEvent>* skin;
 };
 
 // Runs `fn` on a copy of the sequence; when it returns true the copy goes in as one step.
@@ -189,8 +231,10 @@ bool editSeq(Document& doc, SeqRef ref, F&& fn, const std::string& mergeKey = {}
     std::vector<splash::Cutscene> cs = doc.scene().cutscenes;
     std::vector<splash::Animation> as = doc.scene().animations;
     SeqMut m = ref.kind == SeqKind::Cutscene
-                   ? SeqMut{&cs[size_t(ref.index)].durationFrames, &cs[size_t(ref.index)].tracks}
-                   : SeqMut{&as[size_t(ref.index)].durationFrames, &as[size_t(ref.index)].tracks};
+                   ? SeqMut{&cs[size_t(ref.index)].durationFrames, &cs[size_t(ref.index)].tracks, &cs[size_t(ref.index)].audioEvents,
+                            &cs[size_t(ref.index)].skinEvents}
+                   : SeqMut{&as[size_t(ref.index)].durationFrames, &as[size_t(ref.index)].tracks, nullptr,
+                            &as[size_t(ref.index)].skinEvents};
     if (!fn(m)) return false;
     doc.execute(std::make_unique<TimelineCommand>(doc.scene().cutscenes, doc.scene().animations, std::move(cs), std::move(as),
                                                   mergeKey),
@@ -202,6 +246,53 @@ bool trackOk(const SeqMut& m, int track) { return track >= 0 && track < int(m.tr
 
 bool keyOk(const SeqMut& m, KeyRef k) {
     return trackOk(m, k.track) && k.key >= 0 && k.key < int((*m.tracks)[size_t(k.track)].keyframes.size());
+}
+
+bool frameOk(int f) { return f >= 0 && f <= kMaxTimelineFrame; }
+
+// Moves `keys` by `delta` in place; false (the copy half done, so dropped) when
+// one leaves the frame range or lands on a key that stays. `result` gets the
+// keys' new addresses in the order given.
+bool moveKeysIn(SeqMut& m, const std::vector<KeyRef>& keys, int delta, std::vector<KeyRef>& result) {
+    std::set<KeyRef> moving(keys.begin(), keys.end());
+    for (const KeyRef& k : moving)
+        if (!keyOk(m, k)) return false;
+    result.assign(keys.size(), KeyRef{});
+    std::set<int> tracksTouched;
+    for (const KeyRef& k : moving) tracksTouched.insert(k.track);
+    for (int ti : tracksTouched) {
+        std::vector<Keyframe>& ks = (*m.tracks)[size_t(ti)].keyframes;
+        // Each key with its old index, so the new order can be traced back.
+        std::vector<std::pair<Keyframe, int>> tagged;
+        std::multiset<int> frames;
+        for (int i = 0; i < int(ks.size()); ++i) {
+            Keyframe k = ks[size_t(i)];
+            if (moving.count({ti, i})) {
+                k.frame += delta;
+                if (!frameOk(k.frame)) return false;
+            }
+            frames.insert(k.frame);
+            tagged.push_back({std::move(k), i});
+        }
+        for (const auto& [k, i] : tagged)
+            if (moving.count({ti, i}) && frames.count(k.frame) > 1) return false;
+        std::stable_sort(tagged.begin(), tagged.end(), [](const auto& a, const auto& b) { return a.first.frame < b.first.frame; });
+        ks.clear();
+        for (int n = 0; n < int(tagged.size()); ++n) {
+            ks.push_back(tagged[size_t(n)].first);
+            for (size_t j = 0; j < keys.size(); ++j)
+                if (keys[j].track == ti && keys[j].key == tagged[size_t(n)].second) result[j] = {ti, n};
+        }
+    }
+    return true;
+}
+
+// The selection's events that exist, each once.
+std::set<int> eventsOk(const std::vector<int>& idx, size_t n) {
+    std::set<int> out;
+    for (int i : idx)
+        if (i >= 0 && i < int(n)) out.insert(i);
+    return out;
 }
 
 }  // namespace
@@ -374,35 +465,40 @@ std::optional<std::vector<KeyRef>> moveKeys(Document& doc, SeqRef ref, const std
         doc, ref,
         [&](SeqMut& m) {
             if (keys.empty()) return false;
-            std::set<KeyRef> moving(keys.begin(), keys.end());
-            for (const KeyRef& k : moving)
-                if (!keyOk(m, k)) return false;
-            std::vector<KeyRef> result(keys.size());
-            std::set<int> tracksTouched;
-            for (const KeyRef& k : moving) tracksTouched.insert(k.track);
-            for (int ti : tracksTouched) {
-                std::vector<Keyframe>& ks = (*m.tracks)[size_t(ti)].keyframes;
-                // Each key with its old index, so the new order can be traced back.
-                std::vector<std::pair<Keyframe, int>> tagged;
-                std::multiset<int> frames;
-                for (int i = 0; i < int(ks.size()); ++i) {
-                    Keyframe k = ks[size_t(i)];
-                    if (moving.count({ti, i})) {
-                        k.frame += delta;
-                        if (k.frame < 0 || k.frame > kMaxTimelineFrame) return false;
-                    }
-                    frames.insert(k.frame);
-                    tagged.push_back({std::move(k), i});
+            std::vector<KeyRef> result;
+            if (!moveKeysIn(m, keys, delta, result)) return false;
+            out = std::move(result);
+            return true;
+        },
+        mergeKey);
+    return out;
+}
+
+std::optional<Selection> moveSelection(Document& doc, SeqRef ref, const Selection& sel, int delta, const std::string& mergeKey) {
+    std::optional<Selection> out;
+    editSeq(
+        doc, ref,
+        [&](SeqMut& m) {
+            if (sel.empty() || delta == 0) return false;
+            Selection result = sel;
+            if (!sel.keys.empty() && !moveKeysIn(m, sel.keys, delta, result.keys)) return false;
+            if (!sel.audio.empty()) {
+                if (!m.audio) return false;
+                const std::set<int> ok = eventsOk(sel.audio, m.audio->size());
+                if (ok.size() != std::set<int>(sel.audio.begin(), sel.audio.end()).size()) return false;
+                for (int i : ok) {
+                    int& f = (*m.audio)[size_t(i)].frame;
+                    if (!frameOk(f + delta)) return false;
+                    f += delta;
                 }
-                for (const auto& [k, i] : tagged)
-                    if (moving.count({ti, i}) && frames.count(k.frame) > 1) return false;
-                std::stable_sort(tagged.begin(), tagged.end(),
-                                 [](const auto& a, const auto& b) { return a.first.frame < b.first.frame; });
-                ks.clear();
-                for (int n = 0; n < int(tagged.size()); ++n) {
-                    ks.push_back(tagged[size_t(n)].first);
-                    for (size_t j = 0; j < keys.size(); ++j)
-                        if (keys[j].track == ti && keys[j].key == tagged[size_t(n)].second) result[j] = {ti, n};
+            }
+            if (!sel.skin.empty()) {
+                const std::set<int> ok = eventsOk(sel.skin, m.skin->size());
+                if (ok.size() != std::set<int>(sel.skin.begin(), sel.skin.end()).size()) return false;
+                for (int i : ok) {
+                    int& f = (*m.skin)[size_t(i)].frame;
+                    if (!frameOk(f + delta)) return false;
+                    f += delta;
                 }
             }
             out = std::move(result);
@@ -410,6 +506,186 @@ std::optional<std::vector<KeyRef>> moveKeys(Document& doc, SeqRef ref, const std
         },
         mergeKey);
     return out;
+}
+
+int deleteSelection(Document& doc, SeqRef ref, const Selection& sel) {
+    int removed = 0;
+    editSeq(doc, ref, [&](SeqMut& m) {
+        std::set<KeyRef> gone;
+        for (const KeyRef& k : sel.keys)
+            if (keyOk(m, k)) gone.insert(k);
+        const std::set<int> audio = m.audio ? eventsOk(sel.audio, m.audio->size()) : std::set<int>();
+        const std::set<int> skin = eventsOk(sel.skin, m.skin->size());
+        if (gone.empty() && audio.empty() && skin.empty()) return false;
+        // Back to front, so earlier indices stay valid.
+        for (auto it = gone.rbegin(); it != gone.rend(); ++it) {
+            std::vector<Keyframe>& ks = (*m.tracks)[size_t(it->track)].keyframes;
+            ks.erase(ks.begin() + it->key);
+        }
+        for (auto it = audio.rbegin(); it != audio.rend(); ++it) m.audio->erase(m.audio->begin() + *it);
+        for (auto it = skin.rbegin(); it != skin.rend(); ++it) m.skin->erase(m.skin->begin() + *it);
+        removed = int(gone.size() + audio.size() + skin.size());
+        return true;
+    });
+    return removed;
+}
+
+TimelineClipboard copySelection(const Document& doc, SeqRef ref, const Selection& sel) {
+    TimelineClipboard clip;
+    const std::vector<CutsceneTrack>* tracks = seqTracks(doc, ref);
+    if (!tracks) return clip;
+    int first = std::numeric_limits<int>::max();
+    for (const KeyRef& k : std::set<KeyRef>(sel.keys.begin(), sel.keys.end()))
+        if (const Keyframe* kf = key(doc, ref, k)) {
+            const CutsceneTrack& t = (*tracks)[size_t(k.track)];
+            clip.keys.push_back({t.type, t.target, *kf});
+            first = std::min(first, kf->frame);
+        }
+    if (const auto* audio = seqAudio(doc, ref))
+        for (int i : eventsOk(sel.audio, audio->size())) {
+            clip.audio.push_back((*audio)[size_t(i)]);
+            first = std::min(first, clip.audio.back().frame);
+        }
+    const auto* skin = seqSkin(doc, ref);
+    for (int i : eventsOk(sel.skin, skin->size())) {
+        clip.skin.push_back((*skin)[size_t(i)]);
+        first = std::min(first, clip.skin.back().frame);
+    }
+    for (auto& k : clip.keys) k.key.frame -= first;
+    for (auto& a : clip.audio) a.frame -= first;
+    for (auto& s : clip.skin) s.frame -= first;
+    return clip;
+}
+
+std::optional<Selection> pasteClipboard(Document& doc, SeqRef ref, const TimelineClipboard& clip, int frame, int* skipped) {
+    std::optional<Selection> out;
+    int skip = 0;
+    editSeq(doc, ref, [&](SeqMut& m) {
+        skip = 0;
+        // Keys: into the track with the same type and target, replacing a key on that frame.
+        std::vector<std::pair<int, int>> placed;  // track, frame
+        for (const TimelineClipboard::Key& ck : clip.keys) {
+            auto t = std::find_if(m.tracks->begin(), m.tracks->end(),
+                                  [&](const CutsceneTrack& tr) { return tr.type == ck.type && tr.target == ck.target; });
+            if (t == m.tracks->end()) {
+                ++skip;
+                continue;
+            }
+            Keyframe k = ck.key;
+            k.frame += frame;
+            if (!frameOk(k.frame)) return false;
+            std::vector<Keyframe>& ks = t->keyframes;
+            auto same = std::find_if(ks.begin(), ks.end(), [&](const Keyframe& e) { return e.frame == k.frame; });
+            if (same != ks.end()) {
+                *same = k;
+            } else {
+                if (int(ks.size()) >= kMaxTimelineKeys) return false;
+                ks.insert(std::upper_bound(ks.begin(), ks.end(), k.frame, [](int f, const Keyframe& e) { return f < e.frame; }), k);
+            }
+            placed.push_back({int(t - m.tracks->begin()), k.frame});
+        }
+        Selection sel;
+        // Inserting shifts indices: address the pasted keys once all are in.
+        for (auto [ti, f] : placed) {
+            const auto& ks = (*m.tracks)[size_t(ti)].keyframes;
+            for (int i = 0; i < int(ks.size()); ++i)
+                if (ks[size_t(i)].frame == f && std::find(sel.keys.begin(), sel.keys.end(), KeyRef{ti, i}) == sel.keys.end())
+                    sel.keys.push_back({ti, i});
+        }
+        if (!clip.audio.empty()) {
+            if (!m.audio) {
+                skip += int(clip.audio.size());
+            } else {
+                if (int(m.audio->size() + clip.audio.size()) > kMaxAudioEvents) return false;
+                for (splash::CutsceneAudioEvent a : clip.audio) {
+                    a.frame += frame;
+                    if (!frameOk(a.frame)) return false;
+                    sel.audio.push_back(int(m.audio->size()));
+                    m.audio->push_back(std::move(a));
+                }
+            }
+        }
+        if (!clip.skin.empty()) {
+            if (int(m.skin->size() + clip.skin.size()) > kMaxSkinEvents) return false;
+            for (splash::SkinAnimEvent e : clip.skin) {
+                e.frame += frame;
+                if (!frameOk(e.frame)) return false;
+                sel.skin.push_back(int(m.skin->size()));
+                m.skin->push_back(std::move(e));
+            }
+        }
+        if (sel.empty()) return false;
+        out = std::move(sel);
+        return true;
+    });
+    if (skipped) *skipped = skip;
+    return out;
+}
+
+int addAudioEvent(Document& doc, SeqRef ref, int frame, const std::string& clip) {
+    int added = -1;
+    editSeq(doc, ref, [&](SeqMut& m) {
+        if (!m.audio || clip.empty() || int(m.audio->size()) >= kMaxAudioEvents) return false;
+        splash::CutsceneAudioEvent a;
+        a.frame = std::clamp(frame, 0, kMaxTimelineFrame);
+        a.clip = clip;
+        m.audio->push_back(std::move(a));
+        added = int(m.audio->size()) - 1;
+        return true;
+    });
+    return added;
+}
+
+bool setAudioEvent(Document& doc, SeqRef ref, int index, splash::CutsceneAudioEvent ev, const std::string& mergeKey) {
+    ev.frame = std::clamp(ev.frame, 0, kMaxTimelineFrame);
+    ev.volume = std::clamp(ev.volume, 0, kMaxEventVolume);
+    ev.pan = std::clamp(ev.pan, 0, kMaxEventPan);
+    return editSeq(
+        doc, ref,
+        [&](SeqMut& m) {
+            if (!m.audio || index < 0 || index >= int(m.audio->size()) || ev.clip.empty()) return false;
+            splash::CutsceneAudioEvent& a = (*m.audio)[size_t(index)];
+            if (a.frame == ev.frame && a.clip == ev.clip && a.volume == ev.volume && a.pan == ev.pan) return false;
+            a.frame = ev.frame;
+            a.clip = ev.clip;
+            a.volume = ev.volume;
+            a.pan = ev.pan;
+            return true;
+        },
+        mergeKey);
+}
+
+int addSkinEvent(Document& doc, SeqRef ref, int frame, const std::string& object, const std::string& clip, bool loop) {
+    int added = -1;
+    editSeq(doc, ref, [&](SeqMut& m) {
+        if (object.empty() || clip.empty() || int(m.skin->size()) >= kMaxSkinEvents) return false;
+        splash::SkinAnimEvent e;
+        e.frame = std::clamp(frame, 0, kMaxTimelineFrame);
+        e.object = object;
+        e.clip = clip;
+        e.loop = loop;
+        m.skin->push_back(std::move(e));
+        added = int(m.skin->size()) - 1;
+        return true;
+    });
+    return added;
+}
+
+bool setSkinEvent(Document& doc, SeqRef ref, int index, splash::SkinAnimEvent ev, const std::string& mergeKey) {
+    ev.frame = std::clamp(ev.frame, 0, kMaxTimelineFrame);
+    return editSeq(
+        doc, ref,
+        [&](SeqMut& m) {
+            if (index < 0 || index >= int(m.skin->size()) || ev.object.empty() || ev.clip.empty()) return false;
+            splash::SkinAnimEvent& e = (*m.skin)[size_t(index)];
+            if (e.frame == ev.frame && e.object == ev.object && e.clip == ev.clip && e.loop == ev.loop) return false;
+            e.frame = ev.frame;
+            e.object = ev.object;
+            e.clip = ev.clip;
+            e.loop = ev.loop;
+            return true;
+        },
+        mergeKey);
 }
 
 int deleteKeys(Document& doc, SeqRef ref, const std::vector<KeyRef>& keys) {

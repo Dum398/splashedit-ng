@@ -747,7 +747,8 @@ bool deleteCanvas(Document& doc, int c) {
     if (!validCanvas(doc, c)) return false;
     std::vector<UICanvas> after = doc.scene().canvases;
     after.erase(after.begin() + c);
-    commit(doc, std::move(after), {after.empty() ? -1 : std::min(c, int(after.size()) - 1), -1});
+    const int next = after.empty() ? -1 : std::min(c, int(after.size()) - 1);
+    commit(doc, std::move(after), {next, -1});
     return true;
 }
 

@@ -217,7 +217,12 @@ bool AssetIndex::scan(const fs::path& project) {
     bool changed = project != m_project || found.size() != m_entries.size();
     for (size_t i = 0; !changed && i < found.size(); ++i) {
         const AssetEntry &a = found[i], &b = m_entries[i];
-        changed = a.path != b.path || a.size != b.size || a.mtime != b.mtime || a.type != b.type || a.madeBy != b.madeBy;
+        // A folder's own time is not compared: on Windows the time a listing
+        // reports for a folder can move by a few milliseconds between two
+        // scans of an unchanged tree. What a folder holds is compared
+        // through its own entries.
+        const bool timeMoved = a.type != AssetType::Folder && a.mtime != b.mtime;
+        changed = a.path != b.path || a.size != b.size || timeMoved || a.type != b.type || a.madeBy != b.madeBy;
     }
     if (!changed) return false;
     m_project = project;

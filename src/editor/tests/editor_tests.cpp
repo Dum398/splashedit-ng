@@ -3824,7 +3824,9 @@ void testSeqRenameScriptVars() {
         "Cutscene.Play(cue)\n"
         "Cutscene.Play(\"intro\")\n"                         // 16 a literal call: rewritten
         "local joined = \"intro\" .. \"!\"\n"                // 17 not the whole value: left
-        "Cutscene.Play(joined)\n";
+        "Cutscene.Play(joined)\n"
+        "print(\"caf\xc3\xa9\") Animation.Play(\"intro\")\n"   // 19 an animation's: left, not listed
+        "if Animation.IsPlaying(\"intro\") then end\n";      // 20 an animation's: left, not listed
     std::string want = scn;
     for (const char* line : {"local seq = \"", "current = '", "local a, b = 1, \"", "\ncue = \"", "Cutscene.Play(\""}) {
         const size_t at = want.find(line) + std::strlen(line);
@@ -3839,7 +3841,7 @@ void testSeqRenameScriptVars() {
     CHECK(editor::renameSeqInLua(scn, SeqKind::Cutscene, "intro", "opening", &n) == want && n == 5);
     // An animation rename takes the Animation variable, and none of the cutscene's.
     const std::string anim = editor::renameSeqInLua(scn, SeqKind::Animation, "intro", "turn", &n);
-    CHECK(n == 1 && anim.find("local spin = \"turn\"\n") != std::string::npos && anim.find("local seq = \"intro\"") != std::string::npos);
+    CHECK(n == 3 && anim.find("local spin = \"turn\"\n") != std::string::npos && anim.find("local seq = \"intro\"") != std::string::npos);
 
     splash::Scene sc;
     splash::Object o;
@@ -3850,6 +3852,9 @@ void testSeqRenameScriptVars() {
     splash::Cutscene c;
     c.name = "intro";
     sc.cutscenes.push_back(c);
+    splash::Animation an;
+    an.name = "intro";
+    sc.animations.push_back(an);
     editor::Document d;
     d.reset(sc, dir, "s");
     editor::ScriptRenames sr;
@@ -3857,11 +3862,19 @@ void testSeqRenameScriptVars() {
     CHECK(sr.refs == 6 && sr.failed.empty() && (sr.files == std::vector<std::string>{"scripts/obj.lua", "scene.lua"}));
     CHECK(get("scene.lua") == want);
     CHECK(get("scripts/obj.lua") == "local s = \"opening\"\r\nCutscene.Play(s)\r\nprint(\"intro\")\r\n");
-    CHECK((sr.leftovers == std::vector<std::string>{"scripts/obj.lua:3", "scene.lua:5", "scene.lua:7", "scene.lua:11",
-                                                    "scene.lua:13", "scene.lua:17"}));
+    // Lines 7, 19 and 20 name the animation "intro": not listed.
+    CHECK((sr.leftovers == std::vector<std::string>{"scripts/obj.lua:3", "scene.lua:5", "scene.lua:11", "scene.lua:13",
+                                                    "scene.lua:17"}));
     // Undo puts both files back, redo again.
     CHECK(d.undo() && get("scene.lua") == scn && get("scripts/obj.lua") == obj);
     CHECK(d.redo() && get("scene.lua") == want);
+    CHECK(d.undo() && get("scene.lua") == scn);
+    // Renaming the animation lists none of the cutscene's literals (lines 1, 3,
+    // 9, 14, 16 and obj.lua:1), only the unattributed ones.
+    CHECK(editor::renameSequence(d, {SeqKind::Animation, 0}, "turn", &sr));
+    CHECK(sr.refs == 3 && (sr.files == std::vector<std::string>{"scene.lua"}) && get("scene.lua") == anim);
+    CHECK((sr.leftovers == std::vector<std::string>{"scripts/obj.lua:3", "scene.lua:5", "scene.lua:11", "scene.lua:13",
+                                                    "scene.lua:17"}));
     CHECK(d.undo() && get("scene.lua") == scn);
     fs::remove_all(dir, ec);
 }

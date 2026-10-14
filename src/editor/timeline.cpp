@@ -621,17 +621,19 @@ std::set<size_t> seqNameVars(const std::string& s, SeqKind kind, const std::stri
     return out;
 }
 
-// The lines (from 1) of the string literals whose text is `name`.
-std::vector<int> literalLines(const std::string& lua, const std::string& name) {
+// The lines (from 1) of the string literals whose text is `name`, but those
+// at the offsets in `skip`.
+std::vector<int> literalLines(const std::string& lua, const std::string& name, const std::set<size_t>& skip) {
     std::vector<int> out;
     for (const LuaTok& t : lexLua(lua).toks)
-        if (stringText(t) == name) out.push_back(t.pos.line + 1);
+        if (stringText(t) == name && !skip.count(t.off)) out.push_back(t.pos.line + 1);
     return out;
 }
 
-}  // namespace
-
-std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string& from, const std::string& to, int* count) {
+// The offsets (of the opening quote) of the literals a `kind` rename of
+// `from` rewrites: the direct-call ones, Cutscene.Play("intro"), and those
+// held in a variable such a call is passed.
+std::set<size_t> seqLiterals(const std::string& s, SeqKind kind, const std::string& from) {
     static const char* const cutsceneFns[] = {"Play"};
     static const char* const animationFns[] = {"Play", "Stop", "IsPlaying"};
     const bool cs = kind == SeqKind::Cutscene;
@@ -639,9 +641,7 @@ std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string
     const std::span<const char* const> fns = cs ? std::span<const char* const>(cutsceneFns) : std::span<const char* const>(animationFns);
     // Literals held in a variable that such a call is passed.
     const std::set<size_t> vars = seqNameVars(s, kind, from, fns);
-    std::string out;
-    size_t copied = 0;  // s[copied..] is not in `out` yet
-    int n = 0;
+    std::set<size_t> out;
     auto skipSpace = [&](size_t i) {
         while (i < s.size() && spaceChar(s[i])) ++i;
         return i;
@@ -664,12 +664,7 @@ std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string
             const size_t open = i;
             for (++i; i < s.size() && s[i] != c && s[i] != '\n'; ++i)
                 if (s[i] == '\\') ++i;
-            if (vars.count(open) && i < s.size() && s[i] == c) {  // no escapes: seqNameVars checked
-                out.append(s, copied, open + 1 - copied);
-                out += quoteLua(to, c);
-                copied = i;
-                ++n;
-            }
+            if (vars.count(open) && i < s.size() && s[i] == c) out.insert(open);
             ++i;
             continue;
         }
@@ -710,16 +705,26 @@ std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string
         size_t k = j + 1;
         while (k < s.size() && s[k] != q && s[k] != '\\' && s[k] != '\n') ++k;
         if (k >= s.size() || s[k] != q) continue;  // escapes or unfinished: the scanner above takes it
-        if (s.compare(j + 1, k - j - 1, from) == 0 && k - j - 1 == from.size()) {
-            out.append(s, copied, j + 1 - copied);
-            out += quoteLua(to, q);
-            copied = k;
-            ++n;
-        }
+        if (s.compare(j + 1, k - j - 1, from) == 0 && k - j - 1 == from.size()) out.insert(j);
         i = k + 1;
     }
+    return out;
+}
+
+}  // namespace
+
+std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string& from, const std::string& to, int* count) {
+    const std::set<size_t> lits = seqLiterals(s, kind, from);
+    std::string out;
+    size_t copied = 0;  // s[copied..] is not in `out` yet
+    for (size_t open : lits) {
+        const size_t close = s.find(s[open], open + 1);  // no escapes: seqLiterals checked
+        out.append(s, copied, open + 1 - copied);
+        out += quoteLua(to, s[open]);
+        copied = close;
+    }
     out.append(s, copied, std::string::npos);
-    if (count) *count = n;
+    if (count) *count = int(lits.size());
     return out;
 }
 
@@ -769,10 +774,13 @@ bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRe
     result.files = raw->written;
     for (const std::string& f : raw->written) result.refs += refs[f];
     for (const std::string& f : raw->failed) result.failed.push_back(f);
-    // What still spells the old name, as the files now stand.
+    // What still spells the old name, as the files now stand, but for the
+    // literals that name the other kind of sequence.
+    const SeqKind other = ref.kind == SeqKind::Cutscene ? SeqKind::Animation : SeqKind::Cutscene;
     for (const auto& [p, before] : scanned) {
         const bool now = std::find(raw->written.begin(), raw->written.end(), p) != raw->written.end();
-        for (int line : literalLines(now ? written[p] : before, old))
+        const std::string& text = now ? written[p] : before;
+        for (int line : literalLines(text, old, seqLiterals(text, other, old)))
             result.leftovers.push_back(p + ":" + std::to_string(line));
     }
     if (scripts) *scripts = std::move(result);

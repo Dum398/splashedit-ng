@@ -4400,7 +4400,7 @@ void testModelImportsGaps() {
         return editor::applyPlace(doc, s, std::nullopt, at, splash::Vec3{});
     };
     fs::create_directories(proj / "models", ec);
-    editor::PlacedModel p = placeWith(outside / "tri.obj", [&] { std::ofstream(proj / "models" / "tri.obj") << "# mine\n"; });
+    editor::PlacedModel p = placeWith(outside / "tri.obj", [&] { std::ofstream(proj / "models" / "tri.obj", std::ios::binary) << "# mine\n"; });
     CHECK(p.error.empty() && p.renamed == "models/tri_2.obj");
     CHECK(fileBytes(proj / "models" / "tri.obj") == "# mine\n" && !fs::exists(proj / "models" / "tri.obj.import.json"));
     CHECK(fs::exists(proj / "models" / "tri_2.obj") && fs::exists(proj / "models" / "tri_2.mesh"));

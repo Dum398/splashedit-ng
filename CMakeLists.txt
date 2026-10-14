@@ -84,6 +84,7 @@ add_library(splasheditdoc STATIC
     src/editor/timeline.cpp
     src/editor/hardware.cpp
     src/editor/psxmon.cpp
+    src/editor/texture_preview.cpp
     src/editor/unirom.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 find_package(Threads REQUIRED)

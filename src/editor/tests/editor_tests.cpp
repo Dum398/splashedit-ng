@@ -37,6 +37,7 @@
 #include "editor/project.hh"
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
+#include "editor/texture_preview.hh"
 #include "editor/timeline.hh"
 #include "editor/unirom.hh"
 #include "blend.hh"
@@ -3630,6 +3631,235 @@ void testBlendCancel() {
 #endif
 }
 
+// ---- Quantizer speed and quality
+
+// A 256x256 image with 63660 distinct colours (ramps plus noise), built from
+// integers so it is the same on every platform: the 8 bpp quantizer's worst
+// case, one k-means point per distinct colour.
+static splash::Image busyImage() {
+    splash::Image img;
+    img.width = img.height = 256;
+    img.pixels.resize(256 * 256);
+    uint32_t s = 12345;
+    auto noise = [&] {
+        s = s * 1664525u + 1013904223u;
+        return int(s >> 24) % 41 - 20;
+    };
+    auto c8 = [](int v) { return float(v < 0 ? 0 : v > 255 ? 255 : v) / 255.f; };
+    for (int y = 0; y < 256; y++)
+        for (int x = 0; x < 256; x++) {
+            int r = x + noise(), g = y * 3 / 4 + ((x * y) >> 9) + noise(), b = 255 - (x + y) / 2 + noise();
+            img.pixels[size_t(y) * 256 + x] = {c8(r), c8(g), c8(b), 1.f};
+        }
+    return img;
+}
+
+void testQuantizer() {
+    splash::Image img = busyImage();
+    // Speed: the brute-force k-means took 8.4 s on this image in an optimised
+    // build and over 40 s unoptimised; the bounded one well under 2 s. The
+    // bound is loose for slow CI machines.
+    auto t0 = std::chrono::steady_clock::now();
+    splash::PsxTexture t8 = splash::convertTexture(img, splash::BitDepth::Bpp8);
+    double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "quantizer: 256x256 8 bpp in %.2f s\n", sec);
+    CHECK(sec < 10.0);
+    // Quality: the same as the brute-force quantizer's (its output is
+    // byte-identical on x86-64: deltaE 1.716 / 4.827, blurred 0.462 / 2.129).
+    // The headroom only allows for other platforms' float maths (a perturbed
+    // cbrt/pow or FMA moved none of them in the 4th decimal); a quantizer that
+    // stops early or skips a centre it should not have lands 0.02+ away.
+    splash::TextureError e8 = splash::measureTexture(img, t8);
+    std::fprintf(stderr, "quantizer: 8 bpp deltaE %.4f blur %.4f, %d colours\n", e8.deltaE, e8.deltaEBlur, e8.colorsUsed);
+    CHECK(e8.colorsUsed == 256);
+    CHECK(e8.deltaE < 1.7163 + 0.005);
+    CHECK(e8.deltaEBlur < 0.4621 + 0.005);
+    splash::TextureError e4 = splash::measureTexture(img, splash::convertTexture(img, splash::BitDepth::Bpp4));
+    std::fprintf(stderr, "quantizer: 4 bpp deltaE %.4f blur %.4f, %d colours\n", e4.deltaE, e4.deltaEBlur, e4.colorsUsed);
+    CHECK(e4.colorsUsed == 16);
+    CHECK(e4.deltaE < 4.8265 + 0.005);
+    CHECK(e4.deltaEBlur < 2.1287 + 0.005);
+    // Deterministic: the same image converts to the same words.
+    splash::PsxTexture again = splash::convertTexture(img, splash::BitDepth::Bpp8);
+    CHECK(again.palette == t8.palette && again.imageData == t8.imageData);
+}
+
+// ---- Texture preview (inspector side-by-side)
+
+// The VRAM image an export's .vram file describes: atlases and CLUTs placed.
+static std::vector<uint16_t> vramFromFile(const std::filesystem::path& file) {
+    std::vector<uint16_t> vram(1024 * 512, 0);
+    std::ifstream in(file, std::ios::binary);
+    std::vector<uint8_t> d((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto u16 = [&](size_t p) { return p + 1 < d.size() ? uint16_t(d[p] | d[p + 1] << 8) : uint16_t(0); };
+    if (d.size() < 8 || d[0] != 'V' || d[1] != 'R') return {};
+    int na = u16(2), nc = u16(4);
+    size_t p = 8;
+    for (int i = 0; i < na; i++) {
+        int x = u16(p), y = u16(p + 2), w = u16(p + 4), h = u16(p + 6);
+        p += 8;
+        for (int r = 0; r < h; r++)
+            for (int c = 0; c < w; c++, p += 2)
+                if (x + c < 1024 && y + r < 512) vram[size_t(y + r) * 1024 + x + c] = u16(p);
+        p = (p + 3) & ~size_t(3);
+    }
+    for (int i = 0; i < nc; i++) {
+        int x = u16(p) * 16, y = u16(p + 2), n = u16(p + 4);
+        p += 8;
+        for (int k = 0; k < n; k++, p += 2)
+            if (x + k < 1024 && y < 512) vram[size_t(y) * 1024 + x + k] = u16(p);
+        p = (p + 3) & ~size_t(3);
+    }
+    return vram;
+}
+
+// What the GPU samples for a placed texture, RGBA top-down, the 5-bit levels
+// expanded as decodeTexture does.
+static std::vector<uint8_t> sampleVram(const std::vector<uint16_t>& vram, const splash::ExportStats::TexturePlacement& t) {
+    std::vector<uint8_t> out(size_t(t.width) * t.height * 4);
+    auto at = [&](int x, int y) { return vram[size_t(y) * 1024 + x]; };
+    for (int y = 0; y < t.height; y++)
+        for (int x = 0; x < t.width; x++) {
+            uint16_t w;
+            if (t.bitDepth == 16) w = at(t.x + x, t.y + y);
+            else if (t.bitDepth == 8) w = at(t.clutX + ((at(t.x + x / 2, t.y + y) >> ((x & 1) * 8)) & 0xff), t.clutY);
+            else w = at(t.clutX + ((at(t.x + x / 4, t.y + y) >> ((x & 3) * 4)) & 0xf), t.clutY);
+            auto e = [](unsigned v) { return uint8_t((v * 255 + 15) / 31); };
+            uint8_t* o = &out[(size_t(y) * t.width + x) * 4];
+            o[0] = e(w & 31), o[1] = e((w >> 5) & 31), o[2] = e((w >> 10) & 31), o[3] = w ? 255 : 0;
+        }
+    return out;
+}
+
+void testTexturePreview() {
+    namespace fs = std::filesystem;
+    const fs::path fixture = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "quantpreview";
+    const fs::path image = fixture / "gradient.png";
+
+    // The preview is what the export writes: one crate per bit depth,
+    // exported, its texture read back out of the .vram file.
+    for (splash::BitDepth depth : {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8, splash::BitDepth::Bpp16}) {
+        editor::TexturePreview p = editor::makeTexturePreview({image, depth, false});
+        CHECK(p.error.empty());
+        CHECK(p.width == 64 && p.height == 64);
+        CHECK(p.source.size() == 64 * 64 * 4 && p.ps1.size() == 64 * 64 * 4);
+        CHECK(p.paletteSize == (depth == splash::BitDepth::Bpp4 ? 16 : depth == splash::BitDepth::Bpp8 ? 256 : 0));
+        CHECK(p.paletteUsed <= p.paletteSize);
+        CHECK(depth == splash::BitDepth::Bpp16 || p.ps1Colors <= p.paletteUsed);
+        CHECK(p.sourceColors > 256);  // so 4 and 8 bpp both go through k-means and dithering
+        CHECK(p.deltaE > 0 && p.deltaE < 20);
+
+        splash::Scene scene;
+        splash::Object o = named("Crate");
+        splash::MeshComponent m;
+        m.mesh = "../../examples/courtyard/meshes/crate.mesh";
+        m.materials.push_back({"gradient.png", {1, 1, 1, 1}, {}});
+        m.bitDepth = depth;
+        o.mesh = m;
+        scene.objects.push_back(o);
+        const fs::path dir = g_outDir / "texpreview";
+        fs::create_directories(dir);
+        splash::ExportResult r = splash::exportSplashpack(scene, fixture, dir / "scene.splashpack");
+        CHECK(r.ok());
+        CHECK(r.stats.textures.size() == 1);
+        if (!r.ok() || r.stats.textures.size() != 1) continue;
+        const auto& t = r.stats.textures[0];
+        CHECK(t.bitDepth == int(depth) && t.width == 64 && t.height == 64 && !t.cutout);
+        std::vector<uint16_t> vram = vramFromFile(dir / "scene.vram");
+        CHECK(!vram.empty());
+        if (vram.empty()) continue;
+        std::vector<uint8_t> exported = sampleVram(vram, t);
+        size_t differ = 0;
+        for (size_t i = 0; i < exported.size(); i += 4)
+            differ += std::memcmp(&exported[i], &p.ps1[i], 4) != 0;
+        CHECK(differ == 0);
+        if (differ) std::fprintf(stderr, "texture preview: %zu of %d texels differ from the export at %d bpp\n", differ, 64 * 64, int(depth));
+    }
+
+    // Few colours: exact palette, nothing dithered, every colour kept.
+    {
+        splash::Image img;
+        img.width = 8;
+        img.height = 4;
+        const splash::Image::Px cols[3] = {{1, 0, 0, 1}, {0, 1, 0, 1}, {0.2f, 0.4f, 0.6f, 1}};
+        for (int i = 0; i < 32; i++) img.pixels.push_back(cols[(i / 3) % 3]);
+        editor::TexturePreview p = editor::makeTexturePreview(img, {"mem", splash::BitDepth::Bpp4, false});
+        CHECK(p.error.empty());
+        CHECK(p.sourceColors == 3 && p.ps1Colors == 3 && p.paletteUsed == 3 && p.paletteSize == 4);
+        CHECK(p.deltaE < 0.5);
+        bool same = true;
+        for (size_t i = 0; i < p.ps1.size(); i++) same &= std::abs(int(p.ps1[i]) - int(p.source[i])) <= 4;
+        CHECK(same);
+        // Rows top-down: the bottom-up Image's last row is the first one out.
+        CHECK(p.source[0] == uint8_t(std::lround(img.pixels[size_t(3 * 8)].r * 255)));
+
+        // Cutout: transparent texels stay transparent in both.
+        img.pixels[size_t(3 * 8)].a = 0;  // bottom-up row 3 = top row
+        editor::TexturePreview c = editor::makeTexturePreview(img, {"mem", splash::BitDepth::Bpp4, true});
+        CHECK(c.error.empty() && c.ps1[3] == 0 && c.source[3] == 0);
+        editor::TexturePreview n = editor::makeTexturePreview(img, {"mem", splash::BitDepth::Bpp4, false});
+        CHECK(n.error.empty() && n.ps1[3] == 255 && n.source[3] == 255);  // not cutout: the console draws it
+    }
+
+    // A width the bit depth cannot pack is an error, not a crash.
+    {
+        splash::Image img;
+        img.width = 6;
+        img.height = 2;
+        img.pixels.assign(12, {0.5f, 0.5f, 0.5f, 1});
+        CHECK(!editor::makeTexturePreview(img, {"mem", splash::BitDepth::Bpp4, false}).error.empty());
+        CHECK(editor::makeTexturePreview(img, {"mem", splash::BitDepth::Bpp8, false}).error.empty());
+        CHECK(!editor::makeTexturePreview({fixture / "missing.png", splash::BitDepth::Bpp8, false}).error.empty());
+    }
+
+    // Worst case for the UI: 256 x 256 noise at 8 bpp. Converting takes many
+    // frames, so the previewer must hand it to its thread and return at once.
+    {
+        splash::Image img;
+        img.width = img.height = 256;
+        uint32_t s = 12345;
+        auto rnd = [&] { return (s = s * 1664525u + 1013904223u) >> 8 & 0xffff; };
+        for (int i = 0; i < 256 * 256; i++) {
+            float x = float(i % 256) / 255.f, y = float(i / 256) / 255.f;
+            img.pixels.push_back({x * 0.8f + float(rnd()) / 65535.f * 0.2f, y, (x + y) * 0.5f, 1});
+        }
+        const fs::path dir = g_outDir / "texpreview";
+        fs::create_directories(dir);
+        const fs::path big = dir / "noise256.png";
+        splash::savePng(img, big);
+        for (splash::BitDepth depth : {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8, splash::BitDepth::Bpp16}) {
+            editor::TexturePreview p = editor::makeTexturePreview({big, depth, false});
+            CHECK(p.error.empty());
+            std::printf("texture preview 256x256 %d bpp: %.1f ms\n", int(depth), p.convertMs);
+        }
+
+        editor::TexturePreviewer pv;
+        CHECK(!pv.latest());
+        auto t0 = std::chrono::steady_clock::now();
+        pv.request({big, splash::BitDepth::Bpp8, false});
+        pv.request({big, splash::BitDepth::Bpp4, false});  // newest wins
+        double requestMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        CHECK(requestMs < 5);
+        pv.wait();
+        CHECK(!pv.busy());
+        auto last = pv.latest();
+        CHECK(last && last->key.depth == splash::BitDepth::Bpp4 && last->error.empty());
+        // Back to a depth already done: answered from the cache, no work.
+        pv.request({big, splash::BitDepth::Bpp4, false});
+        CHECK(!pv.busy());
+        unsigned g = pv.generation();
+        pv.request({image, splash::BitDepth::Bpp16, false});
+        pv.wait();
+        CHECK(pv.generation() > g && pv.latest()->key.file == image);
+        pv.request({big, splash::BitDepth::Bpp4, false});
+        CHECK(!pv.busy() && pv.latest()->key.file == big);  // cached
+        // A changed file is converted again.
+        pv.invalidate(big);
+        pv.wait();
+        CHECK(pv.latest()->key.file == big && pv.latest()->error.empty());
+    }
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -3688,6 +3918,8 @@ int main(int argc, char** argv) {
     testClipboard();
     testPasteOffset();
     testImportWarnings();
+    testQuantizer();
+    testTexturePreview();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -2412,8 +2412,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.framebufferBytes = size_t(vs.resolutionX) * size_t(vs.resolutionY) * 2 * (vs.dualBuffering ? 2 : 1);
     for (const Atlas& a : vram.atlases) {
         st.atlasBytes += size_t(a.width) * Atlas::kHeight * 2;
-        for (const PsxTexture* t : a.textures)
+        for (const PsxTexture* t : a.textures) {
             if (t->hasPalette) st.clutBytes += t->palette.size() * 2;
+            st.textures.push_back({t->source, int(t->bitDepth), t->cutout, t->width, t->height, a.positionX + t->packingX,
+                                   a.positionY + t->packingY, t->clutPackingX * 16, t->clutPackingY,
+                                   t->hasPalette ? int(t->palette.size()) : 0});
+        }
     }
     for (const FontSheet& f : fontSheets) st.fontBytes += f.packed4bpp().size();
     st.spuEnd = kSpuStart;

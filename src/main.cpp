@@ -19,6 +19,7 @@
 #include <stb_image_write.h>
 
 #include "editor/document.hh"
+#include "editor/texture_preview.hh"
 #include "gl.h"
 #include "mockup/main_screen.h"
 #include "ui/brand.h"
@@ -423,7 +424,36 @@ void openDocument(editor::Document& doc, const Args& args) {
 
 }  // namespace
 
+// --dump-texture-preview <image> <4|8|16> <out.png> [--cutout]: writes the
+// inspector's PS1 preview of an image and prints its numbers, no window
+// (tests/quantpreviewcheck.py compares it with what psxsplash uploads).
+static int dumpTexturePreview(int argc, char** argv) {
+    if (argc < 5) {
+        std::fprintf(stderr, "usage: splashedit --dump-texture-preview <image> <4|8|16> <out.png> [--cutout]\n");
+        return 2;
+    }
+    editor::TexturePreviewKey key;
+    key.file = argv[2];
+    int bpp = std::atoi(argv[3]);
+    if (bpp != 4 && bpp != 8 && bpp != 16) {
+        std::fprintf(stderr, "bit depth must be 4, 8 or 16\n");
+        return 2;
+    }
+    key.depth = static_cast<splash::BitDepth>(bpp);
+    key.cutout = argc > 5 && !std::strcmp(argv[5], "--cutout");
+    editor::TexturePreview p = editor::makeTexturePreview(key);
+    if (!p.error.empty() || !editor::saveTexturePreviewPng(p, argv[4])) {
+        std::fprintf(stderr, "preview failed: %s\n", p.error.empty() ? "cannot write png" : p.error.c_str());
+        return 1;
+    }
+    std::printf("preview %dx%d bpp=%d palette=%d used=%d colours=%d source_colours=%d deltaE=%.3f vram=%d ms=%.1f\n",
+                p.width, p.height, bpp, p.paletteSize, p.paletteUsed, p.ps1Colors, p.sourceColors, p.deltaE, p.vramBytes,
+                p.convertMs);
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && !std::strcmp(argv[1], "--dump-texture-preview")) return dumpTexturePreview(argc, argv);
     Args args = parse(argc, argv);
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());

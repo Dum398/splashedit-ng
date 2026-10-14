@@ -17,6 +17,7 @@
 #include "unitymath.hh"
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
+#include "editor/texture_preview.hh"
 #include "editor/lua_editor_view.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
@@ -240,6 +241,14 @@ struct State {
 
     // Cutscene and animation tracks, docked under the Scene.
     ui::TimelinePanel timeline;
+
+    // Inspector texture preview: Source vs PS1, converted off the UI thread.
+    struct TexPreview {
+        editor::TexturePreviewer previewer;
+        unsigned srcTex = 0, ps1Tex = 0;  // GL textures for the two panes
+        unsigned shownGen = 0;            // previewer generation on the GPU
+        bool compare = false;             // one big pane to flick instead of two
+    } texPreview;
 };
 
 // Draws the main screen for `doc` filling `size`. Returns the title-bar

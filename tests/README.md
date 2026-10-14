@@ -76,8 +76,26 @@ sprite and UI art from a psxsplash game (images with transparency measured with 
 | tileset | 8 | 1.627 | 0.637 | 34.69 | 42.75 |
 
 deltaE goes down on every row. RGB PSNR drops slightly on three small synthetic rows because the
-palette minimises OKLab distance. Not yet checked: these textures rendered
-by psxsplash on the console or an emulator.
+palette minimises OKLab distance.
+
+## Texture preview against the console
+
+The inspector shows a texture's source next to what the console will draw (`src/editor/
+texture_preview.*`: the same `splash::convertTexture` the exporter calls, decoded back to colour).
+`quantpreviewcheck.py` proves that preview is what psxsplash actually uploads. It exports a scene
+to a CD-ROM image, boots it in pcsx-redux headless (`boot/vramdump.lua` saves a state at a frame),
+lifts the GPU's 1 MB VRAM out of the uncompressed save state, reads each texture back through its
+atlas and CLUT exactly as the GPU samples it, and compares the 15-bit texels with the editor's
+`splashedit --dump-texture-preview` output for the same image, bit depth and cutout.
+
+    python3 quantpreviewcheck.py <splashedit> <splashpack-cli> <engine.ps-exe> <pcsx-redux> <bios.bin> [scene] [frame]
+
+The engine is a CD-ROM build of psxsplash (`make LOADER=cdrom`); scene defaults to
+`quantpreview/quantpreview.scene` (one crate per bit depth, textured with a dithering-heavy
+gradient) and frame to 1500 (past the boot splash, once the scene's atlases are uploaded). On the
+fixture every texel matches: 12288 compared, 0 differing, at 4, 8 and 16 bpp. Needs the BIOS, so it
+is **not in CI**. The editor-side unit test (`testTexturePreview` in `editor_tests`) makes the same
+comparison against the exported `.vram` file and **is** in CI.
 
 ## Boot check
 

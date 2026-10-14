@@ -122,6 +122,9 @@ jobs:
       - name: Timeline selections and events
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/timelineselectcheck.py build/splashedit
+      - name: Timeline key and event row
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/timelinekeyrowcheck.py build/splashedit
       - name: UI canvas editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/uicanvascheck.py build/splashedit

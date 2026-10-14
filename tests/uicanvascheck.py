@@ -19,8 +19,10 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-def project():
-    """tests/ui/ui.scene as a project of its own: fonts and texture copied in."""
+def project(fill=0):
+    """tests/ui/ui.scene as a project of its own: fonts and texture copied in,
+    a scene object 'Marker' (to see the UI tab leave the Scene's selection
+    alone) and `fill` extra boxes at the bottom of the canvas."""
     d = os.path.join(tempfile.mkdtemp(), 'ui')
     os.makedirs(os.path.join(d, 'fonts'))
     os.makedirs(os.path.join(d, 'textures'))
@@ -32,19 +34,25 @@ def project():
         if 'texture' in e:
             shutil.copy(os.path.join(here, 'ui', e['texture']), os.path.join(d, 'textures'))
             e['texture'] = 'textures/' + os.path.basename(e['texture'])
+    s['objects'] = [{'name': 'Marker', 'active': True, 'components': [], 'children': [],
+                     'transform': {'position': [0, 0, 0], 'rotation': [0, 0, 0, 1], 'scale': [1, 1, 1]}}]
+    for i in range(fill):
+        s['canvases'][0]['elements'].append({'type': 'box', 'name': 'fill %d' % i, 'visible': True, 'rect': [i % 300, 230, 4, 4],
+                                             'anchorMin': [0, 0], 'anchorMax': [0, 0], 'color': [0.5, 0.5, 0.5]})
     json.dump(s, open(os.path.join(d, 'ui.scene'), 'w'), indent=1)
     return d
 
 
-def run(args, shot=None):
+def run(args, shot=None, fill=0):
     """Runs the editor on a fresh project with the UI tab open, then Ctrl+S;
     returns the saved canvas, the editor's output and the project."""
-    d = project()
+    d = project(fill)
     cmd = [editor, '--size', '1600x960', '--project', d, '--ui', '--wait', '5'] + args + [
         '--key', 'ctrl+s', '--wait', '5', '--screenshot', shot or os.path.join(d, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
     out = (r.stdout + r.stderr).strip()
     scene = json.load(open(os.path.join(d, 'ui.scene'), encoding='utf-8'))
+    run.scene = scene
     return scene['canvases'][0], out, d
 
 
@@ -117,6 +125,7 @@ def row(i):
 
 
 HP = (68, 85)  # inside the progress bar 'hp' (8, 80, 120 x 10), clear of the others
+PARK = '1590,945'  # the pointer off the canvas (status bar): a paste then keeps its 8 px offset
 
 # Drag on the canvas: picks the element up and moves it, one pixel per canvas pixel.
 cv, out, _ = run(['--drag', by(*HP, 30, 20), '--wait', '3'])
@@ -176,22 +185,22 @@ cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--click', at(200, 74), '--
 check('a click on empty canvas deselects', elements(cv)['hp']['rect'] == [8, 80, 120, 10], elements(cv)['hp']['rect'])
 
 # ---- Copy, cut and paste: through the system clipboard, one undo step each.
-cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--key', 'ctrl+v', '--wait', '3'])
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3'])
 n = names(cv)
 check('ctrl+c, ctrl+v pastes a copy in front of the original', n == order[:i + 1] + ['hp (2)'] + order[i + 1:], n)
 check('the pasted copy sits 8 px down and right', elements(cv).get('hp (2)', {}).get('rect') == [16, 88, 120, 10],
       elements(cv).get('hp (2)'))
 check('the original stays put', elements(cv)['hp'] == elements(cv0)['hp'], elements(cv)['hp'])
-cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--key', 'ctrl+v', '--wait', '3', '--key', 'ctrl+v',
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3', '--move', PARK, '--key', 'ctrl+v',
                   '--wait', '3'])
 check('a second paste lands past the first copy', elements(cv).get('hp (3)', {}).get('rect') == [24, 96, 120, 10],
       names(cv))
-cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--key', 'ctrl+v', '--wait', '3', '--key', 'ctrl+z',
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3', '--key', 'ctrl+z',
                   '--wait', '3'])
 check('one ctrl+z takes the paste back', names(cv) == order, names(cv))
 cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+x', '--wait', '3'])
 check('ctrl+x removes the element', names(cv) == order[:i] + order[i + 1:], names(cv))
-cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+x', '--wait', '3', '--key', 'ctrl+v', '--wait', '3'])
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+x', '--wait', '3', '--move', PARK, '--key', 'ctrl+v', '--wait', '3'])
 check('ctrl+x then ctrl+v puts it back in place, on top, under its own name',
       names(cv) == order[:i] + order[i + 1:] + ['hp'] and elements(cv)['hp'] == elements(cv0)['hp'], names(cv))
 
@@ -312,6 +321,141 @@ if S1 == 1:
                 differ.append((x, y, tuple(want), tuple(got)))
     check('at 100%%, the canvas matches the runtime frame pixel for pixel (%d compared)' % compared,
           compared > 8000 and not differ, (compared, len(differ), differ[:5]))
+
+# ---- Multi-select: Ctrl+click toggles, Shift+click on the list takes a range,
+# a rubber band takes what it touches; moving, deleting and the clipboard then
+# act on all of them, one undo step each.
+CRATE = (280, 110)    # inside the crate (248..312 x 80..144), clear of the diagonal
+BAND = (150, 105, 262, 60)  # from empty canvas up and right: touches 'sys' (y 52..68) and 'crate'
+BAND_NAMES = ['sys', 'crate']
+
+
+def moved(cv):
+    """Names whose element differs from the untouched scene."""
+    return sorted(n for n in names(cv0) if elements(cv).get(n) != elements(cv0)[n])
+
+
+def drag_band(extra=()):
+    return list(extra) + ['--drag', '%s,%s' % (at(BAND[0], BAND[1]), at(BAND[2], BAND[3])), '--wait', '3']
+
+
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--keydown', 'ctrl', '--click', at(*CRATE), '--wait', '3', '--keyup', 'ctrl',
+                  '--wait', '3', '--key', 'right', '--key', 'right', '--key', 'shift+down', '--wait', '3'])
+check('ctrl+click adds the element to the selection; arrows then move both',
+      moved(cv) == ['crate', 'hp'] and elements(cv)['hp']['rect'][:2] == [10, 88] and elements(cv)['crate']['rect'][:2] ==
+      [elements(cv0)['crate']['rect'][0] + 2, elements(cv0)['crate']['rect'][1] + 8], moved(cv))
+check('the inspector says "2 elements"', 'uicanvas: inspector 2 elements' in out, out[-400:])
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--keydown', 'ctrl', '--click', at(*CRATE), '--wait', '3',
+                  '--click', at(*CRATE), '--wait', '3', '--keyup', 'ctrl', '--wait', '3', '--key', 'right', '--wait', '3'])
+check('ctrl+click on a selected element takes it out again', moved(cv) == ['hp'], moved(cv))
+cv, out, _ = run(['--click', row(0), '--wait', '3', '--keydown', 'shift', '--click', row(3), '--wait', '3', '--keyup', 'shift',
+                  '--wait', '3', '--key', 'down', '--wait', '3'])
+check('shift+click on the list selects the range', moved(cv) == ['bar', 'body', 'corner', 'title'], moved(cv))
+cv, out, _ = run(['--click', row(1), '--wait', '3', '--keydown', 'ctrl', '--click', row(4), '--wait', '3', '--keyup', 'ctrl',
+                  '--wait', '3', '--key', 'down', '--wait', '3'])
+check('ctrl+click on the list toggles rows', moved(cv) == ['corner', 'sys'], moved(cv))
+
+cv, out, _ = run(drag_band() + ['--key', 'down', '--wait', '3'])
+check('a rubber band selects what it touches (and nothing else)', moved(cv) == sorted(BAND_NAMES), moved(cv))
+check('the inspector says "2 elements" after the band', 'uicanvas: inspector 2 elements' in out, out[-400:])
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--keydown', 'ctrl'] + drag_band() + ['--keyup', 'ctrl', '--wait', '3',
+                  '--key', 'down', '--wait', '3'])
+check('a rubber band with ctrl adds to the selection', moved(cv) == sorted(BAND_NAMES + ['hp']), moved(cv))
+cv, out, _ = run(['--click', at(*HP), '--wait', '3'] + drag_band() + ['--key', 'down', '--wait', '3'])
+check('a plain rubber band replaces the selection', moved(cv) == sorted(BAND_NAMES), moved(cv))
+
+# Dragging one of the selected elements moves them all; it takes one Ctrl+Z.
+SYS = (150, 60)
+cv, out, _ = run(drag_band() + ['--drag', by(*SYS, 0, 30), '--wait', '3'])
+check('dragging one of the selection moves all of them', moved(cv) == sorted(BAND_NAMES) and
+      elements(cv)['sys']['rect'][1] - elements(cv0)['sys']['rect'][1] == elements(cv)['crate']['rect'][1] - elements(cv0)['crate']['rect'][1] > 0,
+      (moved(cv), elements(cv)['sys']['rect'], elements(cv)['crate']['rect']))
+cv, out, _ = run(drag_band() + ['--drag', by(*SYS, 0, 30), '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
+check('one ctrl+z takes the whole group drag back', moved(cv) == [], moved(cv))
+# A click on one of the selection, without moving, narrows the selection to it.
+cv, out, _ = run(drag_band() + ['--click', at(*SYS), '--wait', '3', '--key', 'down', '--wait', '3'])
+check('a click on one of several selected keeps only that one', moved(cv) == ['sys'], moved(cv))
+
+# Delete, cut, duplicate and copy+paste on the whole selection.
+cv, out, _ = run(drag_band() + ['--key', 'delete', '--wait', '3'])
+check('delete removes the whole selection', names(cv) == [n for n in order if n not in BAND_NAMES], names(cv))
+cv, out, _ = run(drag_band() + ['--key', 'delete', '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
+check('one ctrl+z brings all of them back', names(cv) == order, names(cv))
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+d', '--wait', '3'])
+check('ctrl+d duplicates all of them, each in front of its original',
+      names(cv) == ['bar', 'corner', 'title', 'body', 'sys', 'sys (2)', 'hp', 'diag', 'crate', 'crate (2)'], names(cv))
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+d', '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
+check('one ctrl+z takes the duplicates back', names(cv) == order, names(cv))
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3'])
+n = names(cv)
+check('copy then paste of the group adds both, in front of the last selected one',
+      n == ['bar', 'corner', 'title', 'body', 'sys', 'hp', 'diag', 'crate', 'sys (2)', 'crate (2)'], n)
+check('the pasted group keeps its shape, 8 px down and right',
+      elements(cv)['sys (2)']['rect'][:2] == [16, 60] and elements(cv)['crate (2)']['rect'][:2] ==
+      [elements(cv0)['crate']['rect'][0] + 8, elements(cv0)['crate']['rect'][1] + 8],
+      (elements(cv).get('sys (2)'), elements(cv).get('crate (2)')))
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
+check('one ctrl+z takes the whole paste back', names(cv) == order, names(cv))
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+x', '--wait', '3', '--move', PARK, '--key', 'ctrl+v', '--wait', '3'])
+check('cut then paste puts the group back in place, on top',
+      names(cv) == [n for n in order if n not in BAND_NAMES] + BAND_NAMES and
+      all(elements(cv)[n] == elements(cv0)[n] for n in BAND_NAMES), names(cv))
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+x', '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
+check('one ctrl+z takes a cut of several back', names(cv) == order, names(cv))
+
+# ---- Paste at the pointer: the group's top-left lands under it, snapped
+# like a drag, when the pointer is over the canvas; else the +8 offset stays.
+PASTE_AT = (40, 150)
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', at(*PASTE_AT), '--wait', '3', '--key', 'ctrl+v',
+                  '--wait', '3'])
+check('paste with the pointer on the canvas puts the top-left under it',
+      elements(cv).get('hp (2)', {}).get('rect') == [40, 150, 120, 10], elements(cv).get('hp (2)'))
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', at(1, 150), '--wait', '3', '--key', 'ctrl+v',
+                  '--wait', '3'])
+check('the pointer paste snaps like a drag (1 px from the screen edge lands on it)',
+      elements(cv).get('hp (2)', {}).get('rect', [])[:1] == [0], elements(cv).get('hp (2)'))
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+c', '--move', at(8, 100), '--wait', '3', '--key', 'ctrl+v', '--wait', '3'])
+check('a group lands with its top-left at the pointer, its shape kept',
+      elements(cv).get('sys (2)', {}).get('rect', [])[:2] == [8, 100] and
+      elements(cv).get('crate (2)', {}).get('rect', [])[1] == 100 + (elements(cv0)['crate']['rect'][1] - 52),
+      (elements(cv).get('sys (2)'), elements(cv).get('crate (2)')))
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', at(*PASTE_AT), '--wait', '3', '--key', 'ctrl+v',
+                  '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
+check('one ctrl+z takes a pointer paste back', names(cv) == order, names(cv))
+# Over the Edit menu (not on the canvas) Paste keeps the offset.
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--click', '173,20', '--wait', '3', '--click', '207,232', '--wait', '3'])
+check('Edit > Paste keeps the 8 px offset', elements(cv).get('hp (2)', {}).get('rect') == [16, 88, 120, 10], elements(cv).get('hp (2)'))
+
+# ---- Rename: F2 and Edit > Rename act on the selected UI element, not on the
+# scene object ('Marker', selected with --select) that the UI tab is not showing.
+cv, out, _ = run(['--select', 'Marker', '--click', at(*HP), '--wait', '3', '--key', 'f2', '--wait', '3', '--text', 'Health',
+                  '--key', 'enter', '--wait', '3'])
+check('F2 renames the selected UI element', 'Health' in names(cv) and 'hp' not in names(cv) and len(names(cv)) == len(order),
+      names(cv))
+check('F2 leaves the scene object alone', [o['name'] for o in run.scene['objects']] == ['Marker'], run.scene['objects'])
+cv, out, _ = run(['--select', 'Marker', '--click', at(*HP), '--wait', '3', '--click', '173,20', '--wait', '3', '--click', '207,120',
+                  '--wait', '3', '--text', 'Health', '--key', 'enter', '--wait', '3'])
+check('Edit > Rename renames the selected UI element', 'Health' in names(cv) and 'hp' not in names(cv), names(cv))
+check('Edit > Rename leaves the scene object alone', [o['name'] for o in run.scene['objects']] == ['Marker'], run.scene['objects'])
+cv, out, _ = run(['--select', 'Marker', '--click', at(*HP), '--wait', '3', '--key', 'f2', '--wait', '3', '--text', 'Health',
+                  '--key', 'enter', '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
+check('one ctrl+z takes a rename back', names(cv) == order, names(cv))
+
+# ---- The per-canvas limit: a paste (or duplicate) past 255 elements is
+# refused, with a message and no change.
+FULL = 255 - len(order)
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3'], fill=FULL)
+check('paste into a full canvas (255) changes nothing', len(cv['elements']) == 255 and 'hp (2)' not in names(cv), len(cv['elements']))
+check('and says why', 'uicanvas: notice Cannot paste: a canvas holds at most 255' in out, out[-300:])
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3'], fill=FULL - 1)
+check('the paste that makes exactly 255 goes through', len(cv['elements']) == 255 and 'hp (2)' in names(cv), len(cv['elements']))
+cv, out, _ = run(['--click', at(*HP), '--wait', '3', '--key', 'ctrl+d', '--wait', '3'], fill=FULL)
+check('duplicate in a full canvas is refused too', len(cv['elements']) == 255 and 'hp (2)' not in names(cv), len(cv['elements']))
+d = tempfile.mkdtemp()
+cv, out, _ = run(drag_band() + ['--key', 'ctrl+c', '--move', PARK, '--key', 'ctrl+v', '--wait', '3'], fill=FULL - 1,
+                 shot=os.path.join(d, 'full.png'))
+check('a group paste that would pass 255 is refused whole', len(cv['elements']) == 254 and 'sys (2)' not in names(cv),
+      len(cv['elements']))
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

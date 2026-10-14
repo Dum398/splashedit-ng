@@ -3659,24 +3659,28 @@ void testImportWarnings() {
 // import with nothing changed.
 // TMPDIR pointed at a folder of the test's own while it lives, so the
 // temporary folders counted are this process's (std::filesystem::
-// temp_directory_path honours TMPDIR on POSIX), not other processes' on a
-// busy machine.
+// temp_directory_path honours TMPDIR on POSIX and TMP on Windows), not other
+// processes' on a busy machine.
 struct ScopedTmpdir {
+#ifdef _WIN32
+    static constexpr const char* kVar = "TMP";
+#else
+    static constexpr const char* kVar = "TMPDIR";
+#endif
     std::optional<std::string> old;
     explicit ScopedTmpdir(const std::filesystem::path& dir) {
-#ifndef _WIN32
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
-        if (const char* v = std::getenv("TMPDIR")) old = v;
-        setenv("TMPDIR", dir.c_str(), 1);
-#else
-        (void)dir;
-#endif
+        if (const char* v = std::getenv(kVar)) old = v;
+        set(dir.string().c_str());
     }
-    ~ScopedTmpdir() {
-#ifndef _WIN32
-        if (old) setenv("TMPDIR", old->c_str(), 1);
-        else unsetenv("TMPDIR");
+    ~ScopedTmpdir() { set(old ? old->c_str() : nullptr); }
+    static void set(const char* v) {
+#ifdef _WIN32
+        _putenv_s(kVar, v ? v : "");
+#else
+        if (v) setenv(kVar, v, 1);
+        else unsetenv(kVar);
 #endif
     }
 };

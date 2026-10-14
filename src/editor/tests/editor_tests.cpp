@@ -1050,6 +1050,21 @@ void testNewScript() {
     CHECK(std::string((std::istreambuf_iterator<char>(mine)), {}) == "mine");
     CHECK(editor::createScript(proj, "Game Logic", true).path == "scripts/game_logic_3.lua");
     CHECK(!editor::createScript({}, "x", false).error.empty());
+    // A Trigger's script: its own file, the trigger callbacks.
+    const std::string trig = editor::scriptTemplate("Door", editor::ScriptKind::Trigger);
+    CHECK(trig.find("function onTriggerEnter(index)") != std::string::npos && trig.find("function onTriggerExit(index)") != std::string::npos);
+    // The template and the editor's API agree, with the index psxsplash
+    // passes a Trigger's script (Lua::OnTriggerEnterScript pushes it).
+    for (const char* cb : {"onTriggerEnter", "onTriggerExit"}) {
+        const editor::lua::ApiSymbol* api = editor::lua::findApi("", cb);
+        CHECK(api && api->kind == editor::lua::ApiKind::Callback && std::string(api->signature) == std::string("function ") + cb + "(index)");
+        CHECK(api && trig.find(api->signature) != std::string::npos);
+    }
+    CHECK(editor::lua::check(trig).ok());
+    editor::NewScript t = editor::createScript(proj, "Game Logic", editor::ScriptKind::Trigger);
+    CHECK(t.error.empty() && t.path == "scripts/game_logic_trigger.lua");
+    std::ifstream tin(proj / "scripts" / "game_logic_trigger.lua", std::ios::binary);
+    CHECK(std::string((std::istreambuf_iterator<char>(tin)), {}) == editor::scriptTemplate("Game Logic", editor::ScriptKind::Trigger));
 }
 
 void testAdoptAsset() {
@@ -2631,6 +2646,201 @@ void testLuaScriptFile() {
     CHECK(c.save(&err) && slurp(crlf) == "a = 1\r\nb = 20\r\n");
 }
 
+// Replace and Replace all in the script editor.
+void testLuaReplace() {
+    lua::Buffer b;
+    b.setText("local hp = 3\nHP = hp + hp\nprint(hp)");
+    b.moveTo({0, 0});
+    // Nothing selected: Replace first selects the next match.
+    CHECK(!b.replaceNext("hp", "health", true));
+    CHECK(b.selStart() == (lua::Pos{0, 6}) && b.selectedText() == "hp");
+    CHECK(b.replaceNext("hp", "health", true));
+    CHECK(b.line(0) == "local health = 3" && b.selStart() == (lua::Pos{1, 5}));
+    CHECK(b.undo() && b.line(0) == "local hp = 3");
+    // Replace all: every match, one undo step, the cursor stays.
+    b.moveTo({1, 2});
+    CHECK(b.replaceAll("hp", "health", true) == 4);
+    CHECK(b.text() == "local health = 3\nHP = health + health\nprint(health)");
+    CHECK(b.cursor() == (lua::Pos{1, 2}) && !b.hasSelection());
+    CHECK(b.undo() && b.text() == "local hp = 3\nHP = hp + hp\nprint(hp)");
+    CHECK(b.redo() && b.text() == "local health = 3\nHP = health + health\nprint(health)");
+    CHECK(b.undo());
+    // Match case off finds HP too; a replacement holding the needle is not
+    // replaced again; nothing to replace is no undo step.
+    CHECK(b.replaceAll("hp", "hp_hp", false) == 5);
+    CHECK(b.line(1) == "hp_hp = hp_hp + hp_hp");
+    CHECK(b.undo());
+    const uint64_t rev = b.revision();
+    CHECK(b.replaceAll("zz", "y", false) == 0 && b.revision() == rev);
+    CHECK(b.replaceAll("", "y", false) == 0);
+    // Removing every match; matches do not overlap.
+    b.setText("aaa\nkeep\naaaa");
+    CHECK(b.replaceAll("aa", "", true) == 3 && b.text() == "a\nkeep\n");
+    CHECK(b.undo() && b.text() == "aaa\nkeep\naaaa" && !b.undo());
+    // Replace with match case off accepts a selection differing in case.
+    b.setText("Foo foo");
+    b.select({0, 0}, {0, 3});
+    CHECK(b.replaceNext("foo", "x", false) && b.text() == "x foo" && b.selectedText() == "foo");
+    CHECK(!b.replaceNext("FOO", "y", true) && b.text() == "x foo");
+}
+
+// Typing brackets and quotes: pairs, stepping over, Backspace in a pair.
+void testLuaAutoClose() {
+    lua::Buffer b;
+    auto typeAll = [&](const char* s) {
+        for (const char* c = s; *c; ++c) b.type(std::string(1, *c));
+    };
+    typeAll("print(");
+    CHECK(b.text() == "print()" && b.cursor() == (lua::Pos{0, 6}) && b.autoClosers() == 1);
+    typeAll("x[1");
+    CHECK(b.text() == "print(x[1])");
+    typeAll("])");
+    CHECK(b.text() == "print(x[1])" && b.cursor() == (lua::Pos{0, 11}) && b.autoClosers() == 0);
+    // Quotes pair outside words; a typed closer steps over.
+    b.setText("");
+    typeAll("s = \"hi\"");
+    CHECK(b.text() == "s = \"hi\"" && b.cursor() == (lua::Pos{0, 8}));
+    typeAll(" -- don't");
+    CHECK(b.text() == "s = \"hi\" -- don't");
+    // Not inside a string or a comment.
+    b.setText("x = \"a, b\"");
+    b.moveTo({0, 7});
+    typeAll("'");
+    CHECK(b.text() == "x = \"a,' b\"");
+    b.setText("-- note ");
+    b.moveTo({0, 8});
+    typeAll("\"");
+    CHECK(b.text() == "-- note \"");
+    // Brackets only before a blank, the end or punctuation.
+    b.setText("foo");
+    b.moveTo({0, 0});
+    typeAll("(");
+    CHECK(b.text() == "(foo");
+    // Backspace between an empty pair deletes both; with text inside, one.
+    b.setText("");
+    typeAll("f({");
+    CHECK(b.text() == "f({})");
+    b.backspace();
+    CHECK(b.text() == "f()" && b.cursor() == (lua::Pos{0, 2}));
+    b.backspace();
+    CHECK(b.text() == "f" && b.cursor() == (lua::Pos{0, 1}));
+    typeAll("(ab");
+    b.backspace();
+    CHECK(b.text() == "f(a)");
+    typeAll(")");
+    CHECK(b.text() == "f(a)" && b.cursor() == (lua::Pos{0, 4}));
+    // A closer it did not insert is typed, not stepped over.
+    b.setText("g()");
+    b.moveTo({0, 2});
+    typeAll(")");
+    CHECK(b.text() == "g())");
+    b.setText("g()");
+    b.moveTo({0, 2});
+    b.backspace();
+    CHECK(b.text() == "g)");
+    // Another edit forgets the pairs: an undo, a newline.
+    b.setText("");
+    typeAll("h(");
+    b.newline();
+    b.move(lua::Buffer::Move::Down, false);
+    b.move(lua::Buffer::Move::Home, false);
+    CHECK(b.autoClosers() == 0);
+    // A selection on one line gets wrapped and stays selected.
+    b.setText("a = b");
+    b.select({0, 4}, {0, 5});
+    typeAll("(");
+    CHECK(b.text() == "a = (b)" && b.selectedText() == "b");
+    // The pair is one undo step.
+    b.setText("");
+    typeAll("[");
+    CHECK(b.undo() && b.text().empty());
+}
+
+// An open script whose file changes on disk.
+void testLuaReload() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "lua-reload";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const fs::path file = dir / "door.lua";
+    auto write = [&](const char* text) {
+        { std::ofstream(file, std::ios::binary) << text; }
+        // A time of its own, whatever the filesystem's resolution.
+        static int bump = 0;
+        fs::last_write_time(file, fs::file_time_type::clock::now() + std::chrono::seconds(++bump), ec);
+    };
+    write("a = 1\nb = 2\nc = 3\n");
+    lua::Script s;
+    std::string err;
+    CHECK(s.open(file, &err) && !s.changedOnDisk());
+    s.buffer.moveTo({2, 3});
+    // Changed above the cursor: reloaded, the cursor moves with its line.
+    write("-- top\na = 1\nb = 2\nc = 3\n");
+    CHECK(s.changedOnDisk());
+    CHECK(s.reload(&err) && s.buffer.text() == "-- top\na = 1\nb = 2\nc = 3\n");
+    CHECK(!s.dirty() && !s.changedOnDisk() && s.buffer.cursor() == (lua::Pos{3, 3}));
+    // Undo gets the old text back, unsaved.
+    CHECK(s.buffer.undo() && s.buffer.text() == "a = 1\nb = 2\nc = 3\n" && s.dirty());
+    CHECK(s.buffer.redo() && !s.dirty());
+    // Touched with the same text: no change.
+    write("-- top\na = 1\nb = 2\nc = 3\n");
+    CHECK(!s.changedOnDisk());
+    // Keep mine: the change is not reported again; saving overwrites it.
+    s.buffer.moveTo({0, 6});
+    s.buffer.insert("!");
+    write("other\n");
+    CHECK(s.changedOnDisk() && s.dirty());
+    s.keepMine();
+    CHECK(!s.changedOnDisk() && s.dirty());
+    CHECK(s.save(&err) && !s.changedOnDisk());
+    // A save of our own is not a change; a missing file is not one either.
+    fs::remove(file, ec);
+    CHECK(!s.changedOnDisk());
+    write("back\r\n");
+    CHECK(s.changedOnDisk() && s.reload(&err) && s.buffer.text() == "back\n");
+    CHECK(s.save(&err));
+    std::ifstream in(file, std::ios::binary);
+    CHECK(std::string((std::istreambuf_iterator<char>(in)), {}) == "back\r\n");
+}
+
+// A file deleted under its tab is reported until it is saved again or comes
+// back; a script for a file not yet written is not deleted.
+void testLuaDeleted() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "lua-deleted";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const fs::path file = dir / "door.lua";
+    { std::ofstream(file, std::ios::binary) << "a = 1\n"; }
+    lua::Script s;
+    std::string err;
+    CHECK(s.open(file, &err) && !s.deletedOnDisk());
+    fs::remove(file, ec);
+    CHECK(s.deletedOnDisk() && !s.changedOnDisk() && !s.dirty());
+    // Save writes it again, the text as it was.
+    CHECK(s.save(&err) && !s.deletedOnDisk() && fs::exists(file));
+    std::ifstream in(file, std::ios::binary);
+    CHECK(std::string((std::istreambuf_iterator<char>(in)), {}) == "a = 1\n");
+    in.close();
+    // Deleted, then written back by another program: no longer deleted.
+    fs::remove(file, ec);
+    CHECK(s.deletedOnDisk());
+    { std::ofstream(file, std::ios::binary) << "a = 1\n"; }
+    CHECK(!s.deletedOnDisk());
+    // Moved away is the same as deleted.
+    fs::rename(file, dir / "moved.lua", ec);
+    CHECK(s.deletedOnDisk());
+    // A new script's file does not exist until it is saved: not deleted.
+    lua::Script fresh;
+    CHECK(fresh.open(dir / "new.lua", &err) && !fresh.deletedOnDisk());
+    fresh.buffer.insert("x = 1");
+    CHECK(fresh.save(&err) && !fresh.deletedOnDisk());
+    fs::remove(dir / "new.lua", ec);
+    CHECK(fresh.deletedOnDisk());
+}
+
 void testEditMany() {
     editor::Document d;
     d.reset(sample());
@@ -3457,6 +3667,10 @@ int main(int argc, char** argv) {
     testLuaDefinitions();
     testLuaCheck();
     testLuaScriptFile();
+    testLuaReplace();
+    testLuaAutoClose();
+    testLuaReload();
+    testLuaDeleted();
     testLiveExport();
     testBlendCancel();
     testPlay();

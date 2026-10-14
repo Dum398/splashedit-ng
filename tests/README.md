@@ -273,8 +273,25 @@ open afterwards. Needs a display (CI runs it under `xvfb-run`).
 line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the
 tab before building, so the file on disk starts with the typed line; typing alone must not. Then
 New script, in the scene inspector and on an object whose Script component has no file: it writes
-`scripts/<name>.lua` (numbered when taken), sets it, undoes in one step and opens the file. Needs
-a display (CI runs it under `xvfb-run` on Linux).
+`scripts/<name>.lua` (numbered when taken), sets it, undoes in one step and opens the file; on a
+Trigger box it writes `scripts/<name>_trigger.lua` with `onTriggerEnter`/`onTriggerExit`. Then
+the editor itself:
+
+- Replace (Ctrl+H): Ctrl+Alt+Enter and the Replace all button replace every match, Match case
+  leaves other cases alone, one Ctrl+Z undoes the lot, Enter replaces one match at a time.
+- Typing `(`, `"` and the rest inserts the closer, typing the closer steps over it, Backspace in
+  an empty pair deletes both, and `don't` gets no second quote.
+- `--copy-file <from>@<to>` stands in for another program writing the open script. With no edits
+  the tab reloads within a second; with edits the bar comes up (its colour in the screenshot),
+  Reload takes the file, Keep mine keeps the edits (typing goes on where it was) and saves over
+  it, and without an answer the file is left alone.
+- `--delete-file <path>` stands in for another program deleting it: the tab reads `(deleted)`
+  (its strip differs from a run without), a Save / Close bar comes up, Save writes the text
+  again and Close drops the tab without writing anything.
+- With completion open at the far right of a line, the inspector's pixels match a run without it:
+  the list and its docs card stay inside the editor panel.
+
+Needs a display (CI runs it under `xvfb-run` on Linux).
 
     python3 scripteditorcheck.py <splashedit>
 

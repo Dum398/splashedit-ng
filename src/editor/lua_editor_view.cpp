@@ -32,10 +32,17 @@ struct ScriptTabs::Tab {
     uint64_t compRevision = 0;
     lua::Pos compCursor;
     ImRect compRect;
-    // Find.
+    // Find and replace.
     bool findOpen = false, findFocus = false, matchCase = false;
-    std::string query, searched;
+    bool replaceOpen = false, replaceFocus = false;
+    bool findEditing = false, replaceEditing = false;  // last frame
+    std::string query, searched, replacement;
     ImRect findRect;
+    // The file changed on disk under unsaved edits: Reload or Keep mine.
+    bool diskChanged = false;
+    // The file was deleted on disk: Save writes it again, or Close.
+    bool diskDeleted = false;
+    bool closeAsked = false;  // Close on that bar, done by the next tabStrip
     // API docs shown by go-to-definition on an API name, until the cursor moves.
     const lua::ApiSymbol* peek = nullptr;
     lua::Pos peekAt;
@@ -96,8 +103,10 @@ bool ScriptTabs::saveAll(std::string* error) {
     for (auto& t : m_tabs) {
         if (!t->script.dirty()) continue;
         std::string err;
-        if (t->script.save(&err)) m_saved.push_back(t->script.path());
-        else if (ok) {
+        if (t->script.save(&err)) {
+            t->diskChanged = t->diskDeleted = false;
+            m_saved.push_back(t->script.path());
+        } else if (ok) {
             ok = false;
             if (error) *error = err;
         }
@@ -132,6 +141,7 @@ void ScriptTabs::close(int i) {
 static void saveTab(ScriptTabs& tabs, ScriptTabs::Tab& t, std::vector<std::filesystem::path>* saved) {
     std::string err;
     if (t.script.save(&err)) {
+        t.diskChanged = t.diskDeleted = false;
         saved->push_back(t.script.path());
         tabs.notice = "Saved " + t.script.title();
         tabs.noticeBad = false;
@@ -198,8 +208,34 @@ void ScriptTabs::closePrompt() {
     ImGui::EndPopup();
 }
 
+// About once a second: a tab whose file changed on disk reloads when it has
+// no unsaved edits, else asks (the bar over its editor). One whose file was
+// deleted says so on its tab and offers Save or Close.
+void ScriptTabs::pollDisk() {
+    const double now = ImGui::GetTime();
+    if (m_polledAt >= 0 && now - m_polledAt < 1.0) return;
+    m_polledAt = now;
+    for (auto& t : m_tabs) {
+        const bool changed = t->script.changedOnDisk();
+        if (changed && !t->script.dirty()) {
+            std::string err;
+            if (t->script.reload(&err)) t->compOpen = false;
+        }
+        t->diskChanged = changed && t->script.dirty();
+        t->diskDeleted = t->script.deletedOnDisk();
+    }
+}
+
 ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     closePrompt();
+    if (m_tabs.empty()) return r;
+    pollDisk();
+    for (int i = 0; i < (int)m_tabs.size(); ++i) {
+        if (!m_tabs[i]->closeAsked) continue;
+        m_tabs[i]->closeAsked = false;
+        close(i);
+        break;  // the rest wait a frame: close() may be asking about this one
+    }
     if (m_tabs.empty()) return r;
     Fonts& f = fonts();
     const float h = size::panelHeader;
@@ -211,6 +247,7 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     for (int i = -1; i < (int)m_tabs.size(); ++i) {
         const bool scene = i < 0;
         std::string label = scene ? std::string("Scene") : m_tabs[i]->script.title();
+        if (!scene && m_tabs[i]->diskDeleted) label += " (deleted)";
         const char* ic = scene ? icon::box : icon::fileCode;
         const float iw = measure(f.medium, type::icon, ic).x, tw = measure(f.medium, type::label, label.c_str()).x;
         const float w = space::md + iw + space::sm - 2 + tw + (scene ? space::md : 28);
@@ -270,20 +307,46 @@ static ImU32 tokColor(lua::Tok k) {
     }
 }
 
+// Where the cards may go: the script editor's panel, so none covers the
+// inspector beside it. Set by ScriptTabs::draw.
+static ImRect g_cardBounds;
+
 // A card on top of everything: a signature in the code font, then wrapped
 // docs. `arg` (from 0) brightens that parameter. Drawn above `at` when
-// `above`, else below. Returns its rect.
-static ImRect infoCard(ImVec2 at, bool above, const std::string& sig, const std::string& doc, int arg = -1) {
+// `above`, else below; kept inside g_cardBounds. With `beside` (the
+// completion list) it goes right of that, else left, else under or over it.
+// Returns its rect.
+static ImRect infoCard(ImVec2 at, bool above, const std::string& sig, const std::string& doc, int arg = -1,
+                       const ImRect* beside = nullptr) {
     Fonts& f = fonts();
     ImFont* mono = f.mono ? f.mono : f.regular;
-    const float wrap = 420;
+    ImRect bounds = g_cardBounds;
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    if (bounds.GetWidth() <= 0 || bounds.GetHeight() <= 0) bounds = ImRect(ImVec2(0, 0), d);
+    bounds.ClipWithFull(ImRect(ImVec2(space::xs, space::xs), d - ImVec2(space::xs, space::xs)));
+    // Narrow panels wrap the docs sooner.
+    const float wrap = std::max(160.0f, std::min(420.0f, bounds.GetWidth() - space::md * 2 - 2));
     ImVec2 ss = mono->CalcTextSizeA(type::code, FLT_MAX, 0, sig.c_str());
     ImVec2 ds = doc.empty() ? ImVec2(0, 0) : f.regular->CalcTextSizeA(type::label, FLT_MAX, wrap, doc.c_str());
     float w = std::max(ss.x, ds.x) + space::md * 2, h = ss.y + (doc.empty() ? 0 : ds.y + space::sm) + space::sm * 2;
     ImRect r(ImVec2(at.x, above ? at.y - h : at.y), ImVec2(at.x + w, above ? at.y : at.y + h));
-    ImVec2 d = ImGui::GetIO().DisplaySize;
-    float sx = std::min(0.0f, d.x - space::xs - r.Max.x);
+    if (beside && r.Max.x > bounds.Max.x) {
+        const float gap = 6;
+        if (beside->Min.x - gap - w >= bounds.Min.x) {
+            r.Min.x = beside->Min.x - gap - w, r.Max.x = beside->Min.x - gap;
+        } else {
+            // No room on either side: under the list, else over it.
+            r.Min.x = beside->Min.x, r.Max.x = beside->Min.x + w;
+            const float y = beside->Max.y + gap + h <= bounds.Max.y ? beside->Max.y + gap : beside->Min.y - gap - h;
+            r.Min.y = y, r.Max.y = y + h;
+        }
+    }
+    float sx = std::min(0.0f, bounds.Max.x - r.Max.x);
+    sx = std::max(sx, bounds.Min.x - (r.Min.x + sx));
     r.Min.x += sx, r.Max.x += sx;
+    float sy = std::min(0.0f, bounds.Max.y - r.Max.y);
+    sy = std::max(sy, bounds.Min.y - (r.Min.y + sy));
+    r.Min.y += sy, r.Max.y += sy;
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     dl->AddRectFilled(r.Min + ImVec2(0, 2), r.Max + ImVec2(0, 4), rgb(0x000000, 70), radius::card);
     dl->AddRectFilled(r.Min, r.Max, color::active, radius::card);
@@ -425,11 +488,69 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     const float fs = type::code, lineH = std::floor(fs * 1.5f);
     const float charW = mono->CalcTextSizeA(fs, FLT_MAX, 0, "M").x;
     ImGui::PushID(&t);
+    g_cardBounds = r;
 
     dl->AddRectFilled(r.Min, r.Max, color::panel, radius::window, ImDrawFlags_RoundCornersBottom);
     const float statusH = 28, barW = 10;
     ImRect status(ImVec2(r.Min.x, r.Max.y - statusH), r.Max);
     ImRect area(r.Min, ImVec2(r.Max.x, status.Min.y));
+    // The file changed on disk while this tab has unsaved edits, or was
+    // deleted: a bar over the text with what to do about it.
+    ImRect diskBar;
+    auto width = [&](const char* l) { return space::md * 2 + measure(f.medium, type::body, l).x; };
+    auto diskBarFrame = [&](const char* what, const char* detail) {
+        const float bh = 38;
+        ImRect bar(area.Min, ImVec2(area.Max.x, area.Min.y + bh));
+        diskBar = bar;
+        area.Min.y = bar.Max.y;
+        dl->AddRectFilled(bar.Min, bar.Max, color::warnSoft);
+        dl->AddLine(ImVec2(bar.Min.x, bar.Max.y - 0.5f), ImVec2(bar.Max.x, bar.Max.y - 0.5f), color::border);
+        const float cy = bar.GetCenter().y;
+        float x = bar.Min.x + space::md;
+        text(dl, ImVec2(x, cy - type::icon * 0.5f - 1), f.medium, type::icon, color::warn, icon::warning);
+        x += measure(f.medium, type::icon, icon::warning).x + space::sm;
+        text(dl, ImVec2(x, cy - type::label * 0.5f - 1), f.semibold, type::label, color::text, what);
+        x += measure(f.semibold, type::label, what).x + space::sm;
+        text(dl, ImVec2(x, cy - type::label * 0.5f - 1), f.regular, type::label, color::textDim, detail);
+        return cy - size::field * 0.5f;
+    };
+    if (t.diskDeleted) {
+        const float by = diskBarFrame("Deleted on disk.", "Save writes it again; Close drops the tab.");
+        float bx = diskBar.Max.x - space::md - width("Close");
+        if (button("closedeleted", ImVec2(bx, by), nullptr, "Close", ButtonKind::Secondary, nullptr,
+                   "Close the tab. With unsaved edits it asks first.")) {
+            t.closeAsked = true;
+        }
+        bx -= space::sm + width("Save");
+        if (button("recreate", ImVec2(bx, by), nullptr, "Save", ButtonKind::Primary, nullptr,
+                   "Write this text to the file again.")) {
+            saveTab(*this, t, &m_saved);
+            t.focused = true;
+        }
+    } else if (t.diskChanged) {
+        const float by = diskBarFrame("Changed on disk.", "This tab has unsaved edits.");
+        float bx = diskBar.Max.x - space::md - width("Keep mine");
+        if (button("keepmine", ImVec2(bx, by), nullptr, "Keep mine", ButtonKind::Secondary, nullptr,
+                   "Keep editing your text; saving overwrites the file.")) {
+            s.keepMine();
+            t.diskChanged = false;
+            t.focused = true;
+        }
+        bx -= space::sm + width("Reload");
+        if (button("reload", ImVec2(bx, by), nullptr, "Reload", ButtonKind::Primary, nullptr,
+                   "Read the file again. Ctrl+Z gets your edits back.")) {
+            std::string err;
+            if (s.reload(&err)) {
+                t.diskChanged = false;
+                t.focused = true;
+                t.compOpen = false;
+                t.reveal = true;
+            } else {
+                notice = "Reload failed: " + err;
+                noticeBad = true;
+            }
+        }
+    }
     int digits = 3;
     for (int n = b.lineCount(); n >= 1000; n /= 10) ++digits;
     const float gutterW = digits * charW + 30;
@@ -456,6 +577,8 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     const lua::Pos before = b.cursor();
     const uint64_t revBefore = b.revision();
     ImGui::SetCursorScreenPos(area.Min);
+    // The find bar's buttons, drawn later on top, take the clicks over it.
+    ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton("##code", ImMax(ImVec2(area.GetWidth() - barW, area.GetHeight()), ImVec2(1, 1)));
     const bool hovered = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
     const ImVec2 mouse = io.MousePos;
@@ -477,7 +600,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
                 b.select(a, e);
             } else if (clicks >= 3) b.select(lua::Pos{p.line, 0}, lua::Pos{p.line + 1, 0});
             else b.moveTo(p, io.KeyShift);
-        } else if (!overPopup && !(t.compOpen && t.compRect.Contains(mouse))) {
+        } else if (!overPopup && !(t.compOpen && t.compRect.Contains(mouse)) && !diskBar.Contains(mouse)) {
             t.focused = false;
         }
     }
@@ -579,8 +702,11 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
                     }
                 }
                 if (ImGui::IsKeyPressed(ImGuiKey_S, false)) saveTab(*this, t, &m_saved);
-                if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+                // Ctrl+F finds, Ctrl+H finds and replaces.
+                const bool findKey = ImGui::IsKeyPressed(ImGuiKey_F, false), replaceKey = ImGui::IsKeyPressed(ImGuiKey_H, false);
+                if (findKey || replaceKey) {
                     t.findOpen = true;
+                    t.replaceOpen = replaceKey;
                     t.findFocus = true;
                     if (b.hasSelection() && b.selStart().line == b.selEnd().line) t.query = b.selectedText();
                 }
@@ -598,7 +724,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
             if (c < 32 || c == 127 || (ctrl && !alt)) continue;
             char buf[5] = {};
             ImTextCharToUtf8(buf, c);
-            b.insert(buf);
+            b.type(buf);
             const bool word = c < 128 && (std::isalnum((int)c) || c == '_');
             if (word && !t.compOpen) openCompletion(t, false);
             else if (c == '.' || c == ':') openCompletion(t, false);
@@ -793,19 +919,51 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         }
     }
 
-    // --- Find bar ---
+    // --- Find and replace bar ---
     if (t.findOpen) {
-        const float fw = 360, fh = 34;
+        const float fw = 440, rowH = 34, gap = 29;
+        const float fh = t.replaceOpen ? gap + rowH : rowH;
         ImRect fr(ImVec2(body.Max.x - fw - space::sm, area.Min.y + space::sm), ImVec2(body.Max.x - space::sm, area.Min.y + space::sm + fh));
         t.findRect = fr;
         dl->AddRectFilled(fr.Min + ImVec2(0, 2), fr.Max + ImVec2(0, 4), rgb(0x000000, 60), radius::card);
         dl->AddRectFilled(fr.Min, fr.Max, color::raised, radius::card);
         dl->AddRect(fr.Min, fr.Max, color::borderStrong, radius::card);
-        const float bw = 26;
-        ImRect field(fr.Min + ImVec2(5, 5), ImVec2(fr.Max.x - bw * 4 - 82, fr.Max.y - 5));
+        const float bw = 26, toggleW = 20;
+        // The chevron on the left shows or hides the Replace row (Ctrl+H).
+        {
+            ImRect tr(ImVec2(fr.Min.x + 3, fr.Min.y + 5), ImVec2(fr.Min.x + 3 + toggleW - 2, fr.Max.y - 5));
+            Hit h = interact("togglereplace", tr);
+            if (h.hovered) dl->AddRectFilled(tr.Min, tr.Max, color::hover, radius::field);
+            textCentered(dl, tr, f.medium, type::label, h.hovered ? color::text : color::textDim,
+                         t.replaceOpen ? icon::chevronDown : icon::chevronRight);
+            tooltip(t.replaceOpen ? "Hide Replace" : "Replace (Ctrl+H)");
+            if (h.clicked) {
+                t.replaceOpen = !t.replaceOpen;
+                if (t.replaceOpen) t.replaceFocus = true;
+            }
+        }
+        const float fieldX = fr.Min.x + 3 + toggleW;
+        ImRect field(ImVec2(fieldX, fr.Min.y + 5), ImVec2(fr.Max.x - bw * 4 - 82, fr.Min.y + rowH - 5));
+        // Enter in a field acts and keeps the field (ImGui would let go of it).
+        const bool keepActive = io.ConfigInputTextEnterKeepActive;
+        io.ConfigInputTextEnterKeepActive = true;
         bool editing = searchField("find", field, "Find", nullptr, &t.query, t.findFocus);
         t.findFocus = false;
-        if (editing) t.focused = false;
+        bool replacing = false;
+        ImRect rfield;
+        if (t.replaceOpen) {
+            rfield = ImRect(ImVec2(fieldX, fr.Min.y + gap + 5), ImVec2(field.Max.x, fr.Min.y + gap + rowH - 5));
+            replacing = searchField("replace", rfield, "Replace", nullptr, &t.replacement, t.replaceFocus, false);
+            t.replaceFocus = false;
+        }
+        io.ConfigInputTextEnterKeepActive = keepActive;
+        const bool inFind = editing || t.findEditing, inReplace = replacing || t.replaceEditing;
+        t.findEditing = editing;
+        t.replaceEditing = replacing;
+        if (editing || replacing) t.focused = false;
+        // Tab and Shift+Tab go between the two fields.
+        if (t.replaceOpen && inFind && ImGui::IsKeyPressed(ImGuiKey_Tab, false) && !io.KeyShift) t.replaceFocus = true;
+        if (inReplace && ImGui::IsKeyPressed(ImGuiKey_Tab, false) && io.KeyShift) t.findFocus = true;
         if (t.query != t.searched) {
             // Typing a search jumps to the first match from where the cursor was.
             t.searched = t.query;
@@ -814,9 +972,11 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
                 t.reveal = true;
             }
         }
-        bool next = false, prev = false;
-        if (editing && (ImGui::IsKeyPressed(ImGuiKey_Enter, true) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, true)))
-            (io.KeyShift ? prev : next) = true;
+        const bool enter = ImGui::IsKeyPressed(ImGuiKey_Enter, true) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, true);
+        bool next = false, prev = false, replaceOne = false, replaceEvery = false;
+        if (inFind && enter && !io.KeyCtrl) (io.KeyShift ? prev : next) = true;
+        // Enter replaces this match, Ctrl+Alt+Enter all of them (as in VS Code).
+        if (inReplace && enter && !io.KeyShift) (io.KeyCtrl && io.KeyAlt ? replaceEvery : replaceOne) = true;
         int count = b.countMatches(t.query, t.matchCase), at = 0;
         // Which match the selection is, counting from the top.
         lua::Pos from;
@@ -833,30 +993,54 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         if (at) std::snprintf(info, sizeof info, "%d of %d", at, count);
         else std::snprintf(info, sizeof info, count == 1 ? "%d match" : "%d matches", count);
         ImVec2 is = measure(f.regular, type::caption, info);
-        text(dl, ImVec2(field.Max.x + 6, fr.GetCenter().y - is.y * 0.5f), f.regular, type::caption,
-             count || t.query.empty() ? color::textDim : color::bad, info);
+        const float row1 = fr.Min.y + rowH * 0.5f;
+        text(dl, ImVec2(field.Max.x + 6, row1 - is.y * 0.5f), f.regular, type::caption, count || t.query.empty() ? color::textDim : color::bad,
+             info);
         float bx = fr.Max.x - bw * 4 - 6;
-        auto small = [&](const char* id, const char* label, bool on, const char* tip) {
-            ImRect br(ImVec2(bx, fr.Min.y + 5), ImVec2(bx + bw, fr.Max.y - 5));
-            bx += bw + 1;
+        auto small = [&](const char* id, const char* label, bool on, const char* tip, float y0, float w = 0) {
+            if (!w) w = bw;
+            ImRect br(ImVec2(bx, y0 + 5), ImVec2(bx + w, y0 + rowH - 5));
+            bx += w + 1;
             Hit h = interact(id, br);
             if (on || h.hovered) dl->AddRectFilled(br.Min, br.Max, on ? color::accentSoft : color::hover, radius::field);
             textCentered(dl, br, f.medium, type::label, on ? color::text : color::textDim, label);
             tooltip(tip);
             return h.clicked;
         };
-        if (small("case", "Aa", t.matchCase, "Match case")) t.matchCase = !t.matchCase, t.searched.clear();
-        if (small("prev", "\xe2\x86\x91", false, "Previous match (Shift+F3)")) prev = true;
-        if (small("next", "\xe2\x86\x93", false, "Next match (F3)")) next = true;
-        if (small("close", icon::x, false, "Close (Escape)")) t.findOpen = false, t.focused = true;
+        if (small("case", "Aa", t.matchCase, "Match case", fr.Min.y)) t.matchCase = !t.matchCase, t.searched.clear();
+        if (small("prev", "\xe2\x86\x91", false, "Previous match (Shift+F3)", fr.Min.y)) prev = true;
+        if (small("next", "\xe2\x86\x93", false, "Next match (F3)", fr.Min.y)) next = true;
+        if (small("close", icon::x, false, "Close (Escape)", fr.Min.y)) t.findOpen = false, t.focused = true;
+        if (t.replaceOpen) {
+            bx = rfield.Max.x + 6;
+            const float w1 = measure(f.medium, type::label, "Replace").x + 14, w2 = measure(f.medium, type::label, "Replace all").x + 14;
+            if (small("replaceone", "Replace", false, "Replace this match and go to the next (Enter)", fr.Min.y + gap, w1)) replaceOne = true;
+            if (small("replaceall", "Replace all", false, "Replace every match, one undo step (Ctrl+Alt+Enter)", fr.Min.y + gap, w2))
+                replaceEvery = true;
+        }
+        if (replaceOne && !t.query.empty()) {
+            b.replaceNext(t.query, t.replacement, t.matchCase);
+            t.reveal = true;
+            t.searched = t.query;
+        }
+        if (replaceEvery && !t.query.empty()) {
+            int n = b.replaceAll(t.query, t.replacement, t.matchCase);
+            notice = n ? "Replaced " + std::to_string(n) + (n == 1 ? " match" : " matches") : "Nothing to replace";
+            noticeBad = false;
+            t.searched = t.query;
+        }
         if ((next || prev) && !t.query.empty())
             if (auto m = b.find(t.query, prev ? b.selStart() : b.selEnd(), next, t.matchCase)) {
                 b.select(m->first, m->second);
                 t.reveal = true;
             }
-        if (editing && ImGui::IsKeyPressed(ImGuiKey_Escape, false) && t.query.empty()) t.findOpen = false, t.focused = true;
+        // Escape empties a field, then closes the bar.
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) &&
+            ((inFind && t.query.empty()) || (inReplace && t.replacement.empty())))
+            t.findOpen = false, t.focused = true;
     } else {
         t.findRect = ImRect();
+        t.findEditing = t.replaceEditing = false;
     }
 
     // --- Popups: completion, signature hint, docs ---
@@ -868,9 +1052,10 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         t.compSel = std::clamp(t.compSel, 0, n - 1);
         if (t.compSel < t.compTop) t.compTop = t.compSel;
         if (t.compSel >= t.compTop + rows) t.compTop = t.compSel - rows + 1;
-        float px = xOf(t.comp.from.line, t.comp.from.col) - 30;
+        // Inside the panel, as the cards are.
+        float px = std::max(r.Min.x + 4, std::min(xOf(t.comp.from.line, t.comp.from.col) - 30, r.Max.x - w - 4));
         float h = rows * rowH + 8;
-        bool below = caret.y + lineH + h < ImGui::GetIO().DisplaySize.y - 8;
+        bool below = caret.y + lineH + h < std::min(r.Max.y, ImGui::GetIO().DisplaySize.y) - 8;
         ImRect pr(ImVec2(px, below ? caret.y + lineH + 2 : caret.y - h - 2), ImVec2(px + w, below ? caret.y + lineH + 2 + h : caret.y - 2));
         t.compRect = pr;
         ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -922,7 +1107,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         if (t.compSel < n) {
             const lua::Completion& c = t.comp.items[t.compSel];
             if (c.api && (*c.api->doc || c.kind != lua::ItemKind::ApiTable))
-                infoCard(ImVec2(pr.Max.x + 6, pr.Min.y), false, c.api->signature, c.api->doc);
+                infoCard(ImVec2(pr.Max.x + 6, pr.Min.y), false, c.api->signature, c.api->doc, -1, &pr);
         }
     }
     // Inside a call's parentheses: the signature, the current argument lit.

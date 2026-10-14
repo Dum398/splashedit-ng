@@ -47,6 +47,8 @@ public:
 private:
     void close(int i);
     void closePrompt();
+    void pollDisk();
+    double m_polledAt = -1;
     std::vector<std::unique_ptr<Tab>> m_tabs;
     int m_active = -1;
     int m_closing = -1;  // a changed tab waiting on the save prompt

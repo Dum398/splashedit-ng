@@ -61,7 +61,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, CopyFile, DeleteFile } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -69,7 +69,7 @@ struct Action {
     ImGuiKey key = ImGuiKey_None;
     bool ctrl = false, shift = false, alt = false;
     bool hold = false;  // a drag that never lets go (mid-drag screenshots)
-    std::string text;  // Text: the characters; Drop: the file; Shot: the PNG to write
+    std::string text, text2;  // Text: the characters; Drop: the file; Shot: the PNG to write; CopyFile: from, to
     int waitFrames = 0;
 };
 
@@ -117,6 +117,11 @@ bool parseKey(const char* spec, Action& a) {
     else if (s == "backspace") a.key = ImGuiKey_Backspace;
     else if (s == "up") a.key = ImGuiKey_UpArrow;
     else if (s == "down") a.key = ImGuiKey_DownArrow;
+    else if (s == "left") a.key = ImGuiKey_LeftArrow;
+    else if (s == "right") a.key = ImGuiKey_RightArrow;
+    else if (s == "home") a.key = ImGuiKey_Home;
+    else if (s == "end") a.key = ImGuiKey_End;
+    else if (s == "tab") a.key = ImGuiKey_Tab;
     else if (s == "ctrl") a.key = ImGuiKey_LeftCtrl, a.ctrl = true;
     else if (s == "shift") a.key = ImGuiKey_LeftShift, a.shift = true;
     else if (s == "alt") a.key = ImGuiKey_LeftAlt, a.alt = true;
@@ -211,6 +216,21 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
         case Action::Text:
             if (f == 0) io.AddInputCharactersUTF8(a.text.c_str());
             break;
+        case Action::CopyFile:
+            // Another program writing a file the editor has open.
+            if (f == 0) {
+                std::error_code ec;
+                std::filesystem::copy_file(a.text, a.text2, std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec) std::fprintf(stderr, "--copy-file: %s\n", ec.message().c_str());
+            }
+            break;
+        case Action::DeleteFile:
+            // Another program deleting a file the editor has open.
+            if (f == 0) {
+                std::error_code ec;
+                if (!std::filesystem::remove(a.text, ec)) std::fprintf(stderr, "--delete-file: %s\n", ec ? ec.message().c_str() : "no such file");
+            }
+            break;
         case Action::Wait:
         case Action::Drop:  // the loop below hands these to the editor
         case Action::Shot:
@@ -304,6 +324,23 @@ Args parse(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--wait-import")) {
             // Holds the script here while a .blend import is running (Blender in the background), up to 90 s.
             a.actions.push_back(Action(Action::WaitImport));
+        } else if (!std::strcmp(argv[i], "--copy-file")) {
+            // --copy-file <from>@<to>: copies over <to> at this point of the run.
+            Action act(Action::CopyFile);
+            std::string v = next();
+            size_t at = v.rfind('@');
+            if (at == std::string::npos) {
+                std::fprintf(stderr, "--copy-file wants <from>@<to>\n");
+                std::exit(2);
+            }
+            act.text = v.substr(0, at);
+            act.text2 = v.substr(at + 1);
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--delete-file")) {
+            // --delete-file <path>: deletes it at this point of the run.
+            Action act(Action::DeleteFile);
+            act.text = next();
+            a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--text")) {
             Action act(Action::Text);
             act.text = next();

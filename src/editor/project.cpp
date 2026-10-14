@@ -143,10 +143,21 @@ std::string scriptFileStem(const std::string& name) {
     return out.empty() ? "script" : out;
 }
 
-std::string scriptTemplate(const std::string& name, bool scene) {
+std::string scriptTemplate(const std::string& name, ScriptKind kind) {
     std::string title;
     for (char c : name) title += c == '\n' || c == '\r' ? ' ' : c;
-    if (scene)
+    if (kind == ScriptKind::Trigger)
+        return "-- " + title +
+               ": the trigger's script.\n"
+               "\n"
+               "-- The player walked into the box. index is the trigger's number.\n"
+               "function onTriggerEnter(index)\n"
+               "end\n"
+               "\n"
+               "-- The player left it.\n"
+               "function onTriggerExit(index)\n"
+               "end\n";
+    if (kind == ScriptKind::Scene)
         return "-- " + title +
                ": the scene's script.\n"
                "\n"
@@ -169,7 +180,7 @@ std::string scriptTemplate(const std::string& name, bool scene) {
            "-- end\n";
 }
 
-NewScript createScript(const fs::path& project, const std::string& name, bool scene) {
+NewScript createScript(const fs::path& project, const std::string& name, ScriptKind kind) {
     NewScript r;
     std::error_code ec;
     if (project.empty()) {
@@ -182,11 +193,11 @@ NewScript createScript(const fs::path& project, const std::string& name, bool sc
         r.error = "could not create " + utf8(dir) + ": " + ec.message();
         return r;
     }
-    const std::string stem = scriptFileStem(name);
+    const std::string stem = scriptFileStem(kind == ScriptKind::Trigger ? name + " trigger" : name);
     fs::path dest = dir / fromUtf8(stem + ".lua");
     for (int n = 2; fs::exists(dest, ec); ++n) dest = dir / fromUtf8(stem + "_" + std::to_string(n) + ".lua");
     std::ofstream out(dest, std::ios::binary);
-    out << scriptTemplate(name, scene);
+    out << scriptTemplate(name, kind);
     if (!out.flush()) {
         r.error = "could not write " + utf8(dest);
         return r;

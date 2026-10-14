@@ -52,9 +52,10 @@ int segmented(const char* id, ImVec2 pos, std::initializer_list<const char*> ite
 
 // A text field with a search icon. With `query` it is editable: click to
 // type, Escape clears (a second one leaves), the x clears; `focus` puts the caret in it
-// this frame. Returns true while it has the keyboard.
+// this frame. Returns true while it has the keyboard. Without `searchIcon`
+// it is a plain field (the script editor's Replace).
 bool searchField(const char* id, ImRect r, const char* placeholder, const char* shortcut = nullptr, std::string* query = nullptr,
-                 bool focus = false);
+                 bool focus = false, bool searchIcon = true);
 
 struct TreeRow {
     int depth = 0;

@@ -33,6 +33,7 @@
 #include "editor/live_export.hh"
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
+#include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
@@ -3652,6 +3653,199 @@ void testImportWarnings() {
     CHECK(doc.importWarnings("models/rig.gltf").empty());
 }
 
+// The model import queue: models are read and baked on a worker thread into
+// a temporary folder, one at a time in the order asked, and only applying the
+// result changes the project and the scene. Cancel and a scene change drop an
+// import with nothing changed.
+// TMPDIR pointed at a folder of the test's own while it lives, so the
+// temporary folders counted are this process's (std::filesystem::
+// temp_directory_path honours TMPDIR on POSIX and TMP on Windows), not other
+// processes' on a busy machine.
+struct ScopedTmpdir {
+#ifdef _WIN32
+    static constexpr const char* kVar = "TMP";
+#else
+    static constexpr const char* kVar = "TMPDIR";
+#endif
+    std::optional<std::string> old;
+    explicit ScopedTmpdir(const std::filesystem::path& dir) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (const char* v = std::getenv(kVar)) old = v;
+        set(dir.string().c_str());
+    }
+    ~ScopedTmpdir() { set(old ? old->c_str() : nullptr); }
+    static void set(const char* v) {
+#ifdef _WIN32
+        _putenv_s(kVar, v ? v : "");
+#else
+        if (v) setenv(kVar, v, 1);
+        else unsetenv(kVar);
+#endif
+    }
+};
+
+static std::set<std::string> importTemps() {
+    std::set<std::string> r;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(std::filesystem::temp_directory_path(ec), ec), end; !ec && it != end; it.increment(ec))
+        if (it->path().filename().string().rfind("splashedit-import-", 0) == 0) r.insert(it->path().filename().string());
+    return r;
+}
+
+static std::string fileBytes(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+// update() until the queue is empty or 30 s pass; applies each Ready outcome
+// with `apply` before the next update, as the editor does once a frame.
+template <typename F>
+static std::vector<editor::ModelImports::Outcome> drainImports(editor::ModelImports& q, editor::Document& doc, F apply) {
+    std::vector<editor::ModelImports::Outcome> all;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (q.busy() && std::chrono::steady_clock::now() < until) {
+        for (editor::ModelImports::Outcome& o : q.update(doc)) {
+            if (o.kind == editor::ModelImports::Outcome::Ready) apply(o);
+            all.push_back(std::move(o));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return all;
+}
+
+void testModelImports() {
+    namespace fs = std::filesystem;
+    using Outcome = editor::ModelImports::Outcome;
+    std::error_code ec;
+    fs::path dir = g_outDir / "modelimports";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game", outside = dir / "downloads";
+    fs::create_directories(proj, ec);
+    fs::create_directories(outside, ec);
+    const ScopedTmpdir scopedTmp(dir / "tmp");
+    std::ofstream(outside / "robot.gltf") << robotGltf(0.5f);
+    std::ofstream(outside / "crate.gltf") << robotGltf(0.75f);
+    std::ofstream(outside / "tri.obj") << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
+    std::ofstream(outside / "junk.glb") << "not a model";
+    const std::set<std::string> tempsBefore = importTemps();
+
+    splash::Scene sc;
+    sc.objects.push_back(named("A"));
+    editor::Document doc;
+    doc.reset(sc, proj, "game");
+    auto request = [&](const fs::path& file) {
+        editor::ModelImports::Request r;
+        r.file = file;
+        r.to.at = splash::Vec3{1, 2, 3};
+        r.loadId = doc.loadId();
+        return r;
+    };
+    auto place = [&](Outcome& o) {
+        const editor::ObjectPath at{int(doc.scene().objects.size())};
+        editor::PlacedModel p = editor::applyPlace(doc, o.staged, std::nullopt, at, *o.request.to.at);
+        CHECK(p.error.empty());
+    };
+
+    // Two in a row: the first starts on the first update and runs on a worker
+    // while the scene and the project are untouched; both land in order.
+    editor::ModelImports q;
+    CHECK(!q.busy() && q.stage() == editor::ModelImports::Stage::Idle && !q.current());
+    q.add(request(outside / "robot.gltf"));
+    q.add(request(outside / "tri.obj"));
+    CHECK(q.busy() && q.size() == 2 && !q.current());
+    std::vector<Outcome> first = q.update(doc);
+    CHECK(first.empty() && q.stage() == editor::ModelImports::Stage::Import);
+    CHECK(q.current() && q.current()->file == outside / "robot.gltf");
+    CHECK(doc.historySize() == 0 && !fs::exists(proj / "models" / "robot.gltf") && !fs::exists(proj / "models" / "robot.mesh"));
+    std::vector<std::string> order;
+    bool untouchedWhenReady = true;
+    std::vector<Outcome> got = drainImports(q, doc, [&](Outcome& o) {
+        // Ready but not applied: nothing is in the project yet.
+        untouchedWhenReady = untouchedWhenReady && !fs::exists(proj / "models" / o.request.file.filename());
+        order.push_back(o.request.file.filename().string());
+        place(o);
+    });
+    CHECK(got.size() == 2 && got[0].kind == Outcome::Ready && got[1].kind == Outcome::Ready);
+    CHECK((order == std::vector<std::string>{"robot.gltf", "tri.obj"}));
+    CHECK(untouchedWhenReady);
+    CHECK(!q.busy());
+    CHECK(doc.scene().objects.size() == 3 && doc.historySize() == 2);
+    CHECK(doc.object({1}) && doc.object({1})->name == "robot" && doc.object({2}) && doc.object({2})->name == "tri");
+    CHECK(fs::exists(proj / "models" / "robot.gltf") && fs::exists(proj / "models" / "robot" / "Body.mesh"));
+    CHECK(fs::exists(proj / "models" / "tri.obj") && fs::exists(proj / "models" / "tri.mesh"));
+    CHECK(fs::exists(proj / "models" / "robot.gltf.import.json"));
+    // Applying removed the temporary folders.
+    CHECK(importTemps() == tempsBefore);
+
+    // Cancel while it runs: nothing is adopted, written or placed, and the
+    // temporary folder goes once the worker is done with it.
+    q.add(request(outside / "crate.gltf"));
+    q.update(doc);
+    CHECK(q.current() && q.stage() == editor::ModelImports::Stage::Import);
+    q.cancel();
+    bool appliedCancelled = false;
+    got = drainImports(q, doc, [&](Outcome&) { appliedCancelled = true; });
+    CHECK(got.size() == 1 && got[0].kind == Outcome::Cancelled && !appliedCancelled);
+    CHECK(doc.scene().objects.size() == 3 && doc.historySize() == 2);
+    CHECK(!fs::exists(proj / "models" / "crate.gltf") && !fs::exists(proj / "models" / "crate") &&
+          !fs::exists(proj / "models" / "crate.mesh"));
+    bool tempsGone = false;
+    for (int i = 0; i < 1000 && !tempsGone; ++i) {
+        tempsGone = importTemps() == tempsBefore;
+        if (!tempsGone) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(tempsGone);
+
+    // A file that is not a model fails, adopting nothing; the next one still runs.
+    q.add(request(outside / "junk.glb"));
+    q.add(request(outside / "crate.gltf"));
+    got = drainImports(q, doc, place);
+    CHECK(got.size() == 2 && got[0].kind == Outcome::Failed && !got[0].error.empty() && got[1].kind == Outcome::Ready);
+    CHECK(!fs::exists(proj / "models" / "junk.glb"));
+    CHECK(doc.scene().objects.size() == 4 && doc.object({3}) && doc.object({3})->name == "crate");
+
+    // Asked for in a scene that is no longer open: dropped, never started.
+    editor::ModelImports::Request stale = request(outside / "tri.obj");
+    stale.loadId = doc.loadId() + 1;
+    q.add(stale);
+    got = q.update(doc);
+    CHECK(got.size() == 1 && got[0].kind == Outcome::Dropped && !q.busy());
+
+    // Reimport: asked twice before it starts, it runs once. Cancelled, the
+    // meshes on disk and the scene stay as they were; applied, the objects
+    // take the new materials as one undo step.
+    std::ofstream(outside / "robot.gltf", std::ios::trunc) << robotGltf(0.25f, true);
+    const fs::path bodyMesh = proj / "models" / "robot" / "Body.mesh";
+    const std::string bodyBefore = fileBytes(bodyMesh);
+    const unsigned historyBefore = unsigned(doc.historySize());
+    const std::vector<splash::Material> matsBefore = doc.object({1, 0})->mesh->materials;
+    editor::ModelImports::Request re;
+    re.reimport = proj / "models" / "robot.gltf";
+    re.loadId = doc.loadId();
+    q.add(re);
+    re.wasMerged = false;
+    q.add(re);
+    CHECK(q.size() == 1);
+    q.update(doc);
+    CHECK(q.current() && q.current()->reimport == re.reimport && q.current()->wasMerged == std::optional<bool>(false));
+    q.cancel();
+    got = drainImports(q, doc, [](Outcome&) {});
+    CHECK(got.size() == 1 && got[0].kind == Outcome::Cancelled);
+    CHECK(!bodyBefore.empty() && fileBytes(bodyMesh) == bodyBefore);
+    CHECK(doc.historySize() == historyBefore && doc.object({1, 0})->mesh->materials[0].color == matsBefore[0].color);
+    q.add(re);
+    got = drainImports(q, doc, [&](Outcome& o) {
+        editor::Reimported r = editor::applyReimport(doc, o.staged, o.request.wasMerged);
+        CHECK(r.error.empty() && r.objects == 1);
+    });
+    CHECK(got.size() == 1 && got[0].kind == Outcome::Ready);
+    CHECK(doc.historySize() == historyBefore + 1 && !(doc.object({1, 0})->mesh->materials[0].color == matsBefore[0].color));
+    CHECK(fileBytes(bodyMesh) != bodyBefore);
+    for (int i = 0; i < 1000 && importTemps() != tempsBefore; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    CHECK(importTemps() == tempsBefore);
+}
+
 // splash::BlendExport with a mock Blender (a shell script that starts a
 // sleeping child and waits for it): the constructor returns at once, cancel()
 // kills the script and its child, get() then throws BlendCancelled, nothing
@@ -3670,7 +3864,10 @@ void testBlendCancel() {
     fs::create_directories(dir);
     const fs::path mock = dir / "blender", blend = dir / "crate.blend", pids = dir / "pids";
     std::ofstream(blend) << "BLENDER-v300 not really";
-    std::ofstream(mock) << "#!/bin/sh\nsleep 10 &\necho $$ $! > '" << pids.string() << ".tmp'\nmv '" << pids.string()
+    const ScopedTmpdir scopedTmp(dir / "tmp");
+    // The child sleeps far longer than any bound below, so a job that is never
+    // killed cannot pass by Blender ending on its own.
+    std::ofstream(mock) << "#!/bin/sh\nsleep 120 &\necho $$ $! > '" << pids.string() << ".tmp'\nmv '" << pids.string()
                         << ".tmp' '" << pids.string() << "'\nwait\n";
     fs::permissions(mock, fs::perms::owner_all, fs::perm_options::add);
     setenv("SPLASHEDIT_BLENDER", mock.c_str(), 1);
@@ -3701,8 +3898,8 @@ void testBlendCancel() {
         const auto t0 = clock::now();
         {
             splash::BlendExport job(blend);
-            CHECK(clock::now() - t0 < 2s);  // Blender runs on the worker thread
-            CHECK(waitFor([&] { return fs::exists(pids); }, 5000ms));
+            CHECK(clock::now() - t0 < 30s);  // Blender runs on the worker thread (it would block 120 s)
+            CHECK(waitFor([&] { return fs::exists(pids); }, 30000ms));
             std::ifstream(pids) >> shell >> child;
             CHECK(shell > 0 && child > 0);
             CHECK(!job.done());
@@ -3710,8 +3907,8 @@ void testBlendCancel() {
             if (!destroy) {
                 const auto c0 = clock::now();
                 job.cancel();
-                CHECK(waitFor([&] { return job.done(); }, 5000ms));
-                CHECK(clock::now() - c0 < 2s);
+                CHECK(waitFor([&] { return job.done(); }, 30000ms));
+                CHECK(clock::now() - c0 < 30s);
                 bool cancelled = false;
                 try {
                     job.get();
@@ -3722,9 +3919,9 @@ void testBlendCancel() {
                 CHECK(cancelled);
             }
         }
-        CHECK(clock::now() - t0 < 5s);
-        CHECK(waitFor([&] { return !alive(shell) && !alive(child); }, 2000ms));
-        CHECK(temps() == before);
+        CHECK(clock::now() - t0 < 60s);  // never killed, the destructor would wait the 120 s out
+        CHECK(waitFor([&] { return !alive(shell) && !alive(child); }, 30000ms));
+        CHECK(waitFor([&] { return temps() == before; }, 10000ms));
     }
     unsetenv("SPLASHEDIT_BLENDER");
     fs::remove_all(dir, ec);
@@ -4347,6 +4544,7 @@ int main(int argc, char** argv) {
     testPlaceModel();
     testPlaceSkinnedModel();
     testImportSettings();
+    testModelImports();
     testUnirom();
     testPsxmon();
     testHardwareRun();

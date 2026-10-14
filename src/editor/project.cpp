@@ -1,6 +1,8 @@
 #include "editor/project.hh"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <exception>
 #include <fstream>
 #include <iterator>
@@ -85,7 +87,9 @@ static std::string genericUtf8(const fs::path& p) {
     return std::string(u.begin(), u.end());
 }
 
-AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std::string& folder) {
+// adoptAsset, or with `dryRun` where it would put the file, `copied` telling
+// whether it would copy it, without changing anything.
+static AdoptedAsset adopt(const fs::path& project, const fs::path& file, const std::string& folder, bool dryRun) {
     AdoptedAsset r;
     std::error_code ec;
     if (project.empty() || file.empty()) {
@@ -108,7 +112,7 @@ AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std
         return r;
     }
     fs::path dir = root / fromUtf8(folder);
-    fs::create_directories(dir, ec);
+    if (!dryRun) fs::create_directories(dir, ec);
     if (ec) {
         r.error = "could not create " + utf8(dir) + ": " + ec.message();
         return r;
@@ -117,7 +121,7 @@ AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std
     fs::path dest = dir / src.filename();
     for (int n = 2; fs::exists(dest, ec) && !sameBytes(src, dest); ++n) dest = dir / fromUtf8(stem + "_" + std::to_string(n) + ext);
     if (!fs::exists(dest, ec)) {
-        fs::copy_file(src, dest, ec);
+        if (!dryRun) fs::copy_file(src, dest, ec);
         if (ec) {
             r.error = "could not copy " + utf8(src.filename()) + ": " + ec.message();
             return r;
@@ -126,6 +130,10 @@ AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std
     }
     r.path = genericUtf8(dest.lexically_relative(root));
     return r;
+}
+
+AdoptedAsset adoptAsset(const fs::path& project, const fs::path& file, const std::string& folder) {
+    return adopt(project, file, folder, false);
 }
 
 std::string scriptFileStem(const std::string& name) {
@@ -265,41 +273,181 @@ splash::Object modelObject(const splash::ImportedModel& model, const std::string
     return root;
 }
 
-PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<ObjectPath>& replace, const ObjectPath& at,
-                       splash::Vec3 position, const fs::path& converted) {
-    PlacedModel r;
-    if (doc.projectRoot().empty()) {
-        r.error = "no project is open";
-        return r;
+// Every file an import wrote, project-relative.
+static std::vector<std::string> writtenFiles(const splash::ImportedModel& m) {
+    std::vector<std::string> written = m.textures;
+    written.push_back(m.mesh);
+    for (const splash::ImportedNode& n : m.nodes)
+        if (!n.mesh.empty()) written.push_back(n.mesh);
+    written.insert(written.end(), m.clips.begin(), m.clips.end());
+    return written;
+}
+
+StagedModel stagePlace(const Document& doc, const fs::path& file, const fs::path& converted) {
+    StagedModel s;
+    s.project = doc.projectRoot();
+    s.file = file;
+    s.read = converted.empty() ? file : converted;
+    if (s.project.empty()) {
+        s.error = "no project is open";
+        return s;
     }
     if (!splash::canImportModel(file)) {
-        r.error = utf8(file.filename()) + ": only .glb, .gltf, .fbx, .obj and .blend models can be imported";
-        return r;
+        s.error = utf8(file.filename()) + ": only .glb, .gltf, .fbx, .obj and .blend models can be imported";
+        return s;
     }
-    // Adopted first so the outputs are named after the copy, but imported
-    // from where it was found, so a .gltf's buffers and textures beside it
-    // are still at hand. A copy that does not import is taken out again, so a
-    // file that is not a model never lands in the project.
-    AdoptedAsset adopted = adoptAsset(doc.projectRoot(), file, "models");
-    if (!adopted.error.empty()) {
-        r.error = adopted.error;
-        return r;
+    // Named after where the copy goes, but imported from where it was found,
+    // so a .gltf's buffers and textures beside it are still at hand. The copy
+    // is only made once the import worked, so a file that is not a model (or
+    // an import cancelled) never lands in the project.
+    const AdoptedAsset plan = adopt(s.project, file, "models", true);
+    if (!plan.error.empty()) {
+        s.error = plan.error;
+        return s;
     }
-    const fs::path copy = doc.projectRoot() / fromUtf8(adopted.path);
+    s.copy = s.project / fromUtf8(plan.path);
+    s.adopt = plan.copied;
     std::error_code ec;
-    const bool inside = fs::equivalent(file, copy, ec);
-    const bool hadSidecar = fs::exists(splash::importSettingsPath(copy), ec);
-    splash::ImportSettings settings;
+    s.inside = !s.adopt && fs::equivalent(file, s.copy, ec);
+    s.hadSidecar = fs::exists(splash::importSettingsPath(s.copy), ec);
     try {
-        settings = splash::loadImportSettings(copy);
-        r.model = splash::importModel(converted.empty() ? file : converted, doc.projectRoot(), settings, copy);
+        s.settings = splash::loadImportSettings(s.copy);
     } catch (const std::exception& e) {
-        if (adopted.copied) fs::remove(copy, ec);
-        r.error = e.what();
+        s.error = e.what();
+    }
+    return s;
+}
+
+StagedModel stageReimport(const Document& doc, const fs::path& model, const fs::path& converted) {
+    StagedModel s;
+    s.reimport = true;
+    s.project = doc.projectRoot();
+    if (s.project.empty()) {
+        s.error = "no project is open";
+        return s;
+    }
+    s.file = s.copy = model.is_absolute() ? model : s.project / model;
+    try {
+        s.settings = splash::loadImportSettings(s.file);
+        s.read = s.file;
+        std::error_code ec;
+        if (!s.settings.source.empty() && fs::is_regular_file(fromUtf8(s.settings.source), ec)) s.read = fromUtf8(s.settings.source);
+        if (!converted.empty()) s.read = converted;
+    } catch (const std::exception& e) {
+        s.error = e.what();
+    }
+    return s;
+}
+
+void buildStaged(StagedModel& s) {
+    if (!s.error.empty()) return;
+    static std::atomic<unsigned> counter{0};
+    std::error_code ec;
+    const fs::path tmp = fs::temp_directory_path(ec);
+    if (ec) {
+        s.error = "no temporary folder: " + ec.message();
+        return;
+    }
+    const auto now = static_cast<unsigned long long>(std::chrono::steady_clock::now().time_since_epoch().count());
+    s.staging.reset(tmp / ("splashedit-import-" + std::to_string(now) + "-" + std::to_string(counter++)));
+    fs::create_directories(s.staging.path(), ec);
+    if (ec) {
+        s.error = "could not create " + utf8(s.staging.path()) + ": " + ec.message();
+        return;
+    }
+    try {
+        s.model = splash::importModel(s.read, s.staging.path(), s.settings, s.copy);
+    } catch (const std::exception& e) {
+        s.error = e.what();
+    }
+}
+
+StagingFolder::StagingFolder(StagingFolder&& o) noexcept : m_path(std::move(o.m_path)) { o.m_path.clear(); }
+
+StagingFolder& StagingFolder::operator=(StagingFolder&& o) noexcept {
+    if (this != &o) {
+        reset(std::move(o.m_path));
+        o.m_path.clear();
+    }
+    return *this;
+}
+
+void StagingFolder::reset(fs::path p) {
+    if (!m_path.empty()) {
+        std::error_code ec;
+        fs::remove_all(m_path, ec);
+    }
+    m_path = std::move(p);
+}
+
+void discardStaged(StagedModel& s) { s.staging.reset(); }
+
+namespace {
+// Removes the staging folder however applying ends.
+struct Discard {
+    StagedModel& s;
+    ~Discard() { discardStaged(s); }
+};
+}  // namespace
+
+// Moves a built import's outputs into the project, replacing an earlier
+// import's: the node folder is cleared of its meshes and clips first, as
+// importModel does when it writes into the project itself.
+static std::string commitStaged(const StagedModel& s) {
+    std::error_code ec;
+    const fs::path nodeDir = s.project / "models" / fromUtf8(splash::importName(s.copy));
+    for (fs::directory_iterator it(nodeDir, ec), end; !ec && it != end; it.increment(ec))
+        if (it->path().extension() == ".mesh" || it->path().extension() == ".anim") fs::remove(it->path(), ec);
+    for (const std::string& rel : writtenFiles(s.model)) {
+        ec.clear();
+        const fs::path from = s.staging.path() / fromUtf8(rel), to = s.project / fromUtf8(rel);
+        fs::create_directories(to.parent_path(), ec);
+        ec.clear();
+        fs::rename(from, to, ec);
+        if (!ec) continue;
+        ec.clear();
+        fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+        if (ec) return "could not write " + rel + ": " + ec.message();
+    }
+    return {};
+}
+
+PlacedModel applyPlace(Document& doc, StagedModel& s, const std::optional<ObjectPath>& replace, const ObjectPath& at,
+                       splash::Vec3 position) {
+    PlacedModel r;
+    Discard discard{s};
+    if (!s.error.empty()) {
+        r.error = s.error;
         return r;
     }
-    const std::string source = inside ? std::string() : utf8(fs::absolute(file, ec));
-    if (!hadSidecar || (!inside && settings.source != source)) {
+    if (doc.projectRoot() != s.project) {
+        r.error = "another project was opened";
+        return r;
+    }
+    if (s.adopt) {
+        const AdoptedAsset adopted = adoptAsset(s.project, s.file, "models");
+        if (!adopted.error.empty()) {
+            r.error = adopted.error;
+            return r;
+        }
+        if (s.project / fromUtf8(adopted.path) != s.copy) {
+            std::error_code ec;
+            if (adopted.copied) fs::remove(s.project / fromUtf8(adopted.path), ec);
+            r.error = utf8(s.file.filename()) + ": the models folder changed while it was importing, import it again";
+            return r;
+        }
+    }
+    if (std::string e = commitStaged(s); !e.empty()) {
+        r.error = e;
+        return r;
+    }
+    r.model = std::move(s.model);
+    const fs::path& copy = s.copy;
+    const fs::path& file = s.file;
+    splash::ImportSettings& settings = s.settings;
+    std::error_code ec;
+    const std::string source = s.inside ? std::string() : utf8(fs::absolute(file, ec));
+    if (!s.hadSidecar || (!s.inside && settings.source != source)) {
         settings.source = source;
         try {
             splash::saveImportSettings(copy, settings);
@@ -308,12 +456,7 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
         }
     }
     doc.setImportWarnings(copy, r.model.warnings);
-    std::vector<std::string> written = r.model.textures;
-    written.push_back(r.model.mesh);
-    for (const splash::ImportedNode& n : r.model.nodes)
-        if (!n.mesh.empty()) written.push_back(n.mesh);
-    written.insert(written.end(), r.model.clips.begin(), r.model.clips.end());
-    doc.refreshAssets(written);
+    doc.refreshAssets(writtenFiles(r.model));
 
     const splash::Object* target = replace ? doc.object(*replace) : nullptr;
     if (target && target->mesh) {
@@ -337,6 +480,13 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
     doc.insertObject(at, std::move(obj));
     r.path = at;
     return r;
+}
+
+PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<ObjectPath>& replace, const ObjectPath& at,
+                       splash::Vec3 position, const fs::path& converted) {
+    StagedModel s = stagePlace(doc, file, converted);
+    buildStaged(s);
+    return applyPlace(doc, s, replace, at, position);
 }
 
 fs::path modelOfMesh(const fs::path& project, const std::string& mesh) {
@@ -519,30 +669,25 @@ fs::path modelSource(const Document& doc, const fs::path& model) {
     return file;
 }
 
-Reimported reimportModel(Document& doc, const fs::path& model, std::optional<bool> wasMerged, const fs::path& converted) {
+Reimported applyReimport(Document& doc, StagedModel& s, std::optional<bool> wasMerged) {
     Reimported r;
-    if (doc.projectRoot().empty()) {
-        r.error = "no project is open";
+    Discard discard{s};
+    if (!s.error.empty()) {
+        r.error = s.error;
         return r;
     }
-    const fs::path file = model.is_absolute() ? model : doc.projectRoot() / model;
-    splash::ImportSettings settings;
-    try {
-        settings = splash::loadImportSettings(file);
-        fs::path from = file;
-        std::error_code ec;
-        if (!settings.source.empty() && fs::is_regular_file(fromUtf8(settings.source), ec)) from = fromUtf8(settings.source);
-        r.model = splash::importModel(converted.empty() ? from : converted, doc.projectRoot(), settings, file);
-    } catch (const std::exception& e) {
-        r.error = e.what();
+    if (doc.projectRoot() != s.project) {
+        r.error = "another project was opened";
         return r;
     }
-    std::vector<std::string> written = r.model.textures;
-    written.push_back(r.model.mesh);
-    for (const splash::ImportedNode& n : r.model.nodes)
-        if (!n.mesh.empty()) written.push_back(n.mesh);
-    written.insert(written.end(), r.model.clips.begin(), r.model.clips.end());
-    doc.refreshAssets(written);
+    if (std::string e = commitStaged(s); !e.empty()) {
+        r.error = e;
+        return r;
+    }
+    r.model = std::move(s.model);
+    const fs::path& file = s.file;
+    const splash::ImportSettings& settings = s.settings;
+    doc.refreshAssets(writtenFiles(r.model));
 
     Resync sync(r.model, settings, "models/" + splash::importName(file) + "/");
     sync.toMerged = wasMerged && !*wasMerged && settings.mergeMeshes;
@@ -555,6 +700,12 @@ Reimported reimportModel(Document& doc, const fs::path& model, std::optional<boo
     r.objects = doc.replaceTrees(std::move(trees));
     doc.setImportWarnings(file, r.model.warnings);
     return r;
+}
+
+Reimported reimportModel(Document& doc, const fs::path& model, std::optional<bool> wasMerged, const fs::path& converted) {
+    StagedModel s = stageReimport(doc, model, converted);
+    buildStaged(s);
+    return applyReimport(doc, s, wasMerged);
 }
 
 ImportWarning explainImportWarning(const std::string& warning) {

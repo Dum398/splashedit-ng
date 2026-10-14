@@ -189,6 +189,20 @@ there.
 
     python3 blendasynccheck.py <splashedit> [screenshot.png]
 
+`asyncimportcheck.py` does the same for every model format: it builds an 80000-triangle glTF grid
+that takes a few seconds to import and drops it in the editor. The file is read and baked on a
+worker thread into a `splashedit-import-*` temporary folder, so 3 frames after the drop the import
+must still be running, and it reports the frames drawn meanwhile (at least 10); once it is built the
+model is placed and saved. Cancel in the status bar places, adopts and writes nothing, the saved
+scene is byte for byte the one a run without the drop saves, and no temporary folder is left. Two
+models dropped one after the other both land in the order dropped, the second waiting behind the
+first though it alone would be done sooner (the screenshot shows "Importing terrain.glb... N s (1
+more waiting)" and Cancel). `editor_tests` checks the queue itself (`editor::ModelImports`): order,
+cancel, a failed file, a scene change and a cancelled reimport leaving the meshes on disk as they
+were. Needs a display (CI runs it under xvfb on Linux).
+
+    python3 asyncimportcheck.py <splashedit> [screenshot.png]
+
 ## Lua compiler
 
 `luacheck.py` compiles every `lua/*.lua` with `splashpack-cli luac` and compares the result with

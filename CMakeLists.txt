@@ -80,6 +80,7 @@ add_library(splasheditdoc STATIC
     src/editor/live_export.cpp
     src/editor/lua_editor.cpp
     src/editor/play.cpp
+    src/editor/model_import.cpp
     src/editor/project.cpp
     src/editor/serial.cpp
     src/editor/timeline.cpp

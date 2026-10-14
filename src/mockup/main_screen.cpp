@@ -1595,14 +1595,13 @@ static void modelPlace(editor::Document& doc, const viewport::Ps1View& view, con
     }
 }
 
-// Imports a model file into the project and places it (see editor::placeModel),
-// as one undo step. `converted` is the GLB Blender wrote for a .blend.
+// Places a model built on the worker thread (see editor::applyPlace), as one undo step.
 static void placeModelFile(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::filesystem::path& src,
-                           const ModelTarget& to, const std::filesystem::path& converted) {
+                           const ModelTarget& to, editor::StagedModel& staged) {
     editor::ObjectPath at;
     splash::Vec3 pos{};
     modelPlace(doc, view, to, at, pos);
-    editor::PlacedModel placed = editor::placeModel(doc, src, to.replace, at, pos, converted);
+    editor::PlacedModel placed = editor::applyPlace(doc, staged, to.replace, at, pos);
     if (!placed.error.empty()) {
         notify(st, "Import failed: " + placed.error, true);
         return;
@@ -1618,26 +1617,15 @@ static void placeModelFile(State& st, editor::Document& doc, const viewport::Ps1
     notify(st, msg, false);
 }
 
-static bool isBlend(const std::filesystem::path& p) {
-    std::string e = utf8(p.extension());
-    for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return e == ".blend";
-}
-
-// A model file dropped or picked: imported now, or, for a .blend, queued for
-// Blender to convert in the background (see updateBlendImports).
-static void importModelFile(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& file,
+// A model file dropped or picked: queued, to be imported in the background
+// (see updateImports).
+static void importModelFile(State& st, editor::Document& doc, const viewport::Ps1View&, const std::string& file,
                             const ModelTarget& to) {
-    const std::filesystem::path src = fromUtf8(file);
-    if (isBlend(src) && !doc.projectRoot().empty()) {
-        State::BlendImport b;
-        b.file = file;
-        b.to = to;
-        b.loadId = doc.loadId();
-        st.blendImports.push_back(std::move(b));
-        return;
-    }
-    placeModelFile(st, doc, view, src, to, {});
+    editor::ModelImports::Request r;
+    r.file = fromUtf8(file);
+    r.to = to;
+    r.loadId = doc.loadId();
+    st.imports.add(std::move(r));
 }
 
 // Files released over the window and files picked in the Model field's
@@ -4733,34 +4721,39 @@ static float hardwareStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     return r.Max.x + space::md;
 }
 
-// Status bar entry while Blender converts a .blend: a spinner, which file,
-// the seconds so far (wall clock: Blender runs in real time), how many more
-// wait, and Cancel, which kills Blender.
-static float blendStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
-    st.blendCancel = ImRect();
-    if (st.blendImports.empty() || !st.blendImports.front().job) return x;
+// Status bar entry while a model imports: a spinner, which file (and
+// "with Blender" while Blender converts a .blend), the seconds so far (wall
+// clock: the import runs in real time), how many more wait, and Cancel,
+// which stops it with nothing imported.
+static float importStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
+    st.importCancel = ImRect();
+    const editor::ModelImports::Request* rq = st.imports.current();
+    if (!rq) return x;
     Fonts& f = fonts();
-    State::BlendImport& b = st.blendImports.front();
-    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - b.started).count();
-    std::string label = (b.reimport.empty() ? "Importing " : "Reimporting ") + utf8(fromUtf8(b.file).filename()) +
-                        " with Blender... " + std::to_string(static_cast<int>(secs)) + " s";
-    if (st.blendImports.size() > 1) label += " (" + std::to_string(st.blendImports.size() - 1) + " more waiting)";
+    const double secs = st.imports.seconds();
+    const bool blender = st.imports.stage() == editor::ModelImports::Stage::Blender;
+    std::string label = (rq->reimport.empty() ? "Importing " : "Reimporting ") +
+                        utf8((rq->reimport.empty() ? rq->file : rq->reimport).filename()) + (blender ? " with Blender... " : "... ") +
+                        std::to_string(static_cast<int>(secs)) + " s";
+    if (st.imports.size() > 1) label += " (" + std::to_string(st.imports.size() - 1) + " more waiting)";
     const ImVec2 ls = measure(f.medium, type::caption, label.c_str());
     const float cy = bar.GetCenter().y;
     const float a0 = static_cast<float>(std::fmod(secs, 1.0) * 2 * IM_PI);
     dl->PathArcTo(ImVec2(x + 10, cy), 5.5f, a0, a0 + IM_PI * 1.5f, 18);
     dl->PathStroke(color::accent, ImDrawFlags_None, 2.0f);
     text(dl, ImVec2(x + 24, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, color::text, label.c_str());
-    const char* cl = b.job->done() ? "Finishing" : "Cancel";
+    const char* cl = st.imports.finishing() ? "Finishing" : "Cancel";
     const ImVec2 cs = measure(f.medium, type::caption, cl);
     const float cx = x + 24 + ls.x + space::sm;
     const ImRect r(ImVec2(cx, bar.Min.y + 5), ImVec2(cx + cs.x + 20, bar.Max.y - 5));
-    const Hit h = interact("blendcancel", r);
+    const Hit h = interact("importcancel", r);
     dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
     text(dl, ImVec2(r.Min.x + 10, bar.Min.y + (size::statusBar - cs.y) * 0.5f), f.medium, type::caption, color::text, cl);
-    if (h.hover) tooltip("Stop Blender. Nothing is imported and nothing is added to the project.");
-    if (h.clicked) b.job->cancel();
-    st.blendCancel = r;
+    if (h.hover)
+        tooltip(blender ? "Stop Blender. Nothing is imported and nothing is added to the project."
+                        : "Stop the import. Nothing is imported and nothing is added to the project.");
+    if (h.clicked) st.imports.cancel();
+    st.importCancel = r;
     return r.Max.x + space::xl;
 }
 
@@ -4798,7 +4791,7 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
              res ? color::bad : color::textFaint, msg);
         x += ms.x + space::xl;
     }
-    x = blendStatus(dl, bar, x, st);
+    x = importStatus(dl, bar, x, st);
     x = playStatus(dl, bar, x, st);
     x = hardwareStatus(dl, bar, x, st);
 
@@ -4933,22 +4926,24 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (ctrl && !shift && pressed(ImGuiKey_Q)) request(st, doc, State::Pending::Quit);
 }
 
-// Imports `r.model` again, from `converted` when Blender wrote it a GLB.
-static void reimportNow(State& st, editor::Document& doc, const State::Reimport& r, const std::filesystem::path& converted) {
-    editor::Reimported re = editor::reimportModel(doc, r.model, r.wasMerged, converted);
+// Updates the scene for `model` imported again on the worker thread (see editor::applyReimport).
+static void reimportNow(State& st, editor::Document& doc, const std::filesystem::path& model, std::optional<bool> wasMerged,
+                        editor::StagedModel& staged) {
+    editor::Reimported re = editor::applyReimport(doc, staged, wasMerged);
     if (!re.error.empty()) {
         notify(st, "Reimport failed: " + re.error, true);
         return;
     }
-    std::string msg = "Reimported " + utf8(r.model.filename());
+    std::string msg = "Reimported " + utf8(model.filename());
     msg += importNote(re.model.warnings);
     notify(st, msg, false);
     st.importPanel.checked = -1;
 }
 
 // Imports models again: the ones the inspector's Import settings changed last
-// frame, and, about once a second, the ones whose file changed on disk. A
-// .blend goes to Blender in the background first, once per model.
+// frame, and, about once a second, the ones whose file changed on disk. They
+// join the import queue (see updateImports); one already waiting there is
+// not queued twice.
 static void updateModels(State& st, editor::Document& doc) {
     std::vector<State::Reimport> todo;
     todo.swap(st.reimports);
@@ -4958,74 +4953,39 @@ static void updateModels(State& st, editor::Document& doc) {
         for (const std::filesystem::path& m : st.watcher.poll(doc.projectRoot())) todo.push_back({m, std::nullopt});
     }
     for (const State::Reimport& r : todo) {
-        if (!isBlend(r.model)) {
-            reimportNow(st, doc, r, {});
-            continue;
-        }
-        // Already waiting (not yet started): that run will read the newest file.
-        bool queued = false;
-        for (State::BlendImport& b : st.blendImports)
-            if (!b.job && b.reimport == r.model) {
-                if (r.wasMerged) b.wasMerged = r.wasMerged;
-                queued = true;
-            }
-        if (queued) continue;
-        State::BlendImport b;
-        b.file = utf8(r.model);
-        b.reimport = r.model;
-        b.wasMerged = r.wasMerged;
-        b.loadId = doc.loadId();
-        st.blendImports.push_back(std::move(b));
+        editor::ModelImports::Request q;
+        q.reimport = r.model;
+        q.wasMerged = r.wasMerged;
+        q.loadId = doc.loadId();
+        st.imports.add(std::move(q));
     }
 }
 
-// Runs Blender for the .blend at the front of the queue on a worker thread
-// (splash::BlendExport) and, once it is done, places the model or imports it
-// again here, on the UI thread. Imports asked for in a scene that is no
-// longer open are dropped, their Blender killed.
-static void updateBlendImports(State& st, editor::Document& doc, const viewport::Ps1View& view) {
-    for (auto it = st.blendImports.begin(); it != st.blendImports.end();) {
-        if (it->loadId == doc.loadId()) {
-            ++it;
-            continue;
+// Runs the import queue (editor::ModelImports): Blender for a .blend, then
+// the file read and baked on a worker thread, and, once it is built, the
+// model placed or the scene updated here, on the UI thread. Imports asked
+// for in a scene that is no longer open are dropped.
+static void updateImports(State& st, editor::Document& doc, const viewport::Ps1View& view) {
+    for (editor::ModelImports::Outcome& o : st.imports.update(doc)) {
+        const editor::ModelImports::Request& rq = o.request;
+        const bool re = !rq.reimport.empty();
+        const std::string name = utf8((re ? rq.reimport : rq.file).filename());
+        switch (o.kind) {
+        case editor::ModelImports::Outcome::Dropped:
+            notify(st, "Import of " + name + " dropped: another scene was opened", false);
+            break;
+        case editor::ModelImports::Outcome::Cancelled:
+            notify(st, (re ? "Reimport of " : "Import of ") + name + " cancelled", false);
+            break;
+        case editor::ModelImports::Outcome::Failed:
+            notify(st, (re ? "Reimport failed: " : "Import failed: ") + o.error, true);
+            break;
+        case editor::ModelImports::Outcome::Ready:
+            if (re) reimportNow(st, doc, rq.reimport, rq.wasMerged, o.staged);
+            else placeModelFile(st, doc, view, rq.file, rq.to, o.staged);
+            break;
         }
-        if (it->job) it->job->cancel();
-        notify(st, "Import of " + utf8(fromUtf8(it->file).filename()) + " dropped: another scene was opened", false);
-        it = st.blendImports.erase(it);  // waits for the thread; Blender is already being killed
     }
-    if (st.blendImports.empty()) return;
-    State::BlendImport& b = st.blendImports.front();
-    const char* failed = b.reimport.empty() ? "Import failed: " : "Reimport failed: ";
-    if (!b.job) {
-        st.blendFramesDrawn = 0;
-        b.started = std::chrono::steady_clock::now();
-        try {
-            b.job = std::make_shared<splash::BlendExport>(b.reimport.empty() ? fromUtf8(b.file) : editor::modelSource(doc, b.reimport));
-        } catch (const std::exception& e) {
-            notify(st, failed + std::string(e.what()), true);
-            st.blendImports.pop_front();
-        }
-        return;
-    }
-    if (!b.job->done()) {
-        ++st.blendFramesDrawn;
-        return;
-    }
-    const State::BlendImport done = std::move(b);  // keeps the GLB (and its folder) until the end of this function
-    st.blendImports.pop_front();
-    std::filesystem::path glb;
-    try {
-        glb = done.job->get();
-    } catch (const splash::BlendCancelled&) {
-        notify(st, (done.reimport.empty() ? "Import of " : "Reimport of ") + utf8(fromUtf8(done.file).filename()) + " cancelled",
-               false);
-        return;
-    } catch (const std::exception& e) {
-        notify(st, failed + std::string(e.what()), true);
-        return;
-    }
-    if (done.reimport.empty()) placeModelFile(st, doc, view, fromUtf8(done.file), done.to, glb);
-    else reimportNow(st, doc, State::Reimport{done.reimport, done.wasMerged}, glb);
 }
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
@@ -5131,7 +5091,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         textCentered(dl, pill, f.medium, type::body, color::text, hint);
     }
     importPending(st, doc, view);
-    updateBlendImports(st, doc, view);
+    updateImports(st, doc, view);
     assetRequests(st, doc, view);
     statusBar(dl, size, doc, st);
     playSetup(st, doc, size);

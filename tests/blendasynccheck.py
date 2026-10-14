@@ -95,7 +95,7 @@ def run(name, script, release_after=None):
 
 
 def shot_line(out):
-    m = re.search(r'blend import: (\w+), (\d+) frames drawn while it ran', out)
+    m = re.search(r'model import: (\w+), (\d+) frames drawn while it ran', out)
     return (m.group(1), int(m.group(2))) if m else (None, 0)
 
 
@@ -130,8 +130,8 @@ _, out, _ = run('probe', ['--drop-now', blend + '@' + DROP, '--wait', '30', '--s
 m = re.search(r'cancel button at (\d+),(\d+)', out)
 check('the status bar shows a Cancel button while importing', m is not None, out[-300:])
 if m:
-    cancel = m.group(1) + ',' + m.group(2)
-    project, out, names = run('cancel', ['--drop-now', blend + '@' + DROP, '--wait', '30', '--click', cancel, '--wait', '30',
+    # Clicked where the button is in this run: it moves with the budget meters beside it.
+    project, out, names = run('cancel', ['--drop-now', blend + '@' + DROP, '--wait', '30', '--click-import-cancel', '--wait', '30',
                                          '--shot', os.path.join(tmp, 'cancelled.png'), '--wait-import', '--key', 'ctrl+s',
                                          '--wait', '10'], '')
     state, _ = shot_line(out)

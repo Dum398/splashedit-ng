@@ -123,6 +123,54 @@ Reimported reimportModel(Document& doc, const std::filesystem::path& model, std:
 // document under the model's project path (Document::importWarnings), the
 // last import of a model replacing the ones before.
 
+// placeModel and reimportModel in two halves, so the slow one can run on a
+// worker thread while the editor keeps drawing. stagePlace / stageReimport
+// (UI thread, quick) read the sidecar and work out where the model goes in
+// the project without changing anything there. buildStaged is the slow half:
+// it reads the file and bakes the meshes, textures and clips into a
+// temporary folder standing in for the project (splashedit-import-* in the
+// system temp folder), touching no Document; any thread may run it.
+// applyPlace / applyReimport (UI thread) then adopt the file, move the
+// outputs into the project and change the scene, as placeModel and
+// reimportModel do, and remove the temporary folder. discardStaged drops a
+// staged import instead (Cancel): the project and the scene are as before.
+// A temporary folder removed with everything in it when its owner goes, so a
+// staged import nobody applies leaves nothing behind. Move-only.
+class StagingFolder {
+  public:
+    StagingFolder() = default;
+    StagingFolder(StagingFolder&& o) noexcept;
+    StagingFolder& operator=(StagingFolder&& o) noexcept;
+    ~StagingFolder() { reset(); }
+    void reset(std::filesystem::path p = {});  // removes the folder held, then holds `p`
+    const std::filesystem::path& path() const { return m_path; }
+
+  private:
+    std::filesystem::path m_path;
+};
+
+struct StagedModel {
+    std::filesystem::path project;  // the project it was staged for
+    std::filesystem::path file;     // placed: the file dropped or picked; reimported: the project model
+    std::filesystem::path read;     // what importModel reads (a .blend's GLB, the sidecar's source, or `file`)
+    std::filesystem::path copy;     // the model in the project; for a placed model, where its copy goes
+    bool reimport = false;
+    bool adopt = false;             // `file` is copied to `copy` when applied
+    bool inside = false;            // `file` is in the project already
+    bool hadSidecar = false;
+    splash::ImportSettings settings;
+    StagingFolder staging;          // the temporary folder; empty when there is none
+    std::string error;              // empty while it is going well
+    splash::ImportedModel model;    // once built
+};
+StagedModel stagePlace(const Document& doc, const std::filesystem::path& file, const std::filesystem::path& converted = {});
+StagedModel stageReimport(const Document& doc, const std::filesystem::path& model, const std::filesystem::path& converted = {});
+void buildStaged(StagedModel& staged);
+void discardStaged(StagedModel& staged);
+PlacedModel applyPlace(Document& doc, StagedModel& staged, const std::optional<ObjectPath>& replace, const ObjectPath& at,
+                       splash::Vec3 position);
+Reimported applyReimport(Document& doc, StagedModel& staged, std::optional<bool> wasMerged = std::nullopt);
+
 // The file reimportModel reads for `model` (absolute, or relative to the
 // project): its sidecar's source while that file is there, else the copy.
 std::filesystem::path modelSource(const Document& doc, const std::filesystem::path& model);

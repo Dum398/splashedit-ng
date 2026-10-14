@@ -18,6 +18,7 @@
 #include "editor/asset_browser_view.hh"
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
+#include "editor/model_import.hh"
 #include "editor/texture_preview.hh"
 #include "editor/lua_editor_view.hh"
 #include "editor/play.hh"
@@ -35,13 +36,8 @@ class Document;
 
 namespace mockup {
 
-// Where an imported model goes. With none of these set, a new object goes
-// where the Add object picker would put it.
-struct ModelTarget {
-    std::optional<std::vector<int>> replace;  // the Model field's object: its model is swapped
-    std::optional<std::vector<int>> under;    // a scene tree row: added as its last child
-    std::optional<splash::Vec3> at;           // the viewport: added at the top level, here (world)
-};
+// Where an imported model goes (see editor::ModelTarget).
+using ModelTarget = editor::ModelTarget;
 
 struct State {
     int tool = 1;        // 0 hand, 1 move, 2 rotate, 3 scale
@@ -192,25 +188,16 @@ struct State {
     editor::ModelWatcher watcher;
     double watchedAt = -1;
 
-    // .blend files waiting for Blender, oldest first. Blender runs for the
-    // front one on a worker thread (splash::BlendExport) while the editor
-    // keeps drawing; the status bar shows it with a Cancel button. When it is
-    // done the model is placed (or, for `reimport`, imported again) here on
-    // the UI thread, as one undo step.
-    struct BlendImport {
-        std::string file;                 // the .blend (UTF-8), where it was dropped or picked from
-        ModelTarget to;                   // where a placed model goes
-        std::filesystem::path reimport;   // set: the project model to import again instead
-        std::optional<bool> wasMerged;    // for a reimport
-        unsigned loadId = 0;              // the scene it was asked for (Document::loadId); dropped if another opens
-        std::shared_ptr<splash::BlendExport> job;  // started once it is at the front
-        std::chrono::steady_clock::time_point started;
-    };
-    std::deque<BlendImport> blendImports;
-    int blendFramesDrawn = 0;  // frames drawn while the current (or last) Blender ran
-    ImRect blendCancel;        // the status bar's Cancel button this frame; empty when not shown
-    bool blendBusy() const { return !blendImports.empty(); }
-    int blendFrames() const { return blendFramesDrawn; }
+    // Models waiting to be imported (dropped, picked, or changed on disk),
+    // oldest first, one running at a time: Blender for a .blend, then the
+    // file is read and baked on a worker thread while the editor keeps
+    // drawing; the status bar shows it with a Cancel button. Once it is
+    // built the model is placed (or, for a reimport, the scene updated) here
+    // on the UI thread, as one undo step.
+    editor::ModelImports imports;
+    ImRect importCancel;  // the status bar's Cancel button this frame; empty when not shown
+    bool importBusy() const { return imports.busy(); }
+    int importFrames() const { return imports.frames(); }
 
     // Gizmo drag in progress, for the tool in `tool`. Move: handle 0..2 =
     // X/Y/Z arrow, 3 = XZ plane. Rotate: 0..2 = X/Y/Z ring. Scale: 0..2 =

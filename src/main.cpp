@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -70,6 +71,7 @@ struct Action {
     ImGuiKey key = ImGuiKey_None;
     bool ctrl = false, shift = false, alt = false;
     bool hold = false;  // a drag that never lets go (mid-drag screenshots)
+    bool importCancel = false;  // a Click on the status bar's import Cancel, wherever it was drawn last frame
     std::string text, text2;  // Text: the characters; Drop: the file; Shot: the PNG to write; CopyFile: from, to
     int waitFrames = 0;
 };
@@ -269,6 +271,13 @@ Args parse(int argc, char** argv) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
             std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
             a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--click-import-cancel")) {
+            // Clicks the status bar's import Cancel where it is when the click starts
+            // (it moves with the budget meters beside it); nowhere when it is not shown.
+            Action act(Action::Click);
+            act.importCancel = true;
+            act.x0 = act.y0 = -1;
+            a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--drag") || !std::strcmp(argv[i], "--drag-hold")) {
             Action act(Action::Drag);
             act.hold = !std::strcmp(argv[i], "--drag-hold");
@@ -323,7 +332,7 @@ Args parse(int argc, char** argv) {
             act.text = next();
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--wait-import")) {
-            // Holds the script here while a .blend import is running (Blender in the background), up to 90 s.
+            // Holds the script here while a model import is running (in the background), up to 90 s.
             a.actions.push_back(Action(Action::WaitImport));
         } else if (!std::strcmp(argv[i], "--copy-file")) {
             // --copy-file <from>@<to>: copies over <to> at this point of the run.
@@ -556,6 +565,9 @@ int main(int argc, char** argv) {
     bool held = false;
     std::chrono::steady_clock::time_point heldSince;
     std::string shotDue;
+    // The end screenshot waits (up to 90 s, since when) for a model import still
+    // running, so a --drop has landed in it; --shot-at keeps its exact frame.
+    std::optional<std::chrono::steady_clock::time_point> endHeldSince;
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -577,19 +589,21 @@ int main(int argc, char** argv) {
         if (args.screenshot) {
             io.DeltaTime = 1.0f / 60.0f;
             for (size_t i = 0; i < args.actions.size(); ++i) {
-                const Action& a = args.actions[i];
+                Action& a = args.actions[i];
                 if (actionStart[i] < 0) {
                     if (frame == 0) io.AddKeyEvent(ImGuiMod_Ctrl, true);
                     continue;
                 }
+                if (a.importCancel && frame == actionStart[i] && state.importCancel.GetWidth() > 0)
+                    a.x0 = state.importCancel.GetCenter().x, a.y0 = state.importCancel.GetCenter().y;
                 if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
                 if (frame != actionStart[i] || held) continue;
                 if (a.kind == Action::Drop) state.drop.files.push_back({a.text, ImVec2(a.x0, a.y0)});
                 if (a.kind == Action::Shot) shotDue = a.text;
-                if (a.kind == Action::WaitImport && state.blendBusy()) held = true, heldSince = std::chrono::steady_clock::now();
+                if (a.kind == Action::WaitImport && state.importBusy()) held = true, heldSince = std::chrono::steady_clock::now();
             }
-            if (held && (!state.blendBusy() || std::chrono::steady_clock::now() - heldSince > std::chrono::seconds(90))) {
-                if (state.blendBusy()) std::fprintf(stderr, "--wait-import: still importing after 90 s\n");
+            if (held && (!state.importBusy() || std::chrono::steady_clock::now() - heldSince > std::chrono::seconds(90))) {
+                if (state.importBusy()) std::fprintf(stderr, "--wait-import: still importing after 90 s\n");
                 held = false;
                 ++frame;  // past the --wait-import frame
             }
@@ -627,13 +641,20 @@ int main(int argc, char** argv) {
 
         if (!shotDue.empty()) {
             writeShot(window, shotDue.c_str());
-            std::printf("blend import: %s, %d frames drawn while it ran\n", state.blendBusy() ? "running" : "idle",
-                        state.blendFrames());
-            if (state.blendCancel.GetWidth() > 0)
-                std::printf("cancel button at %d,%d\n", (int)state.blendCancel.GetCenter().x, (int)state.blendCancel.GetCenter().y);
+            std::printf("model import: %s, %d frames drawn while it ran, %zu queued\n", state.importBusy() ? "running" : "idle",
+                        state.importFrames(), state.imports.size());
+            if (state.importCancel.GetWidth() > 0)
+                std::printf("cancel button at %d,%d\n", (int)state.importCancel.GetCenter().x, (int)state.importCancel.GetCenter().y);
             shotDue.clear();
         }
-        if (args.screenshot && !held && ++frame >= args.frames) {
+        bool endHeld = false;
+        if (args.screenshot && !held && args.shotAt < 0 && frame + 1 >= args.frames && state.importBusy()) {
+            const auto now = std::chrono::steady_clock::now();
+            if (!endHeldSince) endHeldSince = now;
+            endHeld = now - *endHeldSince < std::chrono::seconds(90);
+            if (!endHeld) std::fprintf(stderr, "--screenshot: still importing after 90 s\n");
+        }
+        if (args.screenshot && !held && !endHeld && ++frame >= args.frames) {
             if (!writeShot(window, args.screenshot)) return 1;
             // For scripted checks: menus and pickers left open by the input.
             std::printf("popups open: %s\n", ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ? "yes" : "no");

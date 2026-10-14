@@ -61,7 +61,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, CopyFile } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, CopyFile, DeleteFile } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -224,6 +224,13 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
                 if (ec) std::fprintf(stderr, "--copy-file: %s\n", ec.message().c_str());
             }
             break;
+        case Action::DeleteFile:
+            // Another program deleting a file the editor has open.
+            if (f == 0) {
+                std::error_code ec;
+                if (!std::filesystem::remove(a.text, ec)) std::fprintf(stderr, "--delete-file: %s\n", ec ? ec.message().c_str() : "no such file");
+            }
+            break;
         case Action::Wait:
         case Action::Drop:  // the loop below hands these to the editor
         case Action::Shot:
@@ -328,6 +335,11 @@ Args parse(int argc, char** argv) {
             }
             act.text = v.substr(0, at);
             act.text2 = v.substr(at + 1);
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--delete-file")) {
+            // --delete-file <path>: deletes it at this point of the run.
+            Action act(Action::DeleteFile);
+            act.text = next();
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--text")) {
             Action act(Action::Text);

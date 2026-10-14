@@ -1334,6 +1334,12 @@ bool Script::changedOnDisk() {
     return true;
 }
 
+bool Script::deletedOnDisk() const {
+    if (!m_stamp.exists) return false;
+    std::error_code ec;
+    return !std::filesystem::exists(m_path, ec) && !ec;
+}
+
 void Script::keepMine() {
     const Stamp now = stamp();
     std::string text;

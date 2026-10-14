@@ -79,6 +79,15 @@ STDLIB = [
 ]
 STDLIB_TABLES = ["string", "table", "coroutine", "bit32", "debug"]
 
+# Callbacks whose arguments events.md gets wrong, as psxsplash calls them:
+# {name: (arguments, sentence added to the doc)}. A Trigger component's
+# script gets the trigger box's index (Lua::OnTriggerEnterScript and
+# OnTriggerExitScript in src/lua.cpp push triggerIndex).
+EVENT_ARGS = {
+    "onTriggerEnter": ("index", "index is the trigger box's number, from 0. Goes in the script set on a Trigger component."),
+    "onTriggerExit": ("index", "index is the trigger box's number, from 0. Goes in the script set on a Trigger component."),
+}
+
 
 def read(path):
     with open(path, encoding="utf-8") as f:
@@ -277,6 +286,10 @@ def main():
             rows.append((table, "", "Table", table, "psxsplash API table."))
         rows.append((table, name, "Function", sig, doc))
     for (_, name), (sig, doc) in sorted(events.items()):
+        if name in EVENT_ARGS:
+            args, more = EVENT_ARGS[name]
+            sig = "%s(%s)" % (name, args)
+            doc = (doc + " " + more).strip()
         rows.append(("", name, "Callback", "function " + sig, doc))
     for table in STDLIB_TABLES:
         rows.append((table, "", "Table", table, "Lua standard library."))

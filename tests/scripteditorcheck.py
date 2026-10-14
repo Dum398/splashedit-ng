@@ -6,8 +6,9 @@
 # scripts/<name>_trigger.lua. Then the editor itself: Replace all (Ctrl+H) and
 # its single undo step, brackets and quotes closing as they are typed, and a
 # script changed on disk by another program: reloaded when the tab has no
-# edits, else the Reload / Keep mine bar. Drives the editor headless on copies
-# of the courtyard example.
+# edits, else the Reload / Keep mine bar; one deleted on disk: "(deleted)" on
+# its tab and a Save / Close bar. Drives the editor headless on copies of the
+# courtyard example.
 # usage: python3 scripteditorcheck.py <splashedit>   (needs a display: xvfb-run -a)
 import json, os, shutil, struct, subprocess, sys, tempfile, zlib
 
@@ -23,6 +24,8 @@ CODE = '700,500'  # the script editor's text, below a short script
 REPLACE_ALL = '1132,132'  # the Replace row's "Replace all"
 MATCH_CASE = '1124,103'  # the find row's "Aa"
 RELOAD, KEEP_MINE = '1105,100', '1186,100'  # the changed-on-disk bar
+SAVE_DELETED, CLOSE_DELETED = '1138,100', '1200,100'  # the deleted-on-disk bar
+BAR = (52, 45, 39)  # either bar's background
 NEW_TRIGGER_SCRIPT = '1412,573'  # Game Logic's Trigger box "New script", with a trigger added
 CHANGED = '-- changed elsewhere\nfunction onCreate(self)\n  print("hi")\nend\n'
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
@@ -178,26 +181,61 @@ check('typed brackets and quotes close themselves, step over and delete in pairs
 
 # --- Changed on disk ---
 def changed_run(args):
+    """The file's text afterwards (None when it is gone), the editor's output
+    and the final screenshot."""
     project = project_copy()
     new = os.path.join(project, 'changed.lua')
     open(new, 'w', encoding='utf-8', newline='\n').write(CHANGED)
     script = os.path.join(project, 'scripts', 'game_logic.lua')
-    args = [new + '@' + script if a == '@NEW' else a for a in args]
+    args = [new + '@' + script if a == '@NEW' else script if a == '@SCRIPT' else a for a in args]
     out = editor_run(project, ['--select', 'Game Logic', '--click', EDIT_SCRIPT, '--wait', '5'] + args)
-    return read(script), out
+    return read(script), out, readpng(os.path.join(project, 'shot.png'))
+
+
+def bar_shown(shot):
+    """A disk bar over the code: its background across the top of the editor."""
+    w, rows, bpp = shot
+    return all(tuple(rows[84][x * bpp:x * bpp + 3]) == BAR for x in range(300, 1000, 25))
+
+
+def tab_strip(shot):
+    w, rows, bpp = shot
+    return [bytes(r[360 * bpp:640 * bpp]) for r in rows[50:76]]
 
 COPY = ['--copy-file', '@NEW', '--wait', '90']
-lua, out = changed_run(COPY + ['--text', MARK, '--key', 'ctrl+s'])
+lua, out, shot = changed_run(COPY + ['--text', MARK, '--key', 'ctrl+s'])
 check('a script with no edits reloads when its file changes', lua == MARK + CHANGED, repr((lua or '')[:60]) + ' | ' + out[-200:])
 
-lua, out = changed_run(['--text', MARK] + COPY + ['--click', RELOAD, '--key', 'ctrl+s'])
+lua, out, shot = changed_run(['--text', MARK] + COPY)
+check('with edits and no answer, the file on disk is left alone', lua == CHANGED, repr((lua or '')[:60]) + ' | ' + out[-200:])
+conflict_bar = bar_shown(shot)
+check('with edits, a change on disk brings up the Reload / Keep mine bar', conflict_bar)
+
+lua, out, shot = changed_run(['--text', MARK] + COPY + ['--click', RELOAD, '--key', 'ctrl+s'])
 check('with edits, Reload on the bar takes the file from disk', lua == CHANGED, repr((lua or '')[:60]) + ' | ' + out[-200:])
 
-lua, out = changed_run(['--text', MARK] + COPY + ['--click', KEEP_MINE, '--key', 'ctrl+s'])
-check('with edits, Keep mine keeps them and saves over the file', lua == MARK + original, repr((lua or '')[:60]) + ' | ' + out[-200:])
+# Keep mine leaves the cursor after the typed text: Q lands there. Clicking
+# where the bar should be with no bar up puts the cursor elsewhere.
+lua, out, shot = changed_run(['--text', MARK] + COPY + ['--click', KEEP_MINE, '--text', 'Q', '--key', 'ctrl+s'])
+check('with edits, Keep mine on the bar keeps them and saves over the file',
+      conflict_bar and lua == MARK + 'Q' + original and not bar_shown(shot),
+      f'bar came up: {conflict_bar} | ' + repr((lua or '')[:60]) + ' | ' + out[-200:])
 
-lua, out = changed_run(['--text', MARK] + COPY)
-check('with edits and no answer, the file on disk is left alone', lua == CHANGED, repr((lua or '')[:60]) + ' | ' + out[-200:])
+# --- Deleted on disk ---
+DELETE = ['--delete-file', '@SCRIPT', '--wait', '90']
+_, _, plain = changed_run(['--wait', '90'])
+lua, out, shot = changed_run(DELETE)
+check('a script deleted on disk stays gone with no answer', lua is None, repr((lua or '')[:60]) + ' | ' + out[-200:])
+check('a script deleted on disk brings up the Save / Close bar', bar_shown(shot) and not bar_shown(plain))
+check('a script deleted on disk is marked on its tab', tab_strip(shot) != tab_strip(plain))
+
+lua, out, shot = changed_run(['--text', MARK] + DELETE + ['--click', SAVE_DELETED, '--wait', '5'])
+check('Save on the deleted bar writes the file again, edits and all', lua == MARK + original and not bar_shown(shot),
+      repr((lua or '')[:60]) + ' | ' + out[-200:])
+
+lua, out, shot = changed_run(DELETE + ['--click', CLOSE_DELETED, '--wait', '5', '--key', 'ctrl+s', '--wait', '5'])
+check('Close on the deleted bar closes the tab; nothing writes the file', lua is None and not bar_shown(shot),
+      repr((lua or '')[:60]) + ' | ' + out[-200:])
 
 # --- New script on a Trigger component ---
 project = project_copy()

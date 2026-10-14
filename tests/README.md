@@ -282,8 +282,12 @@ the editor itself:
 - Typing `(`, `"` and the rest inserts the closer, typing the closer steps over it, Backspace in
   an empty pair deletes both, and `don't` gets no second quote.
 - `--copy-file <from>@<to>` stands in for another program writing the open script. With no edits
-  the tab reloads within a second; with edits the bar's Reload takes the file, Keep mine keeps
-  the edits and saves over it, and without an answer the file is left alone.
+  the tab reloads within a second; with edits the bar comes up (its colour in the screenshot),
+  Reload takes the file, Keep mine keeps the edits (typing goes on where it was) and saves over
+  it, and without an answer the file is left alone.
+- `--delete-file <path>` stands in for another program deleting it: the tab reads `(deleted)`
+  (its strip differs from a run without), a Save / Close bar comes up, Save writes the text
+  again and Close drops the tab without writing anything.
 - With completion open at the far right of a line, the inspector's pixels match a run without it:
   the list and its docs card stay inside the editor panel.
 

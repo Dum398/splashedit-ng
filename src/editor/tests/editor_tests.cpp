@@ -1053,6 +1053,13 @@ void testNewScript() {
     // A Trigger's script: its own file, the trigger callbacks.
     const std::string trig = editor::scriptTemplate("Door", editor::ScriptKind::Trigger);
     CHECK(trig.find("function onTriggerEnter(index)") != std::string::npos && trig.find("function onTriggerExit(index)") != std::string::npos);
+    // The template and the editor's API agree, with the index psxsplash
+    // passes a Trigger's script (Lua::OnTriggerEnterScript pushes it).
+    for (const char* cb : {"onTriggerEnter", "onTriggerExit"}) {
+        const editor::lua::ApiSymbol* api = editor::lua::findApi("", cb);
+        CHECK(api && api->kind == editor::lua::ApiKind::Callback && std::string(api->signature) == std::string("function ") + cb + "(index)");
+        CHECK(api && trig.find(api->signature) != std::string::npos);
+    }
     CHECK(editor::lua::check(trig).ok());
     editor::NewScript t = editor::createScript(proj, "Game Logic", editor::ScriptKind::Trigger);
     CHECK(t.error.empty() && t.path == "scripts/game_logic_trigger.lua");
@@ -2797,6 +2804,43 @@ void testLuaReload() {
     CHECK(std::string((std::istreambuf_iterator<char>(in)), {}) == "back\r\n");
 }
 
+// A file deleted under its tab is reported until it is saved again or comes
+// back; a script for a file not yet written is not deleted.
+void testLuaDeleted() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "lua-deleted";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    const fs::path file = dir / "door.lua";
+    { std::ofstream(file, std::ios::binary) << "a = 1\n"; }
+    lua::Script s;
+    std::string err;
+    CHECK(s.open(file, &err) && !s.deletedOnDisk());
+    fs::remove(file, ec);
+    CHECK(s.deletedOnDisk() && !s.changedOnDisk() && !s.dirty());
+    // Save writes it again, the text as it was.
+    CHECK(s.save(&err) && !s.deletedOnDisk() && fs::exists(file));
+    std::ifstream in(file, std::ios::binary);
+    CHECK(std::string((std::istreambuf_iterator<char>(in)), {}) == "a = 1\n");
+    in.close();
+    // Deleted, then written back by another program: no longer deleted.
+    fs::remove(file, ec);
+    CHECK(s.deletedOnDisk());
+    { std::ofstream(file, std::ios::binary) << "a = 1\n"; }
+    CHECK(!s.deletedOnDisk());
+    // Moved away is the same as deleted.
+    fs::rename(file, dir / "moved.lua", ec);
+    CHECK(s.deletedOnDisk());
+    // A new script's file does not exist until it is saved: not deleted.
+    lua::Script fresh;
+    CHECK(fresh.open(dir / "new.lua", &err) && !fresh.deletedOnDisk());
+    fresh.buffer.insert("x = 1");
+    CHECK(fresh.save(&err) && !fresh.deletedOnDisk());
+    fs::remove(dir / "new.lua", ec);
+    CHECK(fresh.deletedOnDisk());
+}
+
 void testEditMany() {
     editor::Document d;
     d.reset(sample());
@@ -3626,6 +3670,7 @@ int main(int argc, char** argv) {
     testLuaReplace();
     testLuaAutoClose();
     testLuaReload();
+    testLuaDeleted();
     testLiveExport();
     testBlendCancel();
     testPlay();

@@ -253,8 +253,13 @@ public:
     // Whether the file on disk changed since it was opened, saved or
     // reloaded: its time or size moved and its text is not what was last
     // read or written. A file that went missing is not a change (a save
-    // elsewhere may be replacing it); one that appears is.
+    // elsewhere may be replacing it; deletedOnDisk() tells); one that
+    // appears is.
     bool changedOnDisk();
+    // The file was on disk when this was opened, saved or reloaded and is
+    // gone now: deleted or moved away. save() writes it again. A script
+    // opened for a file not yet written is not deleted.
+    bool deletedOnDisk() const;
     // Reads the file again. The new text replaces the old as one undo step,
     // so Ctrl+Z gets the old text back; the cursor stays on its line (moved
     // with the lines when the change was above it). Not dirty afterwards.

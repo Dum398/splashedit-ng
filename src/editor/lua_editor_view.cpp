@@ -40,6 +40,9 @@ struct ScriptTabs::Tab {
     ImRect findRect;
     // The file changed on disk under unsaved edits: Reload or Keep mine.
     bool diskChanged = false;
+    // The file was deleted on disk: Save writes it again, or Close.
+    bool diskDeleted = false;
+    bool closeAsked = false;  // Close on that bar, done by the next tabStrip
     // API docs shown by go-to-definition on an API name, until the cursor moves.
     const lua::ApiSymbol* peek = nullptr;
     lua::Pos peekAt;
@@ -101,7 +104,7 @@ bool ScriptTabs::saveAll(std::string* error) {
         if (!t->script.dirty()) continue;
         std::string err;
         if (t->script.save(&err)) {
-            t->diskChanged = false;
+            t->diskChanged = t->diskDeleted = false;
             m_saved.push_back(t->script.path());
         } else if (ok) {
             ok = false;
@@ -138,7 +141,7 @@ void ScriptTabs::close(int i) {
 static void saveTab(ScriptTabs& tabs, ScriptTabs::Tab& t, std::vector<std::filesystem::path>* saved) {
     std::string err;
     if (t.script.save(&err)) {
-        t.diskChanged = false;
+        t.diskChanged = t.diskDeleted = false;
         saved->push_back(t.script.path());
         tabs.notice = "Saved " + t.script.title();
         tabs.noticeBad = false;
@@ -206,7 +209,8 @@ void ScriptTabs::closePrompt() {
 }
 
 // About once a second: a tab whose file changed on disk reloads when it has
-// no unsaved edits, else asks (the bar over its editor).
+// no unsaved edits, else asks (the bar over its editor). One whose file was
+// deleted says so on its tab and offers Save or Close.
 void ScriptTabs::pollDisk() {
     const double now = ImGui::GetTime();
     if (m_polledAt >= 0 && now - m_polledAt < 1.0) return;
@@ -218,6 +222,7 @@ void ScriptTabs::pollDisk() {
             if (t->script.reload(&err)) t->compOpen = false;
         }
         t->diskChanged = changed && t->script.dirty();
+        t->diskDeleted = t->script.deletedOnDisk();
     }
 }
 
@@ -225,6 +230,13 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     closePrompt();
     if (m_tabs.empty()) return r;
     pollDisk();
+    for (int i = 0; i < (int)m_tabs.size(); ++i) {
+        if (!m_tabs[i]->closeAsked) continue;
+        m_tabs[i]->closeAsked = false;
+        close(i);
+        break;  // the rest wait a frame: close() may be asking about this one
+    }
+    if (m_tabs.empty()) return r;
     Fonts& f = fonts();
     const float h = size::panelHeader;
     ImRect strip(r.Min, ImVec2(r.Max.x, r.Min.y + h));
@@ -235,6 +247,7 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     for (int i = -1; i < (int)m_tabs.size(); ++i) {
         const bool scene = i < 0;
         std::string label = scene ? std::string("Scene") : m_tabs[i]->script.title();
+        if (!scene && m_tabs[i]->diskDeleted) label += " (deleted)";
         const char* ic = scene ? icon::box : icon::fileCode;
         const float iw = measure(f.medium, type::icon, ic).x, tw = measure(f.medium, type::label, label.c_str()).x;
         const float w = space::md + iw + space::sm - 2 + tw + (scene ? space::md : 28);
@@ -481,9 +494,11 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     const float statusH = 28, barW = 10;
     ImRect status(ImVec2(r.Min.x, r.Max.y - statusH), r.Max);
     ImRect area(r.Min, ImVec2(r.Max.x, status.Min.y));
-    // The file changed on disk while this tab has unsaved edits.
+    // The file changed on disk while this tab has unsaved edits, or was
+    // deleted: a bar over the text with what to do about it.
     ImRect diskBar;
-    if (t.diskChanged) {
+    auto width = [&](const char* l) { return space::md * 2 + measure(f.medium, type::body, l).x; };
+    auto diskBarFrame = [&](const char* what, const char* detail) {
         const float bh = 38;
         ImRect bar(area.Min, ImVec2(area.Max.x, area.Min.y + bh));
         diskBar = bar;
@@ -494,12 +509,27 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         float x = bar.Min.x + space::md;
         text(dl, ImVec2(x, cy - type::icon * 0.5f - 1), f.medium, type::icon, color::warn, icon::warning);
         x += measure(f.medium, type::icon, icon::warning).x + space::sm;
-        text(dl, ImVec2(x, cy - type::label * 0.5f - 1), f.semibold, type::label, color::text, "Changed on disk.");
-        x += measure(f.semibold, type::label, "Changed on disk.").x + space::sm;
-        text(dl, ImVec2(x, cy - type::label * 0.5f - 1), f.regular, type::label, color::textDim, "This tab has unsaved edits.");
-        auto width = [&](const char* l) { return space::md * 2 + measure(f.medium, type::body, l).x; };
-        float bx = bar.Max.x - space::md - width("Keep mine");
-        const float by = cy - size::field * 0.5f;
+        text(dl, ImVec2(x, cy - type::label * 0.5f - 1), f.semibold, type::label, color::text, what);
+        x += measure(f.semibold, type::label, what).x + space::sm;
+        text(dl, ImVec2(x, cy - type::label * 0.5f - 1), f.regular, type::label, color::textDim, detail);
+        return cy - size::field * 0.5f;
+    };
+    if (t.diskDeleted) {
+        const float by = diskBarFrame("Deleted on disk.", "Save writes it again; Close drops the tab.");
+        float bx = diskBar.Max.x - space::md - width("Close");
+        if (button("closedeleted", ImVec2(bx, by), nullptr, "Close", ButtonKind::Secondary, nullptr,
+                   "Close the tab. With unsaved edits it asks first.")) {
+            t.closeAsked = true;
+        }
+        bx -= space::sm + width("Save");
+        if (button("recreate", ImVec2(bx, by), nullptr, "Save", ButtonKind::Primary, nullptr,
+                   "Write this text to the file again.")) {
+            saveTab(*this, t, &m_saved);
+            t.focused = true;
+        }
+    } else if (t.diskChanged) {
+        const float by = diskBarFrame("Changed on disk.", "This tab has unsaved edits.");
+        float bx = diskBar.Max.x - space::md - width("Keep mine");
         if (button("keepmine", ImVec2(bx, by), nullptr, "Keep mine", ButtonKind::Secondary, nullptr,
                    "Keep editing your text; saving overwrites the file.")) {
             s.keepMine();

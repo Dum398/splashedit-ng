@@ -231,12 +231,18 @@ struct Definition {
     Pos pos;
     DefKind kind;
     std::string signature;  // "function foo(a, b)"; empty for variables
+    // Where the name is visible: locals, parameters and loop variables from
+    // after their statement to the end of their block; functions and globals
+    // the whole file.
+    Pos from, to{1 << 30, 0};
+    bool visibleAt(Pos p) const { return p == pos || (from <= p && p < to); }
 };
 
 std::vector<Definition> definitions(const std::vector<std::string>& lines);
 
-// What the name at `p` means: a definition in the file (the last one
-// before p, else the first one after), or an API symbol.
+// What the name at `p` means: the definition in scope there (the innermost
+// local, else a function or global, the last one before p, else the first
+// one after), or an API symbol.
 struct Lookup {
     std::optional<Definition> def;
     const ApiSymbol* api = nullptr;

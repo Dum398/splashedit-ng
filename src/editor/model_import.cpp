@@ -1,6 +1,7 @@
 #include "editor/model_import.hh"
 
 #include <cctype>
+#include <cstdlib>
 #include <condition_variable>
 #include <exception>
 #include <mutex>
@@ -32,6 +33,10 @@ StagedBuild::StagedBuild(StagedModel staged, std::shared_ptr<void> keep) : m(std
             s = std::move(sh->staged);
         }
         buildStaged(s);
+        // Tests stretch the build so a fast machine cannot finish it before
+        // the check looks at the running state.
+        if (const char* ms = std::getenv("SPLASHEDIT_IMPORT_DELAY_MS"))
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(ms)));
         std::lock_guard<std::mutex> lock(sh->mutex);
         sh->staged = std::move(s);
         sh->done = true;

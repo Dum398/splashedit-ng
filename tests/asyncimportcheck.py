@@ -65,7 +65,10 @@ grid_glb(terrain, 200)
 grid_glb(rocks, 32)
 
 DROP = '800,420'  # in the Scene view at 1600x960
-ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
+ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe',
+           # every build takes at least 3 s, so a Release build on a fast runner
+           # is still importing when the checks look
+           SPLASHEDIT_IMPORT_DELAY_MS='3000')
 
 
 def tempdir(name):

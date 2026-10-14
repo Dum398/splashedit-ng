@@ -13,7 +13,9 @@
 #include <imgui_internal.h>
 
 #include <functional>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "editor/timeline.hh"
@@ -64,6 +66,15 @@ public:
     float frame() const { return m_frame; }
     editor::SeqRef sequence() const { return m_ref; }
     std::vector<Sampled> sampled(const editor::Document& doc) const;
+    // The last rename since the last call, for the script tabs: a tab with
+    // unsaved changes gets the same rewrite in its buffer (the file on disk
+    // already has it), and the status bar the summary.
+    struct Renamed {
+        editor::SeqKind kind;
+        std::string from, to;
+        std::string summary;
+    };
+    std::optional<Renamed> takeRenamed() { return std::exchange(m_renamed, std::nullopt); }
 
 private:
     void header(ImDrawList* dl, ImRect r, editor::Document& doc);
@@ -84,6 +95,7 @@ private:
     // The note: a refused rename, a deleted sequence; shown a few seconds.
     std::string m_note;
     double m_noteUntil = 0;
+    std::optional<Renamed> m_renamed;
     // The sequence picker's Rename arms the name field next frame.
     bool m_renameArm = false;
     // The lane whose menu is open.

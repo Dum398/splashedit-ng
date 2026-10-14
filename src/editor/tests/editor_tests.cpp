@@ -3508,6 +3508,179 @@ void testTimelineEvents() {
     CHECK(back.animations[0].skinEvents.size() == 1 && back.animations[0].skinEvents[0].clip == "raise");
 }
 
+// Lua plays a sequence by name: renameSeqInLua rewrites the calls that name
+// it with a plain string literal, for the right kind, and nothing else.
+void testSeqRenameLua() {
+    using editor::SeqKind;
+    const std::string cs =
+        "Cutscene.Play(\"intro\")\n"
+        "Cutscene.Play('intro', {loop = true})\n"
+        "Cutscene.Play \"intro\"\n"
+        "Cutscene . Play (\r\n  \"intro\" )\n"
+        "Cutscene.Play(\"intro2\") Cutscene.Play(\"Intro\") Cutscene.Stop() Cutscene.IsPlaying()\n"
+        "-- Cutscene.Play(\"intro\")\n"
+        "--[==[ Cutscene.Play(\"intro\") ]==]\n"
+        "local s = \"Cutscene.Play(\\\"intro\\\")\" .. [[Cutscene.Play(\"intro\")]]\n"
+        "Animation.Play(\"intro\") foo.Cutscene.Play(\"intro\") Cutscene.Play(name) Cutscene.Play(\"in\\116ro\")\n";
+    int n = -1;
+    const std::string out = editor::renameSeqInLua(cs, SeqKind::Cutscene, "intro", "opening", &n);
+    CHECK(n == 4);
+    CHECK(out ==
+          "Cutscene.Play(\"opening\")\n"
+          "Cutscene.Play('opening', {loop = true})\n"
+          "Cutscene.Play \"opening\"\n"
+          "Cutscene . Play (\r\n  \"opening\" )\n" +
+              cs.substr(cs.find("Cutscene.Play(\"intro2\")")));
+    // Animations: Play, Stop and IsPlaying take the name; a cutscene or a
+    // skinned clip of the same name is someone else's.
+    const std::string an =
+        "Animation.Play('walk') Animation.Stop(\"walk\") Animation.IsPlaying ( 'walk' )\n"
+        "Animation.Play(\"walk\", {loop = true, onComplete = function() Animation.Stop() end})\n"
+        "Cutscene.Play(\"walk\") SkinnedAnim.Play(\"walk\", \"walk\") Animation.Find(\"walk\")\n";
+    CHECK(editor::renameSeqInLua(an, SeqKind::Animation, "walk", "run", &n) ==
+              "Animation.Play('run') Animation.Stop(\"run\") Animation.IsPlaying ( 'run' )\n"
+              "Animation.Play(\"run\", {loop = true, onComplete = function() Animation.Stop() end})\n"
+              "Cutscene.Play(\"walk\") SkinnedAnim.Play(\"walk\", \"walk\") Animation.Find(\"walk\")\n" &&
+          n == 4);
+    CHECK(editor::renameSeqInLua(an, SeqKind::Cutscene, "walk", "run", &n).find("Cutscene.Play(\"run\")") != std::string::npos &&
+          n == 1);
+    // The new name is quoted for the literal it lands in.
+    CHECK(editor::renameSeqInLua("Animation.Play('walk')", SeqKind::Animation, "walk", "it's", &n) == "Animation.Play('it\\'s')");
+    CHECK(editor::renameSeqInLua("x = 1 -- nothing\n", SeqKind::Animation, "walk", "run", &n) == "x = 1 -- nothing\n" && n == 0);
+}
+
+// Renaming a sequence rewrites the scene's scripts on disk in the same undo
+// step; undo and redo follow, and a file edited since is left alone.
+void testSeqRenameScripts() {
+    namespace fs = std::filesystem;
+    using editor::SeqKind;
+    const fs::path dir = g_outDir / "seq_rename";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    auto put = [&](const char* p, const std::string& text) { std::ofstream(dir / p, std::ios::binary) << text; };
+    auto get = [&](const char* p) {
+        std::ifstream in(dir / p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    const std::string obj = "function onCreate(self)\r\n  Cutscene.Play(\"intro\")\r\nend\r\n";
+    const std::string trig = "function onTriggerEnter(e) Cutscene.Play('intro') Animation.Play('intro') end\n";
+    const std::string scn = "function onSceneCreationEnd() Animation.Play(\"spin\") end\n";
+    const std::string other = "Cutscene.Play(\"intro\")\n";  // not the scene's: left alone
+    put("scripts/obj.lua", obj);
+    put("scripts/trig.lua", trig);
+    put("scene.lua", scn);
+    put("scripts/other.lua", other);
+    splash::Scene sc;
+    splash::Object parent, child, door;
+    parent.name = "Parent";
+    child.name = "Child";
+    child.script = splash::ScriptComponent{"scripts/obj.lua", {}};
+    parent.children.push_back(child);
+    door.name = "Door";
+    door.trigger = splash::TriggerComponent{};
+    door.trigger->lua = "scripts/trig.lua";
+    door.script = splash::ScriptComponent{"scripts/obj.lua", {}};  // the same file twice: rewritten once
+    sc.objects = {parent, door};
+    sc.settings.script = "scene.lua";
+    splash::Cutscene c;
+    c.name = "intro";
+    sc.cutscenes.push_back(c);
+    splash::Animation a;
+    a.name = "spin";
+    sc.animations.push_back(a);
+    editor::Document d;
+    d.reset(sc, dir, "s");
+    CHECK((editor::sceneScripts(d) == std::vector<std::string>{"scripts/obj.lua", "scripts/trig.lua", "scene.lua"}));
+
+    const size_t h = d.historySize();
+    const unsigned assets = d.assetsId();
+    editor::ScriptRenames sr;
+    CHECK(editor::renameSequence(d, {SeqKind::Cutscene, 0}, "opening", &sr));
+    CHECK(d.historySize() == h + 1 && *editor::seqName(d, {SeqKind::Cutscene, 0}) == "opening");
+    CHECK(sr.refs == 2 && sr.failed.empty() &&
+          (sr.files == std::vector<std::string>{"scripts/obj.lua", "scripts/trig.lua"}));
+    CHECK(get("scripts/obj.lua") == "function onCreate(self)\r\n  Cutscene.Play(\"opening\")\r\nend\r\n");
+    CHECK(get("scripts/trig.lua") == "function onTriggerEnter(e) Cutscene.Play('opening') Animation.Play('intro') end\n");
+    CHECK(get("scene.lua") == scn && get("scripts/other.lua") == other);
+    CHECK(d.assetsId() != assets);  // open script tabs reload from this
+    // One step: undo puts the name and the files back, redo again.
+    CHECK(d.undo() && *editor::seqName(d, {SeqKind::Cutscene, 0}) == "intro");
+    CHECK(get("scripts/obj.lua") == obj && get("scripts/trig.lua") == trig);
+    CHECK(d.redo() && get("scripts/obj.lua").find("\"opening\"") != std::string::npos &&
+          get("scripts/trig.lua").find("'opening'") != std::string::npos);
+    // A file changed since the step is not overwritten by its undo.
+    put("scripts/trig.lua", "-- mine now\n");
+    CHECK(d.undo() && *editor::seqName(d, {SeqKind::Cutscene, 0}) == "intro");
+    CHECK(get("scripts/trig.lua") == "-- mine now\n" && get("scripts/obj.lua") == obj);
+    // An animation rename touches Animation calls only.
+    CHECK(editor::renameSequence(d, {SeqKind::Animation, 0}, "turn", &sr) && sr.refs == 1 &&
+          (sr.files == std::vector<std::string>{"scene.lua"}));
+    CHECK(get("scene.lua") == "function onSceneCreationEnd() Animation.Play(\"turn\") end\n");
+    // No references: the rename is still one step and says so.
+    put("scene.lua", scn);
+    CHECK(editor::renameSequence(d, {SeqKind::Animation, 0}, "twirl", &sr) && sr.refs == 0 && sr.files.empty());
+    fs::remove_all(dir, ec);
+}
+
+// A UI position track starts where psxsplash starts it: the element's
+// resolved screen position (UISystem::getPosition: anchor byte * res >> 8
+// plus the stored offset, clamped at 0), less the anchor correction
+// writeSequences adds to each key. At 320x240 an anchor of 1.0 is byte 255,
+// pixel 318 (x) and 239 (y), so the correction is 2 and 1.
+void testTimelineUiPositionStart() {
+    using editor::SeqKind;
+    using splash::TrackType;
+    splash::UICanvas cv;
+    cv.name = "hud";
+    splash::UIElement bar, mid, neg, line;
+    bar.name = "bar";
+    bar.anchorMin = bar.anchorMax = {1, 1};
+    bar.rect = {-40, -20, 32, 8};
+    mid.name = "mid";
+    mid.anchorMin = mid.anchorMax = {0.5f, 0.5f};
+    mid.rect = {-10, 4, 20, 8};
+    neg.name = "neg";
+    neg.rect = {-5, 3, 16, 16};
+    line.name = "line";
+    line.type = splash::UIElementType::Line;
+    line.from = {7, 9};
+    cv.elements = {bar, mid, neg, line};
+    CHECK((splash::uiPositionTrackStart(bar) == std::array<int, 2>{278, 219}));  // on screen at 280, 220
+    CHECK((splash::uiPositionTrackStart(mid) == std::array<int, 2>{150, 124}));
+    CHECK((splash::uiPositionTrackStart(neg) == std::array<int, 2>{0, 3}));      // the runtime clamps at 0
+    CHECK((splash::uiPositionTrackStart(line) == std::array<int, 2>{7, 9}));
+
+    splash::Scene sc;
+    sc.canvases.push_back(cv);
+    splash::Cutscene c;
+    c.name = "intro";
+    c.durationFrames = 60;
+    splash::CutsceneTrack t;
+    t.type = TrackType::UIPosition;
+    t.target = "hud/bar";
+    c.tracks.push_back(t);
+    t.target = "hud/mid";
+    splash::Keyframe k;
+    k.frame = 30;
+    k.value = {0, 0, 0};
+    t.keyframes.push_back(k);
+    c.tracks.push_back(t);
+    sc.cutscenes.push_back(c);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{SeqKind::Cutscene, 0};
+    CHECK((editor::initialValue(d, d.scene().cutscenes[0].tracks[0]) == editor::KeyValue{278, 219, 0}));
+    // The start key on an empty track is where the element sits: exported
+    // as 278 + 2, 219 + 1, the position the runtime starts from, no jump.
+    auto key = editor::addKey(d, ref, 0, 10);
+    CHECK(key && (editor::key(d, ref, *key)->value == editor::KeyValue{278, 219, 0}));
+    // The lane value (and preview) before the first key starts at the element.
+    CHECK((editor::sampleAt(d, ref, 1, 0) == editor::KeyValue{150, 124, 0}));
+    CHECK((editor::sampleAt(d, ref, 1, 15) == editor::KeyValue{75, 62, 0}));
+    CHECK((editor::sampleAt(d, ref, 1, 30) == editor::KeyValue{0, 0, 0}));
+}
+
 void testTimelineRetarget() {
     using splash::TrackType;
     splash::Scene sc;
@@ -4750,6 +4923,9 @@ int main(int argc, char** argv) {
     testTimelineSelection();
     testTimelineClipboard();
     testTimelineEvents();
+    testSeqRenameLua();
+    testSeqRenameScripts();
+    testTimelineUiPositionStart();
     testLuaTokenize();
     testLuaBuffer();
     testLuaComplete();

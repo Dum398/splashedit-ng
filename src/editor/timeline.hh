@@ -124,8 +124,30 @@ std::optional<SeqRef> addSequence(Document& doc, SeqKind kind, const std::string
 // Why `name` cannot name the sequence, or empty when it can: empty, longer
 // than kMaxSeqName, or taken by another sequence of the same kind.
 std::string seqNameProblem(const Document& doc, SeqRef ref, const std::string& name);
+// Lua plays a sequence by name: Cutscene.Play(name) for a cutscene, and
+// Animation.Play(name), Animation.Stop(name) and Animation.IsPlaying(name)
+// for an animation (psxsplash luaapi.cpp; Cutscene.Stop and IsPlaying take
+// no name). `lua` with each such call whose first argument is a quoted
+// string literal spelling exactly `from` (no escapes) changed to spell `to`;
+// `count` gets how many. Calls through another name (local P = Cutscene.Play)
+// or with a computed or long-bracket name are left alone.
+std::string renameSeqInLua(const std::string& lua, SeqKind kind, const std::string& from, const std::string& to,
+                           int* count = nullptr);
+// The scripts the scene exports, project relative: object scripts, trigger
+// scripts and the scene script, each once.
+std::vector<std::string> sceneScripts(const Document& doc);
+// What a rename did to the scene's scripts on disk.
+struct ScriptRenames {
+    int refs = 0;                      // calls rewritten
+    std::vector<std::string> files;    // project paths rewritten
+    std::vector<std::string> failed;   // project paths that could not be read or written
+};
 // Refused (no step) when seqNameProblem() says so or the name is unchanged.
-bool renameSequence(Document& doc, SeqRef ref, const std::string& name);
+// Also rewrites the sequence's name in sceneScripts() (renameSeqInLua) on
+// disk, in the same undo step: undo and redo write each file back only when
+// it still holds what the step left there, so a file edited since is left
+// alone. `scripts` gets what was rewritten.
+bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRenames* scripts = nullptr);
 // Removes the sequence; the ones after it move down an index.
 bool removeSequence(Document& doc, SeqRef ref);
 // The new track's index, or -1: the type is not allowed in this kind of
@@ -212,7 +234,8 @@ KeyValue sampleFixed(const splash::CutsceneTrack& track, float frame, const KeyV
 // The curve psxsplash applies to a 0..1 segment position.
 float applyCurve(float t, splash::Interp mode);
 // The target's state when playback starts, as far as the editor knows it:
-// an object's world position or its start-active flag; zero otherwise
+// an object's world position or its start-active flag, a UI element's
+// on-screen position (splash::uiPositionTrackStart); zero otherwise
 // (object rotation starts from 0,0,0 in the runtime too).
 KeyValue initialValue(const Document& doc, const splash::CutsceneTrack& track);
 // sampleFixed() with initialValue() and the scene's GTE scaling: what the

@@ -226,6 +226,7 @@ struct State {
     // Lua files open in the script editor, as tabs beside the Scene.
     ui::ScriptTabs scripts;
     std::filesystem::path scriptsProject;  // the project they belong to
+    unsigned scriptsAssets = 0;            // doc.assetsId() the tabs last matched disk at
 
     // Cutscene and animation tracks, docked under the Scene.
     ui::TimelinePanel timeline;

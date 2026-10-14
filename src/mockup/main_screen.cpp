@@ -5025,6 +5025,22 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.scripts.closeAll();
         st.scriptsProject = doc.projectRoot();
     }
+    // A sequence rename rewrote the scripts that play it by name on disk; a
+    // tab with unsaved changes gets the same rewrite, so saving it keeps it.
+    if (auto r = st.timeline.takeRenamed()) {
+        std::vector<std::filesystem::path> files;
+        for (const std::string& p : editor::sceneScripts(doc)) files.push_back(doc.resolve(p));
+        const int tabs = st.scripts.rewriteUnsaved(files, [&](const std::string& text) {
+            return editor::renameSeqInLua(text, r->kind, r->from, r->to);
+        });
+        notify(st, r->summary + (tabs ? "; also in " + std::to_string(tabs) + " unsaved script tab" + (tabs == 1 ? "" : "s") : ""),
+               false);
+    }
+    // Rewritten on disk (the rename, its undo or redo): clean tabs reload.
+    if (st.scriptsAssets != doc.assetsId()) {
+        st.scripts.reloadFromDisk();
+        st.scriptsAssets = doc.assetsId();
+    }
     // The bottom dock: the tab in front takes its height from the bottom of
     // the middle panel; the other is not drawn until it is picked.
     const bool tl = timelineInFront(st);

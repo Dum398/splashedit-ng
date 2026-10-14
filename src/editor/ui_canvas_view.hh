@@ -36,12 +36,25 @@ public:
     // right-click menus and the Edit menu. The text goes through the system
     // clipboard (uic::copyElementText), so it survives between projects and
     // scene object text is never taken for it.
+    // They act on the whole selection, each as one undo step. Paste lands the
+    // group's top-left at the pointer when it is over the canvas (and not in a
+    // menu), else 8 px down and right of where the originals sit.
     bool hasElement(const editor::Document& doc) const;
+    // Edit > Rename and F2: the selected element's name becomes a text field in the list.
+    void rename(editor::Document& doc);
+    bool canRename(const editor::Document& doc) const;
     void copy(editor::Document& doc);
     void cut(editor::Document& doc);
-    void paste(editor::Document& doc);
+    // `atPointer`: false for the Edit menu. `forced`: canvas pixel to land at, for a menu opened on the canvas.
+    void paste(editor::Document& doc, bool atPointer = true, const std::array<int, 2>* forced = nullptr);
+    // The pointer position (canvas pixels) when it is over the canvas pane and no menu is open.
+    bool pointerOnCanvas(std::array<int, 2>* at) const;
     void duplicate(editor::Document& doc);
     void remove(editor::Document& doc);
+
+    // A refusal the app shows in the status bar (main_screen takes and clears it).
+    std::string status;
+    bool statusBad = false;
 
     // Scripted tests (--ui): print where the canvas, the list and the
     // canvas's eye are whenever that changes.
@@ -51,6 +64,8 @@ private:
     void list(ImDrawList* dl, ImRect r, editor::Document& doc);
     void canvas(ImDrawList* dl, ImRect r, editor::Document& doc);
     void keys(editor::Document& doc);
+    void multiInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc);
+    void select(editor::Document& doc, int c, const std::vector<int>& idx, int primary);
     void elementInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc);
     void canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc);
     void upload(const editor::Document& doc, const std::vector<bool>& show);
@@ -77,7 +92,25 @@ private:
         editor::uic::Rect rect;
         std::array<int, 2> from{}, to{};
         bool moved = false;
+        // The whole selection being moved: indices and where each started.
+        std::vector<int> idx;
+        std::vector<editor::uic::Rect> rects;
+        std::vector<std::array<int, 2>> froms, tos;
+        int narrowTo = -1;  // a plain click in a multi-selection: select only this if it was not a drag
     } m_drag;
+    // A rubber band dragged on empty canvas: canvas pixels, and what was
+    // selected before (kept with Ctrl).
+    struct Band {
+        bool active = false, moved = false;
+        ImVec2 start, now;
+        std::vector<int> base;
+    } m_band;
+    int m_anchor = -1;       // the row a Shift+click range starts from
+    bool m_renaming = false, m_renameStart = false;
+    // Where a right click on the canvas opened the element menu (canvas pixels), for Paste.
+    bool m_menuAtCanvas = false;
+    std::array<int, 2> m_menuAt{};
+
     std::vector<editor::uic::Guide> m_guides;
     std::string m_dragLabel;
     bool m_snap = true;
@@ -106,7 +139,7 @@ private:
     bool m_rowDragging = false;
     float m_listScroll = 0;
 
-    std::string m_reported, m_listLayout, m_menuReported;
+    std::string m_reported, m_listLayout, m_menuReported, m_inspReported;
 };
 
 }  // namespace ui

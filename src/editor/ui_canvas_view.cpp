@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <functional>
@@ -129,7 +130,10 @@ editor::Document::UiSelection validSelection(const editor::Document& doc) {
     const auto& cvs = doc.scene().canvases;
     if (cvs.empty()) return {-1, -1};
     if (sel.canvas < 0 || sel.canvas >= int(cvs.size())) sel = {0, -1};
-    if (sel.element >= int(cvs[size_t(sel.canvas)].elements.size())) sel.element = -1;
+    const int n = int(cvs[size_t(sel.canvas)].elements.size());
+    if (sel.element >= n) sel.element = -1;
+    sel.more.erase(std::remove_if(sel.more.begin(), sel.more.end(), [&](int i) { return i < 0 || i >= n || i == sel.element; }),
+                   sel.more.end());
     return sel;
 }
 
@@ -344,6 +348,8 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
     ImGui::PushClipRect(area.Min, area.Max, true);
     int clickedRow = -1, eyeRow = -1, rightRow = -2;
+    const std::vector<int> picked = uic::selectedElements(doc);
+    auto isPicked = [&](int i) { return std::binary_search(picked.begin(), picked.end(), i); };
     for (int i = 0; i < n; i++) {
         ImRect rr(ImVec2(x0 - space::xs, top + i * rowH), ImVec2(x1 + space::xs, top + (i + 1) * rowH));
         if (rr.Max.y < area.Min.y || rr.Min.y > area.Max.y) continue;
@@ -353,12 +359,27 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
         row.iconColor = e.unknown.empty() ? typeColor(e.type) : color::textFaint;
         row.label = e.name.empty() ? "(unnamed)" : e.name.c_str();
         row.meta = e.unknown.empty() ? nullptr : "unknown type";
-        row.selected = i == sel.element;
+        row.selected = isPicked(i);
         row.warning = m_rowWarn[size_t(i)];
         row.hidden = !e.visible;
         ImGui::PushID(i);
         bool eyeHit = false;
         Hit h = treeRow("row", rr, row, &eyeHit);
+        if (m_renaming && i == sel.element && picked.size() == 1) {
+            // F2: the name becomes a text field.
+            if (m_renameStart) {
+                beginTextEdit("uirename", e.name);
+                m_renameStart = false;
+            }
+            const float lx = rr.Min.x + space::xs + 16 + 22;
+            ImRect field(ImVec2(lx - space::xs - 2, rr.Min.y + 2), ImVec2(rr.Max.x - 2, rr.Max.y - 2));
+            std::string typed;
+            TextEdit res = textEdit("uirename", field, fonts().medium, type::body, lx, field.Max.x - space::xs, &typed);
+            if (res == TextEdit::Commit && !typed.empty() && typed != e.name)
+                uic::editElement(doc, c, i, [&](UIElement& el) { el.name = typed; });
+            if (res != TextEdit::Editing) m_renaming = false;
+            eyeHit = false;
+        }
         ImGui::PopID();
         if (eyeHit) eyeRow = i;
         else if (h.clicked && !m_rowDragging) clickedRow = i;
@@ -378,20 +399,40 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
     ImGui::PopClipRect();
     if (eyeRow >= 0) uic::editElement(doc, c, eyeRow, [](UIElement& e) { e.visible = !e.visible; });
-    if (clickedRow >= 0) doc.selectUi({c, clickedRow});
+    if (clickedRow >= 0) {
+        ImGuiIO& io = ImGui::GetIO();
+        m_renaming = false;
+        if (io.KeyShift && m_anchor >= 0 && m_anchor < n) {
+            // A range from the row last clicked plain or with Ctrl.
+            std::vector<int> range;
+            for (int i = std::min(m_anchor, clickedRow); i <= std::max(m_anchor, clickedRow); i++) range.push_back(i);
+            select(doc, c, range, clickedRow);
+        } else if (io.KeyCtrl) {
+            std::vector<int> v = picked;
+            const bool was = isPicked(clickedRow);
+            if (was) v.erase(std::find(v.begin(), v.end(), clickedRow));
+            else v.push_back(clickedRow);
+            select(doc, c, v, was ? -1 : clickedRow);
+            m_anchor = clickedRow;
+        } else {
+            select(doc, c, {clickedRow}, clickedRow);
+            m_anchor = clickedRow;
+        }
+    }
     // Right click: on a row selects it, below the rows selects none; then the element menu.
     if (rightRow == -2 && !m_rowDragging && ImGui::IsMouseHoveringRect(area.Min, area.Max) &&
         !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
         rightRow = -1;
     if (rightRow >= -1) {
-        doc.selectUi({c, rightRow});
+        if (rightRow < 0 || !isPicked(rightRow)) select(doc, c, rightRow < 0 ? std::vector<int>{} : std::vector<int>{rightRow}, rightRow);
+        m_menuAtCanvas = false;
         ImGui::OpenPopup("##elmenu");
     }
     if (m_rowDragging && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         if (gap >= 0) {
             const int to = gap > m_rowDrag ? gap - 1 : gap;
             if (to != m_rowDrag) uic::moveElement(doc, c, m_rowDrag, to);
-            else doc.selectUi({c, m_rowDrag});
+            else select(doc, c, {m_rowDrag}, m_rowDrag);
         }
         m_rowDragging = false;
         m_rowDrag = -1;
@@ -582,7 +623,10 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
 
     // Mouse.
     Hit h = interact("canvasarea", area);
-    const UIElement* selEl = sel.element >= 0 ? &cv.elements[size_t(sel.element)] : nullptr;
+    const std::vector<int> sels = uic::selectedElements(doc);
+    const bool single = sels.size() == 1;
+    auto inSel = [&](int i) { return std::binary_search(sels.begin(), sels.end(), i); };
+    const UIElement* selEl = single ? &cv.elements[size_t(sels[0])] : nullptr;
     auto handleAt = [&](const UIElement& e) {
         if (e.type == UIElementType::Line) return uic::hitLineHandle(e, mx, my, slop);
         uic::Handle hd = uic::hitHandle(uic::layout(e, s), mx, my, slop);
@@ -592,22 +636,45 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     if (selEl && selEl->unknown.empty()) hoverHandle = handleAt(*selEl);
     const int hoverEl = h.hovered ? uic::hitTest(cv, s, mx, my, slop) : -1;
     if (h.hovered && !m_panning && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && m_drag.element < 0) {
-        // Right click: selects what is under the pointer, then the element menu.
-        if (hoverEl >= 0) doc.selectUi({sel.canvas, hoverEl});
+        // Right click: selects what is under the pointer (keeping a selection it is part of), then the element menu.
+        if (hoverEl >= 0 && !inSel(hoverEl)) select(doc, sel.canvas, {hoverEl}, hoverEl);
+        m_menuAtCanvas = true;
+        m_menuAt = {int(std::floor(mx)), int(std::floor(my))};
         ImGui::OpenPopup("##elmenu");
     }
     if (h.hovered && !m_panning && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        m_drag = Drag();
+        m_band = Band();
+        m_renaming = false;
         int el = -1;
         uic::Handle hd = uic::Handle::None;
-        if (hoverHandle != uic::Handle::None && hoverHandle != uic::Handle::Move) {
-            el = sel.element, hd = hoverHandle;
+        if (!io.KeyCtrl && hoverHandle != uic::Handle::None && hoverHandle != uic::Handle::Move) {
+            el = sels[0], hd = hoverHandle;
         } else if (hoverEl >= 0) {
             el = hoverEl, hd = uic::Handle::Move;
-        } else if (hoverHandle == uic::Handle::Move) {
-            el = sel.element, hd = uic::Handle::Move;  // a line's own body
+        } else if (!io.KeyCtrl && hoverHandle == uic::Handle::Move) {
+            el = sels[0], hd = uic::Handle::Move;  // a line's own body
         }
-        doc.selectUi({sel.canvas, el});
-        m_drag = Drag();
+        if (io.KeyCtrl && el >= 0) {
+            // Ctrl+click toggles the element in the selection.
+            std::vector<int> v = sels;
+            const bool was = inSel(el);
+            if (was) v.erase(std::find(v.begin(), v.end(), el));
+            else v.push_back(el);
+            select(doc, sel.canvas, v, was ? -1 : el);
+            m_anchor = el;
+            el = -1;
+        } else if (el >= 0) {
+            if (hd == uic::Handle::Move && inSel(el) && sels.size() > 1) m_drag.narrowTo = el;  // moves them all
+            else select(doc, sel.canvas, {el}, el);
+            m_anchor = el;
+        } else {
+            // Empty canvas: a rubber band; plain, it starts from nothing selected, with Ctrl it adds.
+            m_band.active = true;
+            m_band.start = m_band.now = ImVec2(mx, my);
+            if (io.KeyCtrl) m_band.base = sels;
+            else doc.selectUi({sel.canvas, -1});
+        }
         if (el >= 0) {
             const UIElement& e = cv.elements[size_t(el)];
             m_drag.canvas = sel.canvas;
@@ -617,6 +684,13 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
             m_drag.rect = uic::layout(e, s);
             m_drag.from = e.from;
             m_drag.to = e.to;
+            m_drag.idx = hd == uic::Handle::Move ? uic::selectedElements(doc) : std::vector<int>{el};
+            for (int i : m_drag.idx) {
+                const UIElement& q = cv.elements[size_t(i)];
+                m_drag.rects.push_back(uic::boundsOf(q, s));
+                m_drag.froms.push_back(q.from);
+                m_drag.tos.push_back(q.to);
+            }
         }
     }
     m_guides.clear();
@@ -624,8 +698,10 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     if (m_drag.element >= 0) {
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             if (m_drag.moved) doc.endMerge();
+            else if (m_drag.narrowTo >= 0) select(doc, sel.canvas, {m_drag.narrowTo}, m_drag.narrowTo);
             m_drag = Drag();
-        } else if (m_drag.canvas == sel.canvas && m_drag.element < int(cv.elements.size())) {
+        } else if (m_drag.canvas == sel.canvas && std::all_of(m_drag.idx.begin(), m_drag.idx.end(),
+                                                               [&](int i) { return i < int(cv.elements.size()); })) {
             const ImVec2 dm = m - m_drag.mouse;
             if (!m_drag.moved && std::fabs(dm.x) + std::fabs(dm.y) >= 2) m_drag.moved = true;
             if (m_drag.moved) {
@@ -643,15 +719,28 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
                     uic::editElement(doc, sel.canvas, ei, [&](UIElement& e) { (hd == uic::Handle::LineFrom ? e.from : e.to) = p; }, kDragKey);
                     std::snprintf(label, sizeof label, "%d, %d", p[0], p[1]);
                 } else if (hd == uic::Handle::Move) {
-                    uic::Rect nr = m_drag.rect;
-                    nr.x += dx;
-                    nr.y += dy;
+                    // The whole selection moves as one box; it snaps to what is not part of it.
+                    int bx0 = INT_MAX, by0 = INT_MAX, bx1 = INT_MIN, by1 = INT_MIN;
+                    for (const uic::Rect& q : m_drag.rects)
+                        bx0 = std::min(bx0, q.x), by0 = std::min(by0, q.y), bx1 = std::max(bx1, q.right()), by1 = std::max(by1, q.bottom());
+                    uic::Rect nr{bx0 + dx, by0 + dy, bx1 - bx0, by1 - by0};
                     if (snap) {
-                        uic::Snapped sn = uic::snapMove(cv, ei, nr, s, th);
+                        UICanvas others = cv;
+                        for (size_t k = m_drag.idx.size(); k-- > 0;) others.elements.erase(others.elements.begin() + m_drag.idx[k]);
+                        uic::Snapped sn = uic::snapMove(others, -1, nr, s, th);
                         nr = sn.rect;
                         m_guides = sn.guides;
                     }
-                    uic::editElement(doc, sel.canvas, ei, [&](UIElement& e) { uic::place(e, nr, s); }, kDragKey);
+                    const int mx2 = nr.x - bx0, my2 = nr.y - by0;
+                    uic::editElements(doc, sel.canvas, m_drag.idx, [&](UIElement& e, size_t k) {
+                        if (e.type == UIElementType::Line) {
+                            e.from = {m_drag.froms[k][0] + mx2, m_drag.froms[k][1] + my2};
+                            e.to = {m_drag.tos[k][0] + mx2, m_drag.tos[k][1] + my2};
+                        } else {
+                            const uic::Rect& q = m_drag.rects[k];
+                            uic::place(e, uic::Rect{q.x + mx2, q.y + my2, q.w, q.h}, s);
+                        }
+                    }, kDragKey);
                     std::snprintf(label, sizeof label, "%d, %d", nr.x, nr.y);
                 } else {
                     uic::Rect nr = uic::resize(m_drag.rect, hd, dx, dy);
@@ -667,6 +756,21 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
             }
         } else {
             m_drag = Drag();
+        }
+    }
+    if (m_band.active) {
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            m_band = Band();
+        } else {
+            m_band.now = ImVec2(mx, my);
+            const ImVec2 sp = toScreen(m_band.start.x, m_band.start.y);
+            if (!m_band.moved && std::fabs(m.x - sp.x) + std::fabs(m.y - sp.y) >= 3) m_band.moved = true;
+            if (m_band.moved) {
+                std::vector<int> v = uic::elementsInBox(cv, s, m_band.start.x, m_band.start.y, mx, my);
+                v.insert(v.end(), m_band.base.begin(), m_band.base.end());
+                const editor::Document::UiSelection want = uic::selectionOf(sel.canvas, v);
+                if (!(want == doc.uiSelection())) doc.selectUi(want);
+            }
         }
     }
 
@@ -693,11 +797,11 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     // Outlines: every element faintly, the one under the pointer brighter,
     // the selection with its handles.
     const UICanvas& now = doc.scene().canvases[size_t(sel.canvas)];
-    const editor::Document::UiSelection sel2 = doc.uiSelection();
+    const std::vector<int> sels2 = uic::selectedElements(doc);
     for (int i = 0; i < int(now.elements.size()); i++) {
         const UIElement& e = now.elements[size_t(i)];
         if (!e.unknown.empty()) continue;
-        const bool selected = i == sel2.element, hovered = i == hoverEl && m_drag.element < 0;
+        const bool selected = std::binary_search(sels2.begin(), sels2.end(), i), hovered = i == hoverEl && m_drag.element < 0;
         if (!e.visible && !selected) continue;
         const ImU32 col = selected ? color::accent : hovered ? rgb(0xffffff, 150) : rgb(0xffffff, 26);
         if (e.type == UIElementType::Line) {
@@ -713,8 +817,8 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
         if (g.vertical) dl->AddLine(toScreen(float(g.pos), float(g.from) - 4), toScreen(float(g.pos), float(g.to) + 4), kGuide, 1.0f);
         else dl->AddLine(toScreen(float(g.from) - 4, float(g.pos)), toScreen(float(g.to) + 4, float(g.pos)), kGuide, 1.0f);
     }
-    if (sel2.element >= 0 && sel2.element < int(now.elements.size()) && now.elements[size_t(sel2.element)].unknown.empty()) {
-        const UIElement& e = now.elements[size_t(sel2.element)];
+    if (sels2.size() == 1 && now.elements[size_t(sels2[0])].unknown.empty()) {
+        const UIElement& e = now.elements[size_t(sels2[0])];
         auto knob = [&](ImVec2 p) {
             dl->AddRectFilled(p - ImVec2(4, 4), p + ImVec2(4, 4), color::text);
             dl->AddRect(p - ImVec2(4, 4), p + ImVec2(4, 4), color::accent, 0, 0, 1.5f);
@@ -729,6 +833,11 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
                              ImVec2((l + rt) * 0.5f, b), ImVec2(l, (t + b) * 0.5f), ImVec2(rt, (t + b) * 0.5f)})
                 knob(toScreen(p.x, p.y));
         }
+    }
+    if (m_band.active && m_band.moved) {
+        const ImVec2 a = toScreen(m_band.start.x, m_band.start.y), b = toScreen(m_band.now.x, m_band.now.y);
+        dl->AddRectFilled(a, b, (color::accent & 0x00ffffffu) | (40u << IM_COL32_A_SHIFT));
+        dl->AddRect(a, b, color::accent, 0, 0, 1.0f);
     }
     if (!m_dragLabel.empty()) {
         ImVec2 ls = measure(f.medium, type::caption, m_dragLabel.c_str());
@@ -760,55 +869,112 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
 
 // ---- Element commands
 
-bool CanvasView::hasElement(const editor::Document& doc) const {
-    const editor::Document::UiSelection sel = doc.uiSelection();
-    const auto& cvs = doc.scene().canvases;
-    return sel.canvas >= 0 && sel.canvas < int(cvs.size()) && sel.element >= 0 &&
-           sel.element < int(cvs[size_t(sel.canvas)].elements.size());
-}
+bool CanvasView::hasElement(const editor::Document& doc) const { return !uic::selectedElements(doc).empty(); }
 
 void CanvasView::notice(std::string msg, bool bad) {
+    if (reportLayout) {
+        std::printf("uicanvas: notice %s\n", msg.c_str());
+        std::fflush(stdout);
+    }
     m_notice = std::move(msg);
     m_noticeBad = bad;
     m_noticeUntil = ImGui::GetTime() + (bad ? 5 : 2.5);
 }
 
+namespace {
+// "Box" for one element, "3 elements" for more.
+std::string describe(const editor::Document& doc, int c, const std::vector<int>& idx) {
+    if (idx.size() == 1) return doc.scene().canvases[size_t(c)].elements[size_t(idx[0])].name;
+    return std::to_string(idx.size()) + " elements";
+}
+}  // namespace
+
+bool CanvasView::canRename(const editor::Document& doc) const { return uic::selectedElements(doc).size() == 1; }
+
+void CanvasView::rename(editor::Document& doc) {
+    const std::vector<int> sels = uic::selectedElements(doc);
+    if (sels.size() != 1) return;
+    m_renaming = true;
+    m_renameStart = true;
+}
+
 void CanvasView::copy(editor::Document& doc) {
-    if (!hasElement(doc)) return;
-    const editor::Document::UiSelection sel = doc.uiSelection();
-    const std::string text = uic::copyElementText(doc, sel.canvas, sel.element);
+    const std::vector<int> sels = uic::selectedElements(doc);
+    if (sels.empty()) return;
+    const int c = doc.uiSelection().canvas;
+    const std::string text = uic::copyElementsText(doc, c, sels);
     if (!SDL_SetClipboardText(text.c_str())) return notice(std::string("Cannot copy: ") + SDL_GetError(), true);
-    notice("Copied " + doc.scene().canvases[size_t(sel.canvas)].elements[size_t(sel.element)].name, false);
+    notice("Copied " + describe(doc, c, sels), false);
 }
 
 void CanvasView::cut(editor::Document& doc) {
-    if (!hasElement(doc)) return;
-    const editor::Document::UiSelection sel = doc.uiSelection();
-    const std::string text = uic::copyElementText(doc, sel.canvas, sel.element);
+    const std::vector<int> sels = uic::selectedElements(doc);
+    if (sels.empty()) return;
+    const int c = doc.uiSelection().canvas;
+    const std::string text = uic::copyElementsText(doc, c, sels);
     // Only removed once the clipboard holds it, so a failed copy loses nothing.
     if (!SDL_SetClipboardText(text.c_str())) return notice(std::string("Cannot cut: ") + SDL_GetError(), true);
-    notice("Cut " + doc.scene().canvases[size_t(sel.canvas)].elements[size_t(sel.element)].name, false);
-    uic::deleteElement(doc, sel.canvas, sel.element);
+    notice("Cut " + describe(doc, c, sels), false);
+    uic::deleteElements(doc, c, sels);
 }
 
-void CanvasView::paste(editor::Document& doc) {
+bool CanvasView::pointerOnCanvas(std::array<int, 2>* at) const {
+    if (m_scale <= 0 || ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) return false;
+    if (!ImGui::IsMouseHoveringRect(m_area.Min, m_area.Max)) return false;
+    const ImVec2 c = toCanvas(ImGui::GetIO().MousePos);
+    *at = {int(std::floor(c.x)), int(std::floor(c.y))};
+    return true;
+}
+
+void CanvasView::paste(editor::Document& doc, bool atPointer, const std::array<int, 2>* forced) {
     const editor::Document::UiSelection sel = doc.uiSelection();
     if (sel.canvas < 0) return;
     char* raw = SDL_GetClipboardText();
     const std::string text = raw ? raw : "";
     SDL_free(raw);
-    if (uic::pasteElements(doc, sel.canvas, sel.element, text, m_screen) < 0)
+    const std::vector<int> sels = uic::selectedElements(doc);
+    const int after = sels.empty() ? -1 : sels.back();
+    // At the pointer when it is over the canvas, snapped the way a drag is; else offset from the originals.
+    std::array<int, 2> pos{};
+    bool placed = forced != nullptr;
+    if (forced) pos = *forced;
+    else if (atPointer) placed = pointerOnCanvas(&pos);
+    if (placed && m_snap) {
+        if (const std::optional<uic::Rect> b = uic::clipboardBounds(text, m_screen)) {
+            const uic::Snapped sn = uic::snapMove(doc.scene().canvases[size_t(sel.canvas)], -1, uic::Rect{pos[0], pos[1], b->w, b->h},
+                                                  m_screen, std::max(1, int(std::lround(6.0f / m_scale))));
+            pos = {sn.rect.x, sn.rect.y};
+        }
+    }
+    const int r = uic::pasteElements(doc, sel.canvas, after, text, m_screen, placed ? &pos : nullptr);
+    if (r == -2) {
+        status = "Cannot paste: a canvas holds at most " + std::to_string(uic::kMaxCanvasElements) + " UI elements";
+        statusBad = true;
+        notice(status, true);
+    } else if (r < 0) {
         notice(text.find("splashedit-objects") != std::string::npos ? "The clipboard holds scene objects: paste them on the Scene tab"
                                                                      : "The clipboard holds no UI elements",
                true);
+    }
 }
 
 void CanvasView::duplicate(editor::Document& doc) {
-    if (hasElement(doc)) uic::duplicateElement(doc, doc.uiSelection().canvas, doc.uiSelection().element);
+    const std::vector<int> sels = uic::selectedElements(doc);
+    if (sels.empty()) return;
+    if (uic::duplicateElements(doc, doc.uiSelection().canvas, sels) == -2) {
+        status = "Cannot duplicate: a canvas holds at most " + std::to_string(uic::kMaxCanvasElements) + " UI elements";
+        statusBad = true;
+        notice(status, true);
+    }
 }
 
 void CanvasView::remove(editor::Document& doc) {
-    if (hasElement(doc)) uic::deleteElement(doc, doc.uiSelection().canvas, doc.uiSelection().element);
+    const std::vector<int> sels = uic::selectedElements(doc);
+    if (!sels.empty()) uic::deleteElements(doc, doc.uiSelection().canvas, sels);
+}
+
+void CanvasView::select(editor::Document& doc, int c, const std::vector<int>& idx, int primary) {
+    doc.selectUi(uic::selectionOf(c, idx, primary));
 }
 
 // The right-click menu of the canvas and the element list.
@@ -816,7 +982,8 @@ void CanvasView::elementMenu(editor::Document& doc) {
     pushMenuStyle();
     if (ImGui::BeginPopup("##elmenu")) {
         const editor::Document::UiSelection sel = doc.uiSelection();
-        const bool has = hasElement(doc);
+        const bool has = uic::selectedElements(doc).size() == 1;  // the order commands act on one
+        const bool any = hasElement(doc);
         const int n = sel.canvas >= 0 ? int(doc.scene().canvases[size_t(sel.canvas)].elements.size()) : 0;
         bool canPaste = false;
         if (sel.canvas >= 0 && SDL_HasClipboardText()) {
@@ -835,11 +1002,11 @@ void CanvasView::elementMenu(editor::Document& doc) {
                 std::fflush(stdout);
             }
         }
-        if (menuItem(icon::x, color::textDim, "Cut", "Ctrl+X", has)) cut(doc);
-        if (menuItem(icon::copy, color::textDim, "Copy", "Ctrl+C", has)) copy(doc);
-        if (menuItem(icon::plus, color::textDim, "Paste", "Ctrl+V", canPaste)) paste(doc);
-        if (menuItem(icon::layers, color::textDim, "Duplicate", "Ctrl+D", has)) duplicate(doc);
-        if (menuItem(icon::trash, color::bad, "Delete", "Del", has)) remove(doc);
+        if (menuItem(icon::x, color::textDim, "Cut", "Ctrl+X", any)) cut(doc);
+        if (menuItem(icon::copy, color::textDim, "Copy", "Ctrl+C", any)) copy(doc);
+        if (menuItem(icon::plus, color::textDim, "Paste", "Ctrl+V", canPaste)) paste(doc, false, m_menuAtCanvas ? &m_menuAt : nullptr);
+        if (menuItem(icon::layers, color::textDim, "Duplicate", "Ctrl+D", any)) duplicate(doc);
+        if (menuItem(icon::trash, color::bad, "Delete", "Del", any)) remove(doc);
         ImGui::Separator();
         if (menuItem(icon::arrowDown, color::textDim, "Bring forward", "Ctrl+]", has && sel.element + 1 < n))
             uic::moveElement(doc, sel.canvas, sel.element, sel.element + 1);
@@ -862,7 +1029,8 @@ void CanvasView::keys(editor::Document& doc) {
     if (ctrl && !shift && pressed(ImGuiKey_1, false)) m_zoom = 1, m_pan = ImVec2(0, 0);
     if (ctrl && (pressed(ImGuiKey_Equal) || pressed(ImGuiKey_KeypadAdd))) zoomAt(stepZoom(m_scale, 1), m_area.GetCenter());
     if (ctrl && (pressed(ImGuiKey_Minus) || pressed(ImGuiKey_KeypadSubtract))) zoomAt(stepZoom(m_scale, -1), m_area.GetCenter());
-    if (sel.element < 0) return;
+    const std::vector<int> sels = uic::selectedElements(doc);
+    if (sels.empty()) return;
     const int c = sel.canvas, e = sel.element;
     const int n = int(doc.scene().canvases[size_t(c)].elements.size());
     if (ctrl && !shift && pressed(ImGuiKey_C, false)) copy(doc);
@@ -878,7 +1046,12 @@ void CanvasView::keys(editor::Document& doc) {
         if (pressed(ImGuiKey_UpArrow)) dy -= step;
         if (pressed(ImGuiKey_DownArrow)) dy += step;
         if (dx || dy)
-            uic::editElement(doc, c, e, [&](UIElement& el) {
+            uic::editElements(doc, c, sels, [&](UIElement& el, size_t) {
+                if (el.type == UIElementType::Line) {
+                    el.from = {el.from[0] + dx, el.from[1] + dy};
+                    el.to = {el.to[0] + dx, el.to[1] + dy};
+                    return;
+                }
                 uic::Rect r = uic::layout(el, m_screen);
                 r.x += dx;
                 r.y += dy;
@@ -888,6 +1061,7 @@ void CanvasView::keys(editor::Document& doc) {
         if (pressed(ImGuiKey_Escape, false)) doc.selectUi({c, -1});
     }
     if (ctrl && !shift && pressed(ImGuiKey_D, false)) duplicate(doc);
+    if (sels.size() != 1) return;
     if (ctrl && pressed(ImGuiKey_RightBracket, false)) uic::moveElement(doc, c, e, shift ? n - 1 : e + 1);
     if (ctrl && pressed(ImGuiKey_LeftBracket, false) && e > 0) uic::moveElement(doc, c, e, shift ? 0 : e - 1);
 }
@@ -896,9 +1070,22 @@ void CanvasView::keys(editor::Document& doc) {
 
 void CanvasView::inspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     const editor::Document::UiSelection sel = validSelection(doc);
+    if (reportLayout) {
+        // Scripted tests: what the inspector shows when that changes.
+        const size_t n = uic::selectedElements(doc).size();
+        const std::string what = n > 1 ? std::to_string(n) + " elements"
+                                 : n == 1 ? "element " + doc.scene().canvases[size_t(sel.canvas)].elements[size_t(sel.element)].name
+                                          : "canvas";
+        if (m_inspReported != what) {
+            m_inspReported = what;
+            std::printf("uicanvas: inspector %s\n", what.c_str());
+            std::fflush(stdout);
+        }
+    }
     ImGui::PushID("uicanvasinspector");
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
-    if (sel.canvas >= 0 && sel.element >= 0) elementInspector(dl, r, y, doc);
+    if (sel.canvas >= 0 && uic::selectedElements(doc).size() > 1) multiInspector(dl, r, y, doc);
+    else if (sel.canvas >= 0 && sel.element >= 0) elementInspector(dl, r, y, doc);
     else if (sel.canvas >= 0) canvasInspector(dl, r, y, doc);
     else textCentered(dl, ImRect(ImVec2(r.Min.x, y), r.Max), fonts().regular, type::body, color::textFaint, "No canvas");
     ImGui::PopClipRect();
@@ -1149,6 +1336,52 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                   e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
                                                  : "Cut to 15-bit colour on the PS1, as the preview shows.",
                   e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, ei);
+        rows.gap();
+    }
+}
+
+// Several elements selected: only what they share. Position is the top-left of
+// the box around them; editing it moves them all together.
+void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
+    Fonts& f = fonts();
+    const int c = doc.uiSelection().canvas;
+    const std::vector<int> sels = uic::selectedElements(doc);
+    const UICanvas& cv = doc.scene().canvases[size_t(c)];
+    Rows rows{dl, r.Min.x + space::md, r.Max.x - space::md, y};
+    const float x0 = rows.x0, x1 = rows.x1;
+    ImRect ic(ImVec2(x0, rows.y), ImVec2(x0 + 40, rows.y + 40));
+    dl->AddRectFilled(ic.Min, ic.Max, (color::accent & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
+    textCentered(dl, ic, f.medium, type::icon + 3, color::accent, icon::layers);
+    char head[64];
+    std::snprintf(head, sizeof head, "%d elements", int(sels.size()));
+    text(dl, ImVec2(ic.Max.x + space::md, rows.y + 2), f.medium, type::body, color::text, head);
+    text(dl, ImVec2(ic.Max.x + space::md, rows.y + 25), f.regular, type::caption, color::textFaint, ("in " + cv.name).c_str());
+    rows.y += 40 + space::lg;
+
+    int x = INT_MAX, yy = INT_MAX;
+    for (int i : sels) {
+        const uic::Rect b = uic::boundsOf(cv.elements[size_t(i)], m_screen);
+        x = std::min(x, b.x), yy = std::min(yy, b.y);
+    }
+    if (rows.sectionHead("uilayout", icon::move, color::textDim, "Layout")) {
+        ImRect field = rows.row("lpos", "Position", "Top-left corner of the box around all of them, in pixels. Changing it moves them together.");
+        const float half = (field.GetWidth() - space::xs) * 0.5f;
+        auto number = [&](const char* id, ImRect fr, int value, ImU32 axis, const char* axisLabel, bool isX) {
+            float v = float(value);
+            FieldEdit fe = numberField(id, fr, std::to_string(value).c_str(), nullptr, axis, axisLabel, &v);
+            if (fe.changed) {
+                const int d = int(std::lround(v)) - value;
+                uic::editElements(doc, c, sels, [&](UIElement& el, size_t) {
+                    uic::Rect q = uic::boundsOf(el, m_screen);
+                    if (isX) q.x += d;
+                    else q.y += d;
+                    uic::place(el, q, m_screen);
+                }, std::string("uinum") + id);
+            }
+            if (fe.done) doc.endMerge();
+        };
+        number("mposa", ImRect(field.Min, ImVec2(field.Min.x + half, field.Max.y)), x, color::axisX, "X", true);
+        number("mposb", ImRect(ImVec2(field.Max.x - half, field.Min.y), field.Max), yy, color::axisY, "Y", false);
         rows.gap();
     }
 }

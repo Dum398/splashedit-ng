@@ -1366,18 +1366,23 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item("Undo", "Ctrl+Z", doc.canUndo(), [&] { doc.undo(); }));
             m.push_back(item("Redo", "Ctrl+Y", doc.canRedo(), [&] { doc.redo(); }));
             m.push_back(separator());
-            m.push_back(item("Rename", "F2", hasSel, [&st, sel] {
-                st.renaming = true;
-                st.renameStart = true;
-                st.renamePath = *sel;
-            }));
+            if (st.scripts.uiShown()) {
+                // The UI tab renames its element, not the scene object that happens to be selected.
+                m.push_back(item("Rename", "F2", st.canvasView.canRename(doc), [&st, &doc] { st.canvasView.rename(doc); }));
+            } else {
+                m.push_back(item("Rename", "F2", hasSel, [&st, sel] {
+                    st.renaming = true;
+                    st.renameStart = true;
+                    st.renamePath = *sel;
+                }));
+            }
             if (st.scripts.uiShown()) {
                 // The UI tab: these act on the selected UI element.
                 const bool hasEl = st.canvasView.hasElement(doc);
                 m.push_back(item("Duplicate", "Ctrl+D", hasEl, [&st, &doc] { st.canvasView.duplicate(doc); }));
                 m.push_back(item("Cut", "Ctrl+X", hasEl, [&st, &doc] { st.canvasView.cut(doc); }));
                 m.push_back(item("Copy", "Ctrl+C", hasEl, [&st, &doc] { st.canvasView.copy(doc); }));
-                m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc] { st.canvasView.paste(doc); }));
+                m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc] { st.canvasView.paste(doc, false); }));
                 m.push_back(item("Delete", "Del", hasEl, [&st, &doc] { st.canvasView.remove(doc); }));
             } else {
                 m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
@@ -4919,6 +4924,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     // elements, and while the Project panel has the keyboard, Delete and F2 are its own.
     const bool uiTab = st.scripts.uiShown();
     const bool assetKeys = st.assets.focused() && !timelineInFront(st);
+    if (uiTab && !assetKeys && !ctrl && pressed(ImGuiKey_F2)) st.canvasView.rename(doc);
     if (const std::optional<editor::ObjectPath> sel = (uiTab || assetKeys) ? std::nullopt : doc.selection()) {
         if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
@@ -5078,6 +5084,10 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.viewportRect = body;
     } else if (st.scripts.uiShown()) {
         st.canvasView.draw(dl, body, doc);
+        if (!st.canvasView.status.empty()) {
+            notify(st, st.canvasView.status, st.canvasView.statusBad);
+            st.canvasView.status.clear();
+        }
         st.viewportRect = ImRect();
     } else {
         st.scripts.draw(dl, body);

@@ -454,6 +454,47 @@ static ImRect g_menuRects[6];
 // label, its release must not open the menu again.
 static int g_menuIgnoreClick = -1;
 
+// The bottom dock: the Timeline tab shows while it is open and is the one in front.
+static bool timelineInFront(const State& st) { return st.timeline.open && st.bottomTab == State::BottomTab::Timeline; }
+
+// Shows the Project tab in front, or folds it to its header when it already is and shows.
+static void toggleProjectTab(State& st) {
+    if (st.bottomTab == State::BottomTab::Project) {
+        st.assets.open = !st.assets.open;
+    } else {
+        st.bottomTab = State::BottomTab::Project;
+        st.assets.open = true;
+    }
+}
+
+// The bottom dock's tabs: Project, then Timeline while it is open. Each tab
+// is its label and icon with padding; `r` is the strip at the left of the
+// panel in front's header.
+static float dockTabWidth(const char* label) { return measure(fonts().semibold, type::body, label).x + 30 + space::md * 2; }
+static float dockTabsWidth(const State& st) { return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0); }
+static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
+    Fonts& f = fonts();
+    float x = r.Min.x;
+    auto tab = [&](const char* id, const char* label, const char* ic, ImU32 iconColor, bool front, bool lit) {
+        const ImRect tr(ImVec2(x, r.Min.y), ImVec2(x + dockTabWidth(label), r.Max.y));
+        x = tr.Max.x;
+        Hit h = interact(id, tr);
+        if (h.hover > 0 && !front) dl->AddRectFilled(ImVec2(tr.Min.x + 2, tr.Min.y + 4), ImVec2(tr.Max.x - 2, tr.Max.y - 4), color::hover, radius::field);
+        const float ih = measure(f.medium, type::icon, "Ag").y, lh = measure(f.semibold, type::body, "Ag").y;
+        text(dl, ImVec2(tr.Min.x + space::md, tr.Min.y + (tr.GetHeight() - ih) * 0.5f), f.medium, type::icon - 1, iconColor, ic);
+        text(dl, ImVec2(tr.Min.x + space::md + 22, tr.Min.y + (tr.GetHeight() - lh) * 0.5f), f.semibold, type::body,
+             front ? color::text : color::textDim, label);
+        if (front && lit) dl->AddRectFilled(ImVec2(tr.Min.x + space::sm, tr.Max.y - 2), ImVec2(tr.Max.x - space::sm, tr.Max.y), color::accent, 1);
+        return h.clicked;
+    };
+    const bool projectFront = !timelineInFront(st);
+    if (tab("tab_project", "Project", st.assets.open && projectFront ? icon::folderOpen : icon::folder, rgb(0xd8b46a), projectFront,
+            st.assets.open))
+        toggleProjectTab(st);
+    if (st.timeline.open && tab("tab_timeline", "Timeline", icon::layers, color::accentHover, !projectFront, true))
+        st.bottomTab = State::BottomTab::Timeline;
+}
+
 static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document& doc) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
@@ -855,18 +896,12 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
                            slot == AssetSlot::SkinClips || (slot == AssetSlot::MemCardIcon && index < 0));
 }
 
-static void applyPickedAssets(State& st, editor::Document& doc) {
-    std::vector<std::string> files;
-    AssetSlot slot;
-    editor::ObjectPath target;
-    int index;
-    {
-        std::lock_guard<std::mutex> lock(g_pickMutex);
-        files.swap(g_assetPicked);
-        slot = g_assetSlot;
-        target = g_assetTarget;
-        index = g_assetIndex;
-    }
+// Sets `files` on the field `slot` of the object at `target` (or the scene's
+// settings for the scene script and memory card icon) as one undo step; a
+// skin's clips are replaced, or with `append` added to (up to 16). `index` is
+// the memory card icon frame to replace, or -1 to append frames.
+static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, const editor::ObjectPath& target,
+                            const std::vector<std::string>& files, bool append = false, int index = -1) {
     const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
     const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? "textures"
@@ -930,7 +965,11 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
                 if (o.audio->clipName.empty()) o.audio->clipName = utf8(fromUtf8(first).stem());
                 break;
             case AssetSlot::SkinClips:
-                if (o.skin) o.skin->clips = paths;
+                if (!o.skin) return;
+                if (!append) o.skin->clips = paths;
+                for (const std::string& p : append ? paths : std::vector<std::string>{})
+                    if (o.skin->clips.size() < 16 && std::find(o.skin->clips.begin(), o.skin->clips.end(), p) == o.skin->clips.end())
+                        o.skin->clips.push_back(p);
                 break;
             case AssetSlot::SceneLua:
             case AssetSlot::MemCardIcon:
@@ -940,6 +979,57 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
     doc.endMerge();
     doc.refreshAssets(paths);
     if (!note.empty()) notify(st, note, false);
+}
+
+static void applyPickedAssets(State& st, editor::Document& doc) {
+    std::vector<std::string> files;
+    AssetSlot slot;
+    editor::ObjectPath target;
+    int index;
+    {
+        std::lock_guard<std::mutex> lock(g_pickMutex);
+        files.swap(g_assetPicked);
+        slot = g_assetSlot;
+        target = g_assetTarget;
+        index = g_assetIndex;
+    }
+    applyAssetFiles(st, doc, slot, target, files, false, index);
+}
+
+// Whether the asset field `slot` (an AssetSlot, or -1 for the Model field)
+// takes a file of type `t` from the Project panel.
+static bool slotTakes(int slot, editor::AssetType t) {
+    using T = editor::AssetType;
+    if (slot < 0) return t == T::Model || t == T::Mesh;
+    switch (static_cast<AssetSlot>(slot)) {
+        case AssetSlot::Texture: return t == T::Texture;
+        case AssetSlot::Lua:
+        case AssetSlot::TriggerLua:
+        case AssetSlot::SceneLua: return t == T::Script;
+        case AssetSlot::Clip: return t == T::Audio;
+        case AssetSlot::SkinClips: return t == T::Animation;
+        case AssetSlot::MemCardIcon: return t == T::Texture;
+    }
+    return false;
+}
+
+// An inspector asset field that also takes a file dragged from the Project
+// panel: a drop target where it shows (not in a folded section), outlined
+// while a file it takes is dragged, strongly under the pointer.
+static bool slotField(State& st, int slot, const editor::ObjectPath& path, const char* id, ImRect r, const char* ic, ImU32 iconColor,
+                      const char* name, const char* meta) {
+    const bool clicked = assetField(id, r, ic, iconColor, name, meta);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImRect shown = r;
+    shown.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
+    if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return clicked;
+    st.assetSlots.push_back({shown, slot, path});
+    if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
+        const bool over = shown.Contains(ImGui::GetIO().MousePos);
+        dl->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft, radius::field + 1, 0,
+                    over ? 2.0f : 1.5f);
+    }
+    return clicked;
 }
 
 // The inspector's New script: writes scripts/<name>.lua from a template, sets
@@ -1330,6 +1420,9 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 for (const std::string& p : luas) m.push_back(item(p, "", true, [&st, &doc, p] { openScript(st, doc, p); }));
             }
             m.push_back(separator());
+            m.push_back(heading("Panels"));
+            m.push_back(item("Project", "", true, [&] { toggleProjectTab(st); }, st.assets.open && !timelineInFront(st)));
+            m.push_back(separator());
             m.push_back(heading("Timeline"));
             m.push_back(item("Timeline", "", true, [&] { st.timeline.open = !st.timeline.open; }, st.timeline.open));
             for (const editor::SeqRef ref : editor::allSequences(doc)) {
@@ -1573,6 +1666,159 @@ static void importPending(State& st, editor::Document& doc, const viewport::Ps1V
     }
 }
 
+// A .mesh from the Project panel: a new object drawing it, placed the way an
+// imported model is, with the mesh settings and materials of an object that
+// already draws it when there is one. On the Model field, that object draws it
+// instead. One undo step either way.
+static void placeMesh(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& mesh, const ModelTarget& to) {
+    std::optional<splash::MeshComponent> like;
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+        if (fo.object->mesh && fo.object->mesh->mesh == mesh) {
+            like = *fo.object->mesh;
+            break;
+        }
+    std::vector<std::string> assets{mesh};
+    if (like)
+        for (const splash::Material& m : like->materials)
+            if (!m.texture.empty()) assets.push_back(m.texture);
+    if (to.replace && doc.object(*to.replace) && doc.object(*to.replace)->mesh) {
+        doc.edit(*to.replace, [&](splash::Object& o) {
+            o.mesh->mesh = mesh;
+            if (like) o.mesh->materials = like->materials;
+        });
+        doc.endMerge();
+        doc.refreshAssets(assets);
+        return;
+    }
+    editor::ObjectPath at;
+    splash::Vec3 pos{};
+    modelPlace(doc, view, to, at, pos);
+    const editor::ObjectPath parentPath(at.begin(), at.end() - 1);
+    const splash::Object* parent = doc.object(parentPath);
+    splash::Object obj;
+    obj.name = editor::uniqueName(utf8(std::filesystem::path(std::u8string(mesh.begin(), mesh.end())).stem()),
+                                  parent ? parent->children : doc.scene().objects);
+    obj.mesh = like ? *like : splash::MeshComponent{};
+    obj.mesh->mesh = mesh;
+    obj.transform.position = pos;
+    const std::string name = obj.name;
+    if (!doc.insertObject(at, std::move(obj))) {
+        notify(st, "There is no object to put " + mesh + " in", true);
+        return;
+    }
+    doc.refreshAssets(assets);
+    if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
+    notify(st, "Added " + name, false);
+}
+
+// Where a model or mesh dragged from the Project panel would land: the Model
+// field, a scene tree row (as its child) or the viewport (at the surface
+// under the pointer). Nothing elsewhere.
+static std::optional<ModelTarget> modelTargetAt(State& st, const viewport::Ps1View& view, ImVec2 pos) {
+    ModelTarget to;
+    for (const State::AssetSlotTarget& t : st.assetSlots)
+        if (t.slot < 0 && t.rect.Contains(pos)) {
+            to.replace = t.path;
+            return to;
+        }
+    if (std::optional<editor::ObjectPath> row = treeRowAt(st, pos)) {
+        to.under = row;
+        return to;
+    }
+    if (st.viewportRect.GetWidth() > 0 && st.viewportRect.Contains(pos)) {
+        to.at = dropPoint(view, st.viewportRect, pos);
+        return to;
+    }
+    return std::nullopt;
+}
+
+// While a model or mesh is dragged out of the Project panel: the tree row or
+// the viewport it would land on, outlined, and a hint saying so.
+static void assetDragHint(State& st, ImDrawList* dl, const editor::Document& doc) {
+    const editor::AssetEntry* e = st.assets.dragging();
+    if (!e || (e->type != editor::AssetType::Model && e->type != editor::AssetType::Mesh)) return;
+    const ImVec2 pos = ImGui::GetIO().MousePos;
+    std::string hint;
+    ImRect zone;
+    for (const State::AssetSlotTarget& t : st.assetSlots)
+        if (t.slot < 0 && t.rect.Contains(pos)) return;  // the Model field outlines itself
+    if (std::optional<editor::ObjectPath> rowPath = treeRowAt(st, pos)) {
+        for (const auto& [rect, path] : st.treeRows)
+            if (path == *rowPath && doc.object(path)) {
+                zone = rect;
+                hint = "Drop to add " + e->name + " under " + doc.object(path)->name;
+            }
+    } else if (st.viewportRect.GetWidth() > 0 && st.viewportRect.Contains(pos)) {
+        zone = st.viewportRect;
+        hint = "Drop to add " + e->name + " to the scene";
+    }
+    if (hint.empty()) return;
+    dl->AddRect(zone.Min, zone.Max, color::accent, radius::card, 0, 2.0f);
+    if (zone.GetHeight() < 100) return;
+    Fonts& f = fonts();
+    ImVec2 hs = measure(f.medium, type::body, hint.c_str());
+    ImRect pill(ImVec2((zone.Min.x + zone.Max.x - hs.x) * 0.5f - space::md, zone.Max.y - 56),
+                ImVec2((zone.Min.x + zone.Max.x + hs.x) * 0.5f + space::md, zone.Max.y - 24));
+    dl->AddRectFilled(pill.Min, pill.Max, color::raised, radius::pill);
+    dl->AddRect(pill.Min, pill.Max, color::accent, radius::pill);
+    textCentered(dl, pill, f.medium, type::body, color::text, hint.c_str());
+}
+
+// What the Project panel asked for this frame: files dropped on the scene or
+// an asset field, opened, reimported, or an object to show.
+static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1View& view) {
+    using T = editor::AssetType;
+    for (const ui::AssetBrowser::Request& r : st.assets.takeRequests()) {
+        const std::filesystem::path abs = doc.resolve(r.path);
+        switch (r.kind) {
+            case ui::AssetBrowser::Request::Drop: {
+                const State::AssetSlotTarget* slot = nullptr;
+                for (const State::AssetSlotTarget& t : st.assetSlots)
+                    if (t.rect.Contains(r.pos)) slot = &t;
+                if (slot && slot->slot >= 0) {
+                    if (slotTakes(slot->slot, r.type))
+                        applyAssetFiles(st, doc, static_cast<AssetSlot>(slot->slot), slot->path, {utf8(abs)}, true);
+                    else {
+                        std::string what = editor::assetTypeName(r.type, true);
+                        for (char& c : what) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        notify(st, "That field does not take " + what, true);
+                    }
+                    break;
+                }
+                if (r.type != T::Model && r.type != T::Mesh) break;
+                std::optional<ModelTarget> to = modelTargetAt(st, view, r.pos);
+                if (!to) break;
+                if (r.type == T::Model) importModelFile(st, doc, view, utf8(abs), *to);
+                else placeMesh(st, doc, view, r.path, *to);
+                break;
+            }
+            case ui::AssetBrowser::Request::Open:
+                if (r.type == T::Script) openScript(st, doc, r.path);
+                else if (r.type == T::Scene) request(st, doc, State::Pending::Recent, abs);
+                else if (r.type == T::Model) importModelFile(st, doc, view, utf8(abs), ModelTarget{});
+                else if (r.type == T::Mesh) placeMesh(st, doc, view, r.path, ModelTarget{});
+                else SDL_OpenURL(editor::fileUrl(abs).c_str());
+                break;
+            case ui::AssetBrowser::Request::Reimport:
+                st.reimports.push_back({abs, std::nullopt});
+                break;
+            case ui::AssetBrowser::Request::Select:
+                if (doc.object(r.object)) {
+                    for (size_t n = 1; n < r.object.size(); ++n) {
+                        const editor::ObjectPath parent(r.object.begin(), r.object.begin() + static_cast<std::ptrdiff_t>(n));
+                        if (!doc.expanded(parent)) doc.toggleExpanded(parent);
+                    }
+                    doc.select(r.object);
+                    st.frameRequest = true;
+                }
+                break;
+            case ui::AssetBrowser::Request::Notice:
+                notify(st, r.text, r.bad);
+                break;
+        }
+    }
+}
+
 // The menu a right-click on a row (kind 1) or the panel's ellipsis (kind 2) opens.
 static std::vector<MenuEntry> treeMenuEntries(int kind, State& st, editor::Document& doc) {
     std::vector<MenuEntry> m;
@@ -1740,11 +1986,12 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
     treeMenu(st, doc);
 
-    // Footer: the project's folder, collapsed.
+    // Footer: the project's folder; a click shows or hides the Project panel.
     dl->AddLine(ImVec2(foot.Min.x + 1, foot.Min.y), ImVec2(foot.Max.x - 1, foot.Min.y), color::border);
     std::string files = std::to_string(doc.projectFileCount()) + (doc.projectFileCount() == 1 ? " file" : " files");
-    TreeRow assets{0, icon::folder, kind::folder, "Assets", files.c_str(), true, false};
-    treeRow("assets", ImRect(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7)), assets);
+    TreeRow assets{0, st.assets.open ? icon::folderOpen : icon::folder, kind::folder, "Assets", files.c_str(), true, st.assets.open};
+    if (treeRow("assets", ImRect(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7)), assets).clicked)
+        toggleProjectTab(st);
 }
 
 static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 a, viewport::Vec3 b) {
@@ -3130,7 +3377,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         y += 34 + space::xs;
         const std::string& lua = set.script;
         const bool found = !lua.empty() && doc.fileExists(lua);
-        if (assetField("scenelua", row("lscenelua", "File", "The Lua file that runs for the whole scene. Click to pick one."),
+        if (slotField(st, static_cast<int>(AssetSlot::SceneLua), {}, "scenelua", row("lscenelua", "File", "The Lua file that runs for the whole scene. Click to pick one."),
                        icon::fileCode, lua.empty() || found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(),
                        nullptr))
             pickAsset(AssetSlot::SceneLua, {});
@@ -4006,7 +4253,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                      removeFlag(editor::ComponentKind::Mesh)));
         y += 34 + space::xs;
         const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb, .gltf, .fbx, .obj or .blend file (.blend needs Blender installed), or drop one here.");
-        bool pickModel = assetField("model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
+        bool pickModel = slotField(st, -1, path, "model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
                                     modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
         st.modelField = folded ? ImRect() : modelRow;
         st.modelField.ClipWith(r);
@@ -4022,7 +4269,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj;blend"}};
             SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
         }
-        if (assetField("texture", row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export."),
+        if (slotField(st, static_cast<int>(AssetSlot::Texture), path, "texture", row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export."),
                        icon::grid, texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str()) |
             fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
             pickAsset(AssetSlot::Texture, path);
@@ -4122,7 +4369,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                      removeFlag(editor::ComponentKind::Script)));
         y += 34 + space::xs;
         bool found = doc.fileExists(lua);
-        if (assetField("lua", row("llua", "File", "The Lua file that runs for this object. Click to pick one."), icon::fileCode,
+        if (slotField(st, static_cast<int>(AssetSlot::Lua), path, "lua", row("llua", "File", "The Lua file that runs for this object. Click to pick one."), icon::fileCode,
                        found ? kind::script : color::warn, lua.empty() ? "None" : fileName(lua).c_str(), nullptr) |
             // No file yet: the field and New script below say so, a "not found" card would not.
             fileCard("fixlua", found || lua.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, lua, std::string()))
@@ -4239,7 +4486,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                          fmtFixed(tr.size.y).c_str(), fmtFixed(tr.size.z).c_str(), nullptr, sz),
                "tsize", [&](splash::Object& ob) { ob.trigger->size = {std::max(0.0f, sz[0]), std::max(0.0f, sz[1]), std::max(0.0f, sz[2])}; });
         bool found = !tr.lua.empty() && doc.fileExists(tr.lua);
-        if (assetField("tlua", row("ltlua", "Script", "The Lua file that gets the enter and exit calls. Click to pick one."), icon::fileCode,
+        if (slotField(st, static_cast<int>(AssetSlot::TriggerLua), path, "tlua", row("ltlua", "Script", "The Lua file that gets the enter and exit calls. Click to pick one."), icon::fileCode,
                        tr.lua.empty() || found ? kind::script : color::warn, tr.lua.empty() ? "None" : fileName(tr.lua).c_str(), nullptr))
             pickAsset(AssetSlot::TriggerLua, path);
         if (!tr.lua.empty()) {
@@ -4277,7 +4524,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_audio", editor::ComponentKind::Audio);
         bool found = doc.fileExists(a.clip);
-        if (assetField("clip", row("lclip", "Clip", "A WAV file, converted to SPU ADPCM at export. Click to pick one."), icon::music,
+        if (slotField(st, static_cast<int>(AssetSlot::Clip), path, "clip", row("lclip", "Clip", "A WAV file, converted to SPU ADPCM at export. Click to pick one."), icon::music,
                        found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr) |
             fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string()))
             pickAsset(AssetSlot::Clip, path);
@@ -4288,7 +4535,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_skin", editor::ComponentKind::Skin);
         std::string clips = std::to_string(sk.clips.size()) + (sk.clips.size() == 1 ? " clip" : " clips");
-        if (assetField("clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
+        if (slotField(st, static_cast<int>(AssetSlot::SkinClips), path, "clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
                        icon::play, kind::camera, clips.c_str(), nullptr))
             pickAsset(AssetSlot::SkinClips, path);
         number("sfps", "Bake rate", "Frames per second the clips are sampled at.", static_cast<float>(sk.fps), "fps", "sfps", 1, 30,
@@ -4660,8 +4907,9 @@ static void shortcuts(State& st, editor::Document& doc) {
         if (pressed(ImGuiKey_E)) st.tool = 2;
         if (pressed(ImGuiKey_R)) st.tool = 3;
     }
-    // Object commands on the selection.
-    if (const std::optional<editor::ObjectPath> sel = doc.selection()) {
+    // Object commands on the selection; while the Project panel has the
+    // keyboard, Delete and F2 are its own.
+    if (const std::optional<editor::ObjectPath> sel = doc.selection(); sel && !(st.assets.focused() && !timelineInFront(st))) {
         if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_C)) copySelection(st, doc, *sel);
@@ -4783,8 +5031,15 @@ static void updateBlendImports(State& st, editor::Document& doc, const viewport:
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     st.importPanel.shown.clear();
     filesPending(st, doc);
-    // The timeline takes Delete and Space while it has focus, before the scene's shortcuts see them.
-    st.timeline.takeKeys(doc);
+    // Whatever opened the timeline (the View menu, Edit in timeline) brings
+    // its tab to the front; closing it shows the Project tab again.
+    if (st.timeline.open && (!st.timelineWasOpen || st.timeline.shows != st.timelineShows)) st.bottomTab = State::BottomTab::Timeline;
+    if (!st.timeline.open) st.bottomTab = State::BottomTab::Project;
+    st.timelineWasOpen = st.timeline.open;
+    st.timelineShows = st.timeline.shows;
+    // The timeline takes Delete and Space while it has focus, before the
+    // scene's shortcuts see them; only while its tab is in front.
+    if (timelineInFront(st)) st.timeline.takeKeys(doc);
     shortcuts(st, doc);
     st.live.update(doc, ImGui::GetTime());
     updatePlay(st, doc);
@@ -4810,11 +5065,21 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         st.scripts.closeAll();
         st.scriptsProject = doc.projectRoot();
     }
-    const ImRect body = st.scripts.tabStrip(dl, st.timeline.dock(mid));
+    // The bottom dock: the tab in front takes its height from the bottom of
+    // the middle panel; the other is not drawn until it is picked.
+    const bool tl = timelineInFront(st);
+    const float tabsW = dockTabsWidth(st);
+    auto tabs = [&st](ImDrawList* d, ImRect r) { dockTabs(st, d, r); };
+    st.timeline.tabs = tabs;
+    st.timeline.tabsWidth = tabsW;
+    st.assets.tabs = tabs;
+    st.assets.tabsWidth = tabsW;
+    const ImRect body = st.scripts.tabStrip(dl, tl ? st.timeline.dock(mid) : st.assets.dock(mid));
     // The timeline takes this frame's scrub first, so the Scene draws the
-    // pose at the new scrub head now rather than a frame late (empty when closed).
-    st.timeline.draw(dl, doc);
-    view.setPreview(st.timeline.preview(doc));
+    // pose at the new scrub head now rather than a frame late (empty when
+    // closed or behind the Project tab).
+    if (tl) st.timeline.draw(dl, doc);
+    view.setPreview(tl ? st.timeline.preview(doc) : editor::Preview{});
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;
@@ -4835,8 +5100,15 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         if (!ec && !rel.empty()) savedScripts.push_back(utf8(rel.generic_u8string()));
     }
     if (!savedScripts.empty()) doc.refreshAssets(savedScripts);
+    if (!tl) st.assets.draw(dl, doc);
+    // Project files renamed, moved or deleted (or that undone): open script
+    // tabs follow their file; a move an undo or redo could not make is said.
+    for (const auto& [from, to] : editor::takeAssetMoves()) st.scripts.moved(from, to);
+    if (std::string why = editor::takeAssetHistoryError(); !why.empty()) notify(st, why, true);
     st.modelField = ImRect();
+    st.assetSlots.clear();
     inspector(st, dl, right, doc);
+    assetDragHint(st, dl, doc);
     if (st.drop.hovering && !st.modelField.Contains(st.drop.pos)) {
         // Anywhere but the Model field, a dropped model becomes a new object:
         // on a scene tree row, that object's child.
@@ -4860,6 +5132,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     importPending(st, doc, view);
     updateBlendImports(st, doc, view);
+    assetRequests(st, doc, view);
     statusBar(dl, size, doc, st);
     playSetup(st, doc, size);
     menus(st, doc, view);

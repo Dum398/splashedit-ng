@@ -35,6 +35,9 @@ public:
     // Saves every changed script; false (with the first error) if one fails.
     bool saveAll(std::string* error);
     void closeAll();
+    // Files moved on disk (absolute; a folder moves what is under it): the
+    // tabs showing them follow.
+    void moved(const std::filesystem::path& from, const std::filesystem::path& to);
 
     // Files written since the last call, for the caller to refresh.
     std::vector<std::filesystem::path> takeSaved();

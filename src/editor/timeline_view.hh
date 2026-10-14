@@ -9,6 +9,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,12 @@ namespace ui {
 class TimelinePanel {
 public:
     bool open = false;
+    // The bottom dock's tab strip, drawn at the left of the header in place
+    // of the panel's own title when set (`tabsWidth` wide).
+    std::function<void(ImDrawList*, ImRect)> tabs;
+    float tabsWidth = 0;
+    // Counts show() calls, so a dock can raise the panel each time.
+    unsigned shows = 0;
 
     // Opens the panel on `ref`, scrub head at frame 0.
     void show(const editor::Document& doc, editor::SeqRef ref);

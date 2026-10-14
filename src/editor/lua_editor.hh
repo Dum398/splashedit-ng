@@ -277,6 +277,8 @@ public:
     bool save(std::string* error);
     bool dirty() const { return buffer.revision() != m_savedRevision; }
     const std::filesystem::path& path() const { return m_path; }
+    // The file was renamed or moved on disk: saves go to `file` from now on.
+    void setPath(const std::filesystem::path& file) { m_path = file; }
     std::string title() const;
     // Re-runs the compile check when the text changed since the last call.
     const Diagnostic& diagnose();

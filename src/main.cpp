@@ -641,6 +641,7 @@ int main(int argc, char** argv) {
             std::printf("status: %s\n", state.notice.c_str());
             std::printf("inspector import warnings: %zu\n", state.importPanel.shown.size());
             for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
+            std::printf("project panel: %s\n", state.assets.shownList().c_str());
             running = false;
         }
         SDL_GL_SwapWindow(window);

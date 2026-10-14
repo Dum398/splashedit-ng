@@ -194,6 +194,15 @@ check('the rename updates a variable the script plays',
 left = '1 other "intro" string left as it was: ' + LOGIC.replace(os.sep, '/') + f':{base + 4}'
 check('the status lists the strings the rename left', left in status, status + ' | want ' + left)
 
+# An "intro" an Animation call names is the animation's: not listed with the
+# cutscene's leftovers; the dialogue one is.
+OTHER = '\nAnimation.Play("intro")\nlocal line = "intro"\nprint(line)\n'
+saved, _, out = run(rename_in_inspector('opening'), save=False, lua=OTHER)
+status = next((l for l in out.splitlines() if l.startswith('status: ')), '')
+left = '1 other "intro" string left as it was: ' + LOGIC.replace(os.sep, '/') + f':{base + 3}'
+check('the status leaves out the Animation call\'s string', left in status and f':{base + 2}' not in status,
+      status + ' | want ' + left)
+
 # Rename from the timeline's sequence picker.
 saved, _, out = run(['--timeline', 'intro', '--click', PICKER, '--wait', '3', '--click', PICKER_RENAME, '--wait', '3', '--key', 'ctrl+a',
                      '--text', 'opening', '--key', 'enter', '--wait', '3'])

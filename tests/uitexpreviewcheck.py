@@ -5,7 +5,8 @@
 # gradient elsewhere) at 16 bpp with cutout on, selects it on the canvas and
 # reads the preview the editor prints with --ui ("uicanvas: texpreview ...":
 # size, bit depth, cutout, PS1 colours and the panes' screen rectangles) and
-# its pixels in the screenshots. Picking 4 bpp in the Bit depth menu must
+# its pixels in the screenshots. The preview comes after the Bit depth and
+# Cutout rows it depends on. Picking 4 bpp in the Bit depth menu must
 # re-quantize the PS1 pane (and leave the Source pane alone); turning Cutout
 # off must change the transparent quarter of the PS1 pane. Needs a display
 # (xvfb-run -a).
@@ -147,10 +148,10 @@ check('the preview is the element\'s texture at 16 bpp with cutout', (p0['w'], p
 check('the panes are side by side, inside the inspector', p0['x'] > 1240 and p0['px'] > p0['x'] + p0['dw'] and p0['dw'] > 60 and
       p0['px'] + p0['dw'] < 1600, p0)
 
-# The inspector rows under the preview: Bit depth, then Cutout (32 px rows,
-# after the two lines of numbers under the panes).
-BPP_Y = p0['y'] + p0['dh'] + 64
-CUT_Y = BPP_Y + 32
+# The inspector rows over the preview, as in the mesh inspector: Bit depth,
+# then Cutout (32 px rows), then the preview, whose panes start 18 px down.
+CUT_Y = p0['y'] - 18 - 16
+BPP_Y = CUT_Y - 32
 BPP_MENU = '1460,%d' % BPP_Y
 BPP_4 = '1400,%d' % (BPP_Y + 33)  # the menu's first item
 CUT = '%d,%d' % (1371, CUT_Y)
@@ -159,6 +160,7 @@ crate, out, d = run(['--click', CRATE, '--wait', '40', '--shot', shots[0], '--cl
                      '--wait', '40', '--shot', shots[1], '--click', CUT, '--wait', '40'])
 pv = previews(out)
 check('the run shows the preview', len(pv) >= 3, out[-400:])
+check('Bit depth and Cutout sit above the preview: the menu there sets 4 bpp', crate.get('bitDepth') == 4, crate)
 check('4 bpp and cutout off are saved', crate.get('bitDepth') == 4 and crate.get('cutout') is False, crate)
 at16 = [p for p in pv if p['bpp'] == 16 and p['cutout'] == 1]
 at4 = [p for p in pv if p['bpp'] == 4 and p['cutout'] == 1]

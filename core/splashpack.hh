@@ -132,6 +132,13 @@ inline bool navCoarsened(const ExportStats& s) { return s.navCellSize > s.navCel
 // checks an enabled config, and not the icon files (export loads those).
 void checkMemCard(const MemCardSettings& mc, std::vector<std::string>& errors, std::vector<std::string>& warnings);
 
+// Where a UI position track on `e` starts, in the keys' units (the scene
+// file's): psxsplash's CutscenePlayer starts the track from the element's
+// resolved screen position (UISystem::getPosition: the anchor's pixel plus the
+// offset, clamped at 0), and writeSequences adds the anchor's rounding
+// correction to every key, so this is that position less the correction.
+std::array<int, 2> uiPositionTrackStart(const UIElement& e, const VramSettings& vs = {});
+
 // `projectRoot` resolves the project-relative asset paths in the scene.
 // `out` is the .splashpack path; .vram and .spu are written next to it.
 ExportResult exportSplashpack(const Scene& scene, const std::filesystem::path& projectRoot,

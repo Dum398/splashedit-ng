@@ -212,7 +212,8 @@ KeyValue sampleFixed(const splash::CutsceneTrack& track, float frame, const KeyV
 // The curve psxsplash applies to a 0..1 segment position.
 float applyCurve(float t, splash::Interp mode);
 // The target's state when playback starts, as far as the editor knows it:
-// an object's world position or its start-active flag; zero otherwise
+// an object's world position or its start-active flag, a UI element's
+// on-screen position (splash::uiPositionTrackStart); zero otherwise
 // (object rotation starts from 0,0,0 in the runtime too).
 KeyValue initialValue(const Document& doc, const splash::CutsceneTrack& track);
 // sampleFixed() with initialValue() and the scene's GTE scaling: what the

@@ -3508,6 +3508,64 @@ void testTimelineEvents() {
     CHECK(back.animations[0].skinEvents.size() == 1 && back.animations[0].skinEvents[0].clip == "raise");
 }
 
+// A UI position track starts where psxsplash starts it: the element's
+// resolved screen position (UISystem::getPosition: anchor byte * res >> 8
+// plus the stored offset, clamped at 0), less the anchor correction
+// writeSequences adds to each key. At 320x240 an anchor of 1.0 is byte 255,
+// pixel 318 (x) and 239 (y), so the correction is 2 and 1.
+void testTimelineUiPositionStart() {
+    using editor::SeqKind;
+    using splash::TrackType;
+    splash::UICanvas cv;
+    cv.name = "hud";
+    splash::UIElement bar, mid, neg, line;
+    bar.name = "bar";
+    bar.anchorMin = bar.anchorMax = {1, 1};
+    bar.rect = {-40, -20, 32, 8};
+    mid.name = "mid";
+    mid.anchorMin = mid.anchorMax = {0.5f, 0.5f};
+    mid.rect = {-10, 4, 20, 8};
+    neg.name = "neg";
+    neg.rect = {-5, 3, 16, 16};
+    line.name = "line";
+    line.type = splash::UIElementType::Line;
+    line.from = {7, 9};
+    cv.elements = {bar, mid, neg, line};
+    CHECK((splash::uiPositionTrackStart(bar) == std::array<int, 2>{278, 219}));  // on screen at 280, 220
+    CHECK((splash::uiPositionTrackStart(mid) == std::array<int, 2>{150, 124}));
+    CHECK((splash::uiPositionTrackStart(neg) == std::array<int, 2>{0, 3}));      // the runtime clamps at 0
+    CHECK((splash::uiPositionTrackStart(line) == std::array<int, 2>{7, 9}));
+
+    splash::Scene sc;
+    sc.canvases.push_back(cv);
+    splash::Cutscene c;
+    c.name = "intro";
+    c.durationFrames = 60;
+    splash::CutsceneTrack t;
+    t.type = TrackType::UIPosition;
+    t.target = "hud/bar";
+    c.tracks.push_back(t);
+    t.target = "hud/mid";
+    splash::Keyframe k;
+    k.frame = 30;
+    k.value = {0, 0, 0};
+    t.keyframes.push_back(k);
+    c.tracks.push_back(t);
+    sc.cutscenes.push_back(c);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{SeqKind::Cutscene, 0};
+    CHECK((editor::initialValue(d, d.scene().cutscenes[0].tracks[0]) == editor::KeyValue{278, 219, 0}));
+    // The start key on an empty track is where the element sits: exported
+    // as 278 + 2, 219 + 1, the position the runtime starts from, no jump.
+    auto key = editor::addKey(d, ref, 0, 10);
+    CHECK(key && (editor::key(d, ref, *key)->value == editor::KeyValue{278, 219, 0}));
+    // The lane value (and preview) before the first key starts at the element.
+    CHECK((editor::sampleAt(d, ref, 1, 0) == editor::KeyValue{150, 124, 0}));
+    CHECK((editor::sampleAt(d, ref, 1, 15) == editor::KeyValue{75, 62, 0}));
+    CHECK((editor::sampleAt(d, ref, 1, 30) == editor::KeyValue{0, 0, 0}));
+}
+
 void testTimelineRetarget() {
     using splash::TrackType;
     splash::Scene sc;
@@ -4750,6 +4808,7 @@ int main(int argc, char** argv) {
     testTimelineSelection();
     testTimelineClipboard();
     testTimelineEvents();
+    testTimelineUiPositionStart();
     testLuaTokenize();
     testLuaBuffer();
     testLuaComplete();

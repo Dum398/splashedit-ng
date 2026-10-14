@@ -8,6 +8,7 @@
 
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include "splashpack.hh"
 
 namespace editor {
 
@@ -837,8 +838,9 @@ FixedValue encodeValue(TrackType t, const KeyValue& v, float gte) {
         case TrackType::RumbleSmall:
         case TrackType::LightEnabled: o[0] = v[0] > 0.5f ? 1 : 0; break;
         case TrackType::UIProgress: o[0] = byteOf(v[0], 0, 100); break;
-        // The exporter adds the element's anchor offset to both keys; a
-        // linear blend carries it through unchanged, so it is left out.
+        // The exporter adds the anchor's rounding correction to every key;
+        // initialValue() is already less it, and a blend carries a shared
+        // offset through unchanged, so it is left out here.
         case TrackType::UIPosition: o = {sat16(roundInt(v[0])), sat16(roundInt(v[1])), 0}; break;
         case TrackType::UIColor:
         case TrackType::LightColor:
@@ -977,6 +979,20 @@ KeyValue initialValue(const Document& doc, const CutsceneTrack& track) {
             for (const splash::UICanvas& c : doc.scene().canvases)
                 if (c.name == track.target) return {c.visible ? 1.0f : 0.0f, 0, 0};
             break;
+        case TrackType::UIPosition: {
+            // The element where it sits on screen (its anchor's pixel plus its
+            // offset), in the units the exporter packs keys from.
+            const size_t slash = track.target.find('/');
+            if (slash == std::string::npos) break;
+            for (const splash::UICanvas& c : doc.scene().canvases)
+                if (c.name == track.target.substr(0, slash))
+                    for (const splash::UIElement& e : c.elements)
+                        if (e.name == track.target.substr(slash + 1)) {
+                            const std::array<int, 2> p = splash::uiPositionTrackStart(e);
+                            return {float(p[0]), float(p[1]), 0};
+                        }
+            break;
+        }
         default: break;
     }
     return {0, 0, 0};

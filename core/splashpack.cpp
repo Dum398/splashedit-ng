@@ -1243,6 +1243,24 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
 }
 }  // namespace
 
+std::array<int, 2> uiPositionTrackStart(const UIElement& e, const VramSettings& vs) {
+    // writeUi's stored layout (a line keeps its endpoint and no anchors), then
+    // UISystem::resolveLayout: anchor byte * resolution >> 8 plus the offset,
+    // clamped at 0.
+    const bool line = e.type == UIElementType::Line;
+    const int res[2] = {vs.resolutionX, vs.resolutionY};
+    std::array<int, 2> out{};
+    for (int i = 0; i < 2; i++) {
+        BakedAxis b = line ? BakedAxis{0, 0, int16_t(e.from[size_t(i)]), 0}
+                           : bakeAxis(e.anchorMin[size_t(i)], e.anchorMax[size_t(i)], e.rect[size_t(i)], e.rect[size_t(i) + 2], res[i]);
+        int resolved = std::max(int(int16_t(((b.amin * res[i]) >> 8) + b.pos)), 0);
+        // writeSequences adds this to every key of the track.
+        int keyOffset = bakeAxis(e.anchorMin[size_t(i)], e.anchorMax[size_t(i)], 0, 0, res[i]).pos;
+        out[size_t(i)] = resolved - keyOffset;
+    }
+    return out;
+}
+
 // psxsplash render buffer sizing. Fragment bytes are a 4-byte chain word plus
 // the psyqo primitive: GouraudTriangle 6 words, GouraudTexturedTriangle 9,
 // Rectangle 3, Sprite 4, Line 3, TPage 1.

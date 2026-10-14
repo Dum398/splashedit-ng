@@ -526,6 +526,13 @@ void TimelinePanel::rename(editor::Document& doc, SeqRef ref, const std::string&
     else
         msg += ", no script references to update";
     for (const std::string& f : sr.failed) msg += "; could not update " + f;
+    // Literals the rename could not prove name it: say where, so a stale one is found.
+    if (const size_t left = sr.leftovers.size()) {
+        msg += "; " + std::to_string(left) + " other \"" + old + "\" string" + (left == 1 ? "" : "s") + " left as " +
+               (left == 1 ? "it was: " : "they were: ");
+        for (size_t i = 0; i < left && i < 3; ++i) msg += (i ? ", " : "") + sr.leftovers[i];
+        if (left > 3) msg += " and " + std::to_string(left - 3) + " more";
+    }
     note(msg);
     m_renamed = Renamed{ref.kind, old, name, msg};
 }

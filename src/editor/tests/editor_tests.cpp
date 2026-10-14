@@ -3791,6 +3791,81 @@ void testSeqRenameScripts() {
     fs::remove_all(dir, ec);
 }
 
+// A name held in a variable: the literal assigned to it is rewritten when the
+// same variable (Lua scope) is passed to a call of the right kind; any other
+// literal spelling the old name is left and listed, path:line.
+void testSeqRenameScriptVars() {
+    namespace fs = std::filesystem;
+    using editor::SeqKind;
+    const fs::path dir = g_outDir / "seq_rename_vars";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    auto put = [&](const char* p, const std::string& text) { std::ofstream(dir / p, std::ios::binary) << text; };
+    auto get = [&](const char* p) {
+        std::ifstream in(dir / p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    const std::string scn =
+        "local seq = \"intro\"\n"                            // 1 local, played: rewritten
+        "Cutscene.Play(seq)\n"                               // 2
+        "current = 'intro'\n"                                // 3 global, played: rewritten
+        "function onSceneCreationEnd() Cutscene.Play(current) end\n"
+        "local said = \"intro\" -- dialogue\n"               // 5 never played: left
+        "print(said)\n"
+        "local spin = \"intro\"\n"                           // 7 an animation's: left
+        "Animation.Play(spin)\n"
+        "local a, b = 1, \"intro\"\n"                        // 9 second of two: rewritten
+        "Cutscene.Play(b, {loop = true})\n"
+        "local t = {name = \"intro\"}\n"                     // 11 a table field: left
+        "Cutscene.Play(t.name)\n"
+        "do local cue = \"intro\" print(cue) end\n"          // 13 another variable of that name: left
+        "cue = \"intro\"\n"                                  // 14 the global played: rewritten
+        "Cutscene.Play(cue)\n"
+        "Cutscene.Play(\"intro\")\n"                         // 16 a literal call: rewritten
+        "local joined = \"intro\" .. \"!\"\n"                // 17 not the whole value: left
+        "Cutscene.Play(joined)\n";
+    std::string want = scn;
+    for (const char* line : {"local seq = \"", "current = '", "local a, b = 1, \"", "\ncue = \"", "Cutscene.Play(\""}) {
+        const size_t at = want.find(line) + std::strlen(line);
+        CHECK(want.compare(at, 5, "intro") == 0);
+        want.replace(at, 5, "opening");
+    }
+    const std::string obj = "local s = \"intro\"\r\nCutscene.Play(s)\r\nprint(\"intro\")\r\n";
+    put("scene.lua", scn);
+    put("scripts/obj.lua", obj);
+    // The string rewrite alone: the variables count with the calls.
+    int n = -1;
+    CHECK(editor::renameSeqInLua(scn, SeqKind::Cutscene, "intro", "opening", &n) == want && n == 5);
+    // An animation rename takes the Animation variable, and none of the cutscene's.
+    const std::string anim = editor::renameSeqInLua(scn, SeqKind::Animation, "intro", "turn", &n);
+    CHECK(n == 1 && anim.find("local spin = \"turn\"\n") != std::string::npos && anim.find("local seq = \"intro\"") != std::string::npos);
+
+    splash::Scene sc;
+    splash::Object o;
+    o.name = "Thing";
+    o.script = splash::ScriptComponent{"scripts/obj.lua", {}};
+    sc.objects = {o};
+    sc.settings.script = "scene.lua";
+    splash::Cutscene c;
+    c.name = "intro";
+    sc.cutscenes.push_back(c);
+    editor::Document d;
+    d.reset(sc, dir, "s");
+    editor::ScriptRenames sr;
+    CHECK(editor::renameSequence(d, {SeqKind::Cutscene, 0}, "opening", &sr));
+    CHECK(sr.refs == 6 && sr.failed.empty() && (sr.files == std::vector<std::string>{"scripts/obj.lua", "scene.lua"}));
+    CHECK(get("scene.lua") == want);
+    CHECK(get("scripts/obj.lua") == "local s = \"opening\"\r\nCutscene.Play(s)\r\nprint(\"intro\")\r\n");
+    CHECK((sr.leftovers == std::vector<std::string>{"scripts/obj.lua:3", "scene.lua:5", "scene.lua:7", "scene.lua:11",
+                                                    "scene.lua:13", "scene.lua:17"}));
+    // Undo puts both files back, redo again.
+    CHECK(d.undo() && get("scene.lua") == scn && get("scripts/obj.lua") == obj);
+    CHECK(d.redo() && get("scene.lua") == want);
+    CHECK(d.undo() && get("scene.lua") == scn);
+    fs::remove_all(dir, ec);
+}
+
 // A UI position track starts where psxsplash starts it: the element's
 // resolved screen position (UISystem::getPosition: anchor byte * res >> 8
 // plus the stored offset, clamped at 0), less the anchor correction
@@ -5955,6 +6030,7 @@ int main(int argc, char** argv) {
     testTimelineEvents();
     testSeqRenameLua();
     testSeqRenameScripts();
+    testSeqRenameScriptVars();
     testTimelineUiPositionStart();
     testTimelineUiStartValues();
     testTimelinePasteAddsTrack();

@@ -133,8 +133,12 @@ std::string seqNameProblem(const Document& doc, SeqRef ref, const std::string& n
 // for an animation (psxsplash luaapi.cpp; Cutscene.Stop and IsPlaying take
 // no name). `lua` with each such call whose first argument is a quoted
 // string literal spelling exactly `from` (no escapes) changed to spell `to`;
-// `count` gets how many. Calls through another name (local P = Cutscene.Play)
-// or with a computed or long-bracket name are left alone.
+// so is such a literal assigned to a plain variable (local x = "intro",
+// x = "intro", local a, x = 1, "intro") that the same file passes as the
+// first argument of such a call, the same variable by Lua scope
+// (lua::definitions) or both global. `count` gets how many, both kinds.
+// Calls through another name (local P = Cutscene.Play), names computed,
+// long-bracket, held in tables or assigned in table constructors are left alone.
 std::string renameSeqInLua(const std::string& lua, SeqKind kind, const std::string& from, const std::string& to,
                            int* count = nullptr);
 // The scripts the scene exports, project relative: object scripts, trigger
@@ -145,6 +149,9 @@ struct ScriptRenames {
     int refs = 0;                      // calls rewritten
     std::vector<std::string> files;    // project paths rewritten
     std::vector<std::string> failed;   // project paths that could not be read or written
+    // Each string literal still spelling the old name in the scripts scanned,
+    // "path:line" (line from 1): what the rename could not tie to a call.
+    std::vector<std::string> leftovers;
 };
 // Refused (no step) when seqNameProblem() says so or the name is unchanged.
 // Also rewrites the sequence's name in sceneScripts() (renameSeqInLua) on

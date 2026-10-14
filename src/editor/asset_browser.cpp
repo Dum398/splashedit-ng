@@ -678,6 +678,27 @@ AssetPlan planDelete(const AssetIndex& index, const AssetReferences& refs, const
     return r;
 }
 
+int emptyOldTrash(const fs::path& project, fs::file_time_type now, std::chrono::hours maxAge) {
+    const fs::path trash = project / kTrash;
+    std::error_code ec;
+    if (project.empty() || !fs::is_directory(trash, ec)) return 0;
+    std::vector<fs::path> old;
+    for (fs::directory_iterator it(trash, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isdigit(c); })) continue;
+        std::error_code tec;
+        const fs::file_time_type t = fs::last_write_time(it->path(), tec);
+        if (!tec && t + maxAge < now) old.push_back(it->path());
+    }
+    int removed = 0;
+    for (const fs::path& p : old) {
+        std::error_code rec;
+        if (fs::remove_all(p, rec) != static_cast<std::uintmax_t>(-1) && !rec) ++removed;
+    }
+    if (fs::is_empty(trash, ec) && !ec) fs::remove(trash, ec);
+    return removed;
+}
+
 AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string& openScene, const AssetPlan& plan) {
     AssetOp r;
     r.path = plan.path;

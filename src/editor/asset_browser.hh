@@ -5,6 +5,7 @@
 // asset_browser_view.
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <map>
@@ -162,6 +163,15 @@ std::vector<std::string> deletionSet(const AssetIndex& index, const std::string&
 // from the panel), keeping their paths. Refused while anything references it
 // (nothing could stand in for it), or when it is or holds `openScene`.
 AssetPlan planDelete(const AssetIndex& index, const AssetReferences& refs, const std::string& asset, const std::string& openScene);
+// How long a delete stays in .trash/ (see emptyOldTrash): 30 days.
+constexpr std::chrono::hours kTrashKeep{24 * 30};
+
+// Empties the old part of the project's .trash/: removes each numbered
+// .trash/<n>/ last written before `now - maxAge`, and .trash/ itself when
+// that leaves it empty. Run on opening a project, when no undo step can
+// still bring those files back. Returns how many it removed.
+int emptyOldTrash(const std::filesystem::path& project, std::filesystem::file_time_type now,
+                  std::chrono::hours maxAge = kTrashKeep);
 
 // What a carried-out plan did, or why it could not.
 struct AssetOp {

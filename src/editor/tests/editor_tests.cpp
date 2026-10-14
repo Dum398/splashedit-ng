@@ -5093,12 +5093,14 @@ void testAssetBrowser() {
 
     // Rename a referenced file: the file moves and the open scene's reference
     // follows, as one undo step; undo puts both back, redo does it again.
+    CHECK(!doc.dirty());
     editor::AssetOp op = run(editor::planRename(index, refs, "textures/brick.png", "wall", "game.scene"));
     CHECK(op.error.empty() && op.path == "textures/wall.png" && op.references == 1 && op.scenes.empty());
     CHECK(fs::exists(proj / "textures" / "wall.png") && !fs::exists(proj / "textures" / "brick.png"));
-    CHECK(wallTexture() == "textures/wall.png" && doc.canUndo() && !doc.canRedo());
+    // The open scene's reference changed in memory: it has to be saved.
+    CHECK(wallTexture() == "textures/wall.png" && doc.canUndo() && !doc.canRedo() && doc.dirty());
     CHECK(refs.to(index, "textures/wall.png").size() == 1);
-    CHECK(doc.undo() && wallTexture() == "textures/brick.png");
+    CHECK(doc.undo() && wallTexture() == "textures/brick.png" && !doc.dirty());
     CHECK(fs::exists(proj / "textures" / "brick.png") && !fs::exists(proj / "textures" / "wall.png"));
     CHECK(doc.redo() && wallTexture() == "textures/wall.png" && fs::exists(proj / "textures" / "wall.png"));
     CHECK(editor::takeAssetHistoryError().empty());
@@ -5242,6 +5244,22 @@ void testAssetBrowser() {
     CHECK(op.error.empty() && !fs::exists(proj / "scripts" / "unused.lua") && fs::exists(proj / ".trash" / "2" / "scripts" / "unused.lua"));
     CHECK((op.touched == std::vector<std::string>{"scripts/unused.lua", ".trash/2/scripts/unused.lua"}));
     CHECK(editor::takeAssetHistoryError().empty());
+    // A project opened later empties what has lain in .trash/ past the
+    // limit, and only that; a folder the user put there is left alone.
+    {
+        const auto now = fs::file_time_type::clock::now();
+        fs::create_directories(proj / ".trash" / "keep");
+        fs::last_write_time(proj / ".trash" / "1", now - editor::kTrashKeep - std::chrono::hours(1));
+        fs::last_write_time(proj / ".trash" / "keep", now - editor::kTrashKeep * 2);
+        CHECK(editor::emptyOldTrash(proj, now) == 1);
+        CHECK(!fs::exists(proj / ".trash" / "1") && fs::exists(proj / ".trash" / "2" / "scripts" / "unused.lua"));
+        CHECK(fs::exists(proj / ".trash" / "keep") && fs::exists(proj / "scripts" / "brain.lua"));
+        CHECK(editor::emptyOldTrash(proj, now) == 0);  // the rest is recent
+        fs::remove(proj / ".trash" / "keep");
+        CHECK(editor::emptyOldTrash(proj, now + editor::kTrashKeep + std::chrono::hours(1)) == 1);
+        CHECK(!fs::exists(proj / ".trash") && fs::exists(proj / "scripts"));  // the empty trash goes too
+        CHECK(editor::emptyOldTrash(proj, now) == 0 && editor::emptyOldTrash({}, now) == 0);
+    }
     // The scan notices a file written behind its back.
     write("textures/new.png", "n");
     CHECK(index.scan(proj) && index.find("textures/new.png"));

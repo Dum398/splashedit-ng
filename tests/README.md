@@ -297,6 +297,8 @@ the editor itself:
 
 - Replace (Ctrl+H): Ctrl+Alt+Enter and the Replace all button replace every match, Match case
   leaves other cases alone, one Ctrl+Z undoes the lot, Enter replaces one match at a time.
+  With Regex (`.*`) on, `zzq(\d)` -> `v$1` puts each digit back; Preserve case (`AB`) turns
+  `zzq = Zzq + ZZQ` into `yy = Yy + YY`; In selection (`Sel`) replaces only inside the selection.
 - Typing `(`, `"` and the rest inserts the closer, typing the closer steps over it, Backspace in
   an empty pair deletes both, and `don't` gets no second quote.
 - `--copy-file <from>@<to>` stands in for another program writing the open script. With no edits

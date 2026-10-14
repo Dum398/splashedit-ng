@@ -2499,13 +2499,13 @@ void testLuaBuffer() {
     CHECK(b.line(0) == "function f()");
     // Find, forward and back, wrapping.
     b.setText("Foo foo\nfoo");
-    auto hit = b.find("foo", {0, 1}, true, true);
+    auto hit = b.find("foo", {0, 1}, true, lua::FindOptions{true});
     CHECK(hit && hit->first == (lua::Pos{0, 4}));
-    hit = b.find("foo", {1, 1}, true, true);
+    hit = b.find("foo", {1, 1}, true, lua::FindOptions{true});
     CHECK(hit && hit->first == (lua::Pos{0, 4}));
-    hit = b.find("foo", {0, 0}, false, false);
+    hit = b.find("foo", {0, 0}, false, lua::FindOptions{false});
     CHECK(hit && hit->first == (lua::Pos{1, 0}));
-    CHECK(b.countMatches("foo", false) == 3 && b.countMatches("foo", true) == 2);
+    CHECK(b.countMatches("foo", lua::FindOptions{false}) == 3 && b.countMatches("foo", lua::FindOptions{true}) == 2);
     // Motions.
     b.setText("local abc = x\n  y");
     b.moveTo({0, 0});
@@ -2653,14 +2653,14 @@ void testLuaReplace() {
     b.setText("local hp = 3\nHP = hp + hp\nprint(hp)");
     b.moveTo({0, 0});
     // Nothing selected: Replace first selects the next match.
-    CHECK(!b.replaceNext("hp", "health", true));
+    CHECK(!b.replaceNext("hp", "health", lua::FindOptions{true}));
     CHECK(b.selStart() == (lua::Pos{0, 6}) && b.selectedText() == "hp");
-    CHECK(b.replaceNext("hp", "health", true));
+    CHECK(b.replaceNext("hp", "health", lua::FindOptions{true}));
     CHECK(b.line(0) == "local health = 3" && b.selStart() == (lua::Pos{1, 5}));
     CHECK(b.undo() && b.line(0) == "local hp = 3");
     // Replace all: every match, one undo step, the cursor stays.
     b.moveTo({1, 2});
-    CHECK(b.replaceAll("hp", "health", true) == 4);
+    CHECK(b.replaceAll("hp", "health", lua::FindOptions{true}) == 4);
     CHECK(b.text() == "local health = 3\nHP = health + health\nprint(health)");
     CHECK(b.cursor() == (lua::Pos{1, 2}) && !b.hasSelection());
     CHECK(b.undo() && b.text() == "local hp = 3\nHP = hp + hp\nprint(hp)");
@@ -2668,21 +2668,120 @@ void testLuaReplace() {
     CHECK(b.undo());
     // Match case off finds HP too; a replacement holding the needle is not
     // replaced again; nothing to replace is no undo step.
-    CHECK(b.replaceAll("hp", "hp_hp", false) == 5);
+    CHECK(b.replaceAll("hp", "hp_hp", lua::FindOptions{false}) == 5);
     CHECK(b.line(1) == "hp_hp = hp_hp + hp_hp");
     CHECK(b.undo());
     const uint64_t rev = b.revision();
-    CHECK(b.replaceAll("zz", "y", false) == 0 && b.revision() == rev);
-    CHECK(b.replaceAll("", "y", false) == 0);
+    CHECK(b.replaceAll("zz", "y", lua::FindOptions{false}) == 0 && b.revision() == rev);
+    CHECK(b.replaceAll("", "y", lua::FindOptions{false}) == 0);
     // Removing every match; matches do not overlap.
     b.setText("aaa\nkeep\naaaa");
-    CHECK(b.replaceAll("aa", "", true) == 3 && b.text() == "a\nkeep\n");
+    CHECK(b.replaceAll("aa", "", lua::FindOptions{true}) == 3 && b.text() == "a\nkeep\n");
     CHECK(b.undo() && b.text() == "aaa\nkeep\naaaa" && !b.undo());
     // Replace with match case off accepts a selection differing in case.
     b.setText("Foo foo");
     b.select({0, 0}, {0, 3});
-    CHECK(b.replaceNext("foo", "x", false) && b.text() == "x foo" && b.selectedText() == "foo");
-    CHECK(!b.replaceNext("FOO", "y", true) && b.text() == "x foo");
+    CHECK(b.replaceNext("foo", "x", lua::FindOptions{false}) && b.text() == "x foo" && b.selectedText() == "foo");
+    CHECK(!b.replaceNext("FOO", "y", lua::FindOptions{true}) && b.text() == "x foo");
+}
+
+// Find options: regex with groups, a bad pattern, whole word, preserve case,
+// in selection.
+void testLuaFindOptions() {
+    lua::Buffer b;
+    lua::FindOptions re;
+    re.regex = re.matchCase = true;
+    // Regex: per line, $1 groups, one undo step.
+    b.setText("hp = 3\nlocal mp = 4\nx = hpmax");
+    CHECK(b.countMatches("\\b(h|m)p\\b", re) == 2);
+    CHECK(b.countMatches("^\\w+", re) == 3);
+    CHECK(b.replaceAll("(\\w+) = (\\d+)", "$2 = $1", re) == 2);
+    CHECK(b.text() == "3 = hp\nlocal 4 = mp\nx = hpmax");
+    CHECK(b.undo() && b.text() == "hp = 3\nlocal mp = 4\nx = hpmax" && !b.canUndo());
+    CHECK(b.replaceAll("p", "$&$&", re) == 3 && b.line(2) == "x = hppmax");
+    CHECK(b.undo());
+    // Zero-length matches are skipped, not looped on.
+    CHECK(b.countMatches("4*", re) == 1);
+    // Replace (one) uses the groups of the selected match.
+    b.moveTo({0, 0});
+    CHECK(!b.replaceNext("(m)(p)", "$2$1", re) && b.selStart() == (lua::Pos{1, 6}));
+    CHECK(b.replaceNext("(m)(p)", "$2$1", re) && b.line(1) == "local pm = 4");
+    CHECK(b.undo());
+    // A bad pattern finds nothing and says why; nothing throws.
+    CHECK(!lua::findError("(hp", re).empty() && !lua::findError("[a-", re).empty());
+    CHECK(lua::findError("(hp)", re).empty() && lua::findError("(hp", lua::FindOptions{}).empty());
+    CHECK(b.countMatches("(hp", re) == 0 && !b.find("(hp", {0, 0}, true, re));
+    const uint64_t rev = b.revision();
+    CHECK(b.replaceAll("*", "x", re) == 0 && b.revision() == rev);
+    // Without regex the same text is literal.
+    b.setText("f(hp) f(hp");
+    CHECK(b.countMatches("(hp", lua::FindOptions{}) == 2);
+    // Case-insensitive regex.
+    lua::FindOptions rei;
+    rei.regex = true;
+    CHECK(b.countMatches("F\\(", rei) == 2 && b.countMatches("F\\(", re) == 0);
+
+    // Whole word: not inside a longer name; plain and regex.
+    lua::FindOptions ww;
+    ww.wholeWord = true;
+    b.setText("hp hpmax max_hp _hp hp.x a.hp(hp)");
+    CHECK(b.countMatches("hp", lua::FindOptions{}) == 7 && b.countMatches("hp", ww) == 4);
+    CHECK(b.replaceAll("hp", "H", ww) == 4 && b.text() == "H hpmax max_hp _hp H.x a.H(H)");
+    CHECK(b.undo());
+    ww.regex = true;
+    CHECK(b.countMatches("h.", ww) == 4);
+    // A rejected match does not hide a whole word right after it.
+    b.setText("xhp hp");
+    ww.regex = false;
+    auto hit = b.find("hp", {0, 0}, true, ww);
+    CHECK(hit && hit->first == (lua::Pos{0, 4}));
+
+    // Preserve case: lower, Capitalized and UPPER matches.
+    CHECK(lua::preserveCase("health", "hp") == "hp" && lua::preserveCase("Health", "hp") == "Hp");
+    CHECK(lua::preserveCase("HEALTH", "hp") == "HP" && lua::preserveCase("heAlth", "hP") == "hP");
+    CHECK(lua::preserveCase("health", "HP") == "hp");
+    lua::FindOptions pc;
+    pc.preserveCase = true;
+    b.setText("health = Health + HEALTH");
+    CHECK(b.replaceAll("health", "hp", pc) == 3 && b.text() == "hp = Hp + HP");
+    CHECK(b.undo() && !b.canUndo());
+    b.select({0, 9}, {0, 15});
+    CHECK(b.replaceNext("health", "hp", pc) && b.text() == "health = Hp + HEALTH");
+    CHECK(b.undo());
+    // With regex, after the groups are put in.
+    pc.regex = true;
+    CHECK(b.replaceAll("(h)ealth", "$1p", pc) == 3 && b.text() == "hp = Hp + HP");
+
+    // In selection: only matches inside the scope, which moves with edits.
+    b.setText("hp hp\nhp hp\nhp hp");
+    lua::FindOptions in;
+    in.inSelection = true;
+    b.setFindScope({0, 3}, {1, 5});
+    CHECK(b.countMatches("hp", in) == 3 && b.countMatches("hp", lua::FindOptions{}) == 6);
+    b.moveTo({2, 0});
+    CHECK(b.replaceAll("hp", "health", in) == 3);
+    CHECK(b.text() == "hp health\nhealth health\nhp hp");
+    CHECK(b.cursor() == (lua::Pos{2, 0}));
+    CHECK(b.findScope() && b.findScope()->first == (lua::Pos{0, 3}) && b.findScope()->second == (lua::Pos{1, 13}));
+    // Again: the grown scope still holds exactly the replaced ones.
+    CHECK(b.countMatches("health", in) == 3 && b.countMatches("hp", in) == 0);
+    CHECK(b.undo() && b.text() == "hp hp\nhp hp\nhp hp" && b.findScope()->second == (lua::Pos{1, 5}));
+    CHECK(b.redo() && b.undo() && !b.canUndo());
+    // Typing before the scope shifts it; find stays inside.
+    b.moveTo({0, 0});
+    b.insert("xx");
+    CHECK(b.findScope()->first == (lua::Pos{0, 5}));
+    auto f = b.find("hp", {0, 0}, true, in);
+    CHECK(f && f->first == (lua::Pos{0, 5}));
+    // Replace (one) outside the scope does nothing; inside it walks the scope.
+    b.select({0, 2}, {0, 4});
+    CHECK(!b.replaceNext("hp", "Q", in) && b.selStart() == (lua::Pos{0, 5}));
+    CHECK(b.replaceNext("hp", "Q", in) && b.line(0) == "xxhp Q" && b.selStart() == (lua::Pos{1, 0}));
+    b.clearFindScope();
+    CHECK(b.countMatches("hp", in) == 5);
+    b.setFindScope({0, 0}, {0, 3});
+    b.setText("hp");
+    CHECK(!b.findScope());
 }
 
 // Typing brackets and quotes: pairs, stepping over, Backspace in a pair.
@@ -3898,6 +3997,7 @@ int main(int argc, char** argv) {
     testLuaCheck();
     testLuaScriptFile();
     testLuaReplace();
+    testLuaFindOptions();
     testLuaAutoClose();
     testLuaReload();
     testLuaDeleted();

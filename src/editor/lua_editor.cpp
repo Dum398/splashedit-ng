@@ -8,6 +8,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <map>
+#include <regex>
 #include <set>
 #include <stdexcept>
 #include <system_error>
@@ -115,6 +116,7 @@ static std::string trim(const std::string& s) {
 void Buffer::setText(std::string_view text) {
     m_lines = splitLines(text);
     m_cursor = m_anchor = Pos();
+    m_scope.reset();
     m_undo.clear();
     m_redo.clear();
     m_mergeOpen = false;
@@ -258,8 +260,27 @@ Pos Buffer::endOf(Pos at, std::string_view s) const {
     return Pos{at.line + (int)std::count(s.begin(), s.end(), '\n'), (int)(s.size() - nl - 1)};
 }
 
+// Where p moves when [at, end) is inserted; `after` moves a p at `at` too.
+static Pos shiftInsert(Pos p, Pos at, Pos end, bool after) {
+    if (p < at || (p == at && !after)) return p;
+    if (p.line == at.line) return Pos{end.line, end.col + (p.col - at.col)};
+    return Pos{p.line + (end.line - at.line), p.col};
+}
+
+// Where p moves when [a, b) is erased.
+static Pos shiftErase(Pos p, Pos a, Pos b) {
+    if (p <= a) return p;
+    if (p < b) return a;
+    if (p.line == b.line) return Pos{a.line, a.col + (p.col - b.col)};
+    return Pos{p.line - (b.line - a.line), p.col};
+}
+
 Pos Buffer::rawInsert(Pos at, std::string_view s) {
     std::vector<std::string> parts = splitLines(s);
+    if (m_scope) {
+        Pos end = parts.size() == 1 ? Pos{at.line, at.col + (int)parts[0].size()} : Pos{at.line + (int)parts.size() - 1, (int)parts.back().size()};
+        m_scope = std::make_pair(shiftInsert(m_scope->first, at, end, false), shiftInsert(m_scope->second, at, end, true));
+    }
     std::string& l = m_lines[at.line];
     std::string tail = l.substr(at.col);
     l.erase(at.col);
@@ -275,6 +296,7 @@ Pos Buffer::rawInsert(Pos at, std::string_view s) {
 }
 
 void Buffer::rawErase(Pos a, Pos b) {
+    if (m_scope) m_scope = std::make_pair(shiftErase(m_scope->first, a, b), shiftErase(m_scope->second, a, b));
     if (a.line == b.line) {
         m_lines[a.line].erase(a.col, b.col - a.col);
         return;
@@ -657,81 +679,233 @@ static size_t findIn(const std::string& hay, std::string_view needle, size_t fro
     return std::string::npos;
 }
 
-std::optional<std::pair<Pos, Pos>> Buffer::find(std::string_view needle, Pos from, bool forward, bool matchCase) const {
-    if (needle.empty() || needle.find('\n') != std::string_view::npos) return std::nullopt;
-    // All matches in order; few enough in a script that a scan is fine.
-    std::vector<Pos> hits;
-    for (int l = 0; l < lineCount(); ++l)
-        for (size_t at = findIn(m_lines[l], needle, 0, matchCase); at != std::string::npos;
-             at = findIn(m_lines[l], needle, at + 1, matchCase))
-            hits.push_back(Pos{l, (int)at});
-    if (hits.empty()) return std::nullopt;
-    Pos hit = hits.front();
-    if (forward) {
-        auto it = std::find_if(hits.begin(), hits.end(), [&](Pos p) { return from <= p; });
-        hit = it == hits.end() ? hits.front() : *it;
-    } else {
-        auto it = std::find_if(hits.rbegin(), hits.rend(), [&](Pos p) { return p < from; });
-        hit = it == hits.rend() ? hits.back() : *it;
+namespace {
+
+// The last pattern compiled; the find bar asks for the same one every frame.
+struct Compiled {
+    std::string pattern;
+    bool icase = false, valid = false;
+    std::regex re;
+    std::string error;
+};
+
+std::string regexMessage(std::regex_constants::error_type code) {
+    namespace rc = std::regex_constants;
+    switch (code) {
+    case rc::error_paren: return "Unmatched ( or )";
+    case rc::error_brack: return "Unmatched [ or ]";
+    case rc::error_brace: return "Unmatched { or }";
+    case rc::error_badbrace: return "Bad {n,m} repeat";
+    case rc::error_badrepeat: return "Nothing to repeat";
+    case rc::error_escape: return "Bad escape";
+    case rc::error_range: return "Bad character range";
+    case rc::error_ctype: return "Bad character class";
+    case rc::error_backref: return "Bad back-reference";
+    case rc::error_complexity:
+    case rc::error_stack: return "Pattern too complex";
+    default: return "Invalid pattern";
     }
-    return std::make_pair(hit, Pos{hit.line, hit.col + (int)needle.size()});
 }
 
-bool Buffer::selectionMatches(std::string_view needle, bool matchCase) const {
-    if (!hasSelection() || selStart().line != selEnd().line) return false;
-    std::string t = selectedText();
-    return t.size() == needle.size() && findIn(t, needle, 0, matchCase) == 0;
+const Compiled& compile(std::string_view pattern, bool icase) {
+    thread_local Compiled c;
+    thread_local bool any = false;
+    if (any && c.pattern == pattern && c.icase == icase) return c;
+    any = true;
+    c.pattern = std::string(pattern);
+    c.icase = icase;
+    c.error.clear();
+    c.valid = false;
+    try {
+        auto flags = std::regex::ECMAScript | std::regex::optimize;
+        if (icase) flags |= std::regex::icase;
+        c.re = std::regex(c.pattern, flags);
+        c.valid = true;
+    } catch (const std::regex_error& e) {
+        c.error = regexMessage(e.code());
+    } catch (const std::exception&) {
+        c.error = "Invalid pattern";
+    }
+    return c;
 }
 
-bool Buffer::replaceNext(std::string_view needle, std::string_view with, bool matchCase) {
+bool wordChar(char c) { return std::isalnum((unsigned char)c) || c == '_' || ((unsigned char)c & 0x80); }
+
+// [at, at + len) stands as a whole word in `line`.
+bool wholeWordAt(const std::string& line, size_t at, size_t len) {
+    if (!len) return false;
+    if (at > 0 && wordChar(line[at - 1]) && wordChar(line[at])) return false;
+    size_t e = at + len;
+    if (e < line.size() && wordChar(line[e]) && wordChar(line[e - 1])) return false;
+    return true;
+}
+
+}  // namespace
+
+std::string findError(std::string_view needle, const FindOptions& o) {
+    if (!o.regex || needle.empty()) return {};
+    return compile(needle, !o.matchCase).error;
+}
+
+std::string preserveCase(std::string_view matched, std::string_view with) {
+    bool upper = false, lower = false;
+    for (char c : matched) {
+        if (std::isupper((unsigned char)c)) upper = true;
+        if (std::islower((unsigned char)c)) lower = true;
+    }
+    std::string out(with);
+    if (upper && !lower) {
+        for (char& c : out) c = (char)std::toupper((unsigned char)c);
+    } else if (lower && !upper) {
+        for (char& c : out) c = (char)std::tolower((unsigned char)c);
+    } else if (upper && lower) {
+        // Capitalized: an upper first letter and no other upper one.
+        size_t first = 0;
+        while (first < matched.size() && !std::isalpha((unsigned char)matched[first])) ++first;
+        bool title = first < matched.size() && std::isupper((unsigned char)matched[first]);
+        for (size_t i = first + 1; title && i < matched.size(); ++i)
+            if (std::isupper((unsigned char)matched[i])) title = false;
+        if (title) {
+            size_t k = 0;
+            while (k < out.size() && !std::isalpha((unsigned char)out[k])) ++k;
+            if (k < out.size()) out[k] = (char)std::toupper((unsigned char)out[k]);
+        }
+    }
+    return out;
+}
+
+std::vector<Buffer::Match> Buffer::scan(std::string_view needle, const FindOptions& o, const std::string_view* with) const {
+    std::vector<Match> out;
+    if (needle.empty()) return out;
+    const Compiled* re = nullptr;
+    if (o.regex) {
+        re = &compile(needle, !o.matchCase);
+        if (!re->valid) return out;
+    } else if (needle.find('\n') != std::string_view::npos) {
+        return out;
+    }
+    int l0 = 0, l1 = lineCount() - 1;
+    Pos lo, hi{l1, (int)m_lines[l1].size()};
+    if (o.inSelection && m_scope) {
+        lo = clamp(m_scope->first), hi = clamp(m_scope->second);
+        if (!(lo < hi)) return out;
+        l0 = lo.line, l1 = hi.line;
+    }
+    auto keep = [&](int l, size_t at, size_t len) {
+        Pos a{l, (int)at}, b{l, (int)(at + len)};
+        return lo <= a && b <= hi && (!o.wholeWord || wholeWordAt(m_lines[l], at, len));
+    };
+    for (int l = l0; l <= l1; ++l) {
+        const std::string& line = m_lines[l];
+        if (!re) {
+            for (size_t at = findIn(line, needle, 0, o.matchCase); at != std::string::npos;) {
+                if (keep(l, at, needle.size())) {
+                    Match m{Pos{l, (int)at}, Pos{l, (int)(at + needle.size())}, {}};
+                    if (with) m.with = o.preserveCase ? preserveCase(line.substr(at, needle.size()), *with) : std::string(*with);
+                    out.push_back(std::move(m));
+                    at = findIn(line, needle, at + needle.size(), o.matchCase);
+                } else {
+                    at = findIn(line, needle, at + 1, o.matchCase);
+                }
+            }
+            continue;
+        }
+        // Each search starts where the last match ended (or one past a
+        // rejected one), with the text before it visible to ^ and \b.
+        try {
+            for (size_t at = 0; at < line.size();) {
+                std::smatch sm;
+                auto flags = std::regex_constants::match_not_null;
+                if (at > 0) flags |= std::regex_constants::match_prev_avail;
+                if (!std::regex_search(line.begin() + at, line.end(), sm, re->re, flags)) break;
+                size_t a = at + sm.position(0), len = sm.length(0);
+                if (!keep(l, a, len)) {
+                    at = a + 1;
+                    continue;
+                }
+                Match m{Pos{l, (int)a}, Pos{l, (int)(a + len)}, {}};
+                if (with) {
+                    m.with = sm.format(std::string(*with), std::regex_constants::format_default);
+                    if (o.preserveCase) m.with = preserveCase(sm.str(0), m.with);
+                }
+                out.push_back(std::move(m));
+                at = a + len;
+            }
+        } catch (const std::exception&) {
+            // Too complex for std::regex on this line: no more matches here.
+        }
+    }
+    return out;
+}
+
+std::vector<std::pair<Pos, Pos>> Buffer::matches(std::string_view needle, const FindOptions& o) const {
+    std::vector<std::pair<Pos, Pos>> out;
+    for (const Match& m : scan(needle, o, nullptr)) out.emplace_back(m.a, m.b);
+    return out;
+}
+
+std::optional<std::pair<Pos, Pos>> Buffer::find(std::string_view needle, Pos from, bool forward, const FindOptions& o) const {
+    // All matches in order; few enough in a script that a scan is fine.
+    std::vector<Match> hits = scan(needle, o, nullptr);
+    if (hits.empty()) return std::nullopt;
+    const Match* hit = &hits.front();
+    if (forward) {
+        auto it = std::find_if(hits.begin(), hits.end(), [&](const Match& m) { return from <= m.a; });
+        hit = it == hits.end() ? &hits.front() : &*it;
+    } else {
+        auto it = std::find_if(hits.rbegin(), hits.rend(), [&](const Match& m) { return m.a < from; });
+        hit = it == hits.rend() ? &hits.back() : &*it;
+    }
+    return std::make_pair(hit->a, hit->b);
+}
+
+bool Buffer::replaceNext(std::string_view needle, std::string_view with, const FindOptions& o) {
     if (needle.empty()) return false;
-    const bool did = selectionMatches(needle, matchCase);
-    if (did) replace(selStart(), selEnd(), with);
+    // The selection is one of the matches (in its context, for whole words
+    // and regex anchors).
+    bool did = false;
+    if (hasSelection()) {
+        for (const Match& m : scan(needle, o, &with))
+            if (m.a == selStart() && m.b == selEnd()) {
+                replace(m.a, m.b, m.with);
+                did = true;
+                break;
+            }
+    }
     // After the replacement, so `with` containing `needle` is not found again.
-    if (auto m = find(needle, did ? m_cursor : selStart(), true, matchCase)) select(m->first, m->second);
+    if (auto m = find(needle, did ? m_cursor : selStart(), true, o)) select(m->first, m->second);
     return did;
 }
 
-int Buffer::replaceAll(std::string_view needle, std::string_view with, bool matchCase) {
-    if (needle.empty() || needle.find('\n') != std::string_view::npos) return 0;
-    int n = 0, first = -1, last = -1;
-    std::vector<std::string> out(m_lines.size());
-    std::vector<char> changed(m_lines.size(), 0);
-    for (int l = 0; l < lineCount(); ++l) {
-        const std::string& line = m_lines[l];
-        size_t at = 0;
-        bool any = false;
-        for (size_t hit; (hit = findIn(line, needle, at, matchCase)) != std::string::npos; at = hit + needle.size()) {
-            out[l].append(line, at, hit - at);
-            out[l] += with;
-            ++n;
-            any = true;
-        }
-        if (!any) continue;
-        out[l].append(line, at, std::string::npos);
-        changed[l] = 1;
-        if (first < 0) first = l;
-        last = l;
-    }
-    if (!n) return 0;
+int Buffer::replaceAll(std::string_view needle, std::string_view with, const FindOptions& o) {
+    std::vector<Match> hits = scan(needle, o, &with);
+    if (hits.empty()) return 0;
+    // One edit over the lines holding matches, or over the scope.
+    Pos a{hits.front().a.line, 0}, b{hits.back().b.line, (int)m_lines[hits.back().b.line].size()};
+    if (o.inSelection && m_scope) a = clamp(m_scope->first), b = clamp(m_scope->second);
     std::string text;
-    for (int l = first; l <= last; ++l) {
-        if (l > first) text += '\n';
-        text += changed[l] ? out[l] : m_lines[l];
+    Pos at = a;
+    for (const Match& m : hits) {
+        text += textRange(at, m.a);
+        text += m.with;
+        at = m.b;
     }
+    text += textRange(at, b);
     const Pos keep = m_cursor;
-    replace(Pos{first, 0}, Pos{last, (int)m_lines[last].size()}, text);
+    replace(a, b, text);
     m_cursor = m_anchor = clamp(keep);
     m_undo.back().cursorAfter = m_cursor;
-    return n;
+    return (int)hits.size();
 }
 
-int Buffer::countMatches(std::string_view needle, bool matchCase) const {
-    if (needle.empty()) return 0;
-    int n = 0;
-    for (const std::string& l : m_lines)
-        for (size_t at = findIn(l, needle, 0, matchCase); at != std::string::npos; at = findIn(l, needle, at + 1, matchCase)) ++n;
-    return n;
+int Buffer::countMatches(std::string_view needle, const FindOptions& o) const {
+    return (int)scan(needle, o, nullptr).size();
+}
+
+void Buffer::setFindScope(Pos a, Pos b) {
+    a = clamp(a), b = clamp(b);
+    if (b < a) std::swap(a, b);
+    m_scope = std::make_pair(a, b);
 }
 
 // --- Tokenizer --------------------------------------------------------------

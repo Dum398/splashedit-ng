@@ -33,7 +33,8 @@ struct ScriptTabs::Tab {
     lua::Pos compCursor;
     ImRect compRect;
     // Find and replace.
-    bool findOpen = false, findFocus = false, matchCase = false;
+    bool findOpen = false, findFocus = false;
+    lua::FindOptions opts;  // inSelection searches the buffer's find scope
     bool replaceOpen = false, replaceFocus = false;
     bool findEditing = false, replaceEditing = false;  // last frame
     std::string query, searched, replacement;
@@ -670,7 +671,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
             }
             if (key(ImGuiKey_F12)) gotoDefinition(t, b.cursor(), now);
             if (key(ImGuiKey_F3) && !t.query.empty()) {
-                if (auto m = b.find(t.query, shift ? b.selStart() : b.selEnd(), !shift, t.matchCase)) b.select(m->first, m->second);
+                if (auto m = b.find(t.query, shift ? b.selStart() : b.selEnd(), !shift, t.opts)) b.select(m->first, m->second);
             }
             if (ctrl && !alt) {
                 if (key(ImGuiKey_A)) b.selectAll();
@@ -708,7 +709,18 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
                     t.findOpen = true;
                     t.replaceOpen = replaceKey;
                     t.findFocus = true;
-                    if (b.hasSelection() && b.selStart().line == b.selEnd().line) t.query = b.selectedText();
+                    if (b.hasSelection() && b.selStart().line == b.selEnd().line) {
+                        t.query = b.selectedText();
+                        // Literally, with Regex on.
+                        if (t.opts.regex) {
+                            std::string q;
+                            for (char c : t.query) {
+                                if (std::strchr("\\^$.|?*+()[]{}", c)) q += '\\';
+                                q += c;
+                            }
+                            t.query = q;
+                        }
+                    }
                 }
                 if (key(ImGuiKey_Slash)) b.toggleComment();
                 if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) openCompletion(t, true);
@@ -779,17 +791,21 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         int a = (int)(90 * (1.0 - (now - t.flashAt)));
         dl->AddRectFilled(ImVec2(body.Min.x, yOf(t.flashLine)), ImVec2(body.Max.x, yOf(t.flashLine) + lineH), rgb(0x8b7bff, a));
     }
-    if (t.findOpen && !t.query.empty()) {
-        for (int l = first; l <= last; ++l) {
-            const std::string& line = b.line(l);
-            for (size_t at = 0;;) {
-                auto m = b.find(t.query, lua::Pos{l, (int)at}, true, t.matchCase);
-                if (!m || m->first.line != l || m->first.col < (int)at) break;
-                dl->AddRectFilled(ImVec2(xOf(l, m->first.col), yOf(l) + 1), ImVec2(xOf(l, m->second.col), yOf(l) + lineH - 1), code::match, 2);
-                at = m->first.col + 1;
-                if (at > line.size()) break;
-            }
+    // The range In selection searches, then the matches.
+    if (t.findOpen && t.opts.inSelection && b.findScope()) {
+        auto [a, e] = *b.findScope();
+        for (int l = std::max(first, a.line); l <= std::min(last, e.line); ++l) {
+            float x0 = l == a.line ? xOf(l, a.col) : origin().x;
+            float x1 = l == e.line ? xOf(l, e.col) : xOf(l, (int)b.line(l).size()) + charW * 0.6f;
+            dl->AddRectFilled(ImVec2(x0, yOf(l)), ImVec2(x1, yOf(l) + lineH), code::scope);
         }
+    }
+    std::vector<std::pair<lua::Pos, lua::Pos>> found;
+    if (t.findOpen && !t.query.empty()) found = b.matches(t.query, t.opts);
+    for (const auto& [ma, mb] : found) {
+        if (ma.line < first) continue;
+        if (ma.line > last) break;
+        dl->AddRectFilled(ImVec2(xOf(ma.line, ma.col), yOf(ma.line) + 1), ImVec2(xOf(ma.line, mb.col), yOf(ma.line) + lineH - 1), code::match, 2);
     }
     if (b.hasSelection()) {
         lua::Pos a = b.selStart(), e = b.selEnd();
@@ -921,7 +937,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
 
     // --- Find and replace bar ---
     if (t.findOpen) {
-        const float fw = 440, rowH = 34, gap = 29;
+        const float fw = 530, rowH = 34, gap = 29;
         const float fh = t.replaceOpen ? gap + rowH : rowH;
         ImRect fr(ImVec2(body.Max.x - fw - space::sm, area.Min.y + space::sm), ImVec2(body.Max.x - space::sm, area.Min.y + space::sm + fh));
         t.findRect = fr;
@@ -943,7 +959,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
             }
         }
         const float fieldX = fr.Min.x + 3 + toggleW;
-        ImRect field(ImVec2(fieldX, fr.Min.y + 5), ImVec2(fr.Max.x - bw * 4 - 82, fr.Min.y + rowH - 5));
+        ImRect field(ImVec2(fieldX, fr.Min.y + 5), ImVec2(fr.Max.x - bw * 7 - 6 - 82, fr.Min.y + rowH - 5));
         // Enter in a field acts and keeps the field (ImGui would let go of it).
         const bool keepActive = io.ConfigInputTextEnterKeepActive;
         io.ConfigInputTextEnterKeepActive = true;
@@ -967,7 +983,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         if (t.query != t.searched) {
             // Typing a search jumps to the first match from where the cursor was.
             t.searched = t.query;
-            if (auto m = b.find(t.query, b.selStart(), true, t.matchCase)) {
+            if (auto m = b.find(t.query, b.selStart(), true, t.opts)) {
                 b.select(m->first, m->second);
                 t.reveal = true;
             }
@@ -977,26 +993,33 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         if (inFind && enter && !io.KeyCtrl) (io.KeyShift ? prev : next) = true;
         // Enter replaces this match, Ctrl+Alt+Enter all of them (as in VS Code).
         if (inReplace && enter && !io.KeyShift) (io.KeyCtrl && io.KeyAlt ? replaceEvery : replaceOne) = true;
-        int count = b.countMatches(t.query, t.matchCase), at = 0;
+        const int count = (int)found.size();
+        int at = 0;
         // Which match the selection is, counting from the top.
-        lua::Pos from;
-        for (int k = 0; k < count && k < 1000; ++k) {
-            auto m = b.find(t.query, from, true, t.matchCase);
-            if (!m || m->first < from) break;
-            if (m->first == b.selStart() && m->second == b.selEnd()) {
+        for (int k = 0; k < count; ++k)
+            if (found[k].first == b.selStart() && found[k].second == b.selEnd()) {
                 at = k + 1;
                 break;
             }
-            from = lua::Pos{m->first.line, m->first.col + 1};
+        // A pattern that does not compile: the field in red, why under the bar.
+        const std::string error = lua::findError(t.query, t.opts);
+        if (!error.empty()) {
+            dl->AddRect(field.Min, field.Max, color::bad, radius::field, 0, 1.5f);
+            ImVec2 es = measure(f.regular, type::caption, error.c_str());
+            ImRect er(ImVec2(field.Min.x, fr.Max.y + 2), ImVec2(field.Min.x + es.x + 12, fr.Max.y + 2 + es.y + 8));
+            dl->AddRectFilled(er.Min, er.Max, color::raised, radius::field);
+            dl->AddRect(er.Min, er.Max, color::bad, radius::field);
+            text(dl, er.Min + ImVec2(6, 4), f.regular, type::caption, color::bad, error.c_str());
         }
         char info[32];
-        if (at) std::snprintf(info, sizeof info, "%d of %d", at, count);
+        if (!error.empty()) std::snprintf(info, sizeof info, "Bad regex");
+        else if (at) std::snprintf(info, sizeof info, "%d of %d", at, count);
         else std::snprintf(info, sizeof info, count == 1 ? "%d match" : "%d matches", count);
         ImVec2 is = measure(f.regular, type::caption, info);
         const float row1 = fr.Min.y + rowH * 0.5f;
-        text(dl, ImVec2(field.Max.x + 6, row1 - is.y * 0.5f), f.regular, type::caption, count || t.query.empty() ? color::textDim : color::bad,
-             info);
-        float bx = fr.Max.x - bw * 4 - 6;
+        text(dl, ImVec2(field.Max.x + 6, row1 - is.y * 0.5f), f.regular, type::caption,
+             (count || t.query.empty()) && error.empty() ? color::textDim : color::bad, info);
+        float bx = fr.Max.x - bw * 7 - 6;
         auto small = [&](const char* id, const char* label, bool on, const char* tip, float y0, float w = 0) {
             if (!w) w = bw;
             ImRect br(ImVec2(bx, y0 + 5), ImVec2(bx + w, y0 + rowH - 5));
@@ -1007,30 +1030,46 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
             tooltip(tip);
             return h.clicked;
         };
-        if (small("case", "Aa", t.matchCase, "Match case", fr.Min.y)) t.matchCase = !t.matchCase, t.searched.clear();
+        if (small("case", "Aa", t.opts.matchCase, "Match case", fr.Min.y)) t.opts.matchCase = !t.opts.matchCase, t.searched.clear();
+        if (small("word", "ab", t.opts.wholeWord, "Whole word", fr.Min.y)) t.opts.wholeWord = !t.opts.wholeWord, t.searched.clear();
+        if (small("regex", ".*", t.opts.regex, "Regular expression ($1 in Replace)", fr.Min.y)) t.opts.regex = !t.opts.regex, t.searched.clear();
         if (small("prev", "\xe2\x86\x91", false, "Previous match (Shift+F3)", fr.Min.y)) prev = true;
         if (small("next", "\xe2\x86\x93", false, "Next match (F3)", fr.Min.y)) next = true;
+        // In selection: the selection now (or the cursor's line) is the range
+        // searched, until this is turned off.
+        if (small("insel", "Sel", t.opts.inSelection, "Find in selection", fr.Min.y)) {
+            t.opts.inSelection = !t.opts.inSelection;
+            if (t.opts.inSelection) {
+                lua::Pos a = b.selStart(), e = b.selEnd();
+                if (!b.hasSelection()) a = lua::Pos{a.line, 0}, e = lua::Pos{a.line, (int)b.line(a.line).size()};
+                b.setFindScope(a, e);
+            } else {
+                b.clearFindScope();
+            }
+            t.searched = t.query;
+        }
         if (small("close", icon::x, false, "Close (Escape)", fr.Min.y)) t.findOpen = false, t.focused = true;
         if (t.replaceOpen) {
             bx = rfield.Max.x + 6;
+            if (small("preserve", "AB", t.opts.preserveCase, "Preserve case", fr.Min.y + gap)) t.opts.preserveCase = !t.opts.preserveCase;
             const float w1 = measure(f.medium, type::label, "Replace").x + 14, w2 = measure(f.medium, type::label, "Replace all").x + 14;
             if (small("replaceone", "Replace", false, "Replace this match and go to the next (Enter)", fr.Min.y + gap, w1)) replaceOne = true;
             if (small("replaceall", "Replace all", false, "Replace every match, one undo step (Ctrl+Alt+Enter)", fr.Min.y + gap, w2))
                 replaceEvery = true;
         }
         if (replaceOne && !t.query.empty()) {
-            b.replaceNext(t.query, t.replacement, t.matchCase);
+            b.replaceNext(t.query, t.replacement, t.opts);
             t.reveal = true;
             t.searched = t.query;
         }
         if (replaceEvery && !t.query.empty()) {
-            int n = b.replaceAll(t.query, t.replacement, t.matchCase);
+            int n = b.replaceAll(t.query, t.replacement, t.opts);
             notice = n ? "Replaced " + std::to_string(n) + (n == 1 ? " match" : " matches") : "Nothing to replace";
             noticeBad = false;
             t.searched = t.query;
         }
         if ((next || prev) && !t.query.empty())
-            if (auto m = b.find(t.query, prev ? b.selStart() : b.selEnd(), next, t.matchCase)) {
+            if (auto m = b.find(t.query, prev ? b.selStart() : b.selEnd(), next, t.opts)) {
                 b.select(m->first, m->second);
                 t.reveal = true;
             }

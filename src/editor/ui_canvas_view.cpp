@@ -1360,6 +1360,18 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                         });
                     rows.y += 22;
                 }
+                // What the console will show, next to the source, at this
+                // element's bit depth and cutout: the mesh inspector's preview.
+                rows.y += texturePreview(m_texPreview, dl, x0 + space::sm, x1 - space::sm, rows.y, doc, e.texture, e.bitDepth, e.cutout) +
+                          space::sm;
+                if (reportLayout && m_texPreview.shown != m_texPreviewReported) {
+                    // Scripted tests: what the preview shows when that changes.
+                    m_texPreviewReported = m_texPreview.shown;
+                    if (!m_texPreview.shown.empty()) {
+                        std::printf("uicanvas: texpreview %s\n", m_texPreview.shown.c_str());
+                        std::fflush(stdout);
+                    }
+                }
             }
             ImRect bf = rows.row("lbpp", "Bit depth", "4 and 8 bpp use a palette (16 and 256 colours) and less VRAM.");
             const int cur = e.bitDepth == splash::BitDepth::Bpp4 ? 0 : e.bitDepth == splash::BitDepth::Bpp8 ? 1 : 2;

@@ -19,7 +19,7 @@
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
 #include "editor/model_import.hh"
-#include "editor/texture_preview.hh"
+#include "editor/texture_preview_view.hh"
 #include "editor/lua_editor_view.hh"
 #include "editor/ui_canvas_view.hh"
 #include "editor/play.hh"
@@ -236,12 +236,7 @@ struct State {
     ui::TimelinePanel timeline;
 
     // Inspector texture preview: Source vs PS1, converted off the UI thread.
-    struct TexPreview {
-        editor::TexturePreviewer previewer;
-        unsigned srcTex = 0, ps1Tex = 0;  // GL textures for the two panes
-        unsigned shownGen = 0;            // previewer generation on the GPU
-        bool compare = false;             // one big pane to flick instead of two
-    } texPreview;
+    ui::TexturePreviewView texPreview;
 
     // The bottom dock under the middle panel holds the Project panel and,
     // while it is open, the Timeline as tabs; one shows at a time.

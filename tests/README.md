@@ -348,6 +348,18 @@ to 1600x960, the resolution and the hint must both show again. Needs a display (
 
     python3 uicanvassmallcheck.py <splashedit>
 
+`uitexpreviewcheck.py` checks the UI tab's inspector shows an Image element's texture as the mesh
+inspector does: Source next to the PS1 image at the element's bit depth and cutout. The scene is a
+copy of `ui/ui.scene` whose image uses a generated 32 x 32 RGBA texture (a transparent left quarter,
+a gradient elsewhere) at 16 bpp with cutout on. With `--ui` the editor prints
+`uicanvas: texpreview ...` whenever the preview changes (size, bit depth, cutout, PS1 colours and
+the panes' screen rectangles). Selecting the image must show it, selecting the progress bar must
+not; picking 4 bpp in the Bit depth menu must re-quantize the PS1 pane (at most 16 colours, its
+pixels change, the Source pane's do not), and turning Cutout off must change the transparent quarter
+of the PS1 pane; the saved scene must carry both. Needs a display (CI runs it under `xvfb-run`).
+
+    python3 uitexpreviewcheck.py <splashedit>
+
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
 `SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in
 the Game view. They must reach the game only: the check fails if an editor menu or picker is

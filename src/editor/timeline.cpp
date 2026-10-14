@@ -13,6 +13,7 @@
 
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include "editor/lua_editor.hh"
 #include "splashpack.hh"
 
 namespace editor {
@@ -477,6 +478,157 @@ void collectScripts(const std::vector<splash::Object>& objs, std::vector<std::st
     }
 }
 
+
+// The scanned file as lua_editor tokenizes it (its definitions() share the
+// positions), comments dropped, each token with its byte offset in the file.
+struct LuaTok {
+    std::string text;
+    lua::Pos pos;
+    lua::Tok kind;
+    size_t off;
+};
+struct LuaLex {
+    std::vector<std::string> lines;
+    std::vector<LuaTok> toks;
+};
+LuaLex lexLua(const std::string& s) {
+    LuaLex x;
+    std::vector<size_t> starts;
+    for (size_t b = 0;;) {
+        const size_t nl = s.find('\n', b);
+        std::string line = s.substr(b, nl == std::string::npos ? std::string::npos : nl - b);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        x.lines.push_back(std::move(line));
+        starts.push_back(b);
+        if (nl == std::string::npos) break;
+        b = nl + 1;
+    }
+    const std::vector<std::vector<lua::Token>> toks = lua::tokenize(x.lines);
+    for (size_t l = 0; l < toks.size(); ++l)
+        for (const lua::Token& t : toks[l])
+            if (t.kind != lua::Tok::Comment)
+                x.toks.push_back({x.lines[l].substr(size_t(t.col), size_t(t.len)), lua::Pos{int(l), t.col}, t.kind, starts[l] + size_t(t.col)});
+    return x;
+}
+bool nameTok(const LuaTok& t) {
+    return t.kind == lua::Tok::Identifier || t.kind == lua::Tok::Function || t.kind == lua::Tok::Api || t.kind == lua::Tok::ApiMember;
+}
+bool opTok(const LuaTok& t, const char* op) { return t.kind == lua::Tok::Operator && t.text == op; }
+// A quoted literal with no escapes: its text.
+std::optional<std::string> plainString(const LuaTok& t) {
+    if (t.kind != lua::Tok::String || t.text.size() < 2 || (t.text[0] != '"' && t.text[0] != '\'')) return std::nullopt;
+    if (t.text.find('\\') != std::string::npos) return std::nullopt;
+    return t.text.substr(1, t.text.size() - 2);
+}
+// A literal's text as written (quoted, or a long bracket on one line).
+std::optional<std::string> stringText(const LuaTok& t) {
+    if (t.kind != lua::Tok::String || t.text.size() < 2) return std::nullopt;
+    if (t.text[0] == '"' || t.text[0] == '\'') return t.text.substr(1, t.text.size() - 2);
+    if (t.text[0] != '[') return std::nullopt;  // the rest of a long string begun on an earlier line
+    size_t level = 1;
+    while (level < t.text.size() && t.text[level] == '=') ++level;
+    level -= 1;
+    const std::string close = "]" + std::string(level, '=') + "]";
+    if (t.text.size() < 2 * close.size() || t.text.compare(t.text.size() - close.size(), close.size(), close) != 0)
+        return std::nullopt;
+    return t.text.substr(close.size(), t.text.size() - 2 * close.size());
+}
+
+// The offsets of the literals spelling `from` that are assigned to a plain
+// variable (local x = "intro", x = "intro", local a, x = 1, "intro") which
+// the file then passes as the first argument of a `kind` call
+// (Cutscene.Play(x)). The assignment and the call must mean the same
+// variable: the same local by lua::definitions() scope, or both global.
+std::set<size_t> seqNameVars(const std::string& s, SeqKind kind, const std::string& from,
+                             std::span<const char* const> fns) {
+    std::set<size_t> out;
+    const LuaLex x = lexLua(s);
+    const std::vector<LuaTok>& t = x.toks;
+    const std::string table = kind == SeqKind::Cutscene ? "Cutscene" : "Animation";
+    auto at = [&](size_t k) -> const LuaTok* { return k < t.size() ? &t[k] : nullptr; };
+    auto member = [&](size_t k) { return k > 0 && (opTok(t[k - 1], ".") || opTok(t[k - 1], ":")); };
+    struct Use {
+        std::string name;
+        lua::Pos pos;
+    };
+    std::vector<Use> calls;
+    for (size_t k = 0; k < t.size(); ++k) {
+        if (!nameTok(t[k]) || t[k].text != table || member(k)) continue;
+        const LuaTok *dot = at(k + 1), *fn = at(k + 2), *open = at(k + 3), *arg = at(k + 4), *next = at(k + 5);
+        if (!dot || !opTok(*dot, ".") || !fn || !open || !opTok(*open, "(") || !arg || !nameTok(*arg) || !next) continue;
+        if (std::find_if(fns.begin(), fns.end(), [&](const char* f) { return fn->text == f; }) == fns.end()) continue;
+        if (opTok(*next, ")") || opTok(*next, ",")) calls.push_back({arg->text, arg->pos});
+    }
+    if (calls.empty()) return out;
+    const std::vector<lua::Definition> defs = lua::definitions(x.lines);
+    // The local `name` means at p (the innermost, the last declared), or -1: a global.
+    auto resolve = [&](const std::string& name, lua::Pos p) {
+        int best = -1;
+        for (size_t i = 0; i < defs.size(); ++i) {
+            const lua::Definition& d = defs[i];
+            const bool scoped = d.kind == lua::DefKind::Local || d.kind == lua::DefKind::LocalFunction || d.kind == lua::DefKind::Parameter;
+            if (!scoped || d.name != name || !d.visibleAt(p) || p < d.pos) continue;
+            if (best < 0 || defs[size_t(best)].pos < d.pos) best = int(i);
+        }
+        return best;
+    };
+    std::vector<int> callVars;
+    for (const Use& c : calls) callVars.push_back(resolve(c.name, c.pos));
+    auto keyword = [&](const LuaTok& tk, const char* w) { return tk.kind == lua::Tok::Keyword && tk.text == w; };
+    std::vector<char> brackets;  // open ( [ {, innermost last
+    for (size_t k = 0; k < t.size(); ++k) {
+        const LuaTok& tk = t[k];
+        if (tk.kind == lua::Tok::Operator) {
+            if (tk.text == "(" || tk.text == "[" || tk.text == "{") brackets.push_back(tk.text[0]);
+            else if ((tk.text == ")" || tk.text == "]" || tk.text == "}") && !brackets.empty()) brackets.pop_back();
+            continue;
+        }
+        if (!nameTok(tk) || member(k)) continue;
+        if (!brackets.empty() && brackets.back() == '{') continue;  // a table field, { x = "intro" }
+        if (k > 0 && (opTok(t[k - 1], ",") || keyword(t[k - 1], "for"))) continue;
+        // name {, name} = expr {, expr}
+        std::vector<size_t> names{k};
+        size_t j = k + 1;
+        while (j + 1 < t.size() && opTok(t[j], ",") && nameTok(t[j + 1])) {
+            names.push_back(j + 1);
+            j += 2;
+        }
+        if (j >= t.size() || !opTok(t[j], "=")) continue;
+        ++j;
+        for (size_t e = 0; j < t.size(); ++e, j += 2) {
+            const LuaTok& v = t[j];
+            const bool simple = v.kind == lua::Tok::String || v.kind == lua::Tok::Number || v.kind == lua::Tok::Constant || nameTok(v);
+            if (!simple) break;
+            const LuaTok* after = at(j + 1);
+            const bool more = after && opTok(*after, ",");
+            // The literal is the whole expression: what follows starts the next statement.
+            const bool ends = !after || more || opTok(*after, ";") ||
+                              (after->kind == lua::Tok::Keyword && after->text != "and" && after->text != "or") || nameTok(*after);
+            if (!ends) break;
+            if (e < names.size() && plainString(v) == from) {
+                const LuaTok& n = t[names[e]];
+                const int var = resolve(n.text, n.pos);
+                for (size_t c = 0; c < calls.size(); ++c)
+                    if (calls[c].name == n.text && callVars[c] == var) {
+                        out.insert(v.off);
+                        break;
+                    }
+            }
+            if (!more) break;
+        }
+        k = names.back();
+    }
+    return out;
+}
+
+// The lines (from 1) of the string literals whose text is `name`.
+std::vector<int> literalLines(const std::string& lua, const std::string& name) {
+    std::vector<int> out;
+    for (const LuaTok& t : lexLua(lua).toks)
+        if (stringText(t) == name) out.push_back(t.pos.line + 1);
+    return out;
+}
+
 }  // namespace
 
 std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string& from, const std::string& to, int* count) {
@@ -484,6 +636,9 @@ std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string
     static const char* const animationFns[] = {"Play", "Stop", "IsPlaying"};
     const bool cs = kind == SeqKind::Cutscene;
     const std::string table = cs ? "Cutscene" : "Animation";
+    const std::span<const char* const> fns = cs ? std::span<const char* const>(cutsceneFns) : std::span<const char* const>(animationFns);
+    // Literals held in a variable that such a call is passed.
+    const std::set<size_t> vars = seqNameVars(s, kind, from, fns);
     std::string out;
     size_t copied = 0;  // s[copied..] is not in `out` yet
     int n = 0;
@@ -506,8 +661,15 @@ std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string
             continue;
         }
         if (c == '"' || c == '\'') {
+            const size_t open = i;
             for (++i; i < s.size() && s[i] != c && s[i] != '\n'; ++i)
                 if (s[i] == '\\') ++i;
+            if (vars.count(open) && i < s.size() && s[i] == c) {  // no escapes: seqNameVars checked
+                out.append(s, copied, open + 1 - copied);
+                out += quoteLua(to, c);
+                copied = i;
+                ++n;
+            }
             ++i;
             continue;
         }
@@ -539,8 +701,7 @@ std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string
         while (fe < s.size() && identChar(s[fe])) ++fe;
         const std::string fn = s.substr(j, fe - j);
         bool known = false;
-        for (const char* f : cs ? std::span<const char* const>(cutsceneFns) : std::span<const char* const>(animationFns))
-            known |= fn == f;
+        for (const char* f : fns) known |= fn == f;
         if (!known) continue;
         j = skipSpace(fe);
         if (j < s.size() && s[j] == '(') j = skipSpace(j + 1);  // Cutscene.Play "intro" is a call too
@@ -579,6 +740,8 @@ bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRe
     ScriptRenames result;
     std::vector<RenameCommand::File> files;
     std::map<std::string, int> refs;
+    std::map<std::string, std::string> written;                // path: text after, for the files rewritten
+    std::vector<std::pair<std::string, std::string>> scanned;  // path, text before
     // An unsaved scene has no project to find its scripts in.
     if (!doc.projectRoot().empty())
         for (const std::string& p : sceneScripts(doc)) {
@@ -590,10 +753,12 @@ bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRe
                 result.failed.push_back(p);
                 continue;
             }
+            scanned.emplace_back(p, *text);
             int n = 0;
             std::string after = renameSeqInLua(*text, ref.kind, old, name, &n);
             if (!n) continue;
             refs[p] = n;
+            written[p] = after;
             files.push_back({p, *text, std::move(after)});
         }
     auto cmd = std::make_unique<RenameCommand>(
@@ -604,6 +769,12 @@ bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRe
     result.files = raw->written;
     for (const std::string& f : raw->written) result.refs += refs[f];
     for (const std::string& f : raw->failed) result.failed.push_back(f);
+    // What still spells the old name, as the files now stand.
+    for (const auto& [p, before] : scanned) {
+        const bool now = std::find(raw->written.begin(), raw->written.end(), p) != raw->written.end();
+        for (int line : literalLines(now ? written[p] : before, old))
+            result.leftovers.push_back(p + ":" + std::to_string(line));
+    }
     if (scripts) *scripts = std::move(result);
     return true;
 }

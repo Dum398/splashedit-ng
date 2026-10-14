@@ -444,7 +444,10 @@ a display (CI runs it under `xvfb-run` on Linux).
     python3 importwarningscheck.py <splashedit> [screenshot.png]
 `timelineeditcheck.py` checks the Timeline's edits beyond keys on copies of the courtyard example
 with two cutscenes: renaming one in the scene inspector (double-click the name) and from the
-timeline's sequence picker, undo of a rename, a taken name and a 25-character one refused, deleting
+timeline's sequence picker, undo of a rename, a taken name and a 25-character one refused, the
+rename rewriting the scene script's `Cutscene.Play("intro")` calls and a variable holding the name
+that the script plays (an "intro" that is only dialogue left alone and listed, path:line, in the
+status), deleting
 one from the inspector and undoing it, pointing a track at another object from its lane menu (and
 undoing that), each read back from the saved scene; the Scene view previewing a light track and a
 UV offset track (pixels at frame 0 against frame 75) without touching the scene file; and, with

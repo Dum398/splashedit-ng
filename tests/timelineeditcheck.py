@@ -1,5 +1,7 @@
 # Timeline edits beyond keys: rename a cutscene (in the scene inspector and
-# from the timeline's sequence picker) with a taken name refused, delete one
+# from the timeline's sequence picker) with a taken name refused, the scene
+# scripts that play it rewritten (literal names and a variable holding the
+# name; the status lists the "intro" strings left), delete one
 # and undo it, point a track at another object from its lane menu, and the
 # Scene view previewing light and UV offset tracks, and a skin clip event whose
 # clip is gone drawn red in its lane beside a good one. Each run saves with
@@ -179,6 +181,18 @@ check('the rename updates the scripts that play it', names(saved) == ['opening',
 saved, _, out = run(rename_in_inspector('opening') + ['--key', 'ctrl+z', '--wait', '3'], lua=PLAYS)
 check('undo puts the scripts back with the name', names(saved) == ['intro', 'outro'] and script_after.endswith(PLAYS),
       str(names(saved)) + ' | ' + script_after[-120:] + ' | ' + out[-200:])
+
+# A name held in a variable the script plays is rewritten too; an "intro"
+# that is only dialogue stays, and the status says where it was left.
+VARS = '\nlocal seq = "intro"\nCutscene.Play(seq)\nlocal line = "intro"\nprint(line)\n'
+base = open(os.path.join(example, LOGIC), encoding='utf-8', newline='').read().count('\n')
+saved, _, out = run(rename_in_inspector('opening'), save=False, lua=VARS)
+status = next((l for l in out.splitlines() if l.startswith('status: ')), '')
+check('the rename updates a variable the script plays',
+      script_after.endswith('\nlocal seq = "opening"\nCutscene.Play(seq)\nlocal line = "intro"\nprint(line)\n'),
+      script_after[-120:] + ' | ' + out[-200:])
+left = '1 other "intro" string left as it was: ' + LOGIC.replace(os.sep, '/') + f':{base + 4}'
+check('the status lists the strings the rename left', left in status, status + ' | want ' + left)
 
 # Rename from the timeline's sequence picker.
 saved, _, out = run(['--timeline', 'intro', '--click', PICKER, '--wait', '3', '--click', PICKER_RENAME, '--wait', '3', '--key', 'ctrl+a',

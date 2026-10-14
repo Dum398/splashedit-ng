@@ -1,8 +1,11 @@
 // The timeline panel: a cutscene's or an animation's tracks as lanes under a
-// frame ruler, docked under the middle panel. Keys are diamonds: click to
-// select (Ctrl or Shift adds), drag to move (whole frames), double-click a
-// lane to key it at the scrub head, Delete to remove. The row at the bottom
-// edits the selected key's frame, value and curve. Every edit goes through
+// frame ruler, docked under the middle panel, then a lane of audio events
+// (cutscenes) and one of skin clip events. Keys are diamonds, events flags:
+// click to select (Ctrl or Shift adds), drag on empty lane space to box-select
+// across lanes, drag a selected item to move the whole selection (whole
+// frames), double-click a lane to key it at the scrub head, Delete to remove,
+// Ctrl+C / Ctrl+V to copy and paste at the scrub head. The row at the bottom
+// edits the selected key or event. Every edit goes through
 // editor/timeline.hh, one undo step each.
 #pragma once
 
@@ -34,8 +37,9 @@ public:
     // Opens the panel on `ref`, scrub head at frame 0.
     void show(const editor::Document& doc, editor::SeqRef ref);
     // Before the main screen's shortcuts: while the panel has focus, Delete
-    // removes the selected keys and Space plays or pauses, and both are
-    // locked for the frame so the scene's own Delete does not also run.
+    // removes the selection, Ctrl+C / Ctrl+V copy it and paste at the scrub
+    // head, Space plays or pauses; those keys are locked for the frame so the
+    // scene's own Delete, copy and paste do not also run.
     void takeKeys(editor::Document& doc);
     // Takes the bottom of `area` (with a drag bar to resize) when open;
     // returns what is left above it.
@@ -67,6 +71,10 @@ private:
     void lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Document& doc);
     void keyRow(ImDrawList* dl, ImRect r, editor::Document& doc);
     void addTrackPopup(editor::Document& doc);
+    // The audio and skin lanes' add menus (at m_addFrame) and the selected event's clip pickers.
+    void addEventPopups(editor::Document& doc);
+    void eventRow(ImDrawList* dl, ImRect r, float x, editor::Document& doc);
+    void paste(editor::Document& doc);
     void sequencePopup(editor::Document& doc);
     void trackMenu(editor::Document& doc);
     // Renames, or says why not in the note.
@@ -87,7 +95,18 @@ private:
 
     editor::SeqRef m_ref;
     unsigned m_loadId = ~0u;
-    std::vector<editor::KeyRef> m_sel;
+    editor::Selection m_sel;
+    // Ctrl+C's keys and events, for Ctrl+V in this sequence or another.
+    editor::TimelineClipboard m_clip;
+    // A box select: where it started (frame, and y in the lanes' scrolled
+    // content) and the selection it adds to.
+    bool m_boxing = false;
+    float m_boxFrame = 0, m_boxY = 0;
+    editor::Selection m_boxBase;
+    // Where an event lane's add menu puts the event.
+    int m_addFrame = 0;
+    // Where the bottom row's clip dropdown opens its menu.
+    ImVec2 m_evClipAt, m_addAt;
     float m_frame = 0;
     bool m_playing = false;
     bool m_loop = true;
@@ -100,8 +119,8 @@ private:
     float m_height = 320;
     ImRect m_rect;
     float m_bodyX0 = 0, m_bodyX1 = 0;
-    // A key drag: the frame under the mouse when it started and the whole
-    // frames applied so far.
+    // A drag of the selection: the frame under the mouse when it started and
+    // the whole frames applied so far.
     bool m_dragging = false;
     float m_dragFrom = 0;
     int m_dragApplied = 0;

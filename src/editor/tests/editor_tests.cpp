@@ -3285,6 +3285,229 @@ void testTimelineRenameDelete() {
 
 // A track pointed at another target: one step, keys kept; refused where the
 // export could not tell the tracks apart or the track has no target.
+// Box selections: keys on several lanes and events move together and
+// delete together, one undo step each; refused moves change nothing.
+void testTimelineSelection() {
+    using splash::TrackType;
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{0, 0}, {30, 1}, {60, 2}}));
+    cs.tracks.push_back(trackOf(TrackType::ObjectRotation, {{10, 0}, {40, 1}}));
+    cs.audioEvents.push_back({});
+    cs.audioEvents[0].frame = 20;
+    cs.audioEvents[0].clip = "bell";
+    cs.skinEvents.push_back({});
+    cs.skinEvents[0].frame = 5;
+    cs.skinEvents[0].object = "Arm";
+    cs.skinEvents[0].clip = "bend";
+    sc.cutscenes.push_back(cs);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    auto frames = [&](int t) {
+        std::vector<int> f;
+        for (const auto& k : editor::seqTracks(d, ref)->at(size_t(t)).keyframes) f.push_back(k.frame);
+        return f;
+    };
+
+    // Keys on two lanes and both events, moved +5 as one step.
+    editor::Selection sel;
+    sel.keys = {{0, 1}, {1, 0}, {1, 1}};
+    sel.audio = {0};
+    sel.skin = {0};
+    size_t h = d.historySize();
+    auto moved = editor::moveSelection(d, ref, sel, 5);
+    CHECK(moved && d.historySize() == h + 1);
+    CHECK(frames(0) == std::vector<int>({0, 35, 60}) && frames(1) == std::vector<int>({15, 45}));
+    CHECK(editor::seqAudio(d, ref)->at(0).frame == 25 && editor::seqSkin(d, ref)->at(0).frame == 10);
+    CHECK(moved && moved->keys == sel.keys && moved->audio == sel.audio && moved->skin == sel.skin);
+    // A drag merges; past frame 0 (the skin event at 10 cannot go -11) or onto a resting key is refused whole.
+    CHECK(!editor::moveSelection(d, ref, *moved, -11));
+    CHECK(!editor::moveSelection(d, ref, {{{0, 1}}, {}, {}}, 25));  // 35 -> 60, taken
+    CHECK(d.historySize() == h + 1 && frames(1) == std::vector<int>({15, 45}));
+    editor::Selection cur = *moved;
+    for (int i = 0; i < 3; ++i) {
+        auto r = editor::moveSelection(d, ref, cur, 1, "box");
+        CHECK(r.has_value());
+        if (r) cur = *r;
+    }
+    d.endMerge();
+    CHECK(d.historySize() == h + 2 && frames(0) == std::vector<int>({0, 38, 60}));
+    CHECK(d.undo() && d.undo() && frames(0) == std::vector<int>({0, 30, 60}) && editor::seqAudio(d, ref)->at(0).frame == 20);
+    // An index past the end refuses the move.
+    CHECK(!editor::moveSelection(d, ref, {{}, {3}, {}}, 1));
+
+    // Delete keys from both lanes and both events: one step, all back with one undo.
+    CHECK(!d.canUndo());  // back to the scene as loaded
+    CHECK(editor::deleteSelection(d, ref, sel) == 5);
+    CHECK(d.historySize() == 1 && frames(0) == std::vector<int>({0, 60}) && frames(1).empty());
+    CHECK(editor::seqAudio(d, ref)->empty() && editor::seqSkin(d, ref)->empty());
+    CHECK(editor::deleteSelection(d, ref, {}) == 0 && d.historySize() == 1);
+    CHECK(d.undo() && !d.canUndo() && frames(1) == std::vector<int>({10, 40}) && editor::seqAudio(d, ref)->size() == 1);
+
+    // Animations have no audio: a selection naming one is refused.
+    splash::Animation an;
+    an.name = "spin";
+    an.tracks.push_back(trackOf(TrackType::ObjectRotation, {{0, 0}}));
+    sc.animations.push_back(an);
+    d.reset(sc);
+    const editor::SeqRef aref{editor::SeqKind::Animation, 0};
+    CHECK(!editor::seqAudio(d, aref) && editor::seqSkin(d, aref)->empty());
+    CHECK(!editor::moveSelection(d, aref, {{{0, 0}}, {0}, {}}, 1));
+    CHECK(editor::moveSelection(d, aref, {{{0, 0}}, {}, {}}, 1));
+}
+
+// Copy and paste at the scrub head: keys land in the track with their type
+// and target, events come along, one step; limits refuse the whole paste.
+void testTimelineClipboard() {
+    using splash::TrackType;
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{10, 1}, {20, 2}}));
+    cs.tracks.push_back(trackOf(TrackType::ObjectRotation, {{15, 3}, {100, 4}}));
+    cs.audioEvents.push_back({});
+    cs.audioEvents[0].frame = 12;
+    cs.audioEvents[0].clip = "bell";
+    cs.audioEvents[0].volume = 80;
+    sc.cutscenes.push_back(cs);
+    splash::Cutscene other;
+    other.name = "outro";
+    other.tracks.push_back(trackOf(TrackType::ObjectRotation, {}));
+    sc.cutscenes.push_back(other);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+
+    editor::Selection sel{{{0, 0}, {0, 1}, {1, 0}}, {0}, {}};
+    const editor::TimelineClipboard clip = editor::copySelection(d, ref, sel);
+    CHECK(clip.keys.size() == 3 && clip.audio.size() == 1 && clip.skin.empty());
+    CHECK(clip.keys[0].key.frame == 0 && clip.keys[1].key.frame == 10 && clip.keys[2].key.frame == 5);
+    CHECK(clip.audio[0].frame == 2 && clip.audio[0].volume == 80);
+
+    size_t h = d.historySize();
+    int skipped = -1;
+    auto pasted = editor::pasteClipboard(d, ref, clip, 50, &skipped);
+    CHECK(pasted && skipped == 0 && d.historySize() == h + 1);
+    CHECK(pasted && pasted->size() == 4);
+    const auto& t0 = editor::seqTracks(d, ref)->at(0).keyframes;
+    CHECK(t0.size() == 4 && t0[2].frame == 50 && t0[3].frame == 60 && near3(t0[3].value, 2, 4, 0));
+    CHECK(editor::seqTracks(d, ref)->at(1).keyframes[1].frame == 55);
+    CHECK(editor::seqAudio(d, ref)->size() == 2 && editor::seqAudio(d, ref)->at(1).frame == 52);
+    // The pasted keys are the selection afterwards.
+    for (const editor::KeyRef& k : pasted->keys) CHECK(editor::key(d, ref, k) && editor::key(d, ref, k)->frame >= 50);
+    // On a frame that has a key, the pasted key replaces it.
+    CHECK(d.undo());
+    auto over = editor::pasteClipboard(d, ref, clip, 90);  // the rotation key lands on 95; position on 90, 100
+    CHECK(over && editor::seqTracks(d, ref)->at(1).keyframes.size() == 3);
+    CHECK(d.undo());
+    auto onto = editor::pasteClipboard(d, ref, clip, 95);  // rotation key at 100 replaced
+    CHECK(onto && editor::seqTracks(d, ref)->at(1).keyframes.size() == 2 &&
+          near3(editor::seqTracks(d, ref)->at(1).keyframes[1].value, 3, 6, 0));
+    CHECK(d.undo());
+    // Past the last frame: refused, no step.
+    h = d.historySize();
+    CHECK(!editor::pasteClipboard(d, ref, clip, editor::kMaxTimelineFrame - 5) && d.historySize() == h);
+    // Into another cutscene: only the rotation track matches; the position keys are skipped.
+    const editor::SeqRef out{editor::SeqKind::Cutscene, 1};
+    auto there = editor::pasteClipboard(d, out, clip, 0, &skipped);
+    CHECK(there && skipped == 2 && there->keys.size() == 1 && there->audio.size() == 1);
+    CHECK(editor::seqTracks(d, out)->at(0).keyframes.size() == 1 && editor::seqTracks(d, out)->at(0).keyframes[0].frame == 5);
+    CHECK(d.undo());
+    // Nothing that can land: refused.
+    editor::TimelineClipboard posOnly;
+    posOnly.keys = {clip.keys[0]};
+    CHECK(!editor::pasteClipboard(d, out, posOnly, 0, &skipped) && skipped == 1);
+    // A track at 64 keys takes no more.
+    for (int i = 0; i < editor::kMaxTimelineKeys - 2; ++i) CHECK(editor::addKey(d, ref, 0, 200 + i, editor::KeyValue{0, 0, 0}));
+    h = d.historySize();
+    CHECK(!editor::pasteClipboard(d, ref, clip, 1000) && d.historySize() == h);
+}
+
+// Audio and skin clip events: added, edited and limited as the exporter
+// limits them (64 audio events in a cutscene, none in an animation, 16 skin
+// events, volume 0..128, pan 0..127), one undo step each.
+void testTimelineEvents() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skin";
+    splash::Scene sc = splash::loadScene(project / "skin.scene");
+    splash::Object bell = named("Bell");
+    bell.audio = splash::AudioComponent{};
+    bell.audio->clipName = "bell";
+    sc.objects.push_back(bell);
+    splash::Object off = named("Off");
+    off.active = false;
+    off.audio = splash::AudioComponent{};
+    off.audio->clipName = "muted";
+    sc.objects.push_back(off);
+    splash::Cutscene cs;
+    cs.name = "intro";
+    sc.cutscenes.push_back(cs);
+    splash::Animation an;
+    an.name = "wave";
+    sc.animations.push_back(an);
+    editor::Document d;
+    d.reset(sc, project);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const editor::SeqRef aref{editor::SeqKind::Animation, 0};
+
+    // What the add menus list: the export's clip table and skinned objects' clip names.
+    CHECK(editor::audioClips(d) == std::vector<std::string>({"bell"}));
+    const std::vector<editor::SkinTarget> skins = editor::skinTargets(d);
+    CHECK(skins.size() == 1 && skins[0].object == "Arm" && skins[0].clips == std::vector<std::string>({"bend", "raise"}));
+
+    size_t h = d.historySize();
+    CHECK(editor::addAudioEvent(d, ref, 30, "bell") == 0);
+    CHECK(d.historySize() == h + 1);
+    const splash::CutsceneAudioEvent& a = editor::seqAudio(d, ref)->at(0);
+    CHECK(a.frame == 30 && a.clip == "bell" && a.volume == 100 && a.pan == 64);
+    CHECK(editor::addAudioEvent(d, ref, 30, "") == -1);
+    CHECK(editor::addAudioEvent(d, aref, 30, "bell") == -1);  // animations have no audio
+    CHECK(editor::addAudioEvent(d, ref, 99999, "bell") == 1 && editor::seqAudio(d, ref)->at(1).frame == editor::kMaxTimelineFrame);
+    CHECK(d.undo() && editor::seqAudio(d, ref)->size() == 1);
+    // Volume and pan are clamped to what the runtime reads; no change, no step.
+    splash::CutsceneAudioEvent ev = editor::seqAudio(d, ref)->at(0);
+    ev.volume = 500;
+    ev.pan = -3;
+    CHECK(editor::setAudioEvent(d, ref, 0, ev));
+    CHECK(editor::seqAudio(d, ref)->at(0).volume == editor::kMaxEventVolume && editor::seqAudio(d, ref)->at(0).pan == 0);
+    h = d.historySize();
+    CHECK(!editor::setAudioEvent(d, ref, 0, editor::seqAudio(d, ref)->at(0)) && d.historySize() == h);
+    ev.clip = "";
+    CHECK(!editor::setAudioEvent(d, ref, 0, ev) && !editor::setAudioEvent(d, ref, 4, editor::seqAudio(d, ref)->at(0)));
+    CHECK(d.undo() && editor::seqAudio(d, ref)->at(0).volume == 100);
+    // 64 at most.
+    for (int i = 1; i < editor::kMaxAudioEvents; ++i) CHECK(editor::addAudioEvent(d, ref, i, "bell") == i);
+    CHECK(editor::addAudioEvent(d, ref, 0, "bell") == -1);
+
+    // Skin clip events, in cutscenes and animations; 16 at most.
+    h = d.historySize();
+    CHECK(editor::addSkinEvent(d, aref, 12, "Arm", "raise") == 0 && d.historySize() == h + 1);
+    CHECK(editor::addSkinEvent(d, aref, 12, "", "raise") == -1 && editor::addSkinEvent(d, aref, 12, "Arm", "") == -1);
+    splash::SkinAnimEvent se = editor::seqSkin(d, aref)->at(0);
+    CHECK(se.frame == 12 && se.object == "Arm" && se.clip == "raise" && !se.loop);
+    se.loop = true;
+    se.clip = "bend";
+    CHECK(editor::setSkinEvent(d, aref, 0, se) && editor::seqSkin(d, aref)->at(0).loop && editor::seqSkin(d, aref)->at(0).clip == "bend");
+    CHECK(!editor::setSkinEvent(d, aref, 0, se));
+    CHECK(d.undo() && !editor::seqSkin(d, aref)->at(0).loop);
+    for (int i = 0; i < editor::kMaxSkinEvents; ++i) CHECK(editor::addSkinEvent(d, ref, i, "Arm", "bend") == i);
+    CHECK(editor::addSkinEvent(d, ref, 0, "Arm", "bend") == -1);
+    // Moved with a selection and deleted, one step each, then saved and loaded back.
+    auto moved = editor::moveSelection(d, ref, {{}, {0}, {3}}, 7);
+    CHECK(moved && editor::seqAudio(d, ref)->at(0).frame == 37 && editor::seqSkin(d, ref)->at(3).frame == 10);
+    CHECK(editor::deleteSelection(d, ref, {{}, {1, 2}, {0}}) == 3);
+    const fs::path dir = g_outDir / "timeline_events";
+    fs::create_directories(dir);
+    splash::saveScene(d.scene(), dir / "t.scene");
+    splash::Scene back = splash::loadScene(dir / "t.scene");
+    CHECK(back.cutscenes[0].audioEvents.size() == size_t(editor::kMaxAudioEvents - 2));
+    CHECK(back.cutscenes[0].audioEvents[0].frame == 37 && back.cutscenes[0].audioEvents[0].clip == "bell");
+    CHECK(back.cutscenes[0].skinEvents.size() == size_t(editor::kMaxSkinEvents - 1) && back.cutscenes[0].skinEvents[2].frame == 10);
+    CHECK(back.animations[0].skinEvents.size() == 1 && back.animations[0].skinEvents[0].clip == "raise");
+}
+
 void testTimelineRetarget() {
     using splash::TrackType;
     splash::Scene sc;
@@ -4524,6 +4747,9 @@ int main(int argc, char** argv) {
     testTimelineRetarget();
     testTimelineFixedSample();
     testTimelinePreviewMore();
+    testTimelineSelection();
+    testTimelineClipboard();
+    testTimelineEvents();
     testLuaTokenize();
     testLuaBuffer();
     testLuaComplete();

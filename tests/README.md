@@ -400,5 +400,14 @@ project's `.trash/1/` after the prompt; Ctrl+Z brings it back. Needs a display (
 
     python3 assetbrowsercheck.py <splashedit>
 
+`timelineselectcheck.py` checks the Timeline's selections and its audio lane on copies of the
+courtyard example with two audio clips: a box dragged over empty lane space selecting keys on two
+lanes (Ctrl adding a second box), one key dragged moving them all, Delete removing them all, one
+Ctrl+Z taking each back; a box over a key and an audio event moving both; Ctrl+C / Ctrl+V pasting a
+key at the scrub head; and an audio event added from the lane's clip menu, dragged and deleted, each
+undone, all read back from the saved scene:
+
+    python3 timelineselectcheck.py <splashedit>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

@@ -111,6 +111,41 @@ void diamond(ImDrawList* dl, ImVec2 c, float s, ImU32 fill, ImU32 edge, float th
     dl->AddPolyline(p, 4, edge, ImDrawFlags_Closed, thick);
 }
 
+const ImU32 kAudioColor = rgb(0xf0b45a), kSkinColor = rgb(0x7fb2ff);
+
+// One selectable thing in the lanes: a key, or an audio or skin event by index.
+struct Item {
+    enum Kind { Key, Audio, Skin } kind = Key;
+    KeyRef key;
+    int index = -1;
+    bool operator==(const Item&) const = default;
+};
+
+std::vector<int>& eventsOf(editor::Selection& s, Item::Kind k) { return k == Item::Audio ? s.audio : s.skin; }
+
+bool selHas(const editor::Selection& s, const Item& it) {
+    if (it.kind == Item::Key) return std::find(s.keys.begin(), s.keys.end(), it.key) != s.keys.end();
+    const std::vector<int>& v = it.kind == Item::Audio ? s.audio : s.skin;
+    return std::find(v.begin(), v.end(), it.index) != v.end();
+}
+
+void selAdd(editor::Selection& s, const Item& it) {
+    if (selHas(s, it)) return;
+    if (it.kind == Item::Key)
+        s.keys.push_back(it.key);
+    else
+        eventsOf(s, it.kind).push_back(it.index);
+}
+
+void selRemove(editor::Selection& s, const Item& it) {
+    if (it.kind == Item::Key)
+        std::erase(s.keys, it.key);
+    else
+        std::erase(eventsOf(s, it.kind), it.index);
+}
+
+std::string skinLabel(const splash::SkinAnimEvent& e) { return e.object + ": " + e.clip + (e.loop ? " (loop)" : ""); }
+
 }  // namespace
 
 void TimelinePanel::show(const editor::Document& doc, SeqRef ref) {
@@ -120,7 +155,7 @@ void TimelinePanel::show(const editor::Document& doc, SeqRef ref) {
     m_loadId = doc.loadId();
     m_frame = 0;
     m_playing = false;
-    m_sel.clear();
+    m_sel = {};
     m_scrollY = 0;
     m_fitPending = true;
 }
@@ -130,7 +165,7 @@ void TimelinePanel::validate(const editor::Document& doc) {
         // Another scene: start on its first sequence.
         m_loadId = doc.loadId();
         m_ref = {};
-        m_sel.clear();
+        m_sel = {};
         m_frame = 0;
         m_playing = false;
         m_fitPending = true;
@@ -138,10 +173,14 @@ void TimelinePanel::validate(const editor::Document& doc) {
     if (!editor::valid(doc, m_ref)) {
         const std::vector<SeqRef> all = editor::allSequences(doc);
         m_ref = all.empty() ? SeqRef{} : all.front();
-        m_sel.clear();
+        m_sel = {};
         m_fitPending = true;
     }
-    std::erase_if(m_sel, [&](const KeyRef& k) { return !editor::key(doc, m_ref, k); });
+    std::erase_if(m_sel.keys, [&](const KeyRef& k) { return !editor::key(doc, m_ref, k); });
+    const auto* audio = editor::seqAudio(doc, m_ref);
+    const auto* skin = editor::seqSkin(doc, m_ref);
+    std::erase_if(m_sel.audio, [&](int i) { return !audio || i < 0 || i >= int(audio->size()); });
+    std::erase_if(m_sel.skin, [&](int i) { return !skin || i < 0 || i >= int(skin->size()); });
 }
 
 std::vector<TimelinePanel::Sampled> TimelinePanel::sampled(const editor::Document& doc) const {
@@ -167,14 +206,38 @@ void TimelinePanel::takeKeys(editor::Document& doc) {
     if (io.WantTextInput) return;
     validate(doc);
     if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Delete, false) && !m_sel.empty()) {
-        editor::deleteKeys(doc, m_ref, m_sel);
-        m_sel.clear();
+        editor::deleteSelection(doc, m_ref, m_sel);
+        m_sel = {};
     }
     if (!io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_Space, false) && editor::valid(doc, m_ref)) m_playing = !m_playing;
-    // The keys belong to the timeline this frame: the scene's Delete stays out.
+    const bool ctrlOnly = io.KeyCtrl && !io.KeyShift && !io.KeyAlt;
+    if (ctrlOnly && ImGui::IsKeyPressed(ImGuiKey_C, false) && !m_sel.empty()) {
+        m_clip = editor::copySelection(doc, m_ref, m_sel);
+        const size_t n = m_clip.keys.size() + m_clip.audio.size() + m_clip.skin.size();
+        note("Copied " + std::to_string(n) + (n == 1 ? " item" : " items") + ": Ctrl+V pastes at the scrub head");
+    }
+    if (ctrlOnly && ImGui::IsKeyPressed(ImGuiKey_V, false)) paste(doc);
+    // The keys belong to the timeline this frame: the scene's Delete, copy and paste stay out.
     const ImGuiID owner = ImHashStr("timeline-keys");
-    ImGui::SetKeyOwner(ImGuiKey_Delete, owner, ImGuiInputFlags_LockThisFrame);
-    ImGui::SetKeyOwner(ImGuiKey_Space, owner, ImGuiInputFlags_LockThisFrame);
+    for (ImGuiKey k : {ImGuiKey_Delete, ImGuiKey_Space, ImGuiKey_C, ImGuiKey_V})
+        ImGui::SetKeyOwner(k, owner, ImGuiInputFlags_LockThisFrame);
+}
+
+void TimelinePanel::paste(editor::Document& doc) {
+    if (m_clip.empty()) {
+        note("Nothing copied: select keys or events and press Ctrl+C");
+        return;
+    }
+    int skipped = 0;
+    const int at = int(std::lround(m_frame));
+    if (auto sel = editor::pasteClipboard(doc, m_ref, m_clip, at, &skipped)) {
+        m_sel = *sel;
+        if (skipped) note("Pasted; " + std::to_string(skipped) + " had no matching track here");
+    } else if (skipped) {
+        note("Not pasted: no track here drives what the keys were copied from");
+    } else {
+        note("Not pasted: it would pass frame " + std::to_string(editor::kMaxTimelineFrame) + " or the runtime's limits");
+    }
 }
 
 ImRect TimelinePanel::dock(ImRect area) {
@@ -454,7 +517,7 @@ void TimelinePanel::remove(editor::Document& doc, SeqRef ref) {
     note("Deleted '" + name + "' (Ctrl+Z brings it back)");
     if (ref == m_ref) {
         // On to whatever sits there now, or the first one.
-        m_sel.clear();
+        m_sel = {};
         m_frame = 0;
         m_playing = false;
         m_fitPending = true;
@@ -490,7 +553,7 @@ void TimelinePanel::trackMenu(editor::Document& doc) {
             }
             if (ImGui::MenuItem("Remove track")) {
                 editor::removeTrack(doc, m_ref, ti);
-                m_sel.clear();
+                m_sel = {};
             }
         }
         ImGui::EndPopup();
@@ -584,9 +647,24 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     Fonts& f = fonts();
     ImGuiIO& io = ImGui::GetIO();
     const std::vector<splash::CutsceneTrack>& tracks = *editor::seqTracks(doc, m_ref);
+    const std::vector<splash::CutsceneAudioEvent>* audio = editor::seqAudio(doc, m_ref);
+    const std::vector<splash::SkinAnimEvent>& skin = *editor::seqSkin(doc, m_ref);
     const int n = int(tracks.size());
     const int length = editor::seqLength(doc, m_ref);
-    const float maxScroll = std::max(0.0f, n * kLaneH - body.GetHeight());
+    // Under the tracks: the audio lane (cutscenes only), then the skin clip
+    // lane when the scene has a skinned object or the sequence skin events.
+    bool anySkinned = !skin.empty();
+    if (!anySkinned)
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+            if (fo.object->skin) {
+                anySkinned = true;
+                break;
+            }
+    const int audioRow = audio ? n : -1;
+    const int skinRow = anySkinned ? n + (audio ? 1 : 0) : -1;
+    const int rows = n + (audio ? 1 : 0) + (anySkinned ? 1 : 0);
+    const float maxScroll = std::max(0.0f, rows * kLaneH - body.GetHeight());
+    const std::vector<std::string> clips = audio ? editor::audioClips(doc) : std::vector<std::string>();
 
     // Wheel: Ctrl zooms about the mouse, Shift (or no room to scroll) pans, else scrolls the lanes.
     const ImRect area(labels.Min, ImVec2(body.Max.x, body.Max.y));
@@ -608,7 +686,7 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);
 
     std::set<int> selTracks;
-    for (const KeyRef& k : m_sel) selTracks.insert(k.track);
+    for (const KeyRef& k : m_sel.keys) selTracks.insert(k.track);
 
     // Labels.
     dl->AddRectFilled(labels.Min, labels.Max, rgb(0x1d2026));
@@ -657,6 +735,40 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
             ImGui::SetNextWindowPos(ImVec2(row.Min.x + 18, y + kLaneH), ImGuiCond_Always);
         }
     }
+    // The event lanes' labels: what they hold, how many of the runtime's limit, and + to add one at the scrub head.
+    const char* openAdd = nullptr;
+    ImVec2 addAt;
+    auto eventLabel = [&](int rowIdx, const char* name, const char* id, ImU32 col, int count, int limit, const char* addTip,
+                          const char* fullTip, const char* popup, bool canAdd) {
+        const float y = labels.Min.y + rowIdx * kLaneH - m_scrollY;
+        if (y + kLaneH < labels.Min.y || y > labels.Max.y) return;
+        const ImRect row(ImVec2(labels.Min.x, y), ImVec2(labels.Max.x - 1, y + kLaneH));
+        dl->AddRectFilled(row.Min, row.Max, rgb(0x191b20));
+        dl->AddLine(ImVec2(row.Min.x, row.Max.y - 0.5f), ImVec2(row.Max.x, row.Max.y - 0.5f), color::border);
+        dl->AddRectFilled(ImVec2(row.Min.x + 6, y + 8), ImVec2(row.Min.x + 9, y + kLaneH - 8), col, 2);
+        text(dl, ImVec2(row.Min.x + 18, y + 4), f.medium, type::label, color::text, name);
+        char c[48];
+        std::snprintf(c, sizeof c, "EVENTS  %d / %d", count, limit);
+        text(dl, ImVec2(row.Min.x + 18, y + 21), f.medium, type::caption, count >= limit ? color::warn : color::textFaint, c);
+        const bool full = count >= limit;
+        const ImRect plus(ImVec2(row.Max.x - 28, y + 4), ImVec2(row.Max.x - 6, y + 20));
+        const bool hovered = row.Contains(io.MousePos);
+        if (iconButton(id, plus, icon::plus, false, full ? fullTip : addTip, hovered ? color::textDim : withAlpha(color::textFaint, 110)) &&
+            !full && canAdd) {
+            openAdd = popup;
+            addAt = ImVec2(plus.Min.x, plus.Min.y);
+            m_addFrame = int(std::lround(m_frame));
+        }
+    };
+    char fullAudio[96], fullSkin[96];
+    std::snprintf(fullAudio, sizeof fullAudio, "This cutscene has the runtime's %d audio events", editor::kMaxAudioEvents);
+    std::snprintf(fullSkin, sizeof fullSkin, "This sequence has the runtime's %d skin clip events", editor::kMaxSkinEvents);
+    if (audio)
+        eventLabel(audioRow, "Audio", "addaudio", kAudioColor, int(audio->size()), editor::kMaxAudioEvents,
+                   "Add an audio event at the scrub head (or double-click the lane)", fullAudio, "##addaudio", true);
+    if (anySkinned)
+        eventLabel(skinRow, "Skin clips", "addskin", kSkinColor, int(skin.size()), editor::kMaxSkinEvents,
+                   "Play a skinned mesh's clip from the scrub head (or double-click the lane)", fullSkin, "##addskin", true);
     ImGui::PopClipRect();
     trackMenu(doc);
 
@@ -671,9 +783,19 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     }
     if (endX < body.Max.x) dl->AddRectFilled(ImVec2(std::max(endX, body.Min.x), body.Min.y), body.Max, rgb(0x000000, 80));
 
-    // What the mouse is over: a lane and the nearest key in reach.
+    auto rowY = [&](int r) { return body.Min.y + r * kLaneH - m_scrollY; };
+    // An event's flag: a stem at its frame and a tab with its name.
+    auto flagRect = [&](int r, int frame, const std::string& label) {
+        const float x = std::floor(xOf(float(frame))) + 0.5f;
+        const float w = std::min(150.0f, measure(f.medium, type::caption, label.c_str()).x + 12);
+        return ImRect(ImVec2(x, rowY(r) + 7), ImVec2(x + w, rowY(r) + 23));
+    };
+    auto audioName = [&](int i) { return (*audio)[size_t(i)].clip; };
+    auto skinName = [&](int i) { return skinLabel(skin[size_t(i)]); };
+
+    // What the mouse is over: a lane and the nearest key or event in reach.
     const int laneAt = body.Contains(io.MousePos) ? int(std::floor((io.MousePos.y - body.Min.y + m_scrollY) / kLaneH)) : -1;
-    std::optional<KeyRef> hit;
+    std::optional<Item> hit;
     if (laneAt >= 0 && laneAt < n) {
         float best = kDiamond + 4;
         const auto& ks = tracks[size_t(laneAt)].keyframes;
@@ -681,14 +803,35 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
             const float d = std::fabs(xOf(float(ks[size_t(k)].frame)) - io.MousePos.x);
             if (d <= best) {
                 best = d;
-                hit = KeyRef{laneAt, k};
+                hit = Item{Item::Key, KeyRef{laneAt, k}, -1};
             }
         }
+    } else if (laneAt >= 0 && (laneAt == audioRow || laneAt == skinRow)) {
+        // The stem nearest the mouse, else the topmost tab under it (later events draw over earlier).
+        const bool isAudio = laneAt == audioRow;
+        const int count = isAudio ? int(audio->size()) : int(skin.size());
+        float best = kDiamond;
+        for (int i = 0; i < count; ++i) {
+            const int fr = isAudio ? (*audio)[size_t(i)].frame : skin[size_t(i)].frame;
+            const float d = std::fabs(xOf(float(fr)) - io.MousePos.x);
+            if (d <= best) {
+                best = d;
+                hit = Item{isAudio ? Item::Audio : Item::Skin, {}, i};
+            }
+        }
+        if (!hit)
+            for (int i = count - 1; i >= 0; --i) {
+                const int fr = isAudio ? (*audio)[size_t(i)].frame : skin[size_t(i)].frame;
+                if (flagRect(laneAt, fr, isAudio ? audioName(i) : skinName(i)).Contains(io.MousePos)) {
+                    hit = Item{isAudio ? Item::Audio : Item::Skin, {}, i};
+                    break;
+                }
+            }
     }
 
     for (int i = 0; i < n; ++i) {
         const splash::CutsceneTrack& t = tracks[size_t(i)];
-        const float y = body.Min.y + i * kLaneH - m_scrollY;
+        const float y = rowY(i);
         if (y + kLaneH < body.Min.y || y > body.Max.y) continue;
         const float cy = std::floor(y + kLaneH / 2) + 0.5f;
         if (i == laneAt) dl->AddRectFilled(ImVec2(body.Min.x, y), ImVec2(body.Max.x, y + kLaneH), rgb(0xffffff, 6));
@@ -725,15 +868,60 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         for (int k : order) {
             const splash::Keyframe& kf = t.keyframes[size_t(k)];
             const ImVec2 c(std::floor(xOf(float(kf.frame))) + 0.5f, cy);
-            const bool sel = std::find(m_sel.begin(), m_sel.end(), KeyRef{i, k}) != m_sel.end();
-            const bool over = hit && *hit == KeyRef{i, k};
+            const Item me{Item::Key, KeyRef{i, k}, -1};
+            const bool sel = selHas(m_sel, me);
+            const bool over = hit && *hit == me;
             const bool past = kf.frame > length;
             const ImU32 fill = sel ? rgb(0xffffff) : past ? color::textFaint : over ? lerpColor(tc, rgb(0xffffff), 0.35f) : tc;
             diamond(dl, c, sel ? kDiamond + 1 : kDiamond, fill, sel ? color::accent : rgb(0x0e1014), sel ? 2.5f : 1.5f);
         }
     }
-    if (n == 0) {
+
+    // The event lanes: a flag per event, its clip named on the tab.
+    auto eventLane = [&](int r, Item::Kind kind, ImU32 col, int count, auto frameOf, auto nameOf, auto problemOf) {
+        const float y = rowY(r);
+        if (y + kLaneH < body.Min.y || y > body.Max.y) return;
+        dl->AddRectFilled(ImVec2(body.Min.x, y), ImVec2(body.Max.x, y + kLaneH), r == laneAt ? rgb(0xffffff, 8) : rgb(0x000000, 40));
+        dl->AddLine(ImVec2(body.Min.x, y - 0.5f), ImVec2(body.Max.x, y - 0.5f), rgb(0xffffff, 16));
+        dl->AddLine(ImVec2(body.Min.x, y + kLaneH - 0.5f), ImVec2(body.Max.x, y + kLaneH - 0.5f), rgb(0xffffff, 10));
+        for (int i = 0; i < count; ++i) {
+            const int fr = frameOf(i);
+            const std::string name = nameOf(i);
+            const Item me{kind, {}, i};
+            const bool sel = selHas(m_sel, me), over = hit && *hit == me;
+            const bool bad = !problemOf(i).empty();
+            const ImU32 c = bad ? color::bad : fr > length ? color::textFaint : col;
+            const ImRect tab = flagRect(r, fr, name);
+            const float x = tab.Min.x;
+            dl->AddLine(ImVec2(x, y + 5), ImVec2(x, y + kLaneH - 5), sel ? color::accent : c, sel ? 2.5f : 1.5f);
+            dl->AddRectFilled(tab.Min, tab.Max, sel ? rgb(0xffffff) : withAlpha(c, over ? 120 : 70), 3, ImDrawFlags_RoundCornersRight);
+            if (sel) dl->AddRect(tab.Min, tab.Max, color::accent, 3, ImDrawFlags_RoundCornersRight, 1.5f);
+            ImGui::PushClipRect(tab.Min, tab.Max, true);
+            text(dl, ImVec2(tab.Min.x + 5, tab.Min.y + 1), f.medium, type::caption, sel ? rgb(0x101216) : color::text, name.c_str());
+            ImGui::PopClipRect();
+            dl->AddTriangleFilled(ImVec2(x - 4, y + kLaneH - 5), ImVec2(x + 4, y + kLaneH - 5), ImVec2(x, y + kLaneH - 11),
+                                  sel ? color::accent : c);
+        }
+    };
+    if (audio) {
+        eventLane(
+            audioRow, Item::Audio, kAudioColor, int(audio->size()), [&](int i) { return (*audio)[size_t(i)].frame; }, audioName,
+            [&](int i) {
+                const std::string& c = (*audio)[size_t(i)].clip;
+                return std::find(clips.begin(), clips.end(), c) == clips.end()
+                           ? "No active object's audio component is named '" + c + "': the export refuses it"
+                           : std::string();
+            });
+    }
+    if (anySkinned) eventLane(skinRow, Item::Skin, kSkinColor, int(skin.size()), [&](int i) { return skin[size_t(i)].frame; }, skinName,
+                              [&](int) { return std::string(); });
+
+    if (rows == 0) {
         textCentered(dl, body, f.regular, type::label, color::textFaint, "No tracks yet: Add track picks a property and a target.");
+    } else if (n == 0) {
+        const float y = rowY(rows);
+        if (y + 24 < body.Max.y)
+            text(dl, ImVec2(body.Min.x + kPad, y + 8), f.regular, type::label, color::textFaint, "No tracks yet: Add track picks a property and a target.");
     }
     // The scrub head across the lanes.
     const float hx = std::floor(xOf(m_frame)) + 0.5f;
@@ -744,58 +932,191 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     const bool addMod = io.KeyCtrl || io.KeyShift;
     if (ImGui::IsItemActivated()) {
         m_dragging = false;
+        m_boxing = false;
         if (hit) {
-            auto it = std::find(m_sel.begin(), m_sel.end(), *hit);
-            if (addMod && it != m_sel.end()) {
-                m_sel.erase(it);
+            const bool had = selHas(m_sel, *hit);
+            if (addMod && had) {
+                selRemove(m_sel, *hit);
             } else {
-                if (!addMod && it == m_sel.end()) m_sel.clear();
-                if (it == m_sel.end()) m_sel.push_back(*hit);
+                // A click on an unselected item without Ctrl or Shift selects it alone;
+                // on a selected one it keeps the selection, to drag it all.
+                if (!addMod && !had) m_sel = {};
+                selAdd(m_sel, *hit);
                 m_dragging = true;
                 m_dragFrom = frameAt(io.MousePos.x);
                 m_dragApplied = 0;
             }
-        } else if (!addMod) {
-            m_sel.clear();
+        } else {
+            // Empty lane space: a box select, adding to the selection with Ctrl or Shift.
+            m_boxing = true;
+            m_boxBase = addMod ? m_sel : editor::Selection{};
+            m_sel = m_boxBase;
+            m_boxFrame = frameAt(io.MousePos.x);
+            m_boxY = io.MousePos.y - body.Min.y + m_scrollY;
         }
+    }
+    if (ImGui::IsItemActive() && m_boxing) {
+        const ImVec2 a(xOf(m_boxFrame), body.Min.y + m_boxY - m_scrollY);
+        const ImRect box(ImMin(a, io.MousePos), ImMax(a, io.MousePos));
+        editor::Selection s = m_boxBase;
+        if (box.GetWidth() >= 3 || box.GetHeight() >= 3) {
+            // Whatever has its key or stem inside the box (within a key's reach of its edge).
+            const ImRect reach(box.Min - ImVec2(kDiamond, kDiamond), box.Max + ImVec2(kDiamond, kDiamond));
+            auto inside = [&](int r, int frame) {
+                const ImVec2 p(xOf(float(frame)), rowY(r) + kLaneH / 2);
+                return reach.Contains(p) || (p.x >= reach.Min.x && p.x <= reach.Max.x && box.Min.y <= rowY(r) + kLaneH - 8 &&
+                                             box.Max.y >= rowY(r) + 8);
+            };
+            for (int i = 0; i < n; ++i)
+                for (int k = 0; k < int(tracks[size_t(i)].keyframes.size()); ++k)
+                    if (inside(i, tracks[size_t(i)].keyframes[size_t(k)].frame)) selAdd(s, Item{Item::Key, KeyRef{i, k}, -1});
+            if (audio)
+                for (int i = 0; i < int(audio->size()); ++i)
+                    if (inside(audioRow, (*audio)[size_t(i)].frame)) selAdd(s, Item{Item::Audio, {}, i});
+            if (anySkinned)
+                for (int i = 0; i < int(skin.size()); ++i)
+                    if (inside(skinRow, skin[size_t(i)].frame)) selAdd(s, Item{Item::Skin, {}, i});
+            dl->AddRectFilled(box.Min, box.Max, withAlpha(color::accent, 34));
+            dl->AddRect(box.Min, box.Max, withAlpha(color::accent, 200), 0, 0, 1.0f);
+        }
+        m_sel = s;
     }
     if (ImGui::IsItemActive() && m_dragging && !m_sel.empty()) {
         const int want = int(std::lround(frameAt(io.MousePos.x) - m_dragFrom));
         if (want != m_dragApplied) {
-            if (auto moved = editor::moveKeys(doc, m_ref, m_sel, want - m_dragApplied, "timeline.drag")) {
+            if (auto moved = editor::moveSelection(doc, m_ref, m_sel, want - m_dragApplied, "timeline.drag")) {
                 m_sel = *moved;
                 m_dragApplied = want;
             }
         }
         ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     }
-    if (ImGui::IsItemDeactivated() && m_dragging) {
+    if (ImGui::IsItemDeactivated()) {
+        if (m_dragging) doc.endMerge();
         m_dragging = false;
-        doc.endMerge();
+        m_boxing = false;
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) && laneAt >= 0 && laneAt < n && !hit) {
         // A key at the scrub head, or the one already there selected.
         const int fr = int(std::lround(m_frame));
         if (auto k = editor::addKey(doc, m_ref, laneAt, fr)) {
-            m_sel = {*k};
+            m_sel = {{*k}, {}, {}};
         } else {
             const auto& ks = tracks[size_t(laneAt)].keyframes;
             for (int k2 = 0; k2 < int(ks.size()); ++k2)
-                if (ks[size_t(k2)].frame == fr) m_sel = {KeyRef{laneAt, k2}};
+                if (ks[size_t(k2)].frame == fr) m_sel = {{KeyRef{laneAt, k2}}, {}, {}};
+        }
+    }
+    // Double- or right-click an event lane: its add menu, for the scrub head.
+    const bool eventLaneAt = laneAt >= 0 && (laneAt == audioRow || laneAt == skinRow);
+    if (eventLaneAt && !hit && ImGui::IsItemHovered() &&
+        (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))) {
+        const bool isAudio = laneAt == audioRow;
+        const int count = isAudio ? int(audio->size()) : int(skin.size());
+        if (count >= (isAudio ? editor::kMaxAudioEvents : editor::kMaxSkinEvents)) {
+            note(isAudio ? fullAudio : fullSkin);
+        } else {
+            openAdd = isAudio ? "##addaudio" : "##addskin";
+            addAt = io.MousePos;
+            m_addFrame = int(std::lround(m_frame));
         }
     }
     if (hit && ImGui::IsItemHovered() && !ImGui::IsItemActive()) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-        if (const splash::Keyframe* kf = editor::key(doc, m_ref, *hit)) {
-            const TrackType ty = tracks[size_t(hit->track)].type;
-            char tip[160];
-            std::snprintf(tip, sizeof tip, "Frame %d: %s%s%s", kf->frame, fmtValue(ty, kf->value).c_str(), editor::isDiscrete(ty) ? "" : ", ",
-                          editor::isDiscrete(ty) ? "" : kInterpNames[int(kf->interp)]);
+        char tip[320];
+        if (hit->kind == Item::Key) {
+            if (const splash::Keyframe* kf = editor::key(doc, m_ref, hit->key)) {
+                const TrackType ty = tracks[size_t(hit->key.track)].type;
+                std::snprintf(tip, sizeof tip, "Frame %d: %s%s%s", kf->frame, fmtValue(ty, kf->value).c_str(), editor::isDiscrete(ty) ? "" : ", ",
+                              editor::isDiscrete(ty) ? "" : kInterpNames[int(kf->interp)]);
+                tooltip(tip);
+            }
+        } else if (hit->kind == Item::Audio) {
+            const splash::CutsceneAudioEvent& a = (*audio)[size_t(hit->index)];
+            const bool missing = std::find(clips.begin(), clips.end(), a.clip) == clips.end();
+            std::snprintf(tip, sizeof tip, "Frame %d: play '%s', volume %d, pan %d%s", a.frame, a.clip.c_str(), a.volume, a.pan,
+                          missing ? "\nNo active object's audio component has this clip name: the export refuses it" : "");
+            tooltip(tip);
+        } else {
+            const splash::SkinAnimEvent& e = skin[size_t(hit->index)];
+            std::snprintf(tip, sizeof tip, "Frame %d: %s plays '%s'%s", e.frame, e.object.c_str(), e.clip.c_str(), e.loop ? ", looping" : "");
             tooltip(tip);
         }
     }
     ImGui::PopClipRect();
-    if (removeTrack >= 0 && editor::removeTrack(doc, m_ref, removeTrack)) m_sel.clear();
+    if (removeTrack >= 0 && editor::removeTrack(doc, m_ref, removeTrack)) m_sel = {};
+    if (openAdd) {
+        ImGui::OpenPopup(openAdd);
+        m_addAt = addAt;
+    }
+    addEventPopups(doc);
+}
+
+void TimelinePanel::addEventPopups(editor::Document& doc) {
+    pushPopupStyle();
+    // The panel sits at the bottom of the window: these open upwards.
+    ImGui::SetNextWindowPos(m_addAt, ImGuiCond_Always, ImVec2(0, 1));
+    if (ImGui::BeginPopup("##addaudio")) {
+        ImGui::TextDisabled("Audio event at frame %d", m_addFrame);
+        ImGui::Separator();
+        const std::vector<std::string> clips = editor::audioClips(doc);
+        if (clips.empty()) ImGui::TextDisabled("No audio clips: give an object an Audio component");
+        for (const std::string& c : clips)
+            if (ImGui::MenuItem(c.c_str())) {
+                const int i = editor::addAudioEvent(doc, m_ref, m_addFrame, c);
+                if (i >= 0) m_sel = {{}, {i}, {}};
+            }
+        ImGui::EndPopup();
+    }
+    ImGui::SetNextWindowPos(m_addAt, ImGuiCond_Always, ImVec2(0, 1));
+    if (ImGui::BeginPopup("##addskin")) {
+        ImGui::TextDisabled("Skin clip from frame %d", m_addFrame);
+        ImGui::Separator();
+        const std::vector<editor::SkinTarget> targets = editor::skinTargets(doc);
+        if (targets.empty()) ImGui::TextDisabled("No skinned objects");
+        for (const editor::SkinTarget& t : targets) {
+            if (ImGui::BeginMenu(t.object.c_str(), !t.clips.empty())) {
+                for (const std::string& c : t.clips)
+                    if (ImGui::MenuItem(c.c_str())) {
+                        const int i = editor::addSkinEvent(doc, m_ref, m_addFrame, t.object, c);
+                        if (i >= 0) m_sel = {{}, {}, {i}};
+                    }
+                ImGui::EndMenu();
+            }
+        }
+        ImGui::EndPopup();
+    }
+    // The selected event's clip, from the bottom row.
+    ImGui::SetNextWindowPos(m_evClipAt, ImGuiCond_Always, ImVec2(0, 1));
+    if (ImGui::BeginPopup("##evclip")) {
+        const auto* audio = editor::seqAudio(doc, m_ref);
+        const auto* skin = editor::seqSkin(doc, m_ref);
+        if (m_sel.size() == 1 && m_sel.audio.size() == 1 && audio) {
+            splash::CutsceneAudioEvent a = (*audio)[size_t(m_sel.audio[0])];
+            for (const std::string& c : editor::audioClips(doc))
+                if (ImGui::MenuItem(c.c_str(), nullptr, c == a.clip)) {
+                    a.clip = c;
+                    editor::setAudioEvent(doc, m_ref, m_sel.audio[0], a);
+                }
+        } else if (m_sel.size() == 1 && m_sel.skin.size() == 1 && skin) {
+            splash::SkinAnimEvent e = (*skin)[size_t(m_sel.skin[0])];
+            for (const editor::SkinTarget& t : editor::skinTargets(doc)) {
+                if (ImGui::BeginMenu(t.object.c_str(), !t.clips.empty())) {
+                    for (const std::string& c : t.clips)
+                        if (ImGui::MenuItem(c.c_str(), nullptr, t.object == e.object && c == e.clip)) {
+                            e.object = t.object;
+                            e.clip = c;
+                            editor::setSkinEvent(doc, m_ref, m_sel.skin[0], e);
+                        }
+                    ImGui::EndMenu();
+                }
+            }
+        } else {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    popPopupStyle();
 }
 
 void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
@@ -806,22 +1127,35 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
     float x = r.Min.x + space::md;
     if (m_sel.empty()) {
         text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint,
-             "Double-click a lane to key it at the scrub head. Drag keys to move them; Delete removes them; Space plays.");
+             "Double-click a lane to key it at the scrub head. Drag across lanes to box-select, drag a key to move the "
+             "selection; Del deletes, Ctrl+C / Ctrl+V copy and paste at the scrub head.");
         return;
     }
     if (m_sel.size() > 1) {
-        char b[64];
-        std::snprintf(b, sizeof b, "%d keys selected", int(m_sel.size()));
+        char b[96];
+        const int ev = int(m_sel.audio.size() + m_sel.skin.size());
+        if (ev == 0)
+            std::snprintf(b, sizeof b, "%d keys selected", int(m_sel.keys.size()));
+        else if (m_sel.keys.empty())
+            std::snprintf(b, sizeof b, "%d events selected", ev);
+        else
+            std::snprintf(b, sizeof b, "%d keys and %d event%s selected", int(m_sel.keys.size()), ev, ev == 1 ? "" : "s");
         text(dl, ImVec2(x, cy - 9), f.medium, type::label, color::text, b);
         x += measure(f.medium, type::label, b).x + space::lg;
-        text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint, "Drag one to move them all; Delete removes them.");
-        if (iconButton("delkeys", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false, "Delete the selected keys (Del)")) {
-            editor::deleteKeys(doc, m_ref, m_sel);
-            m_sel.clear();
+        text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint,
+             "Drag one to move them all; Del deletes them; Ctrl+C copies them.");
+        if (iconButton("delkeys", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false,
+                       "Delete the selection (Del)")) {
+            editor::deleteSelection(doc, m_ref, m_sel);
+            m_sel = {};
         }
         return;
     }
-    const KeyRef k = m_sel.front();
+    if (m_sel.keys.empty()) {
+        eventRow(dl, r, x, doc);
+        return;
+    }
+    const KeyRef k = m_sel.keys.front();
     const splash::Keyframe kf = *editor::key(doc, m_ref, k);
     const splash::CutsceneTrack& t = (*editor::seqTracks(doc, m_ref))[size_t(k.track)];
     const std::string label = editor::trackLabel(t);
@@ -839,7 +1173,7 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         FieldEdit fe = numberField("kframe", ImRect(ImVec2(x, cy - 12), ImVec2(x + 54, cy + 12)), b, nullptr, 0, nullptr, &v);
         if (fe.changed) {
             const int to = std::clamp(int(std::lround(v)), 0, editor::kMaxTimelineFrame);
-            if (auto moved = editor::moveKeys(doc, m_ref, {k}, to - kf.frame, "timeline.kframe")) m_sel = *moved;
+            if (auto moved = editor::moveKeys(doc, m_ref, {k}, to - kf.frame, "timeline.kframe")) m_sel = {*moved, {}, {}};
         }
         if (fe.done) doc.endMerge();
         x += 54 + space::md;
@@ -885,8 +1219,90 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         if (pick != cur) editor::setKeyInterp(doc, m_ref, k, splash::Interp(pick));
     }
     if (iconButton("delkey", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false, "Delete this key (Del)")) {
-        editor::deleteKeys(doc, m_ref, m_sel);
-        m_sel.clear();
+        editor::deleteSelection(doc, m_ref, m_sel);
+        m_sel = {};
+    }
+}
+
+void TimelinePanel::eventRow(ImDrawList* dl, ImRect r, float x, editor::Document& doc) {
+    Fonts& f = fonts();
+    const float cy = r.GetCenter().y;
+    const bool isAudio = !m_sel.audio.empty();
+    const int index = isAudio ? m_sel.audio[0] : m_sel.skin[0];
+    const auto* audio = editor::seqAudio(doc, m_ref);
+    const auto& skin = *editor::seqSkin(doc, m_ref);
+    splash::CutsceneAudioEvent a;
+    splash::SkinAnimEvent e;
+    if (isAudio)
+        a = (*audio)[size_t(index)];
+    else
+        e = skin[size_t(index)];
+    text(dl, ImVec2(x, cy - 9), f.medium, type::label, isAudio ? kAudioColor : kSkinColor, isAudio ? "Audio event" : "Skin clip event");
+    x += 150 + space::sm;
+
+    auto number = [&](const char* label, const char* id, int value, float w, auto apply, const char* tip = nullptr) {
+        text(dl, ImVec2(x, cy - 8), f.medium, type::caption, color::textFaint, label);
+        x += measure(f.medium, type::caption, label).x + space::sm;
+        float v = float(value);
+        char b[16];
+        std::snprintf(b, sizeof b, "%d", value);
+        FieldEdit fe = numberField(id, ImRect(ImVec2(x, cy - 12), ImVec2(x + w, cy + 12)), b, nullptr, 0, nullptr, &v);
+        if (tip && ImGui::IsItemHovered()) tooltip(tip);
+        if (fe.changed) apply(int(std::lround(v)));
+        if (fe.done) doc.endMerge();
+        x += w + space::md;
+    };
+    number("FRAME", "evframe", isAudio ? a.frame : e.frame, 54, [&](int v) {
+        if (isAudio) {
+            a.frame = v;
+            editor::setAudioEvent(doc, m_ref, index, a, "timeline.evframe");
+        } else {
+            e.frame = v;
+            editor::setSkinEvent(doc, m_ref, index, e, "timeline.evframe");
+        }
+    });
+
+    // The clip: a dropdown of the project's audio clips, or of each skinned object's clips.
+    text(dl, ImVec2(x, cy - 8), f.medium, type::caption, color::textFaint, "CLIP");
+    x += measure(f.medium, type::caption, "CLIP").x + space::sm;
+    {
+        const ImRect dd(ImVec2(x, cy - 12), ImVec2(x + 190, cy + 12));
+        const std::string label = isAudio ? a.clip : e.object + " / " + e.clip;
+        Hit h = interact("evclip", dd);
+        dl->AddRectFilled(dd.Min, dd.Max, h.hover > 0 ? color::hover : color::field, radius::field);
+        dl->AddRect(dd.Min, dd.Max, color::borderStrong, radius::field);
+        ImGui::PushClipRect(dd.Min, ImVec2(dd.Max.x - 22, dd.Max.y), true);
+        text(dl, ImVec2(dd.Min.x + space::sm, cy - 9), f.medium, type::label, color::text, label.c_str());
+        ImGui::PopClipRect();
+        textCentered(dl, ImRect(ImVec2(dd.Max.x - 22, dd.Min.y), dd.Max), f.medium, type::caption + 1, color::textDim, icon::chevronDown);
+        if (h.clicked) {
+            ImGui::OpenPopup("##evclip");
+            m_evClipAt = ImVec2(dd.Min.x, dd.Min.y - 4);
+        }
+        x += 190 + space::md;
+    }
+    if (isAudio) {
+        char tip[96];
+        std::snprintf(tip, sizeof tip, "0..%d, as the runtime reads it", editor::kMaxEventVolume);
+        number("VOLUME", "evvol", a.volume, 54, [&](int v) {
+            a.volume = v;
+            editor::setAudioEvent(doc, m_ref, index, a, "timeline.evvol");
+        }, tip);
+        number("PAN", "evpan", a.pan, 54, [&](int v) {
+            a.pan = v;
+            editor::setAudioEvent(doc, m_ref, index, a, "timeline.evpan");
+        }, "0 left, 64 centre, 127 right");
+    } else {
+        text(dl, ImVec2(x, cy - 8), f.medium, type::caption, color::textFaint, "LOOP");
+        x += measure(f.medium, type::caption, "LOOP").x + space::sm;
+        if (toggle("evloop", ImRect(ImVec2(x, cy - 10), ImVec2(x + 36, cy + 10)), e.loop)) {
+            e.loop = !e.loop;
+            editor::setSkinEvent(doc, m_ref, index, e);
+        }
+    }
+    if (iconButton("delev", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false, "Delete this event (Del)")) {
+        editor::deleteSelection(doc, m_ref, m_sel);
+        m_sel = {};
     }
 }
 

@@ -117,7 +117,7 @@ bool ScriptTabs::saveAll(std::string* error) {
 
 void ScriptTabs::closeAll() {
     m_tabs.clear();
-    m_active = -1;
+    if (m_active >= 0) m_active = kScene;
     m_closing = -1;
 }
 
@@ -280,7 +280,6 @@ void ScriptTabs::pollDisk() {
 
 ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     closePrompt();
-    if (m_tabs.empty()) return r;
     pollDisk();
     for (int i = 0; i < (int)m_tabs.size(); ++i) {
         if (!m_tabs[i]->closeAsked) continue;
@@ -288,19 +287,20 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         close(i);
         break;  // the rest wait a frame: close() may be asking about this one
     }
-    if (m_tabs.empty()) return r;
     Fonts& f = fonts();
     const float h = size::panelHeader;
     ImRect strip(r.Min, ImVec2(r.Max.x, r.Min.y + h));
     dl->AddRectFilled(strip.Min, strip.Max, color::panel, radius::window);
     ImGui::PushID("scripttabs");
     float x = strip.Min.x + space::xs;
-    int pick = -2, closeIt = -1;
-    for (int i = -1; i < (int)m_tabs.size(); ++i) {
-        const bool scene = i < 0;
-        std::string label = scene ? std::string("Scene") : m_tabs[i]->script.title();
-        if (!scene && m_tabs[i]->diskDeleted) label += " (deleted)";
-        const char* ic = scene ? icon::box : icon::fileCode;
+    int pick = -3, closeIt = -1;
+    std::vector<int> order = {kScene, kUi};
+    for (int i = 0; i < (int)m_tabs.size(); ++i) order.push_back(i);
+    for (int i : order) {
+        const bool scene = i < 0;  // Scene or UI: no close button
+        std::string label = i == kScene ? std::string("Scene") : i == kUi ? std::string("UI") : m_tabs[i]->script.title();
+        if (i >= 0 && m_tabs[i]->diskDeleted) label += " (deleted)";
+        const char* ic = i == kScene ? icon::box : i == kUi ? icon::layoutTemplate : icon::fileCode;
         const float iw = measure(f.medium, type::icon, ic).x, tw = measure(f.medium, type::label, label.c_str()).x;
         const float w = space::md + iw + space::sm - 2 + tw + (scene ? space::md : 28);
         ImRect tr(ImVec2(x, strip.Min.y + space::xs), ImVec2(x + w, strip.Max.y));
@@ -311,10 +311,11 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         else if (hit.hovered) dl->AddRectFilled(tr.Min, tr.Max, color::hover, radius::button, ImDrawFlags_RoundCornersTop);
         if (active) dl->AddRectFilled(ImVec2(tr.Min.x + 6, tr.Max.y - 2), ImVec2(tr.Max.x - 6, tr.Max.y), color::accent, 1);
         const float cy = tr.GetCenter().y;
-        ImU32 icol = scene ? color::textDim : rgb(0x5ccfe0);
+        ImU32 icol = i == kScene ? color::textDim : i == kUi ? rgb(0xf2c25c) : rgb(0x5ccfe0);
         dl->AddText(f.medium, type::icon, ImVec2(tr.Min.x + space::md, cy - type::icon * 0.5f - 1), icol, ic);
         dl->AddText(f.medium, type::label, ImVec2(tr.Min.x + space::md + iw + space::sm - 2, cy - type::label * 0.5f - 1),
                     active ? color::text : color::textDim, label.c_str());
+        if (i == kUi) tooltip("The scene's UI canvases: HUD, menus and prompts at PS1 resolution");
         if (!scene) {
             tooltip(utf8(m_tabs[i]->script.path()).c_str());
             ImRect cr(ImVec2(tr.Max.x - 24, cy - 8), ImVec2(tr.Max.x - 8, cy + 8));
@@ -332,7 +333,7 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         x += w + space::xxs;
     }
     ImGui::PopID();
-    if (pick != -2) {
+    if (pick != -3) {
         for (auto& t : m_tabs) t->focused = false;
         m_active = pick;
         if (m_active >= 0) m_tabs[m_active]->focused = true;

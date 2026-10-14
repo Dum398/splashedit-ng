@@ -1366,16 +1366,31 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item("Undo", "Ctrl+Z", doc.canUndo(), [&] { doc.undo(); }));
             m.push_back(item("Redo", "Ctrl+Y", doc.canRedo(), [&] { doc.redo(); }));
             m.push_back(separator());
-            m.push_back(item("Rename", "F2", hasSel, [&st, sel] {
-                st.renaming = true;
-                st.renameStart = true;
-                st.renamePath = *sel;
-            }));
-            m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
-            m.push_back(item("Cut", "Ctrl+X", hasSel, [&st, &doc, sel] { cutSelection(st, doc, *sel); }));
-            m.push_back(item("Copy", "Ctrl+C", hasSel, [&st, &doc, sel] { copySelection(st, doc, *sel); }));
-            m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, sel] { pasteClipboard(st, doc, sel); }));
-            m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
+            if (st.scripts.uiShown()) {
+                // The UI tab renames its element, not the scene object that happens to be selected.
+                m.push_back(item("Rename", "F2", st.canvasView.canRename(doc), [&st, &doc] { st.canvasView.rename(doc); }));
+            } else {
+                m.push_back(item("Rename", "F2", hasSel, [&st, sel] {
+                    st.renaming = true;
+                    st.renameStart = true;
+                    st.renamePath = *sel;
+                }));
+            }
+            if (st.scripts.uiShown()) {
+                // The UI tab: these act on the selected UI element.
+                const bool hasEl = st.canvasView.hasElement(doc);
+                m.push_back(item("Duplicate", "Ctrl+D", hasEl, [&st, &doc] { st.canvasView.duplicate(doc); }));
+                m.push_back(item("Cut", "Ctrl+X", hasEl, [&st, &doc] { st.canvasView.cut(doc); }));
+                m.push_back(item("Copy", "Ctrl+C", hasEl, [&st, &doc] { st.canvasView.copy(doc); }));
+                m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc] { st.canvasView.paste(doc, false); }));
+                m.push_back(item("Delete", "Del", hasEl, [&st, &doc] { st.canvasView.remove(doc); }));
+            } else {
+                m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
+                m.push_back(item("Cut", "Ctrl+X", hasSel, [&st, &doc, sel] { cutSelection(st, doc, *sel); }));
+                m.push_back(item("Copy", "Ctrl+C", hasSel, [&st, &doc, sel] { copySelection(st, doc, *sel); }));
+                m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, sel] { pasteClipboard(st, doc, sel); }));
+                m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
+            }
             m.push_back(separator());
             m.push_back(item("Select None", "", hasSel, [&] { doc.select(std::nullopt); }));
             break;
@@ -3914,6 +3929,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     Fonts& f = fonts();
     panel(dl, r);
     float y = panelHeader(dl, r, "Inspector", nullptr);
+    // The UI tab inspects its canvas and elements.
+    if (st.scripts.uiShown()) {
+        st.canvasView.inspector(dl, r, y, doc);
+        return;
+    }
     // The lock pins what the inspector shows; selecting other objects leaves it there.
     const bool pinned = doc.pinned().has_value();
     if (iconButton("lockinsp", ImRect(ImVec2(r.Max.x - 32, r.Min.y + 5), ImVec2(r.Max.x - 6, r.Min.y + 29)), icon::lock, pinned,
@@ -4900,9 +4920,12 @@ static void shortcuts(State& st, editor::Document& doc) {
         if (pressed(ImGuiKey_E)) st.tool = 2;
         if (pressed(ImGuiKey_R)) st.tool = 3;
     }
-    // Object commands on the selection; while the Project panel has the
-    // keyboard, Delete and F2 are its own.
-    if (const std::optional<editor::ObjectPath> sel = doc.selection(); sel && !(st.assets.focused() && !timelineInFront(st))) {
+    // Object commands on the selection; the UI tab takes these keys for its
+    // elements, and while the Project panel has the keyboard, Delete and F2 are its own.
+    const bool uiTab = st.scripts.uiShown();
+    const bool assetKeys = st.assets.focused() && !timelineInFront(st);
+    if (uiTab && !assetKeys && !ctrl && pressed(ImGuiKey_F2)) st.canvasView.rename(doc);
+    if (const std::optional<editor::ObjectPath> sel = (uiTab || assetKeys) ? std::nullopt : doc.selection()) {
         if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
         if (ctrl && !shift && pressed(ImGuiKey_C)) copySelection(st, doc, *sel);
@@ -4913,7 +4936,7 @@ static void shortcuts(State& st, editor::Document& doc) {
             st.renamePath = *sel;
         }
     }
-    if (ctrl && !shift && pressed(ImGuiKey_V)) pasteClipboard(st, doc, doc.selection());
+    if (ctrl && !shift && !uiTab && pressed(ImGuiKey_V)) pasteClipboard(st, doc, doc.selection());
     if (ctrl && !shift && pressed(ImGuiKey_A)) st.openAddObject = true;
     if (ctrl && !shift && pressed(ImGuiKey_F)) st.focusTreeFilter = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
@@ -5059,6 +5082,13 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;
+    } else if (st.scripts.uiShown()) {
+        st.canvasView.draw(dl, body, doc);
+        if (!st.canvasView.status.empty()) {
+            notify(st, st.canvasView.status, st.canvasView.statusBad);
+            st.canvasView.status.clear();
+        }
+        st.viewportRect = ImRect();
     } else {
         st.scripts.draw(dl, body);
         st.viewportRect = ImRect();

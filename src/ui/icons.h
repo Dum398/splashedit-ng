@@ -49,4 +49,12 @@ inline constexpr const char* gamepad = "\xee\x83\x9f";         // e0df
 inline constexpr const char* wand = "\xee\x8d\x97";            // e357
 inline constexpr const char* help = "\xee\x82\x82";            // e082
 inline constexpr const char* link = "\xee\x84\x82";            // e102
+inline constexpr const char* type = "\xee\x86\x98";            // e198
+inline constexpr const char* image = "\xee\x83\xb6";           // e0f6
+inline constexpr const char* slash = "\xee\x94\x9d";           // e51d
+inline constexpr const char* layoutTemplate = "\xee\x88\x87";  // e207
+inline constexpr const char* arrowUp = "\xee\x81\x8a";         // e04a
+inline constexpr const char* arrowDown = "\xee\x81\x82";       // e042
+inline constexpr const char* trash = "\xee\x86\x8e";           // e18e
+inline constexpr const char* gauge = "\xee\x86\xbf";           // e1bf
 }  // namespace icon

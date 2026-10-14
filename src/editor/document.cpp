@@ -95,6 +95,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
     clearHistory();
     ++m_loadId;
     m_selection.reset();
+    m_uiSelection = {};
     m_pinned.reset();
     m_collapsed.clear();
     m_meshes.clear();
@@ -130,6 +131,7 @@ void Document::reset(splash::Scene scene, const fs::path& project, const std::st
     ++m_loadId;
     ++m_revision;
     m_selection.reset();
+    m_uiSelection = {};
     m_pinned.reset();
     m_collapsed.clear();
     m_meshes.clear();

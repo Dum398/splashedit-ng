@@ -43,6 +43,7 @@
 #include "editor/timeline.hh"
 #include "editor/unirom.hh"
 #include "blend.hh"
+#include "editor/ui_canvas.hh"
 #include "budget.hh"
 #include "navregion.hh"
 #include "splashpack.hh"
@@ -4889,6 +4890,581 @@ void testAssetBrowser() {
     CHECK(editor::sizeLabel(10) == "10 B" && editor::sizeLabel(2048) == "2 KB" && editor::sizeLabel(3 * 1024 * 1024) == "3.0 MB");
 }
 
+// ---- UI canvas editor (ui_canvas.hh)
+
+splash::UIElement uiBox(const char* name, int x, int y, int w, int h) {
+    splash::UIElement e;
+    e.type = splash::UIElementType::Box;
+    e.name = name;
+    e.rect = {x, y, w, h};
+    return e;
+}
+
+// A canvas "hud": back (0..99 x 0..49), front (50..149 x 20..69), a hidden
+// box over both and a diagonal line; and a second canvas "menu".
+splash::Scene uiScene() {
+    splash::Scene s;
+    splash::UICanvas hud;
+    hud.name = "hud";
+    hud.elements.push_back(uiBox("back", 0, 0, 100, 50));
+    hud.elements.push_back(uiBox("front", 50, 20, 100, 50));
+    splash::UIElement hidden = uiBox("hidden", 0, 0, 200, 200);
+    hidden.visible = false;
+    hud.elements.push_back(hidden);
+    splash::UIElement line;
+    line.type = splash::UIElementType::Line;
+    line.name = "line";
+    line.from = {200, 100};
+    line.to = {300, 200};
+    hud.elements.push_back(line);
+    s.canvases.push_back(hud);
+    splash::UICanvas menu;
+    menu.name = "menu";
+    menu.elements.push_back(uiBox("panel", 10, 10, 20, 20));
+    s.canvases.push_back(menu);
+    return s;
+}
+
+void testUiLayout() {
+    using namespace editor::uic;
+    const Screen s;
+    // tests/ui/ui.scene's anchored elements, where uicheck.py expects them.
+    splash::UIElement bar = uiBox("bar", 0, -20, 0, 20);
+    bar.anchorMin = {0, 1};
+    bar.anchorMax = {1, 1};
+    CHECK((layout(bar, s) == Rect{0, 220, 320, 20}));
+    splash::UIElement corner = uiBox("corner", -8, 0, 8, 8);
+    corner.anchorMin = corner.anchorMax = {1, 0};
+    CHECK((layout(corner, s) == Rect{312, 0, 8, 8}));
+    CHECK((layout(uiBox("hp", 8, 80, 120, 10), s) == Rect{8, 80, 120, 10}));
+    // place() is layout()'s inverse, keeping the anchors.
+    for (splash::UIElement e : {bar, corner}) {
+        const auto amin = e.anchorMin, amax = e.anchorMax;
+        place(e, Rect{10, 30, 50, 12}, s);
+        CHECK((layout(e, s) == Rect{10, 30, 50, 12}));
+        CHECK(e.anchorMin == amin && e.anchorMax == amax);
+    }
+    // Centre anchor at an odd resolution: the export rounds 160.5 and 120.5 to even.
+    splash::UIElement mid = uiBox("mid", -10, -5, 20, 10);
+    mid.anchorMin = mid.anchorMax = {0.5f, 0.5f};
+    CHECK((layout(mid, Screen{321, 241}) == Rect{150, 115, 20, 10}));
+    // What the runtime draws: a left overhang shrinks it, the right edge cuts it.
+    CHECK((drawn(uiBox("l", -8, 4, 20, 10), s) == Rect{0, 4, 12, 10}));
+    CHECK((drawn(uiBox("r", 310, 235, 20, 10), s) == Rect{310, 235, 10, 5}));
+    CHECK((drawn(uiBox("gone", -30, 0, 20, 10), s) == Rect{0, 0, 1, 10}));
+    // A line's layout is its endpoints' box; place() moves both endpoints.
+    splash::UIElement line = uiScene().canvases[0].elements[3];
+    CHECK((layout(line, s) == Rect{200, 100, 101, 101}));
+    place(line, Rect{0, 0, 5, 5}, s);
+    CHECK((line.from == std::array<int, 2>{0, 0} && line.to == std::array<int, 2>{100, 100}));
+}
+
+void testUiHitTest() {
+    using namespace editor::uic;
+    using H = Handle;
+    const Screen s;
+    const splash::UICanvas cv = uiScene().canvases[0];
+    CHECK(hitTest(cv, s, 10, 10) == 0);    // only the back box
+    CHECK(hitTest(cv, s, 60, 30) == 1);    // both: the front one wins
+    CHECK(hitTest(cv, s, 99.5f, 49.5f) == 1);
+    CHECK(hitTest(cv, s, 160, 30) == -1);  // only the hidden box: hidden ones do not count
+    CHECK(hitTest(cv, s, 250.5f, 151.5f) == 3);  // on the line
+    CHECK(hitTest(cv, s, 250, 160) == -1);       // 8 px off it
+    CHECK(hitTest(cv, s, 250, 160, 10) == 3);    // within a wider slop
+    CHECK(hitTest(cv, s, 150, 20) == -1);  // right edge is exclusive
+    // Handles: corners first, then edges, inside moves.
+    const Rect r{10, 10, 40, 20};
+    CHECK(hitHandle(r, 10, 10, 2) == H::TopLeft);
+    CHECK(hitHandle(r, 51, 31, 2) == H::BottomRight);
+    CHECK(hitHandle(r, 49, 9, 2) == H::TopRight);
+    CHECK(hitHandle(r, 11, 29, 2) == H::BottomLeft);
+    CHECK(hitHandle(r, 30, 9, 2) == H::Top);
+    CHECK(hitHandle(r, 30, 30, 2) == H::Bottom);
+    CHECK(hitHandle(r, 9, 20, 2) == H::Left);
+    CHECK(hitHandle(r, 50, 20, 2) == H::Right);
+    CHECK(hitHandle(r, 30, 20, 2) == H::Move);
+    CHECK(hitHandle(r, 70, 20, 2) == H::None);
+    const splash::UIElement& line = cv.elements[3];
+    CHECK(hitLineHandle(line, 200.5f, 100.5f, 3) == H::LineFrom);
+    CHECK(hitLineHandle(line, 301, 201, 3) == H::LineTo);
+    CHECK(hitLineHandle(line, 250.5f, 150.5f, 3) == H::Move);
+    CHECK(hitLineHandle(line, 200, 150, 3) == H::None);
+}
+
+void testUiResize() {
+    using namespace editor::uic;
+    using H = Handle;
+    const Rect r{10, 10, 40, 20};
+    CHECK((resize(r, H::BottomRight, 5, 3) == Rect{10, 10, 45, 23}));
+    CHECK((resize(r, H::TopLeft, 5, 3) == Rect{15, 13, 35, 17}));
+    CHECK((resize(r, H::Right, 7, 99) == Rect{10, 10, 47, 20}));  // an edge moves on its own axis only
+    CHECK((resize(r, H::Top, 99, -4) == Rect{10, 6, 40, 24}));
+    // Dragged past the opposite edge: stops 1 px short, the opposite edge stays put.
+    CHECK((resize(r, H::Left, 100, 0) == Rect{49, 10, 1, 20}));
+    CHECK((resize(r, H::BottomRight, -100, -100) == Rect{10, 10, 1, 1}));
+    CHECK((resize(r, H::TopRight, -100, 100) == Rect{10, 29, 1, 1}));
+    // Within the format's 16-bit sizes.
+    CHECK(resize(r, H::Right, 100000, 0).w == 32767);
+    CHECK(resize(r, H::Left, -100000, 0).right() == r.right());
+    CHECK(resize(r, H::Move, 5, 5) == r);
+}
+
+void testUiSnap() {
+    using namespace editor::uic;
+    const Screen s;
+    const splash::UICanvas cv = uiScene().canvases[0];
+    // Near the screen's left edge: snaps to it, with a full-height guide.
+    Snapped a = snapMove(cv, 1, Rect{2, 120, 30, 10}, s, 3);
+    CHECK((a.rect == Rect{0, 120, 30, 10}));
+    CHECK(std::count(a.guides.begin(), a.guides.end(), Guide{true, 0, 0, 240}) == 1);
+    // Centre on the screen's centre.
+    Snapped b = snapMove(cv, 1, Rect{146, 300, 30, 10}, s, 3);
+    CHECK(b.rect.x == 145 && b.rect.y == 300);
+    CHECK(std::count(b.guides.begin(), b.guides.end(), Guide{true, 160, 0, 240}) == 1);
+    // To another element's edge (the back box ends at x 100), the guide spanning both.
+    Snapped c = snapMove(cv, 1, Rect{102, 60, 10, 10}, s, 3);
+    CHECK(c.rect.x == 100);
+    CHECK(std::count(c.guides.begin(), c.guides.end(), Guide{true, 100, 0, 70}) == 1);
+    // Out of reach: unchanged, no guides.
+    Snapped d = snapMove(cv, 1, Rect{110, 60, 10, 10}, s, 3);
+    CHECK((d.rect == Rect{110, 60, 10, 10}) && d.guides.empty());
+    // Hidden elements are no targets (the hidden box ends at 200), itself neither.
+    CHECK(snapMove(cv, 1, Rect{203, 60, 10, 10}, s, 2).rect.x == 203);
+    CHECK(snapMove(cv, 0, Rect{1, 60, 10, 10}, s, 0).rect.x == 1);
+    // Both axes at once: bottom edge to the screen's bottom.
+    Snapped e = snapMove(cv, 1, Rect{318, 228, 1, 10}, s, 3);
+    CHECK(e.rect.x == 319 && e.rect.y == 230 && e.guides.size() == 2);
+    // Resize: only the moving edge snaps, the opposite one stays.
+    Snapped f = snapResize(cv, 1, Rect{50, 20, 52, 50}, Handle::Right, s, 3);
+    CHECK((f.rect == Rect{50, 20, 50, 50}) && f.guides.size() == 1);
+    Snapped g = snapResize(cv, 1, Rect{2, 20, 98, 50}, Handle::Left, s, 3);
+    CHECK((g.rect == Rect{0, 20, 100, 50}));
+    Snapped h = snapResize(cv, 1, Rect{2, 20, 98, 50}, Handle::Right, s, 3);  // the left edge does not
+    CHECK((h.rect == Rect{2, 20, 98, 50}));
+    // A line endpoint.
+    int x = 158, y = 49;
+    std::vector<Guide> pg = snapPoint(cv, 3, &x, &y, s, 3);
+    CHECK(x == 160 && y == 50 && pg.size() == 2);
+}
+
+void testUiZOrder() {
+    using namespace editor::uic;
+    editor::Document d;
+    d.reset(uiScene());
+    auto names = [&](int c) {
+        std::string out;
+        for (const auto& e : d.scene().canvases[size_t(c)].elements) out += e.name + ",";
+        return out;
+    };
+    d.selectUi({0, 0});
+    CHECK(moveElement(d, 0, 0, 2));
+    CHECK(names(0) == "front,hidden,back,line,");
+    CHECK((d.uiSelection() == editor::Document::UiSelection{0, 2}));  // follows the element
+    // Another element moving past the selected one shifts it.
+    CHECK(moveElement(d, 0, 3, 0));
+    CHECK(names(0) == "line,front,hidden,back,");
+    CHECK(d.uiSelection().element == 3);
+    // Clamped to the list; a move to where it is does nothing.
+    CHECK(moveElement(d, 0, 1, 99) && names(0) == "line,hidden,back,front,");
+    CHECK(!moveElement(d, 0, 3, 3) && !moveElement(d, 0, 9, 0) && !moveElement(d, 5, 0, 1));
+    CHECK(d.historySize() == 3);
+    // One undo per move, selection and order back.
+    CHECK(d.undo() && names(0) == "line,front,hidden,back,");
+    CHECK(d.undo() && d.undo() && names(0) == "back,front,hidden,line,");
+    CHECK((d.uiSelection() == editor::Document::UiSelection{0, 0}));
+    CHECK(names(1) == "panel,");
+}
+
+void testUiUndo() {
+    using namespace editor::uic;
+    const Screen s;
+    editor::Document d;
+    d.reset(uiScene());
+    d.selectUi({0, 1});
+    // A drag: many edits under one key, one undo step.
+    for (int i = 1; i <= 10; i++) editElement(d, 0, 1, [&](splash::UIElement& e) { place(e, Rect{50 + i, 20 + i, 100, 50}, s); }, "drag");
+    d.endMerge();
+    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{60, 30, 100, 50}));
+    CHECK(d.historySize() == 1 && d.dirty());
+    // A no-op edit pushes nothing.
+    CHECK(!editElement(d, 0, 1, [](splash::UIElement&) {}));
+    CHECK(d.historySize() == 1);
+    // The next drag is its own step.
+    editElement(d, 0, 1, [&](splash::UIElement& e) { e.rect[2] = 7; }, "drag");
+    d.endMerge();
+    CHECK(d.historySize() == 2);
+    CHECK(d.undo() && d.scene().canvases[0].elements[1].rect[2] == 100);
+    CHECK(d.undo() && (layout(d.scene().canvases[0].elements[1], s) == Rect{50, 20, 100, 50}));
+    CHECK(!d.dirty());
+    CHECK(d.redo() && d.scene().canvases[0].elements[1].rect[0] == 60);
+    // Add, duplicate, delete: each one step, each selecting what it made.
+    d.reset(uiScene());
+    int added = addElement(d, 1, splash::UIElementType::Text, s);
+    CHECK(added == 1 && d.scene().canvases[1].elements[1].name == "Text");
+    CHECK((d.uiSelection() == editor::Document::UiSelection{1, 1}));
+    CHECK((layout(d.scene().canvases[1].elements[1], s) == Rect{100, 112, 120, 16}));
+    CHECK(addElement(d, 1, splash::UIElementType::Text, s) == 2 && d.scene().canvases[1].elements[2].name == "Text (2)");
+    int dup = duplicateElement(d, 0, 0);
+    CHECK(dup == 1 && d.scene().canvases[0].elements[1].name == "back (2)");
+    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{8, 8, 100, 50}));
+    CHECK(duplicateElement(d, 0, 1) == 2 && d.scene().canvases[0].elements[2].name == "back (3)");
+    CHECK(deleteElement(d, 0, 0) && d.scene().canvases[0].elements[0].name == "back (2)");
+    CHECK((d.uiSelection() == editor::Document::UiSelection{0, -1}));
+    CHECK(d.historySize() == 5);
+    CHECK(d.undo() && d.scene().canvases[0].elements[0].name == "back");
+    CHECK((d.uiSelection() == editor::Document::UiSelection{0, 2}));  // the selection from before the delete
+    CHECK(d.undo() && d.undo() && d.scene().canvases[0].elements.size() == 4);
+    CHECK(d.undo() && d.undo() && d.scene().canvases[1].elements.size() == 1);
+    // Canvases.
+    int c = addCanvas(d);
+    CHECK(c == 2 && d.scene().canvases[2].name == "Canvas" && (d.uiSelection() == editor::Document::UiSelection{2, -1}));
+    CHECK(addCanvas(d) == 3 && d.scene().canvases[3].name == "Canvas (2)");
+    CHECK(editCanvas(d, 0, [](splash::UICanvas& cv) { cv.visible = false; }) && !d.scene().canvases[0].visible);
+    CHECK(deleteCanvas(d, 3) && d.scene().canvases.size() == 3 && d.uiSelection().canvas == 2);
+    CHECK(d.undo() && d.undo() && d.scene().canvases[0].visible && d.scene().canvases.size() == 4);
+    // Undo and save: the file holds what the document shows.
+    d.reset(uiScene(), g_outDir, "uicanvas");
+    std::filesystem::create_directories(g_outDir);
+    CHECK(d.saveAs("uicanvas.scene") == std::nullopt);
+    editElement(d, 0, 0, [&](splash::UIElement& e) { place(e, Rect{5, 6, 7, 8}, s); });
+    CHECK(d.save() == std::nullopt);
+    splash::Scene back = splash::loadScene(g_outDir / "uicanvas.scene");
+    CHECK((layout(back.canvases[0].elements[0], s) == Rect{5, 6, 7, 8}));
+}
+
+// Copy, cut and paste of UI elements: the clipboard text, the offset, the
+// names, one undo step each, and text of the other kind refused both ways.
+void testUiClipboard() {
+    using namespace editor::uic;
+    const Screen s;
+    editor::Document d;
+    d.reset(uiScene());
+    const std::string text = copyElementText(d, 0, 1);
+    CHECK(!text.empty() && text.find("splashedit-ui-elements") != std::string::npos);
+    CHECK(copyElementText(d, 0, 9).empty() && copyElementText(d, 5, 0).empty());
+    CHECK(d.historySize() == 0);
+    // Pasted in front of the selection, 8 px down and right, renamed.
+    int p = pasteElements(d, 0, 1, text, s);
+    CHECK(p == 2 && d.scene().canvases[0].elements[2].name == "front (2)");
+    CHECK((layout(d.scene().canvases[0].elements[2], s) == Rect{58, 28, 100, 50}));
+    CHECK((d.uiSelection() == editor::Document::UiSelection{0, 2}));
+    CHECK(d.historySize() == 1);
+    // Again: past the first copy, not on it.
+    CHECK(pasteElements(d, 0, 2, text, s) == 3 && d.scene().canvases[0].elements[3].name == "front (3)");
+    CHECK((layout(d.scene().canvases[0].elements[3], s) == Rect{66, 36, 100, 50}));
+    // One undo takes back one paste.
+    CHECK(d.undo() && d.scene().canvases[0].elements.size() == 5 && d.scene().canvases[0].elements[2].name == "front (2)");
+    CHECK(d.undo() && d.scene().canvases[0].elements.size() == 4);
+    // Cut (copy, then delete) and paste: back where it was, under its own name.
+    const std::string cut = copyElementText(d, 0, 0);
+    CHECK(deleteElement(d, 0, 0));
+    CHECK(pasteElements(d, 0, -1, cut, s) == 3);
+    const splash::UIElement& back = d.scene().canvases[0].elements[3];
+    CHECK(back.name == "back" && (layout(back, s) == Rect{0, 0, 100, 50}));
+    // Into another canvas, on top; a line moves by its endpoints.
+    CHECK(pasteElements(d, 1, -1, copyElementText(d, 0, 2), s) == 1);
+    const splash::UIElement& line = d.scene().canvases[1].elements[1];
+    CHECK(line.type == splash::UIElementType::Line && line.name == "line" && line.from[0] == 200 && line.to[1] == 200);
+    CHECK(pasteElements(d, 1, -1, copyElementText(d, 0, 2), s) == 2);
+    CHECK(d.scene().canvases[1].elements[2].from[0] == 208 && d.scene().canvases[1].elements[2].to[1] == 208);
+    // Anchored elements keep their anchors and move on screen.
+    d.reset(uiScene());
+    editElement(d, 0, 0, [](splash::UIElement& e) {
+        e.anchorMin = e.anchorMax = {1, 1};
+        e.rect = {-110, -60, 100, 50};
+    });
+    CHECK(pasteElements(d, 0, 0, copyElementText(d, 0, 0), s) == 1);
+    const splash::UIElement& anch = d.scene().canvases[0].elements[1];
+    CHECK(anch.anchorMin[0] == 1 && (layout(anch, s) == Rect{s.w - 102, s.h - 52, 100, 50}));
+    // Not ours: no change, no history.
+    const size_t steps = d.historySize();
+    CHECK(pasteElements(d, 0, -1, "hello", s) == -1);
+    CHECK(pasteElements(d, 0, -1, "{\"splashedit-ui-elements\": 2, \"elements\": [{\"type\": \"box\"}]}", s) == -1);
+    CHECK(pasteElements(d, 0, -1, "{\"splashedit-ui-elements\": 1, \"elements\": []}", s) == -1);
+    CHECK(pasteElements(d, 7, -1, text, s) == -1);
+    // Object clipboard text is not UI elements, and UI element text is not objects.
+    editor::Document objs;
+    splash::Scene withObj;
+    withObj.objects.emplace_back();
+    withObj.objects.back().name = "Crate";
+    objs.reset(withObj);
+    const std::string objText = objs.copyObject({0});
+    CHECK(!objText.empty() && pasteElements(d, 0, -1, objText, s) == -1);
+    CHECK(!splash::readObjectsText(text) && !objs.pasteObjects(text, std::nullopt));
+    CHECK(d.historySize() == steps && d.scene().canvases[0].elements.size() == 5);
+}
+
+// Multi-selection: the selection helpers, the rubber-band query and every
+// group edit as one undo step.
+void testUiMultiSelect() {
+    using namespace editor::uic;
+    const Screen s;
+    editor::Document d;
+    d.reset(uiScene());
+    auto names = [&](int c) {
+        std::vector<std::string> out;
+        for (const auto& e : d.scene().canvases[size_t(c)].elements) out.push_back(e.name);
+        return out;
+    };
+    using Names = std::vector<std::string>;
+
+    // The selection: sorted, primary kept apart, stale indices dropped.
+    const editor::Document::UiSelection sel = selectionOf(0, {3, 0, 1, 1}, 1);
+    CHECK(sel.canvas == 0 && sel.element == 1 && sel.more == std::vector<int>({0, 3}));
+    CHECK(selectionOf(0, {2, 0}).element == 2 && selectionOf(0, {}).element == -1 && selectionOf(0, {4}, 9).element == 4);
+    d.selectUi(selectionOf(0, {0, 1, 3, 9, -2}));
+    CHECK(selectedElements(d) == std::vector<int>({0, 1, 3}));
+    d.selectUi(selectionOf(5, {0}));
+    CHECK(selectedElements(d).empty());
+
+    // The rubber band: what the box touches, hidden elements left out, a line by where it runs.
+    const splash::UICanvas& hud = d.scene().canvases[0];
+    CHECK((elementsInBox(hud, s, 90, 40, 110, 45) == std::vector<int>{0, 1}));
+    CHECK((elementsInBox(hud, s, 110, 45, 90, 40) == std::vector<int>{0, 1}));  // either corner first
+    CHECK((elementsInBox(hud, s, 0, 0, 1, 1) == std::vector<int>{0}));
+    CHECK((elementsInBox(hud, s, 240, 140, 250, 150) == std::vector<int>{3}));
+    CHECK(elementsInBox(hud, s, 200, 180, 210, 190).empty());  // beside the line's box corner, not on the line
+    CHECK(elementsInBox(hud, s, 300, 0, 310, 10).empty());
+    CHECK((elementsInBox(hud, s, -50, -50, 400, 400) == std::vector<int>{0, 1, 3}));
+    CHECK(d.historySize() == 0);
+
+    // One edit on several elements is one step.
+    d.selectUi(selectionOf(0, {0, 1}));
+    CHECK(editElements(d, 0, {0, 1}, [&](splash::UIElement& e, size_t k) { place(e, Rect{layout(e, s).x + 10, layout(e, s).y + int(k), 100, 50}, s); }));
+    CHECK((layout(d.scene().canvases[0].elements[0], s) == Rect{10, 0, 100, 50}));
+    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{60, 21, 100, 50}));
+    CHECK(d.historySize() == 1 && selectedElements(d) == std::vector<int>({0, 1}));
+    CHECK(!editElements(d, 0, {0, 1}, [](splash::UIElement&, size_t) {}) && d.historySize() == 1);
+    CHECK(!editElements(d, 0, {0, 9}, [](splash::UIElement& e, size_t) { e.name = "x"; }) && d.historySize() == 1);
+    CHECK(d.undo() && (layout(d.scene().canvases[0].elements[0], s) == Rect{0, 0, 100, 50}) &&
+          (layout(d.scene().canvases[0].elements[1], s) == Rect{50, 20, 100, 50}) && !d.canUndo());
+
+    // Drag merging: many frames under one key, one step.
+    for (int i = 1; i <= 5; i++)
+        editElements(d, 0, {0, 1}, [&](splash::UIElement& e, size_t k) { place(e, Rect{i * 2 + int(k) * 50, i, 100, 50}, s); }, "drag");
+    d.endMerge();
+    CHECK(d.historySize() == 1 && d.scene().canvases[0].elements[0].rect[0] == 10);
+    CHECK(d.undo() && d.scene().canvases[0].elements[0].rect[0] == 0);
+
+    // Delete: one step, undo brings them all back with the selection.
+    d.selectUi(selectionOf(0, {0, 2}));
+    CHECK(deleteElements(d, 0, {0, 2}));
+    CHECK(names(0) == Names({"front", "line"}) && d.historySize() == 1 && d.uiSelection().element == -1 && d.uiSelection().more.empty());
+    CHECK(d.undo() && names(0) == Names({"back", "front", "hidden", "line"}) && selectedElements(d) == std::vector<int>({0, 2}));
+    CHECK(!deleteElements(d, 0, {}) && !deleteElements(d, 0, {1, 9}) && !deleteElements(d, 7, {0}) && !d.canUndo() && d.canRedo());
+
+    // Duplicate: each copy right in front of its original, 8 px down and right, the copies selected.
+    CHECK(duplicateElements(d, 0, {0, 1}) == 2);
+    CHECK(names(0) == Names({"back", "back (2)", "front", "front (2)", "hidden", "line"}) && d.historySize() == 1);
+    CHECK((layout(d.scene().canvases[0].elements[1], s) == Rect{8, 8, 100, 50}));
+    CHECK((layout(d.scene().canvases[0].elements[3], s) == Rect{58, 28, 100, 50}));
+    CHECK(selectedElements(d) == std::vector<int>({1, 3}));
+    CHECK(d.undo() && names(0).size() == 4);
+    CHECK(duplicateElements(d, 0, {3}) == 1 && d.scene().canvases[0].elements[4].from == (std::array<int, 2>{208, 108}));
+    CHECK(d.undo());
+
+    // Copy and paste of a group: both in order, the pasted ones selected, one step.
+    const std::string two = copyElementsText(d, 0, {1, 0});
+    CHECK(!two.empty() && copyElementsText(d, 0, {0, 9}).empty() && copyElementsText(d, 0, {}).empty());
+    CHECK(pasteElements(d, 1, -1, two, s) == 2);
+    CHECK(names(1) == Names({"panel", "back", "front"}) && selectedElements(d) == std::vector<int>({1, 2}) && d.historySize() == 1);
+    CHECK(d.undo() && names(1) == Names({"panel"}));
+    // In front of an element, the group stays together.
+    CHECK(pasteElements(d, 0, 0, two, s) == 2 && names(0) == Names({"back", "back (2)", "front (2)", "front", "hidden", "line"}));
+    CHECK(selectedElements(d) == std::vector<int>({1, 2}));
+    CHECK(d.undo());
+
+    // Pasted at a spot: the top-left of the group's box lands there, keeping how they sit to each other.
+    CHECK((clipboardBounds(two, s) == Rect{0, 0, 150, 70}));
+    const std::array<int, 2> at{100, 90};
+    CHECK(pasteElements(d, 1, -1, two, s, &at) == 2);
+    CHECK((layout(d.scene().canvases[1].elements[1], s) == Rect{100, 90, 100, 50}) &&
+          (layout(d.scene().canvases[1].elements[2], s) == Rect{150, 110, 100, 50}));
+    CHECK(d.undo());
+    // A line counts by its endpoints: front (50..149 x 20..69) and the line (200..300 x 100..200).
+    const std::string mixed = copyElementsText(d, 0, {1, 3});
+    CHECK((clipboardBounds(mixed, s) == Rect{50, 20, 250, 180}));
+    const std::array<int, 2> at0{0, 0};
+    CHECK(pasteElements(d, 1, -1, mixed, s, &at0) == 2);
+    CHECK((layout(d.scene().canvases[1].elements[1], s) == Rect{0, 0, 100, 50}) &&
+          d.scene().canvases[1].elements[2].from == (std::array<int, 2>{150, 80}) &&
+          d.scene().canvases[1].elements[2].to == (std::array<int, 2>{250, 180}));
+    CHECK(d.undo());
+    CHECK(!clipboardBounds("hello", s));
+
+    // z-order keeps a multi-selection on the same elements.
+    d.selectUi(selectionOf(0, {0, 2}, 2));
+    CHECK(moveElement(d, 0, 2, 0));
+    CHECK(names(0) == Names({"hidden", "back", "front", "line"}) && selectedElements(d) == std::vector<int>({0, 1}) &&
+          d.uiSelection().element == 0);
+    CHECK(d.undo());
+
+    // The per-canvas limit: a paste or duplicate past it is refused with nothing changed.
+    editor::Document full;
+    splash::Scene sc = uiScene();
+    while (int(sc.canvases[1].elements.size()) < kMaxCanvasElements - 1)
+        sc.canvases[1].elements.push_back(uiBox("n", 0, 0, 4, 4));
+    full.reset(sc);
+    const std::string one = copyElementText(d, 0, 0);
+    const size_t before = full.scene().canvases[1].elements.size();
+    CHECK(before == size_t(kMaxCanvasElements - 1));
+    CHECK(pasteElements(full, 1, -1, two, s) == -2);  // 254 + 2
+    CHECK(duplicateElements(full, 1, {0, 1}) == -2);
+    CHECK(full.historySize() == 0 && !full.dirty() && full.scene().canvases[1].elements.size() == before);
+    CHECK(pasteElements(full, 1, -1, one, s) >= 0 && int(full.scene().canvases[1].elements.size()) == kMaxCanvasElements);
+    CHECK(pasteElements(full, 1, -1, one, s) == -2 && pasteElements(full, 1, -1, one, s, &at) == -2);
+    CHECK(duplicateElements(full, 1, {0}) == -2 && full.historySize() == 1);
+    CHECK(pasteElements(full, 0, -1, one, s) >= 0);  // another canvas still takes it
+}
+
+void testUiProblems() {
+    using namespace editor::uic;
+    const Screen s;
+    auto titles = [](const std::vector<Problem>& ps) {
+        std::string t;
+        for (const Problem& p : ps) t += p.title + ";";
+        return t;
+    };
+    editor::Document d;
+    splash::Scene sc = uiScene();
+    auto& els = sc.canvases[0].elements;
+    els.push_back(uiBox("off", 400, 10, 20, 20));    // 4
+    els.push_back(uiBox("right", 310, 10, 20, 20));  // 5
+    els.push_back(uiBox("left", -4, 10, 20, 20));    // 6
+    splash::UIElement t = uiBox("t", 0, 0, 100, 16);
+    t.type = splash::UIElementType::Text;
+    t.text = std::string(70, 'a');
+    t.font = "nope";
+    els.push_back(t);  // 7
+    d.reset(sc);
+    CHECK(elementProblems(d, 0, 0, s).empty());
+    const std::vector<Problem> off = elementProblems(d, 0, 4, s);
+    CHECK(titles(off) == "Off screen;");
+    CHECK(off[0].body.find("300, 10") != std::string::npos);  // says where to put it
+    const std::vector<Problem> right = elementProblems(d, 0, 5, s);
+    CHECK(titles(right) == "Past the right edge;" && right[0].body.find("10 px left") != std::string::npos);
+    CHECK(titles(elementProblems(d, 0, 6, s)) == "Cut by the left edge;");
+    CHECK(titles(elementProblems(d, 0, 7, s)) == "Text too long;No such font;");
+    CHECK(elementProblems(d, 0, 7, s)[0].body.find("by 7") != std::string::npos);
+    // The one-click fixes, one undo step each.
+    CHECK(off[0].fix == Fix::MoveOnScreen && applyFix(d, 0, 4, off[0].fix, s));
+    CHECK((layout(d.scene().canvases[0].elements[4], s) == Rect{300, 10, 20, 20}));
+    CHECK(elementProblems(d, 0, 4, s).empty());
+    CHECK(applyFix(d, 0, 6, Fix::MoveOnScreen, s) && layout(d.scene().canvases[0].elements[6], s).x == 0);
+    CHECK(applyFix(d, 0, 7, Fix::TrimText, s) && d.scene().canvases[0].elements[7].text.size() == 63);
+    CHECK(applyFix(d, 0, 7, Fix::SystemFont, s) && elementProblems(d, 0, 7, s).empty());
+    CHECK(!applyFix(d, 0, 7, Fix::SystemFont, s));  // nothing left to fix: no step
+    CHECK(d.historySize() == 4 && d.undo() && d.scene().canvases[0].elements[7].font == "nope");
+    editElement(d, 0, 7, [](splash::UIElement& e) { e.text = "caf\xc3\xa9!"; });
+    CHECK(applyFix(d, 0, 7, Fix::AsciiText, s) && d.scene().canvases[0].elements[7].text == "caf?!");
+    // Over the 256-element budget: the elements past it say so, and the canvas.
+    sc = uiScene();
+    for (int i = 0; i < 260; i++) sc.canvases[1].elements.push_back(uiBox("n", 0, 0, 4, 4));
+    d.reset(sc);
+    CHECK(titles(elementProblems(d, 1, 0, s)).empty());
+    CHECK(titles(elementProblems(d, 1, 260, s)) == "Over the element budget;Over the canvas budget;");
+    CHECK(elementProblems(d, 1, 260, s)[0].body.find("Delete 9") != std::string::npos);
+    CHECK(titles(canvasProblems(d, 1)) == "Too many elements;Over the element budget;");
+    CHECK(canvasProblems(d, 0).size() == 1);
+}
+
+void testUiRender() {
+    using namespace editor::uic;
+    const Screen s;
+    splash::Scene sc = uiScene();
+    sc.canvases[0].elements[0].color = {1, 0, 0};
+    sc.canvases[0].elements[1].color = {0, 1, 0};
+    splash::UIElement bar = uiBox("bar", 0, 100, 100, 4);
+    bar.type = splash::UIElementType::Progress;
+    bar.value = 30;
+    bar.color = {0, 0, 1};
+    bar.background = {0.5f, 0.5f, 0.5f};
+    sc.canvases[0].elements.push_back(bar);
+    splash::UIElement text = uiBox("text", 0, 150, 100, 16);
+    text.type = splash::UIElementType::Text;
+    text.text = "A";
+    sc.canvases[0].elements.push_back(text);
+    Assets assets;
+    assets.refresh(g_outDir, 0);
+    const uint32_t bg = 0xff102030;
+    std::vector<uint8_t> cov;
+    std::vector<uint32_t> px = render(sc, {true, false}, s, assets, bg, &cov);
+    auto at = [&](int x, int y) { return px[size_t(y) * 320 + size_t(x)]; };
+    CHECK(px.size() == 320u * 240u && cov.size() == px.size());
+    CHECK(at(10, 10) == 0xff0000ffu);   // red back box (0xAABBGGRR)
+    CHECK(at(60, 30) == 0xff00ff00u);   // green front box over it
+    CHECK(at(160, 30) == bg && !cov[30 * 320 + 160]);  // hidden box not drawn
+    CHECK(at(200, 100) == 0xffffffffu && at(300, 200) == 0xffffffffu && at(250, 150) == 0xffffffffu);  // line, both ends
+    CHECK(at(29, 101) == 0xffff0000u && at(30, 101) == 0xff848484u);  // 30% fill, 0.5 grey as 5-bit
+    CHECK(at(15, 175) == bg);  // the menu canvas is not shown
+    // System font 'A': the left stroke at column 1 from row 2, the hole at 3..4.
+    CHECK(at(1, 152) == 0xffffffffu && at(3, 154) == bg);
+    std::vector<uint32_t> both = render(sc, {true, true}, s, assets, bg);
+    CHECK(both[15 * 320 + 15] == 0xffffffffu);
+    // Canvases by sortOrder: menu first in the list but drawn behind once hud sorts higher.
+    sc.canvases[1].elements[0].rect = {5, 5, 20, 20};
+    sc.canvases[1].elements[0].color = {0, 0, 1};
+    std::vector<uint32_t> over = render(sc, {true, true}, s, assets, bg);
+    CHECK(over[10 * 320 + 10] == 0xffff0000u);  // menu (later) in front at equal sortOrder
+    sc.canvases[0].sortOrder = 5;
+    std::vector<uint32_t> under = render(sc, {true, true}, s, assets, bg);
+    CHECK(under[10 * 320 + 10] == 0xff0000ffu);
+    // An image: a red, green, blue strip stretched over 6x2, tinted by colour / 128.
+    splash::Image img;
+    img.width = 3;
+    img.height = 1;
+    img.pixels = {{1, 0, 0, 1}, {0, 1, 0, 1}, {0, 0, 1, 1}};
+    std::filesystem::create_directories(g_outDir);
+    splash::savePng(img, g_outDir / "uitex.png");
+    splash::Scene isc;
+    isc.canvases.resize(1);
+    splash::UIElement im = uiBox("im", 10, 10, 6, 2);
+    im.type = splash::UIElementType::Image;
+    im.texture = "uitex.png";
+    im.bitDepth = splash::BitDepth::Bpp16;
+    im.color = {0.5f, 0.5f, 0.5f};
+    isc.canvases[0].elements.push_back(im);
+    std::vector<uint32_t> ip = render(isc, {true}, s, assets, bg);
+    auto iat = [&](int x, int y) { return ip[size_t(y) * 320 + size_t(x)]; };
+    // u = x * (3 - 1) / 6: red, red, red, green, green, green; blue never shows.
+    CHECK(iat(10, 10) == 0xff0000ffu && iat(12, 11) == 0xff0000ffu);
+    CHECK(iat(13, 10) == 0xff00ff00u && iat(15, 11) == 0xff00ff00u && iat(16, 10) == bg);
+    isc.canvases[0].elements[0].color = {0.25f, 0.25f, 0.25f};  // tint 64: half as bright
+    std::vector<uint32_t> dim = render(isc, {true}, s, assets, bg);
+    CHECK(dim[10 * 320 + 10] == 0xff00007bu);
+    CHECK(textWidth(sc, assets, "", "Hello") == 40);
+}
+
+// tests/ui/ui.scene as psxsplash draws it: tests/ui/ui-runtime.png is frame
+// 300 of tests/boot/boot.sh (pcsx-redux, psxsplash 669fb6b). The preview must
+// match it pixel for pixel in 15-bit colour: both Inter fonts (the body text
+// lighter than its colour, the GPU's tint doubling), the system font, the
+// progress bar, the image, the line and the anchored boxes.
+void testUiMatchesRuntime() {
+    using namespace editor::uic;
+    const std::filesystem::path dir = std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "ui";
+    splash::Scene sc = splash::loadScene(dir / "ui.scene");
+    Assets assets;
+    assets.refresh(dir, 0);
+    std::vector<uint32_t> px = render(sc, {true}, Screen{}, assets, 0xff000000u);
+    splash::Image ref = splash::loadImage(dir / "ui-runtime.png");
+    CHECK(ref.width == 320 && ref.height == 240);
+    if (ref.width != 320 || ref.height != 240) return;
+    int differ = 0, lit = 0;
+    for (int y = 0; y < 240; y++)
+        for (int x = 0; x < 320; x++) {
+            const splash::Image::Px& p = ref.pixels[size_t(239 - y) * 320 + size_t(x)];  // rows bottom-up
+            const uint32_t e = px[size_t(y) * 320 + size_t(x)];
+            const int want[3] = {int(std::lround(p.r * 31)), int(std::lround(p.g * 31)), int(std::lround(p.b * 31))};
+            const int got[3] = {int(e & 0xff) >> 3, int((e >> 8) & 0xff) >> 3, int((e >> 16) & 0xff) >> 3};
+            if (want[0] != got[0] || want[1] != got[1] || want[2] != got[2]) differ++;
+            if (got[0] || got[1] || got[2]) lit++;
+        }
+    CHECK(differ == 0);
+    CHECK(lit > 10000);
+    if (differ) std::fprintf(stderr, "UI preview: %d pixels differ from the runtime frame\n", differ);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -4958,6 +5534,17 @@ int main(int argc, char** argv) {
     testQuantizer();
     testTexturePreview();
     testAssetBrowser();
+    testUiLayout();
+    testUiHitTest();
+    testUiResize();
+    testUiSnap();
+    testUiZOrder();
+    testUiUndo();
+    testUiClipboard();
+    testUiMultiSelect();
+    testUiProblems();
+    testUiRender();
+    testUiMatchesRuntime();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -293,6 +293,44 @@ the glyph sheet export builds and prints its cell size and VRAM cost.
 
 `ui/ui.scene` booted with `boot/boot.sh` at frame 300 shows both Inter fonts, the system font, the
 progress bar, the image, a line ending at x 311 and the full-width bar, at the positions above.
+That frame is kept as `ui/ui-runtime.png` (psxsplash 669fb6b): `editor_tests` renders the scene
+with the UI tab's preview and requires the same pixels in 15-bit colour.
+
+`uicanvascheck.py` drives the UI tab (the canvas editor) on a copy of `ui/ui.scene`, started with
+`--ui`, which opens the tab and prints where the canvas and the element list are. It drags an
+element on the canvas (and to 2 px from the screen edge, where it must snap onto it), resizes one
+by its corner handle, nudges with the arrows (Shift: 8 px), brings one forward with Ctrl+],
+reorders by dragging a list row, duplicates, deletes, hides the canvas with its eye and clicks
+empty canvas to deselect, then saves and reads the scene back. One Ctrl+Z must take back one
+whole drag. Needs a display (CI runs it under `xvfb-run` on Linux).
+
+It also copies, cuts and pastes elements (Ctrl+C/X/V and the right-click menu on the canvas and
+on a list row, whose rows the editor prints when it opens): a paste lands in front of the
+selection 8 px down and right of the original (a second one past the first copy, a cut one back
+in place) with a numbered name, and one Ctrl+Z takes it back. Then it zooms (Ctrl+wheel and the
+plain wheel, about the pointer, which must stay over the same canvas pixel) and, zoomed in,
+selects by clicking where the fit view has nothing, drags and resizes by a handle; pans with a
+middle drag and with Space + drag (which must move no element), and Ctrl+0 fits again. At 100%
+(Ctrl+1) the canvas in the screenshot must equal `ui/ui-runtime.png` in 15-bit colour wherever
+the game drew, except the 1 px element outlines. The clipboard text is
+`{"splashedit-ui-elements": 1, ...}`; `editor_tests` checks that it and the scene objects'
+`splashedit-objects` text are never pasted as each other.
+
+Multi-select: Ctrl+click on the canvas and on the list toggles an element, Shift+click on the list
+takes a range, and a rubber band dragged from empty canvas takes every element it touches (with
+Ctrl it adds to the selection); the inspector then says "2 elements" (the editor prints it with
+`--ui`). Arrow keys, a drag on one of them, Delete, Ctrl+X, Ctrl+C then Ctrl+V and Ctrl+D act on
+all of them and one Ctrl+Z takes each back; a plain click on one of several keeps only that one.
+The scenes carry a scene object `Marker` (selected with `--select`): F2 and Edit > Rename (clicked
+at its place in the Edit menu) must rename the selected UI element and leave the object alone.
+Paste with the pointer over the canvas puts the pasted group's top-left under it (snapped like a
+drag: 1 px from the screen edge lands on it), else (the pointer parked on the status bar, or
+Edit > Paste) it keeps the 8 px offset. A canvas filled to 255 elements refuses a paste or a
+duplicate that would pass it, changes nothing and prints `uicanvas: notice Cannot paste...` (the
+status bar shows it); one that makes exactly 255 goes through. `editor_tests` covers the same in
+the model (`testUiMultiSelect`).
+
+    python3 uicanvascheck.py <splashedit>
 
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
 `SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in

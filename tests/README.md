@@ -338,6 +338,16 @@ the model (`testUiMultiSelect`).
 
     python3 uicanvascheck.py <splashedit>
 
+`uicanvassmallcheck.py` opens the same UI tab at a small editor window (`--size 1024x768`) and reads
+the canvas header's layout, which the editor prints with `--ui` (each item as `x0-x1`, or `-` when it
+gives way). At 1024x768 the resolution and the hint text step aside so the toolbar (fit, zoom in and
+out, the zoom label, the snap switch) still fits, and the check asserts the buttons are present and
+that no two header items overlap; it also requires the screen to fit at better than 25%. Widened back
+to 1600x960, the resolution and the hint must both show again. Needs a display (CI runs it under
+`xvfb-run`).
+
+    python3 uicanvassmallcheck.py <splashedit>
+
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
 `SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in
 the Game view. They must reach the game only: the check fails if an editor menu or picker is

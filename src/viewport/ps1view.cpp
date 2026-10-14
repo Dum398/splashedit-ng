@@ -115,13 +115,19 @@ uniform sampler2D uTex;
 uniform int uClean;
 uniform vec3 uFog;
 uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
+uniform float uFogFar;    // > 0: the scene's fog wall, in view depth
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
     vec2 uv = uClean == 0 ? vUvAffine : vUvPersp;
     vec3 c = texture(uTex, fract(uv)).rgb * vCol * 2.0;
-    float fog = clamp((vDepth - 10.0 * uFogScale) / (22.0 * uFogScale), 0.0, 1.0);
-    c = mix(c, uFog, fog * 0.85);
+    if (uFogFar > 0.0) {
+        float fogNear = uFogFar * 0.125;
+        c = mix(c, uFog, clamp((vDepth - fogNear) / (uFogFar - fogNear), 0.0, 1.0));
+    } else {
+        float fog = clamp((vDepth - 10.0 * uFogScale) / (22.0 * uFogScale), 0.0, 1.0);
+        c = mix(c, uFog, fog * 0.85);
+    }
     if (uClean == 0) {
         ivec2 p = ivec2(gl_FragCoord.xy) & 3;
         vec3 v = floor(clamp(c * 255.0 + kDither[p.y * 4 + p.x], 0.0, 255.0));
@@ -465,7 +471,18 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         m_viewProj = Mat4::perspective(kFovY, aspect, 0.1f * viewScale(), 200.0f * viewScale()) * Mat4::lookAt(m_eye, m_target, bUp);
     }
 
-    const float fog[3] = {0.10f, 0.11f, 0.17f};
+    // The scene's fog as psxsplash draws it: the screen clears to the fog
+    // colour and each vertex fades linearly from an eighth of the fog wall
+    // (20000 / density GTE depth units) to the wall. Off, or in an orthographic
+    // view, the view keeps its own haze.
+    const splash::SceneSettings* set = m_doc ? &m_doc->scene().settings : nullptr;
+    const bool sceneFog = set && set->fog.enabled && !m_ortho;
+    float fog[3] = {0.10f, 0.11f, 0.17f}, fogFar = 0;
+    if (sceneFog) {
+        for (int i = 0; i < 3; i++) fog[i] = std::clamp(set->fog.color[i], 0.0f, 1.0f);
+        const float gte = set->gteScaling > 0 ? set->gteScaling : 100.f;
+        fogFar = 20000.0f / float(std::clamp(set->fog.density, 1, 10)) * gte / 4096.0f;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, w, h);
     glClearColor(fog[0], fog[1], fog[2], 1);
@@ -490,7 +507,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform3f(glGetUniformLocation(m_skyProg, "uSkyHi"), kSkyHi[0], kSkyHi[1], kSkyHi[2]);
     glUniform1i(glGetUniformLocation(m_skyProg, "uClean"), clean ? 1 : 0);
     glBindVertexArray(m_vao);
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (!sceneFog) glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glEnable(GL_DEPTH_TEST);
     glUseProgram(m_prog);
@@ -499,6 +516,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform1i(glGetUniformLocation(m_prog, "uClean"), clean ? 1 : 0);
     glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
     glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), viewScale());
+    glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);

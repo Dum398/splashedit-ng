@@ -335,6 +335,7 @@ static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float 
 bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* title, bool open, bool enabled,
              bool removable, bool* removed, bool* toggled) {
     Fonts& f = fonts();
+    nameRect(id, r);  // scripted tests fold a section by clicking @id
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // The ellipsis and the switch register before the header so they win the hover where they overlap.
     ImRect dots(ImVec2(r.Max.x - space::sm - 20, r.Min.y + 5), ImVec2(r.Max.x - space::xs, r.Max.y - 5));
@@ -680,6 +681,7 @@ int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, st
             ImGui::PushID(i);
             Hit h = interact("item", ir);
             ImGui::PopID();
+            nameRect(std::string(id) + "/" + item, ir);  // --click @id/item
             if (i == current) {
                 dl->AddRectFilled(ir.Min, ir.Max, color::accentSoft, radius::field);
                 dl->AddRectFilled(ir.Min + ImVec2(0, 5), ImVec2(ir.Min.x + 2, ir.Max.y - 5), color::accent, 1);

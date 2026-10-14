@@ -11,12 +11,13 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 # At 1600x960 with nothing selected the inspector shows the scene. Folding
-# Cutscenes and animations, then Render buffers, keeps what follows where it is
-# whether or not the background export has filled in its sizes.
-FOLD_CUTSCENES = '1400,273'
-FOLD_RENDER = '1400,319'
-ENABLE = '1390,524'  # the Enable saves switch
-TITLE = '1450,652'  # the Save title field
+# Cutscenes and animations, Rendering and Render buffers brings the Memory card
+# section into view whether or not the background export has filled in its
+# sizes. Controls are clicked by name (--click @scene.mcenable): the editor aims
+# at where the frame before drew them, so no pixel positions live here.
+FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_render', '--wait', '5']
+ENABLE = '@scene.mcenable'  # the Enable saves switch
+TITLE = '@scene.mctitle'  # the Save title field
 TYPED = 'MY GAME 1'
 
 
@@ -31,10 +32,14 @@ def run(args):
     scene's settings.memCard ({} when absent) and the editor's output."""
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
-    cmd = [editor, '--size', '1600x960', '--project', project, '--click', FOLD_CUTSCENES, '--wait', '3', '--click', FOLD_RENDER, '--wait', '5'] + args + [
+    cmd = [editor, '--size', '1600x960', '--project', project] + FOLDS + args + [
         '--key', 'ctrl+s', '--wait', '10', '--screenshot', os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=120)
     out = (r.stdout + r.stderr).strip()
+    # A control the script named and the editor never drew is a broken check, not a pass.
+    missing = [l for l in out.splitlines() if 'no such control drawn' in l]
+    check('every control the script names was drawn', not missing, missing)
+    out = '\n'.join(l for l in out.splitlines() if not l.startswith('control '))
     scene = json.load(open(os.path.join(project, 'courtyard.scene'), encoding='utf-8'))
     return scene.get('settings', {}).get('memCard', {}), out
 

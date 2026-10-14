@@ -1368,8 +1368,11 @@ float TimelinePanel::sequenceList(ImDrawList* dl, float x0, float x1, float y, e
     }
     if (removing) remove(doc, *removing);
     if (ImGui::GetTime() < m_noteUntil) {
-        text(dl, ImVec2(x0, y + 2), f.medium, type::label, color::warn, m_note.c_str());
-        y += 24;
+        // Wrapped to the section: a rename note naming its scripts runs long.
+        const float wrap = x1 - x0;
+        const ImVec2 ns = f.medium->CalcTextSizeA(type::label, FLT_MAX, wrap, m_note.c_str());
+        dl->AddText(f.medium, type::label, ImVec2(x0, y + 2), color::warn, m_note.c_str(), nullptr, wrap);
+        y += std::max(24.0f, ns.y + 8);
     }
     float w = 0;
     if (button("newcs", ImVec2(x0, y + space::xs), icon::plus, "New cutscene", ButtonKind::Ghost, &w))

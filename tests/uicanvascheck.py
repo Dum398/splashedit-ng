@@ -255,7 +255,7 @@ def at2(x, y):
 
 # 'title' (8..307 x 8..27): zoomed in, it is where the fit view shows nothing,
 # so a click going through a stale transform would select nothing.
-TITLE = (60, 15)
+TITLE = (60, 24)  # low in the row: zoomed in, its top lies under the canvas toolbar
 cv, out, _ = run(zoom + ['--click', at2(*TITLE), '--wait', '3', '--key', 'right', '--wait', '3'])
 check('zoomed in, a click selects the element under the pointer', elements(cv)['title']['rect'] == [9, 8, 300, 20],
       [(k, elements(cv)[k].get('rect')) for k in names(cv) if elements(cv)[k] != elements(cv0)[k]])

@@ -2082,6 +2082,9 @@ static void axisWidget(ImDrawList* dl, ImVec2 c, viewport::Ps1View& view) {
         float k = d3(w[i], fw);
         if (view.ortho() && std::fabs(k) > 0.9999f) name = sides[i][k < 0 ? 0 : 1];
     }
+    // A backing pill keeps the caption legible over a light fog colour.
+    const float tw = f.medium->CalcTextSizeA(type::caption, FLT_MAX, 0, name).x;
+    dl->AddRectFilled(c + ImVec2(-tw / 2 - 6, 38), c + ImVec2(tw / 2 + 6, 54), rgb(0x111318, 170), 8);
     textCentered(dl, ImRect(c + ImVec2(-34, 38), c + ImVec2(34, 54)), f.medium, type::caption, color::textDim, name);
 }
 

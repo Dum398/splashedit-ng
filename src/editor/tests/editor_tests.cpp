@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <vector>
 #include <set>
@@ -371,6 +372,104 @@ void testDirtyAndSave() {
     CHECK(!r.load(dir, "saved.scene"));
     CHECK(r.object({0}) && r.object({0})->transform.position.x == 3);
     CHECK(!r.dirty() && !r.canUndo());
+}
+
+// The component fields the object inspector edits: each set through
+// doc.edit survives a save and reload of the scene JSON, and one undo puts
+// the old value back.
+void testComponentFieldsSaveUndo() {
+    std::error_code ec;
+    std::filesystem::path dir = g_outDir;
+    std::filesystem::create_directories(dir, ec);
+    splash::Scene sc;
+    splash::Object lever = named("Lever");
+    lever.interactable = splash::InteractableComponent{};
+    sc.objects.push_back(lever);
+    splash::Object hero = named("Hero");
+    hero.player = splash::PlayerComponent{};
+    sc.objects.push_back(hero);
+    splash::Object bell = named("Bell");
+    bell.audio = splash::AudioComponent{};
+    bell.audio->clipName = "bell";
+    sc.objects.push_back(bell);
+    splash::Object box = named("Box");
+    box.mesh = splash::MeshComponent{};
+    sc.objects.push_back(box);
+    splash::Object lamp = named("Lamp");
+    lamp.light = splash::LightComponent{};
+    lamp.light->kind = splash::LightKind::Spot;
+    sc.objects.push_back(lamp);
+
+    editor::Document d;
+    d.reset(sc, dir, "compfields");
+    // Each edit is its own undo step; undo restores the value before it.
+    struct Step {
+        std::function<void(splash::Object&)> set;
+        std::function<bool(const splash::Object&)> isNew, isOld;
+        int at;
+    };
+    const std::vector<Step> steps = {
+        {[](splash::Object& o) { o.interactable->button = 12; }, [](const splash::Object& o) { return o.interactable->button == 12; },
+         [](const splash::Object& o) { return o.interactable->button == 14; }, 0},
+        {[](splash::Object& o) { o.interactable->repeatable = false; }, [](const splash::Object& o) { return !o.interactable->repeatable; },
+         [](const splash::Object& o) { return o.interactable->repeatable; }, 0},
+        {[](splash::Object& o) { o.interactable->cooldownFrames = 65535; },
+         [](const splash::Object& o) { return o.interactable->cooldownFrames == 65535; },
+         [](const splash::Object& o) { return o.interactable->cooldownFrames == 30; }, 0},
+        {[](splash::Object& o) { o.interactable->showPrompt = true; }, [](const splash::Object& o) { return o.interactable->showPrompt; },
+         [](const splash::Object& o) { return !o.interactable->showPrompt; }, 0},
+        {[](splash::Object& o) { o.interactable->promptCanvas = "Hint"; },
+         [](const splash::Object& o) { return o.interactable->promptCanvas == "Hint"; },
+         [](const splash::Object& o) { return o.interactable->promptCanvas.empty(); }, 0},
+        {[](splash::Object& o) { o.player->sprintSpeed = 6.5f; }, [](const splash::Object& o) { return o.player->sprintSpeed == 6.5f; },
+         [](const splash::Object& o) { return o.player->sprintSpeed == 8.0f; }, 1},
+        {[](splash::Object& o) { o.player->gravity = 12.0f; }, [](const splash::Object& o) { return o.player->gravity == 12.0f; },
+         [](const splash::Object& o) { return o.player->gravity == 20.0f; }, 1},
+        {[](splash::Object& o) { o.player->nav.maxStepHeight = 0.5f; },
+         [](const splash::Object& o) { return o.player->nav.maxStepHeight == 0.5f; },
+         [](const splash::Object& o) { return o.player->nav.maxStepHeight == 0.35f; }, 1},
+        {[](splash::Object& o) { o.player->nav.walkableSlopeAngle = 30.0f; },
+         [](const splash::Object& o) { return o.player->nav.walkableSlopeAngle == 30.0f; },
+         [](const splash::Object& o) { return o.player->nav.walkableSlopeAngle == 46.0f; }, 1},
+        {[](splash::Object& o) { o.audio->clipName = "chime"; }, [](const splash::Object& o) { return o.audio->clipName == "chime"; },
+         [](const splash::Object& o) { return o.audio->clipName == "bell"; }, 2},
+        {[](splash::Object& o) { o.audio->sampleRate = 11025; }, [](const splash::Object& o) { return o.audio->sampleRate == 11025; },
+         [](const splash::Object& o) { return o.audio->sampleRate == 22050; }, 2},
+        {[](splash::Object& o) { o.audio->loop = true; }, [](const splash::Object& o) { return o.audio->loop; },
+         [](const splash::Object& o) { return !o.audio->loop; }, 2},
+        {[](splash::Object& o) { o.audio->trimLeadingSilence = true; }, [](const splash::Object& o) { return o.audio->trimLeadingSilence; },
+         [](const splash::Object& o) { return !o.audio->trimLeadingSilence; }, 2},
+        {[](splash::Object& o) { o.mesh->smoothNormals = false; }, [](const splash::Object& o) { return !o.mesh->smoothNormals; },
+         [](const splash::Object& o) { return o.mesh->smoothNormals; }, 3},
+        {[](splash::Object& o) { o.light->innerSpotAngle = 20.0f; }, [](const splash::Object& o) { return o.light->innerSpotAngle == 20.0f; },
+         [](const splash::Object& o) { return o.light->innerSpotAngle == 0.0f; }, 4},
+    };
+    for (size_t i = 0; i < steps.size(); i++) {
+        const Step& st = steps[i];
+        const editor::ObjectPath p{st.at};
+        CHECK(st.isOld(*d.object(p)));
+        d.edit(p, st.set);
+        CHECK(st.isNew(*d.object(p)));
+        CHECK(d.undo());
+        if (!st.isOld(*d.object(p))) std::fprintf(stderr, "compfields: undo of step %zu did not restore\n", i);
+        CHECK(st.isOld(*d.object(p)));
+        CHECK(d.redo());
+        CHECK(st.isNew(*d.object(p)));
+    }
+    CHECK(d.historySize() == steps.size());
+    CHECK(!d.save());
+
+    editor::Document r;
+    CHECK(!r.load(dir, "compfields.scene"));
+    for (size_t i = 0; i < steps.size(); i++) {
+        const splash::Object* o = r.object(editor::ObjectPath{steps[i].at});
+        const bool ok = o && steps[i].isNew(*o);
+        if (!ok) std::fprintf(stderr, "compfields: step %zu did not survive save and reload\n", i);
+        CHECK(ok);
+    }
+    // The reloaded scene keeps undoing nothing; the edited one undoes all the way back.
+    for (size_t i = 0; i < steps.size(); i++) CHECK(d.undo());
+    for (const Step& st : steps) CHECK(st.isOld(*d.object(editor::ObjectPath{st.at})));
 }
 
 void testStructure() {
@@ -6062,6 +6161,7 @@ int main(int argc, char** argv) {
     testRenderPeak();
     testMemCard();
     testDirtyAndSave();
+    testComponentFieldsSaveUndo();
     testStructure();
     testMove();
     testPick();

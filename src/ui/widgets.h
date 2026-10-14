@@ -126,6 +126,7 @@ bool textField(const char* id, ImRect r, const std::string& value, std::string* 
 void dropdown(const char* id, ImRect r, const char* icon, const char* value);
 // A dropdown that opens a themed list under it. Returns the picked index, or -1.
 int dropdownMenu(const char* id, ImRect r, const char* icon, const char* value, std::initializer_list<const char*> items, int current);
+int dropdownMenu(const char* id, ImRect r, const char* icon, const char* value, const std::vector<const char*>& items, int current);
 
 // Searchable list in a popup, opened with ImGui::OpenPopup(id) from the same
 // ID stack. The caller keeps the search text in `query` and passes `items`

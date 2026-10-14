@@ -448,11 +448,16 @@ scene tree row becomes that object's child with the material of the objects alre
 texture dragged onto the inspector's Texture field is set on that object only. F2 on brick.png,
 which the walls use, renames it and the walls follow, in the open scene and in a second scene
 file on disk (`level2.scene`); one Ctrl+Z puts the file, the scene and `level2.scene` (byte for
-byte) back. Renaming `game_logic.lua` points the Game Logic object's Script at the new name. A
-file dragged onto a folder of the panel's tree moves there with the same reference update, and
-Ctrl+Z moves it back. Delete is refused on a used file and moves an unused one into the
-project's `.trash/1/` after the prompt; Ctrl+Z brings it back. Needs a display (CI runs it under
-`xvfb-run` on Linux).
+byte) back; the rename alone, unsaved, leaves the document with unsaved changes. Renaming
+`game_logic.lua` points the Game Logic object's Script at the new name. A file dragged onto a
+folder of the panel's tree moves there with the same reference update, and Ctrl+Z moves it back;
+a root file dragged onto the `textures` folder tile of the grid moves into it, the Back Wall's
+reference along. Delete is refused on a used file and moves an unused one into the project's
+`.trash/1/` after the prompt; Ctrl+Z brings it back. Opening a project empties a `.trash/<n>/`
+older than 30 days (and keeps a newer one), saying so in the status bar. The chevron folds the
+panel and View > Project opens it again. The Timeline tab is clicked low in the dock's tab strip,
+which is 46 px high (the Timeline's header) with Project in front too. Needs a display (CI runs it
+under `xvfb-run` on Linux).
 
     python3 assetbrowsercheck.py <splashedit>
 

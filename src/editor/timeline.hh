@@ -20,6 +20,9 @@ constexpr int kTimelineFps = 30;
 constexpr int kMaxTimelineTracks = 8;
 constexpr int kMaxTimelineKeys = 64;
 constexpr int kMaxTimelineFrame = 8191;  // 13 bits of the packed key
+// The exporter's name check (splashpack.cpp writeSequences): 1..24 UTF-16
+// code units, as Lua plays a sequence by name.
+constexpr int kMaxSeqName = 24;
 
 enum class SeqKind { Cutscene, Animation };
 
@@ -68,14 +71,29 @@ std::vector<SeqRef> allSequences(const Document& doc);
 //
 // Appends an empty sequence named `name` (made unique with " (2)"...).
 std::optional<SeqRef> addSequence(Document& doc, SeqKind kind, const std::string& name);
+// Why `name` cannot name the sequence, or empty when it can: empty, longer
+// than kMaxSeqName, or taken by another sequence of the same kind.
+std::string seqNameProblem(const Document& doc, SeqRef ref, const std::string& name);
+// Refused (no step) when seqNameProblem() says so or the name is unchanged.
+bool renameSequence(Document& doc, SeqRef ref, const std::string& name);
+// Removes the sequence; the ones after it move down an index.
+bool removeSequence(Document& doc, SeqRef ref);
 // The new track's index, or -1: the type is not allowed in this kind of
 // sequence, the target is missing where needed, the same type and target is
 // already there, or the sequence has kMaxTimelineTracks.
 int addTrack(Document& doc, SeqRef ref, splash::TrackType type, const std::string& target);
 bool removeTrack(Document& doc, SeqRef ref, int track);
+// Points the track at another target, keys unchanged. Refused for tracks
+// with no target (camera, rumble), an empty or unchanged target, or one the
+// sequence already drives with this type.
+bool setTrackTarget(Document& doc, SeqRef ref, int track, const std::string& target);
+// What a track of this type can drive, as the export addresses it: objects
+// with a mesh, runtime point lights, canvases, "canvas/element". Empty for
+// camera and rumble tracks.
+std::vector<std::string> targetsFor(const Document& doc, splash::TrackType type);
 // Adds a key at `frame` (clamped to 0..kMaxTimelineFrame). Without `value`
-// it takes what the track samples there, so adding a key leaves the motion as
-// it was. Returns the key, or nullopt when the frame already has one or the
+// it takes what the track's curve gives there (sample(), before the runtime's
+// rounding), so adding a key leaves the motion as it was. Returns the key, or nullopt when the frame already has one or the
 // track is full.
 std::optional<KeyRef> addKey(Document& doc, SeqRef ref, int track, int frame, std::optional<KeyValue> value = std::nullopt);
 // Moves every key in `keys` by `delta` frames. Refused when one would leave
@@ -97,15 +115,29 @@ bool setLength(Document& doc, SeqRef ref, int frames, const std::string& mergeKe
 // target's state when playback starts) into it with the first key's curve,
 // between keys it uses the later key's curve, after the last it holds; on/off
 // tracks hold the last key at or before the frame. Values are not quantised
-// to the runtime's fixed point.
+// to the runtime's fixed point (sampleFixed() is).
 KeyValue sample(const splash::CutsceneTrack& track, float frame, const KeyValue& initial = {0, 0, 0});
+
+// The runtime's own numbers. A key's value as the exporter packs it
+// (splashpack.cpp: positions round(v / gte * 4096) with Y negated, angles
+// round(deg * 1024 / 180) with X and Z negated, colours 0..255, ...), and back.
+using FixedValue = std::array<int16_t, 3>;
+FixedValue encodeValue(splash::TrackType t, const KeyValue& v, float gte);
+KeyValue decodeValue(splash::TrackType t, const FixedValue& v, float gte);
+// psxsplash's lerpKeyframesSub (interpolation.cpp) on the packed keys: the
+// whole frame plus a 0.12 sub-frame, the 0.12 curve, and `>> 12` rounding
+// towards minus infinity. On/off tracks as sample(). In the packed units.
+FixedValue sampleFixedRaw(const splash::CutsceneTrack& track, float frame, const KeyValue& initial, float gte);
+// The same, decoded to the track's units.
+KeyValue sampleFixed(const splash::CutsceneTrack& track, float frame, const KeyValue& initial, float gte);
 // The curve psxsplash applies to a 0..1 segment position.
 float applyCurve(float t, splash::Interp mode);
 // The target's state when playback starts, as far as the editor knows it:
 // an object's world position or its start-active flag; zero otherwise
 // (object rotation starts from 0,0,0 in the runtime too).
 KeyValue initialValue(const Document& doc, const splash::CutsceneTrack& track);
-// sample() with initialValue().
+// sampleFixed() with initialValue() and the scene's GTE scaling: what the
+// console shows at that frame.
 KeyValue sampleAt(const Document& doc, SeqRef ref, int track, float frame);
 
 // The Scene view's preview: what a sequence poses at a frame. Built from a
@@ -115,22 +147,39 @@ struct ObjectPose {
     std::optional<splash::Vec3> position;  // world units, world space
     std::optional<splash::Vec3> rotation;  // degrees, Quaternion.Euler, world space
     std::optional<bool> active;
+    std::optional<std::array<float, 2>> uvOffset;  // texels, on the mesh's uvOffsetMaterial
     bool operator==(const ObjectPose&) const = default;
+};
+// A runtime point light's tracks.
+struct LightPose {
+    std::optional<splash::Vec3> position;        // world units, world space
+    std::optional<std::array<float, 3>> color;   // 0..1
+    std::optional<float> intensity;
+    std::optional<float> radius;                 // world units: the light's range
+    std::optional<bool> enabled;
+    bool operator==(const LightPose&) const = default;
 };
 struct Preview {
     std::map<std::string, ObjectPose> objects;  // by track target (object name)
+    std::map<std::string, LightPose> lights;    // by track target (the light's object name)
     std::optional<splash::Vec3> cameraPosition;  // world units
     std::optional<splash::Vec3> cameraRotation;  // degrees
-    bool empty() const { return objects.empty() && !cameraPosition && !cameraRotation; }
+    std::optional<float> cameraH;                // projection H, 1..1024
+    bool empty() const { return objects.empty() && lights.empty() && !cameraPosition && !cameraRotation && !cameraH; }
     bool operator==(const Preview&) const = default;
 };
-// Object position, rotation and active tracks and the camera's position and
-// rotation, sampled at `frame` with sampleAt(). Empty for an invalid sequence.
+// Object position, rotation, active and UV offset tracks, light tracks and
+// the camera's position, rotation and H, sampled at `frame` with sampleAt().
+// UI and rumble tracks have nothing in the Scene view to pose; the lane
+// labels show their value. Empty for an invalid sequence.
 Preview samplePreview(const Document& doc, SeqRef ref, float frame);
 // Poses a scene (a copy: the caller's, never the document's). Each target,
 // the first object of that name in flatten order, gets the sampled world
 // position and rotation, its children following; one an active track
-// switches off loses its mesh, so it draws nothing.
+// switches off loses its mesh, so it draws nothing. A light target gets its
+// colour, intensity, range and enabled flag, and its position moves the
+// light's object (the Scene view lights from the scene it draws). UV offsets
+// are the renderer's to apply.
 void applyPreview(splash::Scene& scene, const Preview& preview);
 // Quaternion.Euler: about Z, then X, then Y (degrees).
 splash::Quat quatEuler(splash::Vec3 deg);

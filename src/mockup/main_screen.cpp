@@ -2778,21 +2778,27 @@ static ImRect splitViewport(State& st, ImDrawList* dl, ImRect r) {
     return scene;
 }
 
-static bool samePose(const splash::FlatObject& a, const splash::FlatObject& b) {
+// The same pose as far as the console can tell: the preview samples in its
+// fixed point, so a key on the scene's own pose comes back rounded. Within
+// one position step (gte / 4096 world units) and half an angle step on each
+// axis (180 / 2048 degrees) it is the scene's own.
+static bool samePose(const splash::FlatObject& a, const splash::FlatObject& b, float gte) {
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 4; ++j)
-            if (std::fabs(a.localToWorld.m[i][j] - b.localToWorld.m[i][j]) > 1e-4f) return false;
+            if (std::fabs(a.localToWorld.m[i][j] - b.localToWorld.m[i][j]) > (j == 3 ? gte / 4096.0f + 1e-4f : 5e-3f)) return false;
     return (a.object->mesh.has_value() == b.object->mesh.has_value());
 }
 
 // The camera a cutscene's camera tracks put at the scrub head: a frustum
 // (Unity camera axes, 4:3) with a camera icon at the eye.
 static void previewCamera(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const editor::Preview& p) {
-    if (!p.cameraPosition && !p.cameraRotation) return;
+    if (!p.cameraPosition && !p.cameraRotation && !p.cameraH) return;
     const splash::Vec3 eye = p.cameraPosition.value_or(splash::Vec3{});
     const splash::Quat q = editor::quatEuler(p.cameraRotation.value_or(splash::Vec3{}));
     const splash::Vec3 f = splash::rotate(q, {0, 0, 1}), u = splash::rotate(q, {0, 1, 0}), rt = splash::rotate(q, {1, 0, 0});
-    const float d = 1.2f, hh = d * 0.45f, hw = hh * 4.0f / 3.0f;
+    // A Camera H track sets the projection distance: half the 240 lines over H
+    // is the half height at distance 1 (camera.cpp projects with H).
+    const float d = 1.2f, hh = d * (p.cameraH ? 120.0f / std::max(1.0f, *p.cameraH) : 0.45f), hw = hh * 4.0f / 3.0f;
     const ImU32 col = rgb(0x5ccfe0);
     ImVec2 e, c[4];
     if (!view.project(toGl(eye), mn, sz, &e)) return;
@@ -2902,7 +2908,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 // An object the preview moves (itself or through a parent)
                 // shows no gizmo: a drag from the drawn pose would write the
                 // previewed value into the document.
-                const bool posed = previewing && !samePose(fo, drawnFo);
+                const bool posed = previewing && !samePose(fo, drawnFo, doc.scene().settings.gteScaling);
                 if (posed) {
                     const char* note = "Posed by the timeline: its keys move it";
                     ImVec2 ns = measure(f.regular, type::caption, note);

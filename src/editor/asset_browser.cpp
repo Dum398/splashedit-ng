@@ -425,8 +425,11 @@ std::vector<std::pair<std::string, std::string>> reversed(const std::vector<std:
 // Removes `dir` and its parents up to (not including) `stop` while empty.
 void pruneEmpty(const fs::path& stop, fs::path dir) {
     std::error_code ec;
-    while (!dir.empty() && dir != stop && dir.lexically_relative(stop).native().find("..") != 0 && fs::is_directory(dir, ec) &&
-           fs::is_empty(dir, ec)) {
+    auto inside = [&](const fs::path& d) {
+        fs::path rel = d.lexically_relative(stop);
+        return !rel.empty() && *rel.begin() != "..";
+    };
+    while (!dir.empty() && dir != stop && inside(dir) && fs::is_directory(dir, ec) && fs::is_empty(dir, ec)) {
         fs::remove(dir, ec);
         if (ec) return;
         dir = dir.parent_path();

@@ -3756,14 +3756,20 @@ static splash::Image busyImage() {
 
 void testQuantizer() {
     splash::Image img = busyImage();
-    // Speed: the brute-force k-means took 8.4 s on this image in an optimised
-    // build and over 40 s unoptimised; the bounded one well under 2 s. The
-    // bound is loose for slow CI machines.
+    // Speed: the brute-force k-means took 5-8 s on this image in an optimised
+    // build and over 40 s unoptimised; the bounded one 0.5 s and 1.6 s. Each
+    // build type gets its own bound, loose for slow CI machines, so a CI
+    // (Release) build still catches the old quantizer.
     auto t0 = std::chrono::steady_clock::now();
     splash::PsxTexture t8 = splash::convertTexture(img, splash::BitDepth::Bpp8);
     double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr, "quantizer: 256x256 8 bpp in %.2f s\n", sec);
-    CHECK(sec < 10.0);
+#ifdef NDEBUG
+    const double limit = 3.0;
+#else
+    const double limit = 12.0;
+#endif
+    CHECK(sec < limit);
     // Quality: the same as the brute-force quantizer's (its output is
     // byte-identical on x86-64: deltaE 1.716 / 4.827, blurred 0.462 / 2.129).
     // The headroom only allows for other platforms' float maths (a perturbed
@@ -4015,7 +4021,31 @@ void testAssetBrowser() {
     editor::AssetIndex index;
     CHECK(index.scan(proj));
     const unsigned gen = index.generation();
-    CHECK(!index.scan(proj) && index.generation() == gen);  // nothing changed
+    {
+        // On a mismatch, name the entries that differ between two scans.
+        const std::vector<editor::AssetEntry> before = index.entries();
+        const bool again = index.scan(proj);
+        CHECK(!again && index.generation() == gen);  // nothing changed
+        if (again) {
+            const auto& after = index.entries();
+            std::fprintf(stderr, "rescan: %zu entries before, %zu after\n", before.size(), after.size());
+            for (size_t i = 0; i < std::max(before.size(), after.size()); ++i) {
+                const editor::AssetEntry* x = i < before.size() ? &before[i] : nullptr;
+                const editor::AssetEntry* y = i < after.size() ? &after[i] : nullptr;
+                if (x && y && x->path == y->path && x->size == y->size && x->mtime == y->mtime && x->type == y->type &&
+                    x->madeBy == y->madeBy)
+                    continue;
+                auto show = [](const char* tag, const editor::AssetEntry* e) {
+                    if (!e) return std::fprintf(stderr, "  %s (none)\n", tag), void();
+                    std::fprintf(stderr, "  %s %s size %llu mtime %lld type %d madeBy %s\n", tag, e->path.c_str(),
+                                 (unsigned long long)e->size, (long long)e->mtime.time_since_epoch().count(), int(e->type),
+                                 e->madeBy.c_str());
+                };
+                show("before", x);
+                show("after ", y);
+            }
+        }
+    }
     CHECK(!index.find(".hidden") && !index.find(".git") && !index.find(".git/HEAD"));
     CHECK(!index.find("models/robot.gltf.import.json"));
     using T = editor::AssetType;

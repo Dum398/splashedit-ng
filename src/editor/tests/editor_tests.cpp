@@ -3657,6 +3657,30 @@ void testImportWarnings() {
 // a temporary folder, one at a time in the order asked, and only applying the
 // result changes the project and the scene. Cancel and a scene change drop an
 // import with nothing changed.
+// TMPDIR pointed at a folder of the test's own while it lives, so the
+// temporary folders counted are this process's (std::filesystem::
+// temp_directory_path honours TMPDIR on POSIX), not other processes' on a
+// busy machine.
+struct ScopedTmpdir {
+    std::optional<std::string> old;
+    explicit ScopedTmpdir(const std::filesystem::path& dir) {
+#ifndef _WIN32
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        if (const char* v = std::getenv("TMPDIR")) old = v;
+        setenv("TMPDIR", dir.c_str(), 1);
+#else
+        (void)dir;
+#endif
+    }
+    ~ScopedTmpdir() {
+#ifndef _WIN32
+        if (old) setenv("TMPDIR", old->c_str(), 1);
+        else unsetenv("TMPDIR");
+#endif
+    }
+};
+
 static std::set<std::string> importTemps() {
     std::set<std::string> r;
     std::error_code ec;
@@ -3695,6 +3719,7 @@ void testModelImports() {
     fs::path proj = dir / "game", outside = dir / "downloads";
     fs::create_directories(proj, ec);
     fs::create_directories(outside, ec);
+    const ScopedTmpdir scopedTmp(dir / "tmp");
     std::ofstream(outside / "robot.gltf") << robotGltf(0.5f);
     std::ofstream(outside / "crate.gltf") << robotGltf(0.75f);
     std::ofstream(outside / "tri.obj") << "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n";
@@ -3835,7 +3860,10 @@ void testBlendCancel() {
     fs::create_directories(dir);
     const fs::path mock = dir / "blender", blend = dir / "crate.blend", pids = dir / "pids";
     std::ofstream(blend) << "BLENDER-v300 not really";
-    std::ofstream(mock) << "#!/bin/sh\nsleep 10 &\necho $$ $! > '" << pids.string() << ".tmp'\nmv '" << pids.string()
+    const ScopedTmpdir scopedTmp(dir / "tmp");
+    // The child sleeps far longer than any bound below, so a job that is never
+    // killed cannot pass by Blender ending on its own.
+    std::ofstream(mock) << "#!/bin/sh\nsleep 120 &\necho $$ $! > '" << pids.string() << ".tmp'\nmv '" << pids.string()
                         << ".tmp' '" << pids.string() << "'\nwait\n";
     fs::permissions(mock, fs::perms::owner_all, fs::perm_options::add);
     setenv("SPLASHEDIT_BLENDER", mock.c_str(), 1);
@@ -3866,8 +3894,8 @@ void testBlendCancel() {
         const auto t0 = clock::now();
         {
             splash::BlendExport job(blend);
-            CHECK(clock::now() - t0 < 2s);  // Blender runs on the worker thread
-            CHECK(waitFor([&] { return fs::exists(pids); }, 5000ms));
+            CHECK(clock::now() - t0 < 30s);  // Blender runs on the worker thread (it would block 120 s)
+            CHECK(waitFor([&] { return fs::exists(pids); }, 30000ms));
             std::ifstream(pids) >> shell >> child;
             CHECK(shell > 0 && child > 0);
             CHECK(!job.done());
@@ -3875,8 +3903,8 @@ void testBlendCancel() {
             if (!destroy) {
                 const auto c0 = clock::now();
                 job.cancel();
-                CHECK(waitFor([&] { return job.done(); }, 5000ms));
-                CHECK(clock::now() - c0 < 2s);
+                CHECK(waitFor([&] { return job.done(); }, 30000ms));
+                CHECK(clock::now() - c0 < 30s);
                 bool cancelled = false;
                 try {
                     job.get();
@@ -3887,9 +3915,9 @@ void testBlendCancel() {
                 CHECK(cancelled);
             }
         }
-        CHECK(clock::now() - t0 < 5s);
-        CHECK(waitFor([&] { return !alive(shell) && !alive(child); }, 2000ms));
-        CHECK(temps() == before);
+        CHECK(clock::now() - t0 < 60s);  // never killed, the destructor would wait the 120 s out
+        CHECK(waitFor([&] { return !alive(shell) && !alive(child); }, 30000ms));
+        CHECK(waitFor([&] { return temps() == before; }, 10000ms));
     }
     unsetenv("SPLASHEDIT_BLENDER");
     fs::remove_all(dir, ec);

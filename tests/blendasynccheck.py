@@ -60,8 +60,39 @@ pidfile = os.path.join(tmp, 'mock.pid')
 DROP = '800,420'  # in the Scene view at 1600x960
 
 
-def temps():
-    return set(n for n in os.listdir(tempfile.gettempdir()) if n.startswith('splashedit-blend-'))
+def tempdir(name):
+    """The run's own TMPDIR: the editor makes its temporary folders with
+    std::filesystem::temp_directory_path, which honours TMPDIR, so what is left
+    in it was left by that run and not by anything else on the machine."""
+    return os.path.join(tmp, name, 'tmp')
+
+
+def temps(name):
+    d = tempdir(name)
+    return sorted(n for n in os.listdir(d) if n.startswith(('splashedit-blend-', 'splashedit-import-'))) if os.path.isdir(d) else []
+
+
+def poll(cond, seconds=10):
+    """Whether cond() comes true within `seconds`: under load, a killed process
+    takes a while to be reaped."""
+    deadline = time.time() + seconds
+    while True:
+        if cond():
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    try:
+        return ') Z ' not in open('/proc/%d/stat' % pid).read()
+    except OSError:
+        return False
 
 
 def run(name, script, release_after=None):
@@ -77,8 +108,10 @@ def run(name, script, release_after=None):
             os.remove(f)
     if release_after is None:
         open(release, 'w').close()
+    os.makedirs(tempdir(name))
     env = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe',
-               SPLASHEDIT_BLENDER=mock, MOCK_BLENDER_GLB=glb, MOCK_BLENDER_PID=pidfile, MOCK_BLENDER_RELEASE=release)
+               SPLASHEDIT_BLENDER=mock, MOCK_BLENDER_GLB=glb, MOCK_BLENDER_PID=pidfile, MOCK_BLENDER_RELEASE=release,
+               TMPDIR=tempdir(name))
     cmd = [editor, '--size', '1600x960', '--project', project] + script + ['--screenshot', os.path.join(project, 'end.png')]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
     deadline = time.time() + 180
@@ -99,8 +132,6 @@ def shot_line(out):
     return (m.group(1), int(m.group(2))) if m else (None, 0)
 
 
-before = temps()
-
 # Blender finishes only once the screenshot 60 frames after the drop is
 # written: it must find the import running and the editor drawing; then the
 # script waits for the import to finish and saves.
@@ -115,7 +146,7 @@ check('once Blender is done the model is placed and saved', 'crate' in names, st
 check('the .blend is adopted into models/', os.path.exists(os.path.join(project, 'models', 'crate.blend')))
 check('the model is imported', os.path.exists(os.path.join(project, 'models', 'crate.mesh')) or
       os.path.isdir(os.path.join(project, 'models', 'crate')), os.listdir(os.path.join(project, 'models')))
-check('no temporary folder is left', temps() <= before, temps() - before)
+check('no temporary folder is left', poll(lambda: not temps('place')), temps('place'))
 if shot_to and os.path.exists(mid):
     shutil.copyfile(mid, shot_to)
 
@@ -139,16 +170,9 @@ if m:
     check('Cancel places nothing', 'crate' not in names, str(names))
     check('Cancel adopts nothing', not os.path.exists(os.path.join(project, 'models', 'crate.blend')))
     pid = int(open(pidfile).read()) if os.path.exists(pidfile) else 0
-    alive = False
-    if pid:
-        try:
-            os.kill(pid, 0)
-            st = open('/proc/%d/stat' % pid).read() if os.path.exists('/proc/%d/stat' % pid) else ''
-            alive = ') Z ' not in st
-        except OSError:
-            alive = False
-    check('Cancel kills Blender', pid and not alive, pid)
-    check('Cancel leaves no temporary folder', temps() <= before, temps() - before)
+    # Never released, the mock Blender runs until killed: still alive after 10 s means Cancel did not kill it.
+    check('Cancel kills Blender', pid and poll(lambda: not alive(pid)), pid)
+    check('Cancel leaves no temporary folder', poll(lambda: not temps('cancel')), temps('cancel'))
 
 shutil.rmtree(tmp, ignore_errors=True)
 print('%d failures' % fails)

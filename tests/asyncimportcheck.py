@@ -68,8 +68,16 @@ DROP = '800,420'  # in the Scene view at 1600x960
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 
 
-def temps():
-    return set(n for n in os.listdir(tempfile.gettempdir()) if n.startswith('splashedit-import-'))
+def tempdir(name):
+    """The run's own TMPDIR: the editor makes its temporary folders with
+    std::filesystem::temp_directory_path, which honours TMPDIR, so what is left
+    in it was left by that run and not by anything else on the machine."""
+    return os.path.join(tmp, name, 'tmp')
+
+
+def temps(name):
+    d = tempdir(name)
+    return sorted(n for n in os.listdir(d) if n.startswith('splashedit-import-')) if os.path.isdir(d) else []
 
 
 def run(name, script):
@@ -77,9 +85,10 @@ def run(name, script):
     (project, output, top-level object names of the saved scene, scene bytes)."""
     project = os.path.join(tmp, name, 'courtyard')
     shutil.copytree(example, project)
+    os.makedirs(tempdir(name))
     cmd = [editor, '--size', '1600x960', '--project', project] + script + ['--screenshot', os.path.join(project, 'end.png')]
     try:
-        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=ENV, timeout=240).stdout.strip()
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=dict(ENV, TMPDIR=tempdir(name)), timeout=240).stdout.strip()
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or b'').decode(errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')
         out += '\n(timed out)'
@@ -94,7 +103,6 @@ def shot_lines(out):
             for m in re.finditer(r'model import: (\w+), (\d+) frames drawn while it ran, (\d+) queued', out)]
 
 
-before = temps()
 models = lambda p: sorted(os.listdir(os.path.join(p, 'models'))) if os.path.isdir(os.path.join(p, 'models')) else []
 
 # Three frames after the drop the import must still be running and the
@@ -114,7 +122,7 @@ if len(shots) == 2:
 check('once it is built the model is placed and saved', 'terrain' in names, str(names) + ' | ' + out[-300:])
 check('the model is adopted and imported', 'terrain.glb' in models(project) and 'terrain.mesh' in models(project), models(project))
 check('the status bar says it was imported', 'status: Imported terrain.glb, 80000 triangles' in out, out[-300:])
-check('no temporary folder is left', temps() <= before, temps() - before)
+check('no temporary folder is left', not temps('place'), temps('place'))
 
 # The scene as a run with no import saves it, to compare Cancel against.
 _, _, plain, plainData = run('plain', ['--wait', '5', '--key', 'ctrl+s', '--wait', '10'])
@@ -134,7 +142,7 @@ if m:
     check('Cancel places nothing', 'terrain' not in names, str(names))
     check('Cancel leaves the saved scene as it was', data == plainData, '%d vs %d bytes' % (len(data), len(plainData)))
     check('Cancel adopts and writes nothing', not any(n.startswith('terrain') for n in models(project)), models(project))
-    check('Cancel leaves no temporary folder', temps() <= before, temps() - before)
+    check('Cancel leaves no temporary folder', not temps('cancel'), temps('cancel'))
 
 # Two drops in a row: the second waits for the first, and both land in the
 # order dropped, though the second alone would be done first.
@@ -148,7 +156,7 @@ if shot_to and os.path.exists(queued):
 check('both models are placed', 'terrain' in names and 'rocks' in names, str(names))
 if 'terrain' in names and 'rocks' in names:
     check('in the order they were dropped', names.index('terrain') < names.index('rocks'), str(names))
-check('no temporary folder is left after both', temps() <= before, temps() - before)
+check('no temporary folder is left after both', not temps('two'), temps('two'))
 
 print('took %.0f s' % (time.time() - t0))
 shutil.rmtree(tmp, ignore_errors=True)

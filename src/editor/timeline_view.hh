@@ -3,8 +3,10 @@
 // (cutscenes) and one of skin clip events. Keys are diamonds, events flags:
 // click to select (Ctrl or Shift adds), drag on empty lane space to box-select
 // across lanes, drag a selected item to move the whole selection (whole
-// frames), double-click a lane to key it at the scrub head, Delete to remove,
-// Ctrl+C / Ctrl+V to copy and paste at the scrub head. The row at the bottom
+// frames; past the lanes' left or right edge the view scrolls along),
+// double-click a lane to key it at the scrub head, Delete to remove, Ctrl+C /
+// Ctrl+V to copy and paste at the scrub head (adding a track a key needs).
+// A skin event whose object or clip is gone draws red. The row at the bottom
 // edits the selected key or event. Every edit goes through
 // editor/timeline.hh, one undo step each.
 #pragma once
@@ -136,6 +138,10 @@ private:
     bool m_dragging = false;
     float m_dragFrom = 0;
     int m_dragApplied = 0;
+    // skinTargets() for the skin lane's missing objects and clips, and the
+    // document state it was read at.
+    std::vector<editor::SkinTarget> m_skinTargets;
+    unsigned m_skinRev = ~0u, m_skinAssets = ~0u, m_skinLoad = ~0u;
 };
 
 }  // namespace ui

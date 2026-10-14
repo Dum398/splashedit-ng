@@ -23,6 +23,8 @@ using splash::TrackType;
 namespace {
 
 constexpr float kHeaderH = 46, kRulerH = 26, kLaneH = 40, kKeyRowH = 46, kLabelW = 240, kDiamond = 6, kPad = 12;
+// A drag past the lanes' edge scrolls this many pixels a second, plus the gain per pixel out, up to the max.
+constexpr float kAutoScrollBase = 240, kAutoScrollGain = 8, kAutoScrollMax = 2400;
 
 ImU32 trackColor(TrackType t) {
     const int v = int(t);
@@ -230,11 +232,16 @@ void TimelinePanel::paste(editor::Document& doc) {
     }
     int skipped = 0;
     const int at = int(std::lround(m_frame));
+    const size_t before = editor::seqTracks(doc, m_ref) ? editor::seqTracks(doc, m_ref)->size() : 0;
     if (auto sel = editor::pasteClipboard(doc, m_ref, m_clip, at, &skipped)) {
         m_sel = *sel;
-        if (skipped) note("Pasted; " + std::to_string(skipped) + " had no matching track here");
+        const int added = int(editor::seqTracks(doc, m_ref)->size() - before);
+        std::string msg;
+        if (added) msg = "Pasted; added " + std::to_string(added) + (added == 1 ? " track" : " tracks") + " for the keys";
+        if (skipped) msg += (msg.empty() ? "Pasted; " : "; ") + std::to_string(skipped) + " skipped (an animation has no camera or audio)";
+        if (!msg.empty()) note(msg);
     } else if (skipped) {
-        note("Not pasted: no track here drives what the keys were copied from");
+        note("Not pasted: an animation has no camera tracks or audio events");
     } else {
         note("Not pasted: it would pass frame " + std::to_string(editor::kMaxTimelineFrame) + " or the runtime's limits");
     }
@@ -678,6 +685,14 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
     const int rows = n + (audio ? 1 : 0) + (anySkinned ? 1 : 0);
     const float maxScroll = std::max(0.0f, rows * kLaneH - body.GetHeight());
     const std::vector<std::string> clips = audio ? editor::audioClips(doc) : std::vector<std::string>();
+    // What the skin events can play (read from the .anim files, so only again after an edit).
+    if (!skin.empty() && (m_skinRev != doc.revision() || m_skinAssets != doc.assetsId() || m_skinLoad != doc.loadId())) {
+        m_skinTargets = editor::skinTargets(doc);
+        m_skinRev = doc.revision();
+        m_skinAssets = doc.assetsId();
+        m_skinLoad = doc.loadId();
+    }
+    auto skinProblem = [&](int i) { return editor::skinEventProblem(m_skinTargets, skin[size_t(i)]); };
 
     // Wheel: Ctrl zooms about the mouse, Shift (or no room to scroll) pans, else scrolls the lanes.
     const ImRect area(labels.Min, ImVec2(body.Max.x, body.Max.y));
@@ -696,6 +711,16 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         m_view0 = std::clamp(m_view0, -kPad / m_ppf, float(editor::kMaxTimelineFrame));
     }
     if (io.MouseWheelH != 0 && area.Contains(io.MousePos)) m_view0 = std::max(0.0f, m_view0 - io.MouseWheelH * 40 / m_ppf);
+    // Dragging keys or a box past the left or right of the lanes scrolls them,
+    // faster the further out the mouse is.
+    if ((m_dragging || m_boxing) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const float out = io.MousePos.x < body.Min.x ? io.MousePos.x - body.Min.x : io.MousePos.x > body.Max.x ? io.MousePos.x - body.Max.x : 0;
+        if (out != 0) {
+            const float pxPerSec = std::min(kAutoScrollMax, kAutoScrollBase + kAutoScrollGain * std::fabs(out));
+            m_view0 += std::copysign(pxPerSec, out) * io.DeltaTime / m_ppf;
+            m_view0 = std::clamp(m_view0, -kPad / m_ppf, float(editor::kMaxTimelineFrame));
+        }
+    }
     m_scrollY = std::clamp(m_scrollY, 0.0f, maxScroll);
 
     std::set<int> selTracks;
@@ -926,8 +951,8 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
                            : std::string();
             });
     }
-    if (anySkinned) eventLane(skinRow, Item::Skin, kSkinColor, int(skin.size()), [&](int i) { return skin[size_t(i)].frame; }, skinName,
-                              [&](int) { return std::string(); });
+    if (anySkinned)
+        eventLane(skinRow, Item::Skin, kSkinColor, int(skin.size()), [&](int i) { return skin[size_t(i)].frame; }, skinName, skinProblem);
 
     if (rows == 0) {
         textCentered(dl, body, f.regular, type::label, color::textFaint, "No tracks yet: Add track picks a property and a target.");
@@ -1052,7 +1077,9 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
             tooltip(tip);
         } else {
             const splash::SkinAnimEvent& e = skin[size_t(hit->index)];
-            std::snprintf(tip, sizeof tip, "Frame %d: %s plays '%s'%s", e.frame, e.object.c_str(), e.clip.c_str(), e.loop ? ", looping" : "");
+            const std::string problem = skinProblem(hit->index);
+            std::snprintf(tip, sizeof tip, "Frame %d: %s plays '%s'%s%s%s", e.frame, e.object.c_str(), e.clip.c_str(), e.loop ? ", looping" : "",
+                          problem.empty() ? "" : "\n", problem.c_str());
             tooltip(tip);
         }
     }

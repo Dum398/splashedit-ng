@@ -3410,20 +3410,115 @@ void testTimelineClipboard() {
     // Past the last frame: refused, no step.
     h = d.historySize();
     CHECK(!editor::pasteClipboard(d, ref, clip, editor::kMaxTimelineFrame - 5) && d.historySize() == h);
-    // Into another cutscene: only the rotation track matches; the position keys are skipped.
+    // Into another cutscene: the rotation key goes to its rotation track (the
+    // position keys get a track of their own: testTimelinePasteAddsTrack).
     const editor::SeqRef out{editor::SeqKind::Cutscene, 1};
     auto there = editor::pasteClipboard(d, out, clip, 0, &skipped);
-    CHECK(there && skipped == 2 && there->keys.size() == 1 && there->audio.size() == 1);
+    CHECK(there && skipped == 0 && there->keys.size() == 3 && there->audio.size() == 1);
     CHECK(editor::seqTracks(d, out)->at(0).keyframes.size() == 1 && editor::seqTracks(d, out)->at(0).keyframes[0].frame == 5);
     CHECK(d.undo());
-    // Nothing that can land: refused.
-    editor::TimelineClipboard posOnly;
-    posOnly.keys = {clip.keys[0]};
-    CHECK(!editor::pasteClipboard(d, out, posOnly, 0, &skipped) && skipped == 1);
     // A track at 64 keys takes no more.
     for (int i = 0; i < editor::kMaxTimelineKeys - 2; ++i) CHECK(editor::addKey(d, ref, 0, 200 + i, editor::KeyValue{0, 0, 0}));
     h = d.historySize();
     CHECK(!editor::pasteClipboard(d, ref, clip, 1000) && d.historySize() == h);
+}
+
+// Pasting a key into a sequence without its track adds the track in the same
+// undo step; a camera key has no track to go to in an animation; the tracks
+// stay within the runtime's eight.
+void testTimelinePasteAddsTrack() {
+    using splash::TrackType;
+    splash::Scene sc;
+    splash::Cutscene cs;
+    cs.name = "intro";
+    cs.tracks.push_back(trackOf(TrackType::ObjectPosition, {{10, 1}, {20, 2}}));
+    splash::CutsceneTrack cam = trackOf(TrackType::CameraPosition, {{30, 5}});
+    cam.target = "";
+    cs.tracks.push_back(cam);
+    sc.cutscenes.push_back(cs);
+    splash::Cutscene empty;
+    empty.name = "outro";
+    sc.cutscenes.push_back(empty);
+    splash::Animation an;
+    an.name = "wave";
+    sc.animations.push_back(an);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const editor::SeqRef out{editor::SeqKind::Cutscene, 1};
+    const editor::SeqRef anim{editor::SeqKind::Animation, 0};
+    const editor::TimelineClipboard clip = editor::copySelection(d, ref, {{{0, 0}, {0, 1}, {1, 0}}, {}, {}});
+    CHECK(clip.keys.size() == 3);
+
+    // An empty cutscene: both tracks are added, keys in place, one step.
+    size_t h = d.historySize();
+    int skipped = -1;
+    auto pasted = editor::pasteClipboard(d, out, clip, 40, &skipped);
+    CHECK(pasted && skipped == 0 && pasted->keys.size() == 3 && d.historySize() == h + 1);
+    const auto* tracks = editor::seqTracks(d, out);
+    CHECK(tracks->size() == 2);
+    if (tracks->size() == 2) {
+        CHECK(tracks->at(0).type == TrackType::ObjectPosition && tracks->at(0).target == "A");
+        CHECK(tracks->at(0).keyframes.size() == 2 && tracks->at(0).keyframes[0].frame == 40 && tracks->at(0).keyframes[1].frame == 50);
+        CHECK(near3(tracks->at(0).keyframes[1].value, 2, 4, 0));
+        CHECK(tracks->at(1).type == TrackType::CameraPosition && tracks->at(1).target.empty());
+        CHECK(tracks->at(1).keyframes.size() == 1 && tracks->at(1).keyframes[0].frame == 60);
+    }
+    for (const editor::KeyRef& k : pasted ? pasted->keys : std::vector<editor::KeyRef>())
+        CHECK(editor::key(d, out, k) && editor::key(d, out, k)->frame >= 40);
+    // One undo takes the keys and the added tracks back.
+    CHECK(d.undo() && editor::seqTracks(d, out)->empty());
+    // Pasting again finds the tracks the first paste added.
+    CHECK(d.redo() && editor::pasteClipboard(d, out, clip, 100) && editor::seqTracks(d, out)->size() == 2 &&
+          editor::seqTracks(d, out)->at(0).keyframes.size() == 4);
+
+    // An animation has no camera tracks: the position track is added, the camera key skipped.
+    auto inAnim = editor::pasteClipboard(d, anim, clip, 0, &skipped);
+    CHECK(inAnim && skipped == 1 && inAnim->keys.size() == 2);
+    CHECK(editor::seqTracks(d, anim)->size() == 1 && editor::seqTracks(d, anim)->at(0).type == TrackType::ObjectPosition);
+    CHECK(d.undo());
+    // Only a camera key: nothing can land, refused with no step.
+    editor::TimelineClipboard camOnly;
+    camOnly.keys = {clip.keys[2]};
+    h = d.historySize();
+    CHECK(!editor::pasteClipboard(d, anim, camOnly, 0, &skipped) && skipped == 1 && d.historySize() == h);
+
+    // A sequence with the runtime's eight tracks takes no ninth: refused, no step.
+    for (int i = 0; i < editor::kMaxTimelineTracks; ++i) CHECK(editor::addTrack(d, anim, TrackType::ObjectActive, "T" + std::to_string(i)) == i);
+    h = d.historySize();
+    CHECK(!editor::pasteClipboard(d, anim, clip, 0) && d.historySize() == h && editor::seqTracks(d, anim)->size() == 8);
+}
+
+// A skin event whose object or clip is gone is a problem the export refuses,
+// and the timeline draws it red with that problem in its tooltip.
+void testTimelineSkinEventProblem() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skin";
+    splash::Scene sc = splash::loadScene(project / "skin.scene");
+    editor::Document d;
+    d.reset(sc, project);
+    std::vector<editor::SkinTarget> targets = editor::skinTargets(d);
+    CHECK(targets.size() == 1);
+    splash::SkinAnimEvent e;
+    e.object = "Arm";
+    e.clip = "raise";
+    CHECK(editor::skinEventProblem(targets, e).empty());
+    e.clip = "wave";
+    const std::string noClip = editor::skinEventProblem(targets, e);
+    CHECK(noClip.find("'Arm' has no clip named 'wave'") != std::string::npos);
+    e.clip = "raise";
+    e.object = "Leg";
+    CHECK(editor::skinEventProblem(targets, e).find("No active skinned object is named 'Leg'") != std::string::npos);
+    // The object deleted (or made inactive): what was fine is now missing.
+    e.object = "Arm";
+    splash::Scene gone = sc;
+    for (splash::Object& o : gone.objects)
+        if (o.name == "Arm") o.active = false;
+    d.reset(gone, project);
+    CHECK(editor::skinEventProblem(editor::skinTargets(d), e).find("No active skinned object is named 'Arm'") != std::string::npos);
+    // Two of that name: the export cannot tell them apart.
+    targets.push_back(targets[0]);
+    CHECK(editor::skinEventProblem(targets, e).find("Two skinned objects are named 'Arm'") != std::string::npos);
 }
 
 // Audio and skin clip events: added, edited and limited as the exporter
@@ -3680,6 +3775,59 @@ void testTimelineUiPositionStart() {
     CHECK((editor::sampleAt(d, ref, 1, 0) == editor::KeyValue{150, 124, 0}));
     CHECK((editor::sampleAt(d, ref, 1, 15) == editor::KeyValue{75, 62, 0}));
     CHECK((editor::sampleAt(d, ref, 1, 30) == editor::KeyValue{0, 0, 0}));
+}
+
+// UI visible, progress and colour tracks start from the element as the scene
+// has it (psxsplash's CutscenePlayer reads the UI system when a track starts),
+// so the first key added to an empty track is the element's current value.
+void testTimelineUiStartValues() {
+    using splash::TrackType;
+    splash::UICanvas cv;
+    cv.name = "hud";
+    splash::UIElement bar, label;
+    bar.name = "bar";
+    bar.type = splash::UIElementType::Progress;
+    bar.value = 65;
+    bar.visible = false;
+    bar.color = {0.25f, 0.5f, 1.0f};
+    label.name = "label";
+    label.type = splash::UIElementType::Text;
+    label.value = 40;  // not a progress bar: the runtime's getProgress gives 0
+    cv.elements = {bar, label};
+    splash::Scene sc;
+    sc.canvases.push_back(cv);
+    splash::Cutscene c;
+    c.name = "intro";
+    c.durationFrames = 60;
+    sc.cutscenes.push_back(c);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    const int vis = editor::addTrack(d, ref, TrackType::UIElementVisible, "hud/bar");
+    const int prog = editor::addTrack(d, ref, TrackType::UIProgress, "hud/bar");
+    const int col = editor::addTrack(d, ref, TrackType::UIColor, "hud/bar");
+    const int other = editor::addTrack(d, ref, TrackType::UIProgress, "hud/label");
+    CHECK(vis == 0 && prog == 1 && col == 2 && other == 3);
+    const auto& tr = *editor::seqTracks(d, ref);
+    CHECK((editor::initialValue(d, tr[0]) == editor::KeyValue{0, 0, 0}));
+    CHECK((editor::initialValue(d, tr[1]) == editor::KeyValue{65, 0, 0}));
+    CHECK((editor::initialValue(d, tr[2]) == editor::KeyValue{0.25f, 0.5f, 1.0f}));
+    CHECK((editor::initialValue(d, tr[3]) == editor::KeyValue{0, 0, 0}));
+    // The lane shows the element's value before any key.
+    CHECK(near3(editor::sampleAt(d, ref, prog, 0), 65, 0, 0));
+    // The first key of each track is the element's value, not 0.
+    auto kp = editor::addKey(d, ref, prog, 20);
+    CHECK(kp && near3(editor::key(d, ref, *kp)->value, 65, 0, 0));
+    auto kc = editor::addKey(d, ref, col, 20);
+    CHECK(kc && near3(editor::key(d, ref, *kc)->value, 0.25f, 0.5f, 1.0f));
+    // The bar starts hidden: its first visible key is off.
+    auto kv = editor::addKey(d, ref, vis, 20);
+    CHECK(kv && editor::key(d, ref, *kv)->value[0] < 0.5f);
+    // A shown element starts on.
+    splash::Scene shown = d.scene();
+    shown.canvases[0].elements[0].visible = true;
+    d.reset(shown);
+    CHECK(editor::initialValue(d, d.scene().cutscenes[0].tracks[0])[0] == 1.0f);
 }
 
 void testTimelineRetarget() {
@@ -5716,6 +5864,9 @@ int main(int argc, char** argv) {
     testSeqRenameLua();
     testSeqRenameScripts();
     testTimelineUiPositionStart();
+    testTimelineUiStartValues();
+    testTimelinePasteAddsTrack();
+    testTimelineSkinEventProblem();
     testLuaTokenize();
     testLuaBuffer();
     testLuaComplete();

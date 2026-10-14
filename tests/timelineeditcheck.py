@@ -1,7 +1,8 @@
 # Timeline edits beyond keys: rename a cutscene (in the scene inspector and
 # from the timeline's sequence picker) with a taken name refused, delete one
 # and undo it, point a track at another object from its lane menu, and the
-# Scene view previewing light and UV offset tracks. Each run saves with
+# Scene view previewing light and UV offset tracks, and a skin clip event whose
+# clip is gone drawn red in its lane beside a good one. Each run saves with
 # Ctrl+S and the check reads the saved scene; the previews compare Scene
 # view pixels at two scrub frames and must leave the scene file alone.
 # usage: python3 timelineeditcheck.py <splashedit>   (needs a display: xvfb-run -a)
@@ -39,11 +40,16 @@ def key(frame, value):
     return {'frame': frame, 'value': value}
 
 
-def project_copy(tracks=None):
+def project_copy(tracks=None, skin=None):
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     scene = os.path.join(project, 'courtyard.scene')
     s = json.load(open(scene, encoding='utf-8'))
+    if skin is not None:
+        # tests/skin's arm, with its clips bend and raise, and `skin` as intro's skin events.
+        for f in ('arm.mesh', 'bend.anim', 'raise.anim'):
+            shutil.copy(os.path.join(here, 'skin', f), project)
+        s['objects'].append(json.load(open(os.path.join(here, 'skin', 'skin.scene'), encoding='utf-8'))['objects'][0])
     for o in s['objects']:
         if o['name'] == 'Torch Light':
             o['components'][0]['runtime'] = True  # light tracks drive runtime point lights
@@ -52,6 +58,8 @@ def project_copy(tracks=None):
                   {'type': 'cameraPosition', 'target': '', 'keyframes': [key(0, [0, 3, -10])]}]
     s['cutscenes'] = [{'name': 'intro', 'durationFrames': 150, 'audioEvents': [], 'tracks': tracks},
                       {'name': 'outro', 'durationFrames': 90, 'audioEvents': [], 'tracks': []}]
+    if skin is not None:
+        s['cutscenes'][0]['skinEvents'] = skin
     json.dump(s, open(scene, 'w', encoding='utf-8'), indent=2)
     return project
 
@@ -60,13 +68,13 @@ LOGIC = os.path.join('scripts', 'game_logic.lua')  # Game Logic's script
 script_after = None  # with `lua`: the script as the run left it
 
 
-def run(args, tracks=None, save=True, lua=None):
+def run(args, tracks=None, save=True, lua=None, skin=None):
     """Runs the editor on a fresh copy with `args` (then Ctrl+S when `save`);
     returns the scene file's bytes, the screenshot path and the output. With
     `lua`, Game Logic's script gets it appended first and script_after its
     text after the run."""
     global script_after
-    project = project_copy(tracks)
+    project = project_copy(tracks, skin)
     if lua is not None:
         with open(os.path.join(project, LOGIC), 'a', encoding='utf-8', newline='') as f:
             f.write(lua)
@@ -210,6 +218,27 @@ for what, tracks, least in (
     n = differing(shot0, shot75, SCENE_VIEW)
     check(f'the Scene view previews {what}', n > least, f'{n} pixels differ | ' + out75[-200:])
     check(f'previewing {what} leaves the scene file alone', d0 == untouched and d75 == untouched)
+
+# The skin lane (after the two tracks and the audio lane, y 800..840): the
+# event at 30 plays Arm's raise, the one at 90 a clip Arm does not have. Under
+# each tab, its stem and foot take the event's colour: blue, and red (missing).
+def stem_colours(path, frame, y0=822, y1=838):
+    _, rows = read_png(path, y1)
+    red = blue = 0
+    for y in range(y0, y1):
+        for x in range(fx(frame) - 3, fx(frame) + 4):
+            r, g, b = rows[y][3 * x:3 * x + 3]
+            red += r > b + 60 and r > g + 60
+            blue += b > r + 60
+    return red, blue
+
+
+_, shot, out = run(['--timeline', 'intro', '--wait', '3'], save=False,
+                   skin=[{'frame': 30, 'object': 'Arm', 'clip': 'raise', 'loop': False},
+                         {'frame': 90, 'object': 'Arm', 'clip': 'wave', 'loop': False}])
+good, missing = stem_colours(shot, 30), stem_colours(shot, 90)
+check('a skin event whose clip is gone draws red, a good one does not', good[1] >= 8 and good[0] == 0 and missing[0] >= 8 and
+      missing[1] == 0, f'good (red, blue) {good}, missing {missing} | ' + out[-200:])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

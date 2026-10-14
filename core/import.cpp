@@ -35,6 +35,20 @@ constexpr int kMaxTextureSide = 256;  // PS1 UVs are 8 bits
 
 [[noreturn]] void fail(const std::string& msg) { throw std::runtime_error(msg); }
 
+// The running importModel's ImportProgress on this thread, null for none.
+thread_local ImportProgress* t_progress = nullptr;
+
+// A point where the import may stop: throws ImportCancelled once it is
+// cancelled, else moves the fraction done up to `fraction` (none: unchanged).
+void checkpoint(float fraction = -1) {
+    ImportProgress* p = t_progress;
+    if (!p) return;
+    if (p->cancel.load(std::memory_order_relaxed)) throw ImportCancelled();
+    if (fraction > p->fraction.load(std::memory_order_relaxed)) p->fraction.store(fraction, std::memory_order_relaxed);
+}
+// Every this many triangles of one mesh, the import checks for a cancel.
+constexpr size_t kCheckEvery = 8192;
+
 std::string lower(std::string s) {
     for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
     return s;
@@ -738,9 +752,11 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
                   const RigSource& rig, const fs::path& source, const fs::path& project, const ImportSettings& settings,
                   const std::string& stem) {
     const std::string what = projectPath(source.filename());
+    checkpoint(0.55f);
     std::vector<AnimClip> clips = buildRig(out, baked, nodes, rig, settings);
     applySettings(baked, nodes, clips, settings);
     placeRootSpaceNodes(nodes);
+    checkpoint(0.65f);
     const Mesh& mesh = baked.mesh;
     out.triangles = baked.triangles();
     if (out.triangles == 0) fail(what + " has no triangles to import");
@@ -759,6 +775,7 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     int n = 0;
     std::vector<Material> byIndex;  // per model material index
     for (const SourceMaterial& mat : mats) {
+        checkpoint(0.65f + 0.15f * float(byIndex.size()) / float(mats.size()));
         Material outMat;
         outMat.color = mat.color;
         if (mat.image) {
@@ -782,9 +799,11 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     }
     for (int i : baked.materials) out.materials.push_back(byIndex[size_t(i)]);
 
+    checkpoint(0.8f);
     fs::path meshFile = dir / (stem + ".mesh");
     saveMesh(mesh, project / meshFile);
     out.mesh = projectPath(meshFile);
+    checkpoint(0.85f);
 
     // The tree: models/<stem>/<node>.mesh, and the clips beside them as
     // models/<stem>/<clip>.anim, the folder cleared of an earlier import's
@@ -819,6 +838,7 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     }
     std::set<std::string> taken;
     for (NodeBuild& nb : nodes) {
+        checkpoint(0.85f + 0.15f * float(out.nodes.size()) / float(nodes.size()));
         ImportedNode node;
         node.name = nb.name.empty() ? std::string("Node") : nb.name;
         node.parent = nb.parent;
@@ -915,6 +935,7 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         fail(what + ": " + resultText(r));
     }
     std::unique_ptr<cgltf_data, void (*)(cgltf_data*)> guard(data, cgltf_free);
+    checkpoint(0.15f);
 
     ImportedModel out;
     std::vector<const cgltf_node*> nodes;
@@ -1043,11 +1064,18 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         };
         if (nrm.a) {
             int base = int(mesh.positions.size());
-            for (size_t i = 0; i < pos.a->count; i++) vertex(i, false);
-            for (size_t t = 0; t < idx.size(); t += 3) addTriangle(sm, base + idx[t], base + idx[t + 1], base + idx[t + 2], reverse);
+            for (size_t i = 0; i < pos.a->count; i++) {
+                if (i % kCheckEvery == 0) checkpoint();
+                vertex(i, false);
+            }
+            for (size_t t = 0; t < idx.size(); t += 3) {
+                if (t % (3 * kCheckEvery) == 0) checkpoint();
+                addTriangle(sm, base + idx[t], base + idx[t + 1], base + idx[t + 2], reverse);
+            }
         } else {
             // No normals: flat shading, each triangle gets its own corners.
             for (size_t t = 0; t < idx.size(); t += 3) {
+                if (t % (3 * kCheckEvery) == 0) checkpoint();
                 int c0 = vertex(size_t(idx[t]), true), c1 = vertex(size_t(idx[t + 1]), true), c2 = vertex(size_t(idx[t + 2]), true);
                 addFlatTriangle(mesh, sm, c0, c1, c2, reverse);
             }
@@ -1055,8 +1083,11 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
     };
 
     static const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const size_t meshNodes = size_t(std::count_if(nodes.begin(), nodes.end(), [](const cgltf_node* n) { return n->mesh != nullptr; }));
+    size_t meshesDone = 0;
     for (const cgltf_node* n : nodes) {
         if (!n->mesh) continue;
+        checkpoint(0.15f + 0.35f * float(meshesDone++) / float(meshNodes));
         // A skinned node's transform is ignored (glTF 2.0, 3.7.3.3): the
         // joints place its vertices, which are in root space.
         const int skin = n->skin ? skinIndex[n->skin] : -1;
@@ -1093,6 +1124,7 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
     }
     if (skipped) out.warnings.push_back("points and lines were left out, only triangles are imported");
 
+    checkpoint(0.5f);
     // Animations: the channels on joints. Cubic-spline samplers keep their
     // values (the middle of each in-tangent, value, out-tangent triple).
     bool cubic = false, morph = false;
@@ -1172,11 +1204,25 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     opts.load_external_files = true;  // the .mtl of an .obj
     opts.ignore_missing_external_files = true;
     opts.obj_search_mtl_by_filename = true;
+    // Reading a large file is most of the time: ufbx reports how far it is
+    // and stops when the import is cancelled.
+    opts.progress_cb.fn = [](void*, const ufbx_progress* pr) -> ufbx_progress_result {
+        ImportProgress* p = t_progress;
+        if (!p) return UFBX_PROGRESS_CONTINUE;
+        if (p->cancel.load(std::memory_order_relaxed)) return UFBX_PROGRESS_CANCEL;
+        if (pr->bytes_total > 0) {
+            const float f = 0.15f * float(double(pr->bytes_read) / double(pr->bytes_total));
+            if (f > p->fraction.load(std::memory_order_relaxed)) p->fraction.store(f, std::memory_order_relaxed);
+        }
+        return UFBX_PROGRESS_CONTINUE;
+    };
     ufbx_error err;
     std::u8string src8 = source.u8string();
     std::string src(src8.begin(), src8.end());
     ufbx_scene* loaded = ufbx_load_file(src.c_str(), &opts, &err);
+    if (!loaded && err.type == UFBX_ERROR_CANCELLED) throw ImportCancelled();
     if (!loaded) fail(what + ": " + std::string(err.description.data, err.description.length));
+    checkpoint(0.15f);
     std::unique_ptr<ufbx_scene, void (*)(ufbx_scene*)> scene(loaded, ufbx_free_scene);
 
     ImportedModel out;
@@ -1204,6 +1250,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
         bool reverse = ufbx_matrix_determinant(&toSpace) >= 0;
         tri.resize(me->max_face_triangles * 3);
         for (size_t fi = 0; fi < me->faces.count; fi++) {
+            if (fi % kCheckEvery == 0) checkpoint();
             ufbx_face face = me->faces.data[fi];
             if (face.num_indices < 3) {
                 skipped = true;
@@ -1270,6 +1317,8 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     std::vector<NodeBuild> tree;
     std::vector<int> treeOf(scene->nodes.count, -1);  // by typed id
     std::vector<const ufbx_node*> skinnedNodes;       // by skin index
+    size_t meshNodes = 0, meshesDone = 0;
+    for (const ufbx_node* n : scene->nodes) meshNodes += n->mesh != nullptr;
     std::function<void(const ufbx_node*, int)> walk = [&](const ufbx_node* n, int parent) {
         NodeBuild nb;
         nb.name.assign(n->name.data, n->name.length);
@@ -1289,6 +1338,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
                 skin = int(skinnedNodes.size());
                 skinnedNodes.push_back(n);
             }
+            checkpoint(0.15f + 0.35f * float(meshesDone++) / float(meshNodes));
             emitMesh(baked, n, n->geometry_to_world, skin);
             nb.local.emplace();
             nb.rootSpace = skin >= 0;
@@ -1303,6 +1353,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
         walk(scene->root_node, -1);
     else
         for (const ufbx_node* c : scene->root_node->children) walk(c, -1);
+    checkpoint(0.5f);
     if (skipped) out.warnings.push_back("points and lines were left out, only triangles are imported");
 
     // The skeleton: every bone a skin uses, and the bones above it. Each
@@ -1421,14 +1472,24 @@ bool canImportModel(const fs::path& file) {
 
 std::string importName(const fs::path& file) { return safeStem(file); }
 
-ImportedModel importModel(const fs::path& source, const fs::path& project, const ImportSettings& settings, const fs::path& as) {
+ImportedModel importModel(const fs::path& source, const fs::path& project, const ImportSettings& settings, const fs::path& as,
+                          ImportProgress* progress) {
     if (!canImportModel(source))
         fail(projectPath(source.filename()) + ": only .glb, .gltf, .fbx, .obj and .blend models can be imported");
     if (!(settings.scale > 0) || !std::isfinite(settings.scale)) fail("the import scale must be above 0");
     std::string e = lower(projectPath(source.extension()));
     const std::string stem = safeStem(as.empty() ? source : as);
-    if (e == ".blend") return importBlend(source, project, settings, stem);
-    return e == ".fbx" || e == ".obj" ? importUfbx(source, project, settings, stem) : importGltf(source, project, settings, stem);
+    struct Scope {
+        ImportProgress* old;
+        ~Scope() { t_progress = old; }
+    } scope{t_progress};
+    t_progress = progress;
+    checkpoint();
+    ImportedModel out = e == ".blend"                ? importBlend(source, project, settings, stem)
+                        : e == ".fbx" || e == ".obj" ? importUfbx(source, project, settings, stem)
+                                                     : importGltf(source, project, settings, stem);
+    checkpoint(1.0f);
+    return out;
 }
 
 namespace {

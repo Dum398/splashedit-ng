@@ -193,13 +193,19 @@ there.
 that takes a few seconds to import and drops it in the editor. The file is read and baked on a
 worker thread into a `splashedit-import-*` temporary folder, so 3 frames after the drop the import
 must still be running, and it reports the frames drawn meanwhile (at least 10); once it is built the
-model is placed and saved. Cancel in the status bar places, adopts and writes nothing, the saved
+model is placed and saved. While it builds the status bar shows the share done beside the seconds
+(the `--shot` report adds `import progress: N%`), and an import folder two hours old seeded in the
+run's temp folder is swept at the first import while a folder of another name is left. Cancel in the status bar places, adopts and writes nothing, the saved
 scene is byte for byte the one a run without the drop saves, and no temporary folder is left. Two
 models dropped one after the other both land in the order dropped, the second waiting behind the
 first though it alone would be done sooner (the screenshot shows "Importing terrain.glb... N s (1
 more waiting)" and Cancel). `editor_tests` checks the queue itself (`editor::ModelImports`): order,
 cancel, a failed file, a scene change and a cancelled reimport leaving the meshes on disk as they
-were. Needs a display (CI runs it under xvfb on Linux).
+were; and (`testModelImportsGaps`) that a cancelled 180000-triangle build stops within a quarter of
+its full build time, that the next import never starts while a cancelled build is still stopping,
+that a model whose name (file or baked mesh) appears in `models/` while it imports takes the next
+free name, outputs and node folder following it, and that the stale-folder sweep removes only
+`splashedit-import-*` folders older than an hour that no import holds. Needs a display (CI runs it under xvfb on Linux).
 
     python3 asyncimportcheck.py <splashedit> [screenshot.png]
 

@@ -197,6 +197,7 @@ struct State {
     // on the UI thread, as one undo step.
     editor::ModelImports imports;
     ImRect importCancel;  // the status bar's Cancel button this frame; empty when not shown
+    float importProgress = -1;  // the share of the running build done, as the status bar shows it this frame; below 0: not shown
     bool importBusy() const { return imports.busy(); }
     int importFrames() const { return imports.frames(); }
 

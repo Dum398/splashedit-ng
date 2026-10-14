@@ -1628,6 +1628,7 @@ static void placeModelFile(State& st, editor::Document& doc, const viewport::Ps1
     std::string msg = "Imported " + utf8(src.filename()) + ", " + std::to_string(m.triangles) +
                       (m.triangles == 1 ? " triangle" : " triangles");
     if (m.nodes.size() > 1 && !to.replace) msg += " in " + std::to_string(m.nodes.size()) + " parts";
+    if (!placed.renamed.empty()) msg += ", as " + placed.renamed + " (its name was taken in models/ while it imported)";
     msg += importNote(m.warnings);
     notify(st, msg, false);
 }
@@ -4743,10 +4744,12 @@ static float hardwareStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
 
 // Status bar entry while a model imports: a spinner, which file (and
 // "with Blender" while Blender converts a .blend), the seconds so far (wall
-// clock: the import runs in real time), how many more wait, and Cancel,
-// which stops it with nothing imported.
+// clock: the import runs in real time), how many more wait, a bar with the
+// share done while the build knows it (not while Blender converts), and
+// Cancel, which stops it with nothing imported.
 static float importStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     st.importCancel = ImRect();
+    st.importProgress = -1;
     const editor::ModelImports::Request* rq = st.imports.current();
     if (!rq) return x;
     Fonts& f = fonts();
@@ -4762,9 +4765,22 @@ static float importStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     dl->PathArcTo(ImVec2(x + 10, cy), 5.5f, a0, a0 + IM_PI * 1.5f, 18);
     dl->PathStroke(color::accent, ImDrawFlags_None, 2.0f);
     text(dl, ImVec2(x + 24, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, color::text, label.c_str());
+    float px = x + 24 + ls.x + space::sm;
+    st.importProgress = st.imports.fraction();
+    if (st.importProgress >= 0) {
+        const float done = std::clamp(st.importProgress, 0.0f, 1.0f);
+        const ImRect track(ImVec2(px, cy - 3), ImVec2(px + 64, cy + 3));
+        dl->AddRectFilled(track.Min, track.Max, color::borderStrong, radius::pill);
+        if (done > 0) dl->AddRectFilled(track.Min, ImVec2(track.Min.x + track.GetWidth() * done, track.Max.y), color::accent, radius::pill);
+        const std::string pct = std::to_string(static_cast<int>(done * 100)) + "%";
+        const ImVec2 ps = measure(f.medium, type::caption, pct.c_str());
+        text(dl, ImVec2(track.Max.x + space::sm, bar.Min.y + (size::statusBar - ps.y) * 0.5f), f.medium, type::caption, color::textDim,
+             pct.c_str());
+        px = track.Max.x + space::sm + ps.x + space::sm;
+    }
     const char* cl = st.imports.finishing() ? "Finishing" : "Cancel";
     const ImVec2 cs = measure(f.medium, type::caption, cl);
-    const float cx = x + 24 + ls.x + space::sm;
+    const float cx = px;
     const ImRect r(ImVec2(cx, bar.Min.y + 5), ImVec2(cx + cs.x + 20, bar.Max.y - 5));
     const Hit h = interact("importcancel", r);
     dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);

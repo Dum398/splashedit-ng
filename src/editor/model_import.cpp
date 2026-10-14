@@ -18,6 +18,7 @@ struct StagedBuild::Shared {
     std::condition_variable finished;
     StagedModel staged;
     std::shared_ptr<void> keep;
+    splash::ImportProgress progress;
     bool done = false, cancelled = false, taken = false;
 };
 
@@ -32,11 +33,14 @@ StagedBuild::StagedBuild(StagedModel staged, std::shared_ptr<void> keep) : m(std
             std::lock_guard<std::mutex> lock(sh->mutex);
             s = std::move(sh->staged);
         }
-        buildStaged(s);
+        buildStaged(s, &sh->progress);
         // Tests stretch the build so a fast machine cannot finish it before
-        // the check looks at the running state.
-        if (const char* ms = std::getenv("SPLASHEDIT_IMPORT_DELAY_MS"))
-            std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(ms)));
+        // the check looks at the running state; a cancel cuts it short.
+        if (const char* ms = std::getenv("SPLASHEDIT_IMPORT_DELAY_MS")) {
+            const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(std::atoi(ms));
+            while (!sh->progress.cancel && std::chrono::steady_clock::now() < until)
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         std::lock_guard<std::mutex> lock(sh->mutex);
         sh->staged = std::move(s);
         sh->done = true;
@@ -62,8 +66,11 @@ void StagedBuild::cancel() {
     std::lock_guard<std::mutex> lock(m->mutex);
     if (m->taken || m->cancelled) return;
     m->cancelled = true;
+    m->progress.cancel = true;
     if (m->done) discardStaged(m->staged);
 }
+
+float StagedBuild::fraction() const { return m->progress.fraction; }
 
 StagedModel StagedBuild::take() {
     std::lock_guard<std::mutex> lock(m->mutex);
@@ -151,6 +158,11 @@ bool ModelImports::finishing() const {
     return it.build ? it.build->done() : it.blender && it.blender->done();
 }
 
+float ModelImports::fraction() const {
+    if (m_queue.empty() || !m_queue.front()->build) return -1;
+    return m_queue.front()->build->fraction();
+}
+
 std::vector<ModelImports::Outcome> ModelImports::update(const Document& doc) {
     std::vector<Outcome> out;
     std::erase_if(m_abandoned, [](const std::unique_ptr<StagedBuild>& b) { return b->done(); });
@@ -188,6 +200,12 @@ std::vector<ModelImports::Outcome> ModelImports::update(const Document& doc) {
             return rq.reimport.empty() ? stagePlace(doc, rq.file, converted) : stageReimport(doc, rq.reimport, converted);
         };
         if (!it.blender && !it.build) {
+            // A cancelled build stops at its next step; the next import
+            // waits for that, so builds never overlap.
+            if (!m_abandoned.empty()) return out;
+            // Folders a killed editor left behind go, once a run.
+            static std::once_flag swept;
+            std::call_once(swept, [] { sweepStaleImportFolders(); });
             // New: Blender first for a .blend, else straight to the build.
             m_frames = 0;
             it.started = std::chrono::steady_clock::now();

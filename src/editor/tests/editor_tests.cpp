@@ -4610,9 +4610,10 @@ void testModelImportsGaps() {
     editor::Document doc;
     doc.reset(sc, proj, "game");
 
-    // Built to the end: the fraction climbs to 1. The time it takes is what
-    // a cancel must cut short.
+    // Built to the end: the fraction climbs to 1, past many points where it
+    // looks for a cancel, which is what a cancel cuts short.
     float seenMid = -1;
+    unsigned fullChecks = 0;
     const auto t0 = clock::now();
     {
         editor::StagedBuild b(editor::stagePlace(doc, outside / "terrain.glb"));
@@ -4626,28 +4627,36 @@ void testModelImportsGaps() {
         }
         CHECK(monotonic);
         CHECK(b.fraction() == 1.0f);
+        fullChecks = b.checks();
         editor::StagedModel s = b.take();
         CHECK(s.error.empty() && s.model.triangles == 180000);
         editor::discardStaged(s);
     }
     const auto full = std::chrono::duration_cast<ms>(clock::now() - t0);
-    std::printf("  terrain.glb builds in %lld ms\n", (long long)full.count());
+    std::printf("  terrain.glb builds in %lld ms, looking for a cancel %u times\n", (long long)full.count(), fullChecks);
     CHECK(seenMid > 0 && seenMid < 1);
+    // Often enough that stopping at the next one is stopping soon.
+    CHECK(fullChecks >= 16);
 
-    // Cancelled once it is under way: done within a bound well short of the
-    // whole build, with nothing left in the temp folder.
+    // Cancelled once it is under way: it stops at the next point it looks
+    // (one already past the look may still count itself), short of the end,
+    // with nothing left in the temp folder. Measured in those points, not in
+    // milliseconds a loaded machine stretches.
     {
         editor::StagedBuild b(editor::stagePlace(doc, outside / "terrain.glb"));
         while (b.fraction() <= 0 && !b.done()) std::this_thread::sleep_for(ms(1));
         CHECK(!b.done());
         const auto c0 = clock::now();
         b.cancel();
-        const bool stopped = b.wait(ms(10000));
+        const unsigned checksAtCancel = b.checks();
+        const bool stopped = b.wait(ms(60000));
         const auto took = std::chrono::duration_cast<ms>(clock::now() - c0);
-        std::printf("  a cancelled build stops %lld ms after the cancel\n", (long long)took.count());
+        const unsigned past = b.checks() - checksAtCancel;
+        std::printf("  a cancelled build stops %u checks (%lld ms) after the cancel, at %.2f of the build\n", past,
+                    (long long)took.count(), double(b.fraction()));
         CHECK(stopped);
-        // At most a quarter of the whole build, and never above 2 s.
-        CHECK(took.count() * 4 <= full.count() && took.count() < 2000);
+        CHECK(past <= 1);
+        CHECK(b.fraction() < 1.0f);
     }
     for (int i = 0; i < 1000 && importTemps() != tempsBefore; ++i) std::this_thread::sleep_for(ms(10));
     CHECK(importTemps() == tempsBefore);

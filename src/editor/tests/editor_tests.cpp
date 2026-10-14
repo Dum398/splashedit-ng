@@ -181,6 +181,41 @@ void testSettings() {
     CHECK(d.scene().settings.orderingTableSize == 500);
 }
 
+// The scene inspector's Rendering section: fog, GTE scaling and scene type
+// edit as one step each (a drag merges), survive save and load, and undo.
+void testSceneRendering() {
+    std::error_code ec;
+    std::filesystem::path dir = g_outDir;
+    std::filesystem::create_directories(dir, ec);
+    editor::Document d;
+    d.reset(sample(), dir, "rendering");
+    d.editSettings([](splash::SceneSettings& s) { s.fog.enabled = true; });
+    for (int v : {3, 6, 7}) d.editSettings([&](splash::SceneSettings& s) { s.fog.density = v; }, "fogdensity");
+    d.endMerge();
+    d.editSettings([](splash::SceneSettings& s) { s.fog.color = {0.25f, 0.5f, 1.f}; }, "fogcol");
+    d.endMerge();
+    d.editSettings([](splash::SceneSettings& s) { s.gteScaling = 50.f; }, "gte");
+    d.endMerge();
+    d.editSettings([](splash::SceneSettings& s) { s.sceneType = splash::SceneType::Interior; });
+    CHECK(d.historySize() == 5);
+    CHECK(!d.save());
+
+    editor::Document r;
+    CHECK(!r.load(dir, "rendering.scene"));
+    const splash::SceneSettings& rs = r.scene().settings;
+    CHECK(rs.fog.enabled && rs.fog.density == 7);
+    CHECK(rs.fog.color[0] == 0.25f && rs.fog.color[1] == 0.5f && rs.fog.color[2] == 1.f);
+    CHECK(rs.gteScaling == 50.f);
+    CHECK(rs.sceneType == splash::SceneType::Interior);
+
+    const splash::SceneSettings& ds = d.scene().settings;
+    CHECK(d.undo() && ds.sceneType == splash::SceneType::Exterior && ds.gteScaling == 50.f);
+    CHECK(d.undo() && ds.gteScaling == 100.f);
+    CHECK(d.undo() && ds.fog.color[0] == 0.5f && ds.fog.density == 7);
+    CHECK(d.undo() && ds.fog.density == 5 && ds.fog.enabled);  // the whole drag is one step
+    CHECK(d.undo() && !ds.fog.enabled);
+}
+
 // The Memory card section's helpers: the filename preview, each problem's
 // fix, and the icon decoded through the export's shared palette.
 void testMemCard() {
@@ -6023,6 +6058,7 @@ int main(int argc, char** argv) {
     testApplyUndoRedo();
     testMerge();
     testSettings();
+    testSceneRendering();
     testRenderPeak();
     testMemCard();
     testDirtyAndSave();

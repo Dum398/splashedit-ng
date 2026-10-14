@@ -405,9 +405,19 @@ first. Needs a display (CI runs it under `xvfb-run` on Linux).
 `memcardeditcheck.py` edits the courtyard example's memory card settings in the scene inspector:
 the Enable saves switch, then the Save title field (Enter or clicking away commits, Escape
 cancels), saves with Ctrl+S and reads `settings.memCard` back from the scene. Saving alone must
-write no `memCard`, and one Ctrl+Z must take the title back and leave saves on. Needs a display.
+write no `memCard`, and one Ctrl+Z must take the title back and leave saves on. It folds the
+sections above and clicks the controls by name (`--click @s_render`, `@scene.mcenable`). Needs a display.
 
     python3 memcardeditcheck.py <splashedit>
+
+`scenefogcheck.py` drives the scene inspector's Rendering section on copies of the courtyard example:
+the Fog switch, Density typed (and clamped to 10), GTE scaling typed, Scene type picked from its
+menu (`@scenetype/Interior`), then Ctrl+S, reading `settings.fog`, `gteScaling` and `sceneType` back
+from the saved scene and the inspector's `scene: fog ...` line from its output. One Ctrl+Z each must
+take back the scene type, the typed density and the switch. Controls are clicked by name. Needs a
+display.
+
+    python3 scenefogcheck.py <splashedit>
 
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the

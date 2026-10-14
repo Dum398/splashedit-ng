@@ -3420,6 +3420,93 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
 
+    // Fog, GTE scaling and scene type: what the old exporter inspector had.
+    {
+        const float stop = y;
+        const bool open = section("s_rendering", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::eye, color::textDim, "Rendering",
+                                  true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const float gteNow = set.gteScaling > 0 ? set.gteScaling : 100.f;
+        ImRect v = row("lfog", "Fog", "Fades triangles to the fog colour with distance, and culls anything wholly past the fog wall.");
+        const ImRect fogSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("scene.fog", fogSw);
+        if (toggle("fogon", fogSw, set.fog.enabled))
+            doc.editSettings([](splash::SceneSettings& s) { s.fog.enabled = !s.fog.enabled; });
+        const ImRect colRow = row("lfogcol", "Colour", "What distant triangles fade to. Click to pick one.");
+        nameRect("scene.fogcol", colRow);
+        if (colorField("fogcol", colRow, toColor(set.fog.color), toHex(set.fog.color).c_str())) ImGui::OpenPopup("##fogcolpick");
+        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        pushPopupStyle();
+        if (ImGui::BeginPopup("##fogcolpick")) {
+            float c[3] = {set.fog.color[0], set.fog.color[1], set.fog.color[2]};
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::ColorPicker3("##fogcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                            ImGuiColorEditFlags_NoAlpha))
+                doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = {c[0], c[1], c[2]}; }, "fogcol");
+            if (ImGui::IsItemDeactivated()) doc.endMerge();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(4);
+        ImGui::PopStyleColor(2);
+        const int density = std::clamp(set.fog.density, 1, 10), wall = 20000 / density;
+        char tip[256];
+        std::snprintf(tip, sizeof tip,
+                      "1 to 10: higher is thicker. The fog wall sits at 20000 / density depth units, %d now (%.1f m at this "
+                      "GTE scaling); nothing wholly past it is drawn.",
+                      wall, double(wall) * gteNow / 4096.0);
+        const ImRect denRow = row("lfogden", "Density", tip);
+        nameRect("scene.fogdensity", denRow);
+        float dv = float(density);
+        FieldEdit fe = numberField("fogden", denRow, std::to_string(density).c_str(), nullptr, 0, nullptr, &dv);
+        if (fe.changed) {
+            const int n = std::clamp(int(std::lround(dv)), 1, 10);
+            doc.editSettings([n](splash::SceneSettings& s) { s.fog.density = n; }, "fogdensity");
+        }
+        if (fe.done) doc.endMerge();
+        if (!set.fog.enabled) caption("Off: both are kept for when fog is on.", color::textFaint);
+        const ImRect gteRow = row("lgte", "GTE scaling",
+                                  "Editor units per PS1 unit. Positions export as value / scaling in 16-bit 4.12 fixed point, so "
+                                  "everything must sit within 8 x scaling of the origin. Smaller is finer, larger reaches farther.");
+        nameRect("scene.gte", gteRow);
+        float gv = gteNow;
+        fe = numberField("gte", gteRow, fmtShort(gteNow).c_str(), nullptr, 0, nullptr, &gv);
+        if (fe.changed) {
+            const float g = std::clamp(gv, 0.1f, 10000.f);
+            doc.editSettings([g](splash::SceneSettings& s) { s.gteScaling = g; }, "gte");
+        }
+        if (fe.done) doc.endMerge();
+        const ImRect typeRow = row("lscenetype", "Scene type",
+                                   "Written to the pack. psxsplash picks room and portal culling from the pack's room data, which "
+                                   "the editor does not export, so both types draw the same way today.");
+        nameRect("scene.scenetype", typeRow);
+        const bool interior = set.sceneType == splash::SceneType::Interior;
+        int pick = dropdownMenu("scenetype", typeRow, nullptr, interior ? "Interior" : "Exterior", {"Exterior", "Interior"}, interior);
+        if (pick >= 0) {
+            const splash::SceneType t = pick ? splash::SceneType::Interior : splash::SceneType::Exterior;
+            if (t != set.sceneType) doc.editSettings([t](splash::SceneSettings& s) { s.sceneType = t; });
+        }
+        if (namedRectsOn()) {
+            // Scripted tests: the section's values when they change.
+            char now[128];
+            std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s", set.fog.enabled ? 1 : 0,
+                          set.fog.density, toHex(set.fog.color).c_str(), double(set.gteScaling), interior ? "interior" : "exterior");
+            static std::string reported;
+            if (reported != now) {
+                reported = now;
+                std::printf("%s\n", now);
+                std::fflush(stdout);
+            }
+        }
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
     float top = y;
     // Closed, the body runs under an empty clip rect (see the object inspector's fold).
     const bool renderOpen = section("s_render", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::cpu, color::textDim, "Render buffers",
@@ -3630,7 +3717,9 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         ImRect ev = row("lmcenable", "Enable saves",
                         "Pack memory card settings into this scene. Off, the console keeps the last scene's settings. Use the same "
                         "values in every scene.");
-        if (toggle("mcenable", ImRect(ImVec2(ev.Min.x, ev.GetCenter().y - 8), ImVec2(ev.Min.x + 30, ev.GetCenter().y + 8)), mc.enabled))
+        const ImRect mcSw(ImVec2(ev.Min.x, ev.GetCenter().y - 8), ImVec2(ev.Min.x + 30, ev.GetCenter().y + 8));
+        nameRect("scene.mcenable", mcSw);
+        if (toggle("mcenable", mcSw, mc.enabled))
             edit([](splash::MemCardSettings& m) { m.enabled = !m.enabled; });
         const float dimTop = y;
 
@@ -3659,12 +3748,12 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             caption("Region and product fill all 20 characters of the filename, so every key saves to the same file.", color::warn);
         y += space::xs;
 
-        if (textField("mctitle",
-                      row("lmctitle", "Save title",
-                          tip("Shown in the console's memory card screen. ASCII only; \" ' - \\ ~ show as ?. MemCard.Save's 4th "
-                              "argument overrides it per save.")
-                              .c_str()),
-                      mc.title, &typed, "No title", splash::kMemCardTitleMax))
+        const ImRect titleRow = row("lmctitle", "Save title",
+                                    tip("Shown in the console's memory card screen. ASCII only; \" ' - \\ ~ show as ?. MemCard.Save's "
+                                        "4th argument overrides it per save.")
+                                        .c_str());
+        nameRect("scene.mctitle", titleRow);
+        if (textField("mctitle", titleRow, mc.title, &typed, "No title", splash::kMemCardTitleMax))
             edit([&](splash::MemCardSettings& m) { m.title = typed; });
 
         // Icon: up to 3 frames, each drawn 4x as the console shows it, after

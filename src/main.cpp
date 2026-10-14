@@ -673,8 +673,10 @@ int main(int argc, char** argv) {
             std::printf("popups open: %s\n", ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ? "yes" : "no");
             std::printf("game attached: %s\n", state.play.game.attached() ? "yes" : "no");
             std::printf("status: %s\n", state.notice.c_str());
+            std::printf("unsaved changes: %s\n", doc.dirty() ? "yes" : "no");
             std::printf("inspector import warnings: %zu\n", state.importPanel.shown.size());
             for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
+            std::printf("project panel open: %s\n", state.assets.open ? "yes" : "no");
             std::printf("project panel: %s\n", state.assets.shownList().c_str());
             running = false;
         }

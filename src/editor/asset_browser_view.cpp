@@ -23,7 +23,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr float kHeaderH = 34, kTreeW = 196, kFooterH = 26, kTileW = 92, kTileH = 108, kThumb = 60, kGap = 6, kRowH = 24;
+constexpr float kHeaderH = 46, kTreeW = 196, kFooterH = 26, kTileW = 92, kTileH = 108, kThumb = 60, kGap = 6, kRowH = 24;
 
 // Lucide glyphs the shared icon list does not carry.
 constexpr const char* kImage = "\xee\x83\xb6";        // e0f6 image
@@ -233,6 +233,10 @@ void AssetBrowser::draw(ImDrawList* dl, editor::Document& doc) {
             m_collapsed.clear();
             m_scroll = m_treeScroll = 0;
             dropThumbnails();
+            // A project just opened has no undo step that could bring old
+            // deletes back: what has lain in its trash for a month goes.
+            if (int n = editor::emptyOldTrash(doc.projectRoot(), fs::file_time_type::clock::now()))
+                notice("Emptied " + std::to_string(n) + (n == 1 ? " delete" : " deletes") + " older than 30 days from the project's .trash", false);
         }
         if (m_index.scan(doc.projectRoot())) {
             if (!m_folder.empty() && !m_index.find(m_folder)) m_folder.clear();
@@ -368,6 +372,10 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
         text(dl, ImVec2(tr.Min.x + space::md + 22, centerY(f.semibold, type::body, tr.Min.y, tr.Max.y)), f.semibold, type::body, color::text, tab);
         if (open) dl->AddRectFilled(ImVec2(tr.Min.x + space::sm, tr.Max.y - 2), ImVec2(tr.Max.x - space::sm, tr.Max.y), color::accent, 1);
     }
+    // The tabs take the strip's full height (the Timeline's header's, so the
+    // strip does not jump between tabs); the controls keep a 34 px band
+    // across its middle.
+    h = ImRect(ImVec2(h.Min.x, h.GetCenter().y - 17), ImVec2(h.Max.x, h.GetCenter().y + 17));
 
     // Right: collapse, view mode, type filter, search.
     float x = h.Max.x - space::xs;

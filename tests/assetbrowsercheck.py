@@ -6,7 +6,10 @@
 # back; a Lua script renamed is followed the same way; a file dragged onto a
 # folder of the panel's tree moves there, references along; Delete refuses a
 # used file and moves an unused one to the project's .trash folder after the
-# prompt, and Ctrl+Z brings it back. Drives the editor headless on copies of
+# prompt, and Ctrl+Z brings it back; opening the project empties deletes
+# a month old from .trash. A rename leaves the scene unsaved; a file dropped
+# on a folder tile moves into it; View > Project reopens the folded panel.
+# The dock's tab strip is the Timeline's 46 px with either in front. Drives the editor headless on copies of
 # the courtyard example and reads the saved scenes and the files on disk.
 # usage: python3 assetbrowsercheck.py <splashedit>   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
@@ -17,17 +20,24 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 # At 1600x960 with the Project panel at its default height.
-SEARCH = '880,725'      # the panel's search field
-TILE = '530,800'        # the first file in the grid
+SEARCH = '880,731'      # the panel's search field
+TILE = '530,812'        # the first file in the grid
 VIEWPORT = '760,520'    # the courtyard floor in the Scene view
 CRATES_ROW = '86,335'   # the "Crates" row in the scene tree
 TEXTURE_FIELD = '1468,418'  # the inspector's Texture field with a crate selected
-MESHES_ROW = '363,790'  # "meshes" in the panel's folder tree
+MESHES_ROW = '363,802'  # "meshes" in the panel's folder tree
 # The bottom dock's tabs: with the Timeline in front (its 320 px panel) and
 # with Project in front; the Timeline's ruler and second lane at frame f.
 PROJECT_TAB = '334,631'
-TIMELINE_TAB = '420,725'
+TIMELINE_TAB = '420,752'  # low in the strip: inside it only at its full 46 px
 RULER_Y = 668
+# The Project panel's collapse chevron; the View menu and its Panels > Project item for the courtyard.
+COLLAPSE = '1222,733'
+VIEW_MENU = '322,20'
+VIEW_PROJECT = '350,391'
+# The root's grid: meshes, scripts, textures, courtyard.scene, then a file.
+TEXTURES_TILE = '726,812'
+ROOT_FILE_TILE = '922,812'
 def fx(frame):
     return round(532 + frame * (1224 - 532 - 28) / 150)
 # A one-quad OBJ, never imported yet: the drag imports it.
@@ -51,13 +61,19 @@ def project_copy(extra=None):
 
 def run(project, args, select=None):
     """Runs the editor on `project` with `args`; returns its output and the
-    names the panel showed at the end."""
+    names the panel showed at the end. Sets run.open and run.unsaved from
+    the dump (None when it lacks them)."""
+    run.open = run.unsaved = None
     cmd = [editor, '--size', '1600x960', '--project', project] + (['--select', select] if select else []) + \
         ['--wait', '5'] + args + ['--wait', '10', '--screenshot', os.path.join(os.path.dirname(project), 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=180)
     out = (r.stdout + r.stderr).strip()
     shown = None
     for line in out.splitlines():
+        if line.startswith('project panel open:'):
+            run.open = line.split(':', 1)[1].strip() == 'yes'
+        if line.startswith('unsaved changes:'):
+            run.unsaved = line.split(':', 1)[1].strip() == 'yes'
         if line.startswith('project panel:'):
             shown = [n for n in line[len('project panel:'):].strip().split('|') if n]
     return out, shown
@@ -183,6 +199,13 @@ check('the walls of level2.scene on disk too', textures_of(level2(project)) == [
 check('every texture the scene names is on disk', not missing_textures(project, scene(project)), str(missing_textures(project, scene(project))))
 check('the status says how many references moved', 'references updated' in out, out[-300:])
 check('no prompt is left open', 'popups open: no' in out, out[-300:])
+# Unsaved, the open scene's references moved all the same: the document is
+# dirty, so the rename is not lost on quit.
+project = project_copy()
+out, shown = run(project, search('brick') + ['--click', TILE + ',0', '--key', 'f2', '--wait', '3', '--text', 'wall',
+                                             '--key', 'enter', '--wait', '5'])
+check('the rename leaves the open scene with unsaved changes', getattr(run, 'unsaved', None) is True and
+      os.path.exists(os.path.join(project, 'textures', 'wall.png')), out[-300:])
 
 # One Ctrl+Z puts the file, the open scene and level2.scene back.
 project = project_copy({'level2.scene': example_scene})
@@ -230,6 +253,21 @@ out, shown = run(project, search('brick') + ['--drag', TILE + ',' + MESHES_ROW +
 check('Ctrl+Z moves it back', os.path.exists(os.path.join(project, 'textures', 'brick.png')) and
       not os.path.exists(os.path.join(project, 'meshes', 'brick.png')) and textures_of(scene(project)) == ['textures/brick.png'] * 2, out[-300:])
 
+# A file dropped onto a folder tile of the grid moves into that folder, a
+# reference to it along.
+with_root = json.loads(json.dumps(original))
+for m in comp(find(with_root['objects'], 'Back Wall'), 'mesh')['materials']:
+    m['texture'] = 'zwall.png'
+project = project_copy({'zwall.png': open(os.path.join(example, 'textures', 'brick.png'), 'rb').read(),
+                        'courtyard.scene': json.dumps(with_root, indent=2).encode()})
+out, shown = run(project, ['--drag', ROOT_FILE_TILE + ',' + TEXTURES_TILE + ',0', '--wait', '5', '--key', 'ctrl+s', '--wait', '5'])
+check('dragging zwall.png onto the "textures" tile moves it to textures/zwall.png',
+      os.path.exists(os.path.join(project, 'textures', 'zwall.png')) and not os.path.exists(os.path.join(project, 'zwall.png')),
+      str(shown) + ' | ' + out[-300:])
+check('the Back Wall follows it', textures_of(scene(project), ('Back Wall',)) == ['textures/zwall.png'],
+      str(textures_of(scene(project), ('Back Wall',))))
+check('the root no longer lists it', shown == ['meshes', 'scripts', 'textures', 'courtyard.scene'], str(shown))
+
 # --- delete ---
 project = project_copy({'textures/spare.png': spare})
 out, shown = run(project, search('brick') + ['--click', TILE + ',0', '--key', 'delete', '--wait', '3', '--key', 'enter', '--wait', '5'])
@@ -245,6 +283,18 @@ out, shown = run(project, search('spare') + ['--click', TILE + ',0', '--key', 'd
 check('Ctrl+Z brings the deleted spare.png back', os.path.exists(os.path.join(project, 'textures', 'spare.png')) and
       not os.path.exists(os.path.join(project, '.trash', '1')), out[-300:])
 
+# Opening the project empties deletes older than 30 days from .trash, and
+# only those.
+project = project_copy({'.trash/1/textures/old.png': spare, '.trash/2/textures/new.png': spare})
+month = 31 * 24 * 3600
+for p in (os.path.join(project, '.trash', '1'), os.path.join(project, '.trash', '1', 'textures')):
+    os.utime(p, (os.path.getmtime(p) - month, os.path.getmtime(p) - month))
+out, shown = run(project, [])
+check('opening the project empties the month-old .trash/1 and keeps .trash/2',
+      not os.path.exists(os.path.join(project, '.trash', '1')) and
+      os.path.exists(os.path.join(project, '.trash', '2', 'textures', 'new.png')), out[-300:])
+check('the status says so', 'Emptied 1 delete older than 30 days' in out, out[-300:])
+
 # --- the bottom dock: Project and Timeline as tabs ---
 with_cutscene = dict(original, cutscenes=[CUTSCENE])
 project = project_copy({'courtyard.scene': json.dumps(with_cutscene, indent=2).encode()})
@@ -257,6 +307,15 @@ out, shown = run(project, ['--timeline', 'intro', '--wait', '3', '--click', PROJ
                            '--key', 'ctrl+s', '--wait', '5'])
 frames = [k['frame'] for k in scene(project)['cutscenes'][0]['tracks'][1]['keyframes']]
 check('the Timeline tab brings its lanes back: a key added there is saved', frames == [0, 38, 150], str(frames) + ' | ' + out[-200:])
+
+# --- View > Project: the panel folded by its chevron comes back ---
+project = project_copy()
+out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3'])
+check('the chevron folds the Project panel', getattr(run, 'open', None) is False, out[-200:])
+out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3', '--click', VIEW_MENU + ',0', '--wait', '3',
+                           '--click', VIEW_PROJECT + ',0', '--wait', '5'])
+check('View > Project opens it again on the project root', getattr(run, 'open', None) is True and
+      shown == ['meshes', 'scripts', 'textures', 'courtyard.scene'] and 'popups open: no' in out, str(shown) + ' | ' + out[-200:])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

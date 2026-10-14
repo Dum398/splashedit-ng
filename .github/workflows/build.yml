@@ -76,6 +76,7 @@ jobs:
           "$py" tests/interactcheck.py "$cli"
           "$py" tests/memcardcheck.py "$cli"
           "$py" tests/importcheck.py "$cli"
+          "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
@@ -106,6 +107,9 @@ jobs:
       - name: Import warnings
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/importwarningscheck.py build/splashedit
+      - name: .blend import in the background
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/blendasynccheck.py build/splashedit
       # One download: the editor with its assets, the example project, the
       # engine and the latest pcsx-redux dev build for this OS.
       - uses: actions/download-artifact@v4

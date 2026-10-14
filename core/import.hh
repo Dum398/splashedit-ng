@@ -1,5 +1,5 @@
-// Model import: a glTF 2.0 (.gltf, .glb), FBX or OBJ (with its .mtl) file turned
-// into a project .mesh plus the PNG textures its materials use.
+// Model import: a glTF 2.0 (.gltf, .glb), FBX, OBJ (with its .mtl) or .blend
+// file turned into a project .mesh plus the PNG textures its materials use.
 #pragma once
 
 #include <cstdint>
@@ -105,6 +105,8 @@ std::string importName(const std::filesystem::path& file);
 // every position and node translation, and Recompute replaces the normals.
 // The outputs are named after `as` (see importName) when it is given, so a
 // model read from where it was dropped is named after its copy in the project.
+// A .blend is first exported as a GLB by Blender run in the background (see
+// blend.hh), into a temporary folder, and that GLB is imported as above.
 // Throws std::runtime_error with a message for the user.
 ImportedModel importModel(const std::filesystem::path& source, const std::filesystem::path& project,
                           const ImportSettings& settings = {}, const std::filesystem::path& as = {});

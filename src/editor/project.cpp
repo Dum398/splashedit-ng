@@ -255,14 +255,14 @@ splash::Object modelObject(const splash::ImportedModel& model, const std::string
 }
 
 PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<ObjectPath>& replace, const ObjectPath& at,
-                       splash::Vec3 position) {
+                       splash::Vec3 position, const fs::path& converted) {
     PlacedModel r;
     if (doc.projectRoot().empty()) {
         r.error = "no project is open";
         return r;
     }
     if (!splash::canImportModel(file)) {
-        r.error = utf8(file.filename()) + ": only .glb, .gltf, .fbx and .obj models can be imported";
+        r.error = utf8(file.filename()) + ": only .glb, .gltf, .fbx, .obj and .blend models can be imported";
         return r;
     }
     // Adopted first so the outputs are named after the copy, but imported
@@ -281,7 +281,7 @@ PlacedModel placeModel(Document& doc, const fs::path& file, const std::optional<
     splash::ImportSettings settings;
     try {
         settings = splash::loadImportSettings(copy);
-        r.model = splash::importModel(file, doc.projectRoot(), settings, copy);
+        r.model = splash::importModel(converted.empty() ? file : converted, doc.projectRoot(), settings, copy);
     } catch (const std::exception& e) {
         if (adopted.copied) fs::remove(copy, ec);
         r.error = e.what();
@@ -497,7 +497,18 @@ struct Resync {
 
 }  // namespace
 
-Reimported reimportModel(Document& doc, const fs::path& model, std::optional<bool> wasMerged) {
+fs::path modelSource(const Document& doc, const fs::path& model) {
+    const fs::path file = model.is_absolute() ? model : doc.projectRoot() / model;
+    std::error_code ec;
+    try {
+        const splash::ImportSettings settings = splash::loadImportSettings(file);
+        if (!settings.source.empty() && fs::is_regular_file(fromUtf8(settings.source), ec)) return fromUtf8(settings.source);
+    } catch (const std::exception&) {
+    }
+    return file;
+}
+
+Reimported reimportModel(Document& doc, const fs::path& model, std::optional<bool> wasMerged, const fs::path& converted) {
     Reimported r;
     if (doc.projectRoot().empty()) {
         r.error = "no project is open";
@@ -510,7 +521,7 @@ Reimported reimportModel(Document& doc, const fs::path& model, std::optional<boo
         fs::path from = file;
         std::error_code ec;
         if (!settings.source.empty() && fs::is_regular_file(fromUtf8(settings.source), ec)) from = fromUtf8(settings.source);
-        r.model = splash::importModel(from, doc.projectRoot(), settings, file);
+        r.model = splash::importModel(converted.empty() ? from : converted, doc.projectRoot(), settings, file);
     } catch (const std::exception& e) {
         r.error = e.what();
         return r;

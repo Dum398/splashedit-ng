@@ -5,6 +5,7 @@
 #include <imgui_impl_sdl3.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -60,7 +61,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -68,7 +69,7 @@ struct Action {
     ImGuiKey key = ImGuiKey_None;
     bool ctrl = false, shift = false, alt = false;
     bool hold = false;  // a drag that never lets go (mid-drag screenshots)
-    std::string text;
+    std::string text;  // Text: the characters; Drop: the file; Shot: the PNG to write
     int waitFrames = 0;
 };
 
@@ -131,6 +132,8 @@ int actionFrames(const Action& a) {
         case Action::Drag: return 20;
         case Action::Wait: return a.waitFrames;
         case Action::Move: return 14;
+        case Action::Shot: return 1;
+        case Action::WaitImport: return 2;
         default: return 4;
     }
 }
@@ -209,6 +212,9 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
             if (f == 0) io.AddInputCharactersUTF8(a.text.c_str());
             break;
         case Action::Wait:
+        case Action::Drop:  // the loop below hands these to the editor
+        case Action::Shot:
+        case Action::WaitImport:
             break;
     }
 }
@@ -279,6 +285,25 @@ Args parse(int argc, char** argv) {
             Action act(Action::Wait);
             act.waitFrames = std::atoi(next());
             a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--drop-now")) {
+            // --drop-now <file>@x,y: releases a file there at this point of the script.
+            Action act(Action::Drop);
+            std::string v = next();
+            size_t at = v.rfind('@');
+            if (at == std::string::npos || std::sscanf(v.c_str() + at + 1, "%f,%f", &act.x0, &act.y0) != 2) {
+                std::fprintf(stderr, "--drop-now wants <file>@x,y\n");
+                std::exit(2);
+            }
+            act.text = v.substr(0, at);
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--shot")) {
+            // --shot <file.png>: a screenshot at this point of the script, as well as the one at the end.
+            Action act(Action::Shot);
+            act.text = next();
+            a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--wait-import")) {
+            // Holds the script here while a .blend import is running (Blender in the background), up to 90 s.
+            a.actions.push_back(Action(Action::WaitImport));
         } else if (!std::strcmp(argv[i], "--text")) {
             Action act(Action::Text);
             act.text = next();
@@ -300,6 +325,23 @@ Args parse(int argc, char** argv) {
         }
     }
     return a;
+}
+
+// Writes what was just rendered to `path` as a PNG.
+bool writeShot(SDL_Window* window, const char* path) {
+    int fw, fh;
+    SDL_GetWindowSizeInPixels(window, &fw, &fh);
+    std::vector<unsigned char> px((size_t)fw * fh * 4);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    stbi_flip_vertically_on_write(1);
+    for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
+    if (!stbi_write_png(path, fw, fh, 4, px.data(), fw * 4)) {
+        std::fprintf(stderr, "failed to write %s\n", path);
+        return false;
+    }
+    std::printf("wrote %s (%dx%d)\n", path, fw, fh);
+    return true;
 }
 
 // First *.scene directly inside `project`, by name, or empty if none.
@@ -443,6 +485,10 @@ int main(int argc, char** argv) {
 
     int frame = 0;
     bool running = true;
+    // --wait-import holding the script, since when; and a --shot due after this frame renders.
+    bool held = false;
+    std::chrono::steady_clock::time_point heldSince;
+    std::string shotDue;
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -470,6 +516,15 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
+                if (frame != actionStart[i] || held) continue;
+                if (a.kind == Action::Drop) state.drop.files.push_back({a.text, ImVec2(a.x0, a.y0)});
+                if (a.kind == Action::Shot) shotDue = a.text;
+                if (a.kind == Action::WaitImport && state.blendBusy()) held = true, heldSince = std::chrono::steady_clock::now();
+            }
+            if (held && (!state.blendBusy() || std::chrono::steady_clock::now() - heldSince > std::chrono::seconds(90))) {
+                if (state.blendBusy()) std::fprintf(stderr, "--wait-import: still importing after 90 s\n");
+                held = false;
+                ++frame;  // past the --wait-import frame
             }
             if (args.mouseX >= 0 && frame >= timelineEnd) io.AddMousePosEvent(args.mouseX, args.mouseY);
             if (args.dragX >= 0) {
@@ -503,17 +558,16 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        if (args.screenshot && ++frame >= args.frames) {
-            std::vector<unsigned char> px((size_t)fw * fh * 4);
-            glPixelStorei(GL_PACK_ALIGNMENT, 1);
-            glReadPixels(0, 0, fw, fh, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-            stbi_flip_vertically_on_write(1);
-            for (size_t i = 3; i < px.size(); i += 4) px[i] = 255;
-            if (!stbi_write_png(args.screenshot, fw, fh, 4, px.data(), fw * 4)) {
-                std::fprintf(stderr, "failed to write %s\n", args.screenshot);
-                return 1;
-            }
-            std::printf("wrote %s (%dx%d)\n", args.screenshot, fw, fh);
+        if (!shotDue.empty()) {
+            writeShot(window, shotDue.c_str());
+            std::printf("blend import: %s, %d frames drawn while it ran\n", state.blendBusy() ? "running" : "idle",
+                        state.blendFrames());
+            if (state.blendCancel.GetWidth() > 0)
+                std::printf("cancel button at %d,%d\n", (int)state.blendCancel.GetCenter().x, (int)state.blendCancel.GetCenter().y);
+            shotDue.clear();
+        }
+        if (args.screenshot && !held && ++frame >= args.frames) {
+            if (!writeShot(window, args.screenshot)) return 1;
             // For scripted checks: menus and pickers left open by the input.
             std::printf("popups open: %s\n", ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ? "yes" : "no");
             std::printf("game attached: %s\n", state.play.game.attached() ? "yes" : "no");

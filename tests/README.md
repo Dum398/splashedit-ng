@@ -151,6 +151,26 @@ using the imports must export.
 
     python3 importcheck.py <splashpack-cli>
 
+`blendcheck.py` imports a .blend through a mock Blender (a Python script on PATH or named by
+SPLASHEDIT_BLENDER) that writes a GLB made from `skinimport/rig.gltf` where the export script
+asks, and checks the import writes the same files as that GLB imported directly, that a sidecar
+beside the .blend applies, and the errors when Blender fails, writes nothing or is not found. The
+mock arms print SKIP on Windows, where a shebang script cannot run.
+
+    python3 blendcheck.py <splashpack-cli>
+
+`blendasynccheck.py` drops a .blend in the editor with SPLASHEDIT_BLENDER naming a mock Blender
+that waits until the check lets it finish. Blender runs on a worker thread, so 60 frames after the
+drop the import must still be running with the editor drawing frames (the screenshot then shows
+"Importing crate.blend with Blender... N s" and Cancel in the status bar); once it finishes the
+model is placed and saved, and Ctrl+Z takes it back in one step. Cancel in the status bar kills the
+mock, places and adopts nothing and leaves no `splashedit-blend-*` folder. `editor_tests` checks
+the same cancel at the core level (`splash::BlendExport`). Needs a display (CI runs it under
+`xvfb-run` on Linux); prints SKIP on Windows. A second argument copies the mid-import screenshot
+there.
+
+    python3 blendasynccheck.py <splashedit> [screenshot.png]
+
 ## Lua compiler
 
 `luacheck.py` compiles every `lua/*.lua` with `splashpack-cli luac` and compares the result with

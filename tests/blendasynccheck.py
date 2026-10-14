@@ -1,0 +1,155 @@
+# A .blend dropped in the editor is converted by Blender on a worker thread:
+# with a mock Blender that takes a few seconds, the editor keeps drawing
+# frames while it runs, the status bar shows the import, and once Blender is
+# done the model is placed (and saved with Ctrl+S), as one undo step. Cancel
+# in the status bar kills the mock, places nothing and leaves no temporary
+# folder. Drives the editor headless on copies of the courtyard example.
+# usage: python3 blendasynccheck.py <splashedit> [screenshot.png]   (needs a display: xvfb-run -a)
+import base64, json, os, re, shutil, stat, struct, subprocess, sys, tempfile, time
+
+editor = os.path.abspath(sys.argv[1])
+shot_to = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else None
+here = os.path.dirname(os.path.abspath(__file__))
+example = os.path.join(here, '..', 'examples', 'courtyard')
+tmp = tempfile.mkdtemp()
+fails = 0
+
+if os.name == 'nt':
+    print('SKIP blendasynccheck: the mock Blender is a shebang script')
+    sys.exit(0)
+
+
+def check(name, ok, detail=''):
+    global fails
+    print(('ok   ' if ok else 'FAIL ') + name + ('' if ok else ': ' + str(detail)))
+    fails += not ok
+
+
+# skinimport/rig.gltf (one data-URI buffer) as a GLB, for the mock to "export".
+j = json.load(open(os.path.join(here, 'skinimport', 'rig.gltf')))
+data = base64.b64decode(j['buffers'][0].pop('uri').split(',', 1)[1])
+js = json.dumps(j).encode()
+js += b' ' * (-len(js) % 4)
+data += b'\0' * (-len(data) % 4)
+glb = os.path.join(tmp, 'rig.glb')
+open(glb, 'wb').write(struct.pack('<III', 0x46546C67, 2, 12 + 8 + len(js) + 8 + len(data)) +
+                      struct.pack('<II', len(js), 0x4E4F534A) + js + struct.pack('<II', len(data), 0x004E4942) + data)
+
+blend = os.path.join(tmp, 'src', 'crate.blend')
+os.makedirs(os.path.dirname(blend))
+open(blend, 'wb').write(b'BLENDER-v300 not really')
+
+# Waits until the check creates MOCK_BLENDER_RELEASE (at most a minute), then
+# writes the GLB where the export script asks. Notes its pid.
+mock = os.path.join(tmp, 'bin', 'blender')
+os.makedirs(os.path.dirname(mock))
+open(mock, 'w').write(r'''#!/usr/bin/env python3
+import ast, os, re, shutil, sys, time
+open(os.environ['MOCK_BLENDER_PID'], 'w').write(str(os.getpid()))
+for _ in range(1200):
+    if os.path.exists(os.environ['MOCK_BLENDER_RELEASE']):
+        break
+    time.sleep(0.05)
+expr = sys.argv[sys.argv.index('--python-expr') + 1]
+m = re.search(r"filepath='((?:[^'\\]|\\.)*)'", expr)
+shutil.copyfile(os.environ['MOCK_BLENDER_GLB'], ast.literal_eval(m.group(0)[len('filepath='):]))
+''')
+os.chmod(mock, os.stat(mock).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+pidfile = os.path.join(tmp, 'mock.pid')
+
+DROP = '800,420'  # in the Scene view at 1600x960
+
+
+def temps():
+    return set(n for n in os.listdir(tempfile.gettempdir()) if n.startswith('splashedit-blend-'))
+
+
+def run(name, script, release_after=None):
+    """Runs the editor on a fresh copy of the courtyard with `script`; the mock
+    Blender finishes once the file `release_after` exists (at once when None,
+    never when ''). Returns (project, output, top-level object names of the
+    saved scene)."""
+    project = os.path.join(tmp, name, 'courtyard')
+    shutil.copytree(example, project)
+    release = os.path.join(tmp, name, 'release')
+    for f in (pidfile, release):
+        if os.path.exists(f):
+            os.remove(f)
+    if release_after is None:
+        open(release, 'w').close()
+    env = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe',
+               SPLASHEDIT_BLENDER=mock, MOCK_BLENDER_GLB=glb, MOCK_BLENDER_PID=pidfile, MOCK_BLENDER_RELEASE=release)
+    cmd = [editor, '--size', '1600x960', '--project', project] + script + ['--screenshot', os.path.join(project, 'end.png')]
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    deadline = time.time() + 180
+    while p.poll() is None and time.time() < deadline:
+        if release_after and os.path.exists(release_after) and not os.path.exists(release):
+            time.sleep(0.2)  # let the screenshot finish writing
+            open(release, 'w').close()
+        time.sleep(0.05)
+    if p.poll() is None:
+        p.kill()
+    out = p.communicate()[0].strip()
+    scene = json.load(open(os.path.join(project, 'courtyard.scene'), encoding='utf-8'))
+    return project, out, [o['name'] for o in scene['objects']]
+
+
+def shot_line(out):
+    m = re.search(r'blend import: (\w+), (\d+) frames drawn while it ran', out)
+    return (m.group(1), int(m.group(2))) if m else (None, 0)
+
+
+before = temps()
+
+# Blender finishes only once the screenshot 60 frames after the drop is
+# written: it must find the import running and the editor drawing; then the
+# script waits for the import to finish and saves.
+mid = os.path.join(tmp, 'mid.png')
+project, out, names = run('place', ['--drop-now', blend + '@' + DROP, '--wait', '60', '--shot', mid, '--wait-import',
+                                    '--wait', '10', '--key', 'ctrl+s', '--wait', '10'], mid)
+state, frames = shot_line(out)
+check('mid-import screenshot written', os.path.exists(mid), out[-300:])
+check('the import is still running 60 frames after the drop', state == 'running', out[-300:])
+check('the editor drew frames while Blender ran', frames >= 50, (frames, out[-300:]))
+check('once Blender is done the model is placed and saved', 'crate' in names, str(names) + ' | ' + out[-300:])
+check('the .blend is adopted into models/', os.path.exists(os.path.join(project, 'models', 'crate.blend')))
+check('the model is imported', os.path.exists(os.path.join(project, 'models', 'crate.mesh')) or
+      os.path.isdir(os.path.join(project, 'models', 'crate')), os.listdir(os.path.join(project, 'models')))
+check('no temporary folder is left', temps() <= before, temps() - before)
+if shot_to and os.path.exists(mid):
+    shutil.copyfile(mid, shot_to)
+
+# Undo takes the placed model back in one step.
+project, out, names = run('undo', ['--drop-now', blend + '@' + DROP, '--wait-import', '--wait', '10', '--key', 'ctrl+z',
+                                   '--wait', '5', '--key', 'ctrl+s', '--wait', '10'])
+check('ctrl+z after the import takes the model back in one step', 'crate' not in names, str(names) + ' | ' + out[-300:])
+
+# Cancel: the status bar names the Cancel button's rect in the --shot line.
+probe = os.path.join(tmp, 'probe.png')
+_, out, _ = run('probe', ['--drop-now', blend + '@' + DROP, '--wait', '30', '--shot', probe, '--wait-import'], probe)
+m = re.search(r'cancel button at (\d+),(\d+)', out)
+check('the status bar shows a Cancel button while importing', m is not None, out[-300:])
+if m:
+    cancel = m.group(1) + ',' + m.group(2)
+    project, out, names = run('cancel', ['--drop-now', blend + '@' + DROP, '--wait', '30', '--click', cancel, '--wait', '30',
+                                         '--shot', os.path.join(tmp, 'cancelled.png'), '--wait-import', '--key', 'ctrl+s',
+                                         '--wait', '10'], '')
+    state, _ = shot_line(out)
+    check('Cancel ends the import', state == 'idle', out[-300:])
+    check('Cancel places nothing', 'crate' not in names, str(names))
+    check('Cancel adopts nothing', not os.path.exists(os.path.join(project, 'models', 'crate.blend')))
+    pid = int(open(pidfile).read()) if os.path.exists(pidfile) else 0
+    alive = False
+    if pid:
+        try:
+            os.kill(pid, 0)
+            st = open('/proc/%d/stat' % pid).read() if os.path.exists('/proc/%d/stat' % pid) else ''
+            alive = ') Z ' not in st
+        except OSError:
+            alive = False
+    check('Cancel kills Blender', pid and not alive, pid)
+    check('Cancel leaves no temporary folder', temps() <= before, temps() - before)
+
+shutil.rmtree(tmp, ignore_errors=True)
+print('%d failures' % fails)
+sys.exit(1 if fails else 0)

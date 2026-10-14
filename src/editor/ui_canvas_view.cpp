@@ -241,7 +241,8 @@ void CanvasView::draw(ImDrawList* dl, ImRect r, editor::Document& doc) {
     m_assets.refresh(doc.projectRoot(), doc.assetsId());
     const editor::Document::UiSelection sel = validSelection(doc);
     if (!(sel == doc.uiSelection())) doc.selectUi(sel);
-    const float listW = 264;
+    // The list gives up width on a narrow tab so the canvas keeps some.
+    const float listW = std::clamp(std::floor(r.GetWidth() * 0.4f), 200.0f, 264.0f);
     ImRect left(r.Min, ImVec2(std::min(r.Max.x, r.Min.x + listW), r.Max.y));
     ImRect right(ImVec2(left.Max.x + size::gutter, r.Min.y), r.Max);
     ImGui::PushID("uicanvasview");
@@ -473,7 +474,7 @@ void CanvasView::upload(const editor::Document& doc, const std::vector<bool>& sh
 }
 
 // The transform from the zoom and pan. Fit: the largest whole scale that
-// fits, centred. Otherwise the zoom, panned, kept so some of the screen stays
+// fits, centred; below 1, the fraction that fits (not under 25%). Otherwise the zoom, panned, kept so some of the screen stays
 // in view. The origin is always on a whole pixel, so whole scales draw the
 // texture pixel for pixel.
 void CanvasView::layoutCanvas() {
@@ -513,44 +514,89 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImRect head(r.Min, ImVec2(r.Max.x, r.Min.y + headH));
     ImRect area(ImVec2(r.Min.x, head.Max.y), r.Max);
     m_area = area;
-    const float pad = 24;
+    const float pad = area.GetWidth() < 400 ? space::sm : 24;
     float fit = std::min((area.GetWidth() - pad * 2) / s.w, (area.GetHeight() - pad * 2) / s.h);
     m_fit = fit >= 1 ? std::floor(fit) : std::max(fit, 0.25f);  // whole pixels when it fits
     layoutCanvas();
 
+    // Right to left: the snap switch, fit, zoom in, the zoom, zoom out. When
+    // the header is narrow the gaps and the zoom label tighten, then the
+    // hints, the resolution and last the zoom label give way; the buttons stay.
     char res[64];
     std::snprintf(res, sizeof res, "%d x %d", s.w, s.h);
-    text(dl, ImVec2(head.Min.x + space::md, centerY(f.medium, type::label, head.Min.y, head.Max.y)), f.medium, type::label,
-         color::textDim, res);
-    const float by0 = head.Min.y + 5, by1 = head.Max.y - 5;
-    if (iconButton("snap", ImRect(ImVec2(head.Max.x - 32, by0), ImVec2(head.Max.x - 6, by1)), icon::magnet, m_snap,
+    const float resW = measure(f.medium, type::label, res).x;
+    const float bw = 26, by0 = head.Min.y + 5, by1 = head.Max.y - 5;
+    const float fullW = 6 + bw + 12 + bw + 2 + bw + 2 + 50 + 2 + bw;  // 178
+    const bool compact = head.Min.x + space::md + resW + space::sm + fullW > head.Max.x;
+    const float snapGap = compact ? 6 : 12, pctW0 = compact ? 40 : 50;
+    const float needPct = 6 + bw + snapGap + bw + 2 + bw + 2 + pctW0 + 2 + bw;
+    const float pctW = head.Min.x + space::xs + needPct <= head.Max.x ? pctW0 : 0;
+    float x = head.Max.x - 6;
+    const ImRect snapR(ImVec2(x - bw, by0), ImVec2(x, by1));
+    x -= bw + snapGap;
+    const ImRect fitR(ImVec2(x - bw, by0), ImVec2(x, by1));
+    x -= bw + 2;
+    const ImRect inR(ImVec2(x - bw, by0), ImVec2(x, by1));
+    x -= bw + 2;
+    const ImRect pctR(ImVec2(x - pctW, by0), ImVec2(x, by1));
+    if (pctW > 0) x -= pctW + 2;
+    const ImRect outR(ImVec2(x - bw, by0), ImVec2(x, by1));
+    const float tools = outR.Min.x;
+    const bool showRes = head.Min.x + space::md + resW + space::sm <= tools;
+    const float textX = showRes ? head.Min.x + space::md + resW + space::lg : head.Min.x + space::md;
+    if (showRes)
+        text(dl, ImVec2(head.Min.x + space::md, centerY(f.medium, type::label, head.Min.y, head.Max.y)), f.medium, type::label,
+             color::textDim, res);
+    if (iconButton("snap", snapR, icon::magnet, m_snap,
                    m_snap ? "Snapping to the screen and other elements: on" : "Snapping: off (Ctrl snaps while dragging)"))
         m_snap = !m_snap;
     const bool canZoom = sel.canvas >= 0;
-    if (iconButton("zoomfit", ImRect(ImVec2(head.Max.x - 70, by0), ImVec2(head.Max.x - 44, by1)), icon::maximize, m_zoom <= 0,
-                   "Fit the screen in the view (Ctrl+0)", color::textDim, canZoom))
+    if (iconButton("zoomfit", fitR, icon::maximize, m_zoom <= 0, "Fit the screen in the view (Ctrl+0)", color::textDim, canZoom))
         m_zoom = 0, m_pan = ImVec2(0, 0);
-    if (iconButton("zoomin", ImRect(ImVec2(head.Max.x - 98, by0), ImVec2(head.Max.x - 72, by1)), icon::plus, false,
-                   "Zoom in (Ctrl+=, wheel)", color::textDim, canZoom))
+    if (iconButton("zoomin", inR, icon::plus, false, "Zoom in (Ctrl+=, wheel)", color::textDim, canZoom))
         zoomAt(stepZoom(m_scale, 1), area.GetCenter());
-    {
-        char pct[16];
-        std::snprintf(pct, sizeof pct, "%d%%", int(std::lround(m_scale * 100)));
-        ImRect pr(ImVec2(head.Max.x - 150, by0), ImVec2(head.Max.x - 100, by1));
-        Hit ph = interact("zoom100", pr);
-        if (ph.hovered) dl->AddRectFilled(pr.Min, pr.Max, color::hover, radius::field);
-        textCentered(dl, pr, f.medium, type::caption, m_scale == 1 ? color::text : color::textDim, pct);
-        if (ph.hovered) tooltip("Actual pixels: 100% (Ctrl+1)");
+    char pct[16];
+    std::snprintf(pct, sizeof pct, "%d%%", int(std::lround(m_scale * 100)));
+    if (pctW > 0) {
+        Hit ph = interact("zoom100", pctR);
+        if (ph.hovered) dl->AddRectFilled(pctR.Min, pctR.Max, color::hover, radius::field);
+        textCentered(dl, pctR, f.medium, type::caption, m_scale == 1 ? color::text : color::textDim, pct);
+        if (ph.hovered) {
+            if (showRes) tooltip("Actual pixels: 100% (Ctrl+1)");
+            else tooltip((std::string("Screen ") + res + ". Actual pixels: 100% (Ctrl+1)").c_str());
+        }
         if (ph.clicked && canZoom) m_zoom = 1, m_pan = ImVec2(0, 0);
     }
-    if (iconButton("zoomout", ImRect(ImVec2(head.Max.x - 178, by0), ImVec2(head.Max.x - 152, by1)), icon::minus, false,
-                   "Zoom out (Ctrl+-, wheel)", color::textDim, canZoom))
+    if (iconButton("zoomout", outR, icon::minus, false, "Zoom out (Ctrl+-, wheel)", color::textDim, canZoom))
         zoomAt(stepZoom(m_scale, -1), area.GetCenter());
     const char* hint = "Drag to move, handles resize, arrows nudge, wheel zooms, middle-drag or Space pans";
     const float hw = measure(f.regular, type::caption, hint).x;
-    if (head.Max.x - 190 - hw > head.Min.x + 100)
-        text(dl, ImVec2(head.Max.x - 190 - hw, centerY(f.regular, type::caption, head.Min.y, head.Max.y)), f.regular, type::caption,
+    const bool showHint = tools - space::md - hw >= textX;
+    if (showHint)
+        text(dl, ImVec2(tools - space::md - hw, centerY(f.regular, type::caption, head.Min.y, head.Max.y)), f.regular, type::caption,
              color::textFaint, hint);
+    if (reportLayout) {
+        // Each header item as x0-x1, "-" when it gave way.
+        auto span = [](bool shown, float a, float b) {
+            char t[32];
+            if (shown) std::snprintf(t, sizeof t, "%.0f-%.0f", a, b);
+            else std::snprintf(t, sizeof t, "-");
+            return std::string(t);
+        };
+        const float rx = head.Min.x + space::md, hx = tools - space::md - hw;
+        std::string line = "uicanvas: header " + span(true, head.Min.x, head.Max.x) + " res " + span(showRes, rx, rx + resW) +
+                           " hint " + span(showHint, hx, hx + hw) + " zoomout " + span(true, outR.Min.x, outR.Max.x) + " pct " +
+                           span(pctW > 0, pctR.Min.x, pctR.Max.x) + " pcttext " +
+                           span(pctW > 0, pctR.GetCenter().x - measure(f.medium, type::caption, pct).x * 0.5f,
+                                pctR.GetCenter().x + measure(f.medium, type::caption, pct).x * 0.5f) +
+                           " zoomin " + span(true, inR.Min.x, inR.Max.x) + " zoomfit " + span(true, fitR.Min.x, fitR.Max.x) + " snap " +
+                           span(true, snapR.Min.x, snapR.Max.x);
+        if (m_headReported != line) {
+            m_headReported = line;
+            std::printf("%s\n", line.c_str());
+            std::fflush(stdout);
+        }
+    }
 
     // Zoom about the pointer with the wheel; pan with the middle button or
     // Space + left. Before anything reads the transform this frame.

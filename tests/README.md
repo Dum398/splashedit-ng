@@ -488,5 +488,17 @@ frame 0. All read back from the saved scene:
 
     python3 timelineselectcheck.py <splashedit>
 
+`timelinekeyrowcheck.py` drives the Timeline's bottom row on copies of the courtyard example with
+tests/skin's Arm and two audio clips. With a key selected: its X, Y and Z typed (one Ctrl+Z takes the
+Y back), its CURVE picked (Step, Out, In-out then Ctrl+Z), its FRAME typed, an on/off key flipped
+both ways, the row's x deleting it and a two-key selection. With a skin clip event: one added from the
+lane's + menu (Arm > bend) and its FRAME typed, the red one whose clip is gone pointed at bend from
+CLIP (one Ctrl+Z puts it back), LOOP, and the x. With an audio event: FRAME, CLIP, VOLUME and PAN.
+Controls are clicked by name (`--click @timeline.kv1`, `--move @timeline.evclip/Arm`): the editor
+aims at where the frame before drew the control, and lists every named control with the end
+screenshot (`control <name> at x0,y0 x1,y1`). All read back from the saved scene:
+
+    python3 timelinekeyrowcheck.py <splashedit>
+
 `emulator_tests` (in ctest) stops a child that ignores being asked to close, the way pcsx-redux
 without its UI ignores WM_CLOSE on Windows; `stop()` must still return.

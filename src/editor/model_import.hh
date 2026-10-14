@@ -49,6 +49,8 @@ class StagedBuild {
     void cancel();
     // How far the build is, 0 to 1.
     float fraction() const;
+    // Times the build has looked for a cancel and gone on (ImportProgress::checks).
+    unsigned checks() const;
     // Once done() and not cancelled: the built model, to apply or discard.
     StagedModel take();
 

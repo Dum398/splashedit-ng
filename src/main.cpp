@@ -72,6 +72,10 @@ struct Action {
     bool ctrl = false, shift = false, alt = false;
     bool hold = false;  // a drag that never lets go (mid-drag screenshots)
     bool importCancel = false;  // a Click on the status bar's import Cancel, wherever it was drawn last frame
+    // "@name[,dx,dy]" for x,y: the centre (plus dx, dy) of the control ui::nameRect() named, as the frame
+    // before the action drew it (a Click, DoubleClick or Move).
+    std::string target;
+    float dx = 0, dy = 0;
     std::string text, text2;  // Text: the characters; Drop: the file; Shot: the PNG to write; CopyFile: from, to
     int waitFrames = 0;
 };
@@ -137,6 +141,14 @@ bool parseKey(const char* spec, Action& a) {
     else if (s == "space") a.key = ImGuiKey_Space;
     else return false;
     return true;
+}
+
+// "@name" or "@name,dx,dy": a control by name, and an offset from its centre.
+void parseTarget(const char* spec, Action& a) {
+    std::string s = spec + 1;
+    const size_t comma = s.find(',');
+    if (comma != std::string::npos) std::sscanf(s.c_str() + comma + 1, "%f,%f", &a.dx, &a.dy);
+    a.target = s.substr(0, comma);
 }
 
 // Frames an action takes, including a short gap after it.
@@ -277,7 +289,9 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
-            std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
+            const char* v = next();
+            if (v[0] == '@') parseTarget(v, act);
+            else std::sscanf(v, "%f,%f,%d", &act.x0, &act.y0, &act.button);
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--click-import-cancel")) {
             // Clicks the status bar's import Cancel where it is when the click starts
@@ -316,7 +330,9 @@ Args parse(int argc, char** argv) {
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--move")) {
             Action act(Action::Move);
-            std::sscanf(next(), "%f,%f", &act.x1, &act.y1);
+            const char* v = next();
+            if (v[0] == '@') parseTarget(v, act);
+            else std::sscanf(v, "%f,%f", &act.x1, &act.y1);
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--wait")) {
             // Idle frames before the next action (lets the background export finish).
@@ -567,6 +583,7 @@ int main(int argc, char** argv) {
         actionStart.push_back(timelineEnd);
         timelineEnd += actionFrames(a);
     }
+    ui::namedRectsOn() = args.screenshot != nullptr;  // for --click @name, and printed with the end screenshot
     if (args.screenshot && !args.actions.empty()) args.frames = std::max(args.frames, timelineEnd + 30);
     // --shot-at: the exact frame, even mid-script (actions start at frame 5).
     if (args.shotAt >= 0) args.frames = args.shotAt + 1;
@@ -630,6 +647,14 @@ int main(int argc, char** argv) {
                     if (!aimHeld) aimSince.reset();
                     if (cancelNow.GetWidth() > 0) a.x0 = cancelNow.GetCenter().x, a.y0 = cancelNow.GetCenter().y;
                 }
+                if (!a.target.empty() && frame == actionStart[i] && !held) {
+                    // Aims at the named control where the last frame drew it.
+                    const auto it = ui::namedRects().find(a.target);
+                    if (it == ui::namedRects().end()) std::fprintf(stderr, "@%s: no such control drawn\n", a.target.c_str());
+                    const ImVec2 c = it == ui::namedRects().end() ? ImVec2(-100, -100) : ImVec2(it->second.GetCenter().x + a.dx, it->second.GetCenter().y + a.dy);
+                    if (a.kind == Action::Move) a.x1 = c.x, a.y1 = c.y;
+                    else a.x0 = c.x, a.y0 = c.y;
+                }
                 if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
                 if (frame != actionStart[i] || held) continue;
                 if (a.kind == Action::Drop) state.drop.files.push_back({a.text, ImVec2(a.x0, a.y0)});
@@ -657,6 +682,7 @@ int main(int argc, char** argv) {
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::NewFrame();
         ui::interactiveRects().clear();
+        ui::namedRects().clear();
         // The splash hides the editor until it starts fading out.
         g_hit.titleBar = splash::covering() ? ImRect() : mockup::drawMainScreen(state, doc, view, io.DisplaySize);
         splash::draw(io.DisplaySize, args.screenshot ? frame * 1000.0 / 60.0 : double(SDL_GetTicks()));
@@ -700,6 +726,8 @@ int main(int argc, char** argv) {
             for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
             std::printf("project panel open: %s\n", state.assets.open ? "yes" : "no");
             std::printf("project panel: %s\n", state.assets.shownList().c_str());
+            for (const auto& [name, r] : ui::namedRects())
+                std::printf("control %s at %d,%d %d,%d\n", name.c_str(), int(r.Min.x), int(r.Min.y), int(r.Max.x), int(r.Max.y));
             running = false;
         }
         SDL_GL_SwapWindow(window);

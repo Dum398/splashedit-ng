@@ -44,6 +44,7 @@ void checkpoint(float fraction = -1) {
     ImportProgress* p = t_progress;
     if (!p) return;
     if (p->cancel.load(std::memory_order_relaxed)) throw ImportCancelled();
+    p->checks.fetch_add(1, std::memory_order_relaxed);
     if (fraction > p->fraction.load(std::memory_order_relaxed)) p->fraction.store(fraction, std::memory_order_relaxed);
 }
 // Every this many triangles of one mesh, the import checks for a cancel.
@@ -1210,6 +1211,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
         ImportProgress* p = t_progress;
         if (!p) return UFBX_PROGRESS_CONTINUE;
         if (p->cancel.load(std::memory_order_relaxed)) return UFBX_PROGRESS_CANCEL;
+        p->checks.fetch_add(1, std::memory_order_relaxed);
         if (pr->bytes_total > 0) {
             const float f = 0.15f * float(double(pr->bytes_read) / double(pr->bytes_total));
             if (f > p->fraction.load(std::memory_order_relaxed)) p->fraction.store(f, std::memory_order_relaxed);

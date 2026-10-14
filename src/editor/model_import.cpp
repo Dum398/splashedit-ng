@@ -72,6 +72,8 @@ void StagedBuild::cancel() {
 
 float StagedBuild::fraction() const { return m->progress.fraction; }
 
+unsigned StagedBuild::checks() const { return m->progress.checks; }
+
 StagedModel StagedBuild::take() {
     std::lock_guard<std::mutex> lock(m->mutex);
     if (!m->done || m->cancelled || m->taken) {

@@ -4,6 +4,7 @@
 #include <imgui_internal.h>
 
 #include <initializer_list>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -37,6 +38,13 @@ Hit interact(const char* id, ImRect r);
 // Every rectangle interact() registered since the last clear. The window hit test
 // uses it to keep clicks on title bar controls away from window dragging.
 std::vector<ImRect>& interactiveRects();
+
+// Controls by name, as the last frame drew them, for scripted checks
+// (main.cpp's --click @name). Recorded only while namedRectsOn() is set (in
+// screenshot runs); nameRect() is a no-op otherwise.
+bool& namedRectsOn();
+std::map<std::string, ImRect>& namedRects();
+void nameRect(const std::string& name, ImRect r);
 
 void tooltip(const char* text);
 

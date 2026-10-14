@@ -798,6 +798,7 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         const bool full = count >= limit;
         const ImRect plus(ImVec2(row.Max.x - 28, y + 4), ImVec2(row.Max.x - 6, y + 20));
         const bool hovered = row.Contains(io.MousePos);
+        nameRect(std::string("timeline.") + id, plus);
         if (iconButton(id, plus, icon::plus, false, full ? fullTip : addTip, hovered ? color::textDim : withAlpha(color::textFaint, 110)) &&
             !full && canAdd) {
             openAdd = popup;
@@ -919,6 +920,8 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
             const bool past = kf.frame > length;
             const ImU32 fill = sel ? rgb(0xffffff) : past ? color::textFaint : over ? lerpColor(tc, rgb(0xffffff), 0.35f) : tc;
             diamond(dl, c, sel ? kDiamond + 1 : kDiamond, fill, sel ? color::accent : rgb(0x0e1014), sel ? 2.5f : 1.5f);
+            if (namedRectsOn())
+                nameRect("timeline.key." + std::to_string(i) + "." + std::to_string(k), ImRect(c - ImVec2(kDiamond, kDiamond), c + ImVec2(kDiamond, kDiamond)));
         }
     }
 
@@ -929,6 +932,7 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
         dl->AddRectFilled(ImVec2(body.Min.x, y), ImVec2(body.Max.x, y + kLaneH), r == laneAt ? rgb(0xffffff, 8) : rgb(0x000000, 40));
         dl->AddLine(ImVec2(body.Min.x, y - 0.5f), ImVec2(body.Max.x, y - 0.5f), rgb(0xffffff, 16));
         dl->AddLine(ImVec2(body.Min.x, y + kLaneH - 0.5f), ImVec2(body.Max.x, y + kLaneH - 0.5f), rgb(0xffffff, 10));
+        if (namedRectsOn()) nameRect(std::string("timeline.lane.") + (kind == Item::Audio ? "audio" : "skin"), ImRect(ImVec2(body.Min.x, y), ImVec2(body.Max.x, y + kLaneH)));
         for (int i = 0; i < count; ++i) {
             const int fr = frameOf(i);
             const std::string name = nameOf(i);
@@ -938,6 +942,8 @@ void TimelinePanel::lanes(ImDrawList* dl, ImRect labels, ImRect body, editor::Do
             const ImU32 c = bad ? color::bad : fr > length ? color::textFaint : col;
             const ImRect tab = flagRect(r, fr, name);
             const float x = tab.Min.x;
+            if (namedRectsOn())
+                nameRect(std::string("timeline.") + (kind == Item::Audio ? "audio." : "skin.") + std::to_string(i), ImRect(ImVec2(x - 2, y + 5), ImVec2(x + 2, y + kLaneH - 5)));
             dl->AddLine(ImVec2(x, y + 5), ImVec2(x, y + kLaneH - 5), sel ? color::accent : c, sel ? 2.5f : 1.5f);
             dl->AddRectFilled(tab.Min, tab.Max, sel ? rgb(0xffffff) : withAlpha(c, over ? 120 : 70), 3, ImDrawFlags_RoundCornersRight);
             if (sel) dl->AddRect(tab.Min, tab.Max, color::accent, 3, ImDrawFlags_RoundCornersRight, 1.5f);
@@ -1108,11 +1114,14 @@ void TimelinePanel::addEventPopups(editor::Document& doc) {
         ImGui::Separator();
         const std::vector<std::string> clips = editor::audioClips(doc);
         if (clips.empty()) ImGui::TextDisabled("No audio clips: give an object an Audio component");
-        for (const std::string& c : clips)
-            if (ImGui::MenuItem(c.c_str())) {
+        for (const std::string& c : clips) {
+            const bool picked = ImGui::MenuItem(c.c_str());
+            nameRect("timeline.addaudio/" + c, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+            if (picked) {
                 const int i = editor::addAudioEvent(doc, m_ref, m_addFrame, c);
                 if (i >= 0) m_sel = {{}, {i}, {}};
             }
+        }
         ImGui::EndPopup();
     }
     ImGui::SetNextWindowPos(m_addAt, ImGuiCond_Always, ImVec2(0, 1));
@@ -1122,12 +1131,18 @@ void TimelinePanel::addEventPopups(editor::Document& doc) {
         const std::vector<editor::SkinTarget> targets = editor::skinTargets(doc);
         if (targets.empty()) ImGui::TextDisabled("No skinned objects");
         for (const editor::SkinTarget& t : targets) {
-            if (ImGui::BeginMenu(t.object.c_str(), !t.clips.empty())) {
-                for (const std::string& c : t.clips)
-                    if (ImGui::MenuItem(c.c_str())) {
+            // (An open menu's Begin takes over the last item: its row is named while closed.)
+            const bool open = ImGui::BeginMenu(t.object.c_str(), !t.clips.empty());
+            if (!open) nameRect("timeline.addskin/" + t.object, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+            if (open) {
+                for (const std::string& c : t.clips) {
+                    const bool picked = ImGui::MenuItem(c.c_str());
+                    nameRect("timeline.addskin/" + t.object + "/" + c, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                    if (picked) {
                         const int i = editor::addSkinEvent(doc, m_ref, m_addFrame, t.object, c);
                         if (i >= 0) m_sel = {{}, {}, {i}};
                     }
+                }
                 ImGui::EndMenu();
             }
         }
@@ -1140,21 +1155,29 @@ void TimelinePanel::addEventPopups(editor::Document& doc) {
         const auto* skin = editor::seqSkin(doc, m_ref);
         if (m_sel.size() == 1 && m_sel.audio.size() == 1 && audio) {
             splash::CutsceneAudioEvent a = (*audio)[size_t(m_sel.audio[0])];
-            for (const std::string& c : editor::audioClips(doc))
-                if (ImGui::MenuItem(c.c_str(), nullptr, c == a.clip)) {
+            for (const std::string& c : editor::audioClips(doc)) {
+                const bool picked = ImGui::MenuItem(c.c_str(), nullptr, c == a.clip);
+                nameRect("timeline.evclip/" + c, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (picked) {
                     a.clip = c;
                     editor::setAudioEvent(doc, m_ref, m_sel.audio[0], a);
                 }
+            }
         } else if (m_sel.size() == 1 && m_sel.skin.size() == 1 && skin) {
             splash::SkinAnimEvent e = (*skin)[size_t(m_sel.skin[0])];
             for (const editor::SkinTarget& t : editor::skinTargets(doc)) {
-                if (ImGui::BeginMenu(t.object.c_str(), !t.clips.empty())) {
-                    for (const std::string& c : t.clips)
-                        if (ImGui::MenuItem(c.c_str(), nullptr, t.object == e.object && c == e.clip)) {
+                const bool open = ImGui::BeginMenu(t.object.c_str(), !t.clips.empty());
+                if (!open) nameRect("timeline.evclip/" + t.object, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (open) {
+                    for (const std::string& c : t.clips) {
+                        const bool picked = ImGui::MenuItem(c.c_str(), nullptr, t.object == e.object && c == e.clip);
+                        nameRect("timeline.evclip/" + t.object + "/" + c, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                        if (picked) {
                             e.object = t.object;
                             e.clip = c;
                             editor::setSkinEvent(doc, m_ref, m_sel.skin[0], e);
                         }
+                    }
                     ImGui::EndMenu();
                 }
             }
@@ -1191,6 +1214,7 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         x += measure(f.medium, type::label, b).x + space::lg;
         text(dl, ImVec2(x, cy - 9), f.regular, type::label, color::textFaint,
              "Drag one to move them all; Del deletes them; Ctrl+C copies them.");
+        nameRect("timeline.delkeys", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)));
         if (iconButton("delkeys", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false,
                        "Delete the selection (Del)")) {
             editor::deleteSelection(doc, m_ref, m_sel);
@@ -1217,7 +1241,9 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         float v = float(kf.frame);
         char b[16];
         std::snprintf(b, sizeof b, "%d", kf.frame);
-        FieldEdit fe = numberField("kframe", ImRect(ImVec2(x, cy - 12), ImVec2(x + 54, cy + 12)), b, nullptr, 0, nullptr, &v);
+        const ImRect fr(ImVec2(x, cy - 12), ImVec2(x + 54, cy + 12));
+        FieldEdit fe = numberField("kframe", fr, b, nullptr, 0, nullptr, &v);
+        nameRect("timeline.kframe", fr);
         if (fe.changed) {
             const int to = std::clamp(int(std::lround(v)), 0, editor::kMaxTimelineFrame);
             if (auto moved = editor::moveKeys(doc, m_ref, {k}, to - kf.frame, "timeline.kframe")) m_sel = {*moved, {}, {}};
@@ -1230,7 +1256,9 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
     x += measure(f.medium, type::caption, "VALUE").x + space::sm;
     if (editor::isDiscrete(t.type)) {
         const bool on = kf.value[0] > 0.5f;
-        if (toggle("kon", ImRect(ImVec2(x, cy - 10), ImVec2(x + 36, cy + 10)), on))
+        const ImRect tr(ImVec2(x, cy - 10), ImVec2(x + 36, cy + 10));
+        nameRect("timeline.kon", tr);
+        if (toggle("kon", tr, on))
             editor::setKeyValue(doc, m_ref, k, {on ? 0.0f : 1.0f, 0, 0});
         text(dl, ImVec2(x + 44, cy - 9), f.regular, type::label, color::textDim, on ? "on" : "off");
         x += 80;
@@ -1247,8 +1275,9 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
             char id[16];
             std::snprintf(id, sizeof id, "kv%d", c);
             const std::string shown = fmtNum(v);
-            FieldEdit fe = numberField(id, ImRect(ImVec2(x, cy - 12), ImVec2(x + fw, cy + 12)), shown.c_str(), nullptr,
-                                       nv == 1 ? 0 : axes[c], nv == 1 ? nullptr : (rgbTrack ? rgbl[c] : xyz[c]), &v);
+            const ImRect vr(ImVec2(x, cy - 12), ImVec2(x + fw, cy + 12));
+            FieldEdit fe = numberField(id, vr, shown.c_str(), nullptr, nv == 1 ? 0 : axes[c], nv == 1 ? nullptr : (rgbTrack ? rgbl[c] : xyz[c]), &v);
+            nameRect(std::string("timeline.") + id, vr);
             if (fe.changed) {
                 KeyValue nvv = kf.value;
                 nvv[size_t(c)] = v;
@@ -1265,6 +1294,7 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         if (ImGui::IsItemHovered()) tooltip("The curve from the previous key into this one, as the runtime plays it.");
         if (pick != cur) editor::setKeyInterp(doc, m_ref, k, splash::Interp(pick));
     }
+    nameRect("timeline.delkey", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)));
     if (iconButton("delkey", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false, "Delete this key (Del)")) {
         editor::deleteSelection(doc, m_ref, m_sel);
         m_sel = {};
@@ -1293,7 +1323,9 @@ void TimelinePanel::eventRow(ImDrawList* dl, ImRect r, float x, editor::Document
         float v = float(value);
         char b[16];
         std::snprintf(b, sizeof b, "%d", value);
-        FieldEdit fe = numberField(id, ImRect(ImVec2(x, cy - 12), ImVec2(x + w, cy + 12)), b, nullptr, 0, nullptr, &v);
+        const ImRect nr(ImVec2(x, cy - 12), ImVec2(x + w, cy + 12));
+        FieldEdit fe = numberField(id, nr, b, nullptr, 0, nullptr, &v);
+        nameRect(std::string("timeline.") + id, nr);
         if (tip && ImGui::IsItemHovered()) tooltip(tip);
         if (fe.changed) apply(int(std::lround(v)));
         if (fe.done) doc.endMerge();
@@ -1316,6 +1348,7 @@ void TimelinePanel::eventRow(ImDrawList* dl, ImRect r, float x, editor::Document
         const ImRect dd(ImVec2(x, cy - 12), ImVec2(x + 190, cy + 12));
         const std::string label = isAudio ? a.clip : e.object + " / " + e.clip;
         Hit h = interact("evclip", dd);
+        nameRect("timeline.evclip", dd);
         dl->AddRectFilled(dd.Min, dd.Max, h.hover > 0 ? color::hover : color::field, radius::field);
         dl->AddRect(dd.Min, dd.Max, color::borderStrong, radius::field);
         ImGui::PushClipRect(dd.Min, ImVec2(dd.Max.x - 22, dd.Max.y), true);
@@ -1342,11 +1375,14 @@ void TimelinePanel::eventRow(ImDrawList* dl, ImRect r, float x, editor::Document
     } else {
         text(dl, ImVec2(x, cy - 8), f.medium, type::caption, color::textFaint, "LOOP");
         x += measure(f.medium, type::caption, "LOOP").x + space::sm;
-        if (toggle("evloop", ImRect(ImVec2(x, cy - 10), ImVec2(x + 36, cy + 10)), e.loop)) {
+        const ImRect lr(ImVec2(x, cy - 10), ImVec2(x + 36, cy + 10));
+        nameRect("timeline.evloop", lr);
+        if (toggle("evloop", lr, e.loop)) {
             e.loop = !e.loop;
             editor::setSkinEvent(doc, m_ref, index, e);
         }
     }
+    nameRect("timeline.delev", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)));
     if (iconButton("delev", ImRect(ImVec2(r.Max.x - 36, cy - 13), ImVec2(r.Max.x - 10, cy + 13)), icon::x, false, "Delete this event (Del)")) {
         editor::deleteSelection(doc, m_ref, m_sel);
         m_sel = {};

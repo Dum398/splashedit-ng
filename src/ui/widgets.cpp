@@ -66,6 +66,20 @@ Hit interact(const char* id, ImRect r) {
     return h;
 }
 
+bool& namedRectsOn() {
+    static bool on = false;
+    return on;
+}
+
+std::map<std::string, ImRect>& namedRects() {
+    static std::map<std::string, ImRect> rects;
+    return rects;
+}
+
+void nameRect(const std::string& name, ImRect r) {
+    if (namedRectsOn()) namedRects()[name] = r;
+}
+
 void tooltip(const char* t) {
     if (!ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal | ImGuiHoveredFlags_NoSharedDelay)) return;
     Fonts& f = fonts();
@@ -171,6 +185,7 @@ int segmented(const char* id, ImVec2 pos, std::initializer_list<const char*> ite
         Hit hit = interact(id, r);
         ImGui::PopID();
         if (hit.clicked) result = i;
+        if (namedRectsOn()) nameRect(std::string(id) + "/" + it, r);
         if (i == selected)
             dl->AddRectFilled(r.Min, r.Max, color::active, radius::button);
         else if (hit.hover > 0)

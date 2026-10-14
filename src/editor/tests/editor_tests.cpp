@@ -3631,6 +3631,59 @@ void testBlendCancel() {
 #endif
 }
 
+// ---- Quantizer speed and quality
+
+// A 256x256 image with 63660 distinct colours (ramps plus noise), built from
+// integers so it is the same on every platform: the 8 bpp quantizer's worst
+// case, one k-means point per distinct colour.
+static splash::Image busyImage() {
+    splash::Image img;
+    img.width = img.height = 256;
+    img.pixels.resize(256 * 256);
+    uint32_t s = 12345;
+    auto noise = [&] {
+        s = s * 1664525u + 1013904223u;
+        return int(s >> 24) % 41 - 20;
+    };
+    auto c8 = [](int v) { return float(v < 0 ? 0 : v > 255 ? 255 : v) / 255.f; };
+    for (int y = 0; y < 256; y++)
+        for (int x = 0; x < 256; x++) {
+            int r = x + noise(), g = y * 3 / 4 + ((x * y) >> 9) + noise(), b = 255 - (x + y) / 2 + noise();
+            img.pixels[size_t(y) * 256 + x] = {c8(r), c8(g), c8(b), 1.f};
+        }
+    return img;
+}
+
+void testQuantizer() {
+    splash::Image img = busyImage();
+    // Speed: the brute-force k-means took 8.4 s on this image in an optimised
+    // build and over 40 s unoptimised; the bounded one well under 2 s. The
+    // bound is loose for slow CI machines.
+    auto t0 = std::chrono::steady_clock::now();
+    splash::PsxTexture t8 = splash::convertTexture(img, splash::BitDepth::Bpp8);
+    double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "quantizer: 256x256 8 bpp in %.2f s\n", sec);
+    CHECK(sec < 10.0);
+    // Quality: the same as the brute-force quantizer's (its output is
+    // byte-identical on x86-64: deltaE 1.716 / 4.827, blurred 0.462 / 2.129).
+    // The headroom only allows for other platforms' float maths (a perturbed
+    // cbrt/pow or FMA moved none of them in the 4th decimal); a quantizer that
+    // stops early or skips a centre it should not have lands 0.02+ away.
+    splash::TextureError e8 = splash::measureTexture(img, t8);
+    std::fprintf(stderr, "quantizer: 8 bpp deltaE %.4f blur %.4f, %d colours\n", e8.deltaE, e8.deltaEBlur, e8.colorsUsed);
+    CHECK(e8.colorsUsed == 256);
+    CHECK(e8.deltaE < 1.7163 + 0.005);
+    CHECK(e8.deltaEBlur < 0.4621 + 0.005);
+    splash::TextureError e4 = splash::measureTexture(img, splash::convertTexture(img, splash::BitDepth::Bpp4));
+    std::fprintf(stderr, "quantizer: 4 bpp deltaE %.4f blur %.4f, %d colours\n", e4.deltaE, e4.deltaEBlur, e4.colorsUsed);
+    CHECK(e4.colorsUsed == 16);
+    CHECK(e4.deltaE < 4.8265 + 0.005);
+    CHECK(e4.deltaEBlur < 2.1287 + 0.005);
+    // Deterministic: the same image converts to the same words.
+    splash::PsxTexture again = splash::convertTexture(img, splash::BitDepth::Bpp8);
+    CHECK(again.palette == t8.palette && again.imageData == t8.imageData);
+}
+
 // ---- Texture preview (inspector side-by-side)
 
 // The VRAM image an export's .vram file describes: atlases and CLUTs placed.
@@ -3865,6 +3918,7 @@ int main(int argc, char** argv) {
     testClipboard();
     testPasteOffset();
     testImportWarnings();
+    testQuantizer();
     testTexturePreview();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);

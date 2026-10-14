@@ -3659,10 +3659,11 @@ static float texturePreview(State& st, ImDrawList* dl, float x0, float x1, float
     std::snprintf(src, sizeof src, "source %d colours  \xc2\xb7  %.1f KB VRAM", p->sourceColors, p->vramBytes / 1024.0);
     text(dl, ImVec2(x0, y), f.regular, type::caption, color::textFaint, src);
 
-    // Compare toggle, right-aligned on the numbers row.
+    // Compare toggle, right-aligned on the shorter source row (on the numbers
+    // row it covered the deltaE figure at the inspector's default width).
     const char* cmp = tp.compare ? "Split" : "Compare";
     float cw = measure(f.medium, type::caption, cmp).x + 16;
-    ImRect cb(ImVec2(x1 - cw, y - 16), ImVec2(x1, y - 16 + 18));
+    ImRect cb(ImVec2(x1 - cw, y - 1), ImVec2(x1, y + 17));
     Hit hc = interact("texcomparebtn", cb);
     dl->AddRectFilled(cb.Min, cb.Max, hc.hovered ? color::hover : color::raised, radius::button);
     textCentered(dl, cb, f.medium, type::caption, color::textDim, cmp);

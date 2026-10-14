@@ -21,8 +21,9 @@ def fx(frame):
 
 RULER_Y = 668
 SCENE_VIEW = (290, 50, 1230, 595)
-# The Crate's move gizmo at frame 0 (the scene's own pose): a point on its X arrow.
-GIZMO_X = (845, 368)
+# The Crate's move gizmo at frame 0 (the scene's own pose): a point on its X arrow. The Scene
+# view starts under the tab strip (Scene, UI), which shifts its centre down by 19 px.
+GIZMO_X = (845, 387)
 
 
 def check(name, ok, detail=''):

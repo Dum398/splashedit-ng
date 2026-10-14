@@ -654,6 +654,10 @@ void dropdown(const char* id, ImRect r, const char* ic, const char* value) {
 }
 
 int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, std::initializer_list<const char*> items, int current) {
+    return dropdownMenu(id, r, ic, value, std::vector<const char*>(items), current);
+}
+
+int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, const std::vector<const char*>& items, int current) {
     Fonts& f = fonts();
     dropdown(id, r, ic, value);
     std::string popupId = std::string(id) + "#menu";
@@ -661,7 +665,10 @@ int dropdownMenu(const char* id, ImRect r, const char* ic, const char* value, st
 
     const float pad = space::xs, rowH = size::field + 4;
     ImVec2 size(r.GetWidth(), pad * 2 + rowH * static_cast<float>(items.size()));
-    ImGui::SetNextWindowPos(ImVec2(r.Min.x, r.Max.y + space::xs));
+    // A long list that would run off the bottom opens above the field instead.
+    float top = r.Max.y + space::xs;
+    if (top + size.y > ImGui::GetIO().DisplaySize.y && r.Min.y - space::xs - size.y >= 0) top = r.Min.y - space::xs - size.y;
+    ImGui::SetNextWindowPos(ImVec2(r.Min.x, top));
     ImGui::SetNextWindowSize(size);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);

@@ -4215,6 +4215,18 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
 
     // Mesh.
+    // A labelled on/off switch; a click flips it through `flip` (one undo step).
+    // Named obj.<id> for scripted tests.
+    auto toggleRow = [&](const char* id, const char* label, const char* tip, bool on, void (*flip)(splash::Object&)) {
+        std::string lid = std::string("l") + id;
+        ImRect fr = row(lid.c_str(), label, tip);
+        ImRect sw(ImVec2(fr.Min.x, fr.GetCenter().y - 8), ImVec2(fr.Min.x + 30, fr.GetCenter().y + 8));
+        nameRect(std::string("obj.") + id, sw);
+        if (toggle(id, sw, on)) doc.edit(path, flip);
+    };
+    // Shades rows from `from` down to y: settings that stay editable but do
+    // nothing until another one is turned on.
+    auto dimFrom = [&](float from) { dl->AddRectFilled(ImVec2(x0 + space::sm, from), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150)); };
     if (o->mesh) {
         const splash::MeshComponent& m = *o->mesh;
         const editor::MeshInfo* mi = doc.mesh(m.mesh);
@@ -4276,6 +4288,14 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                     icon::sun, lightingLabel(m.vertexColors), {"Baked vertex", "Flat", "Mesh colours"}, curMode);
         if (pickMode >= 0 && modes[pickMode] != m.vertexColors)
             doc.edit(path, [&](splash::Object& ob) { ob.mesh->vertexColors = modes[pickMode]; });
+        // Smoothed normals only feed baked vertex lighting.
+        const bool baked = m.vertexColors == splash::VertexColorMode::Baked;
+        const float smoothTop = y;
+        toggleRow("smooth", "Smooth normals",
+                  baked ? "Bakes the lighting as if the surface were smoothly curved, instead of shading each face flat. Off keeps the model's own normals, for hard edges."
+                        : "Not used: only Baked vertex lighting uses it. Bakes the lighting as if the surface were smoothly curved.",
+                  m.smoothNormals, [](splash::Object& ob) { ob.mesh->smoothNormals = !ob.mesh->smoothNormals; });
+        if (!baked) dimFrom(smoothTop);
         sectionEnd(top);
     }
 
@@ -4340,6 +4360,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             commit(numberField("lspot", row("llspot", "Spot angle", "Width of the cone of light."), fmtShort(l.spotAngle).c_str(),
                                "\xc2\xb0", 0, nullptr, &sv),
                    "lspot", [&](splash::Object& ob) { ob.light->spotAngle = splash::clampv(sv, 1.0f, 179.0f); });
+            float iv = l.innerSpotAngle;
+            const ImRect innerRow = row("llinner", "Inner angle",
+                                        "Inside this cone the light is at full strength; it fades out toward the spot angle. 0 fades from 80% of the spot angle.");
+            nameRect("obj.linner", innerRow);
+            commit(numberField("linner", innerRow, fmtShort(l.innerSpotAngle).c_str(), "\xc2\xb0", 0, nullptr, &iv), "linner",
+                   [&](splash::Object& ob) { ob.light->innerSpotAngle = splash::clampv(iv, 0.0f, ob.light->spotAngle); });
         }
         sectionEnd(top);
     }
@@ -4380,7 +4406,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                       const std::function<void(splash::Object&, float)>& set) {
         float nv = v;
         std::string lid = std::string("l") + id;
-        commit(numberField(id, row(lid.c_str(), label, tip), fmtShort(v).c_str(), unit, 0, nullptr, &nv), key,
+        const ImRect fr = row(lid.c_str(), label, tip);
+        nameRect(std::string("obj.") + id, fr);
+        commit(numberField(id, fr, fmtShort(v).c_str(), unit, 0, nullptr, &nv), key,
                [&](splash::Object& ob) { set(ob, splash::clampv(nv, lo, hi)); });
     };
     // What the last export's nav bake made of the scene: psxsplash only gives
@@ -4446,6 +4474,14 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                [](splash::Object& ob, float v) { ob.player->moveSpeed = v; });
         number("pjump", "Jump height", "How high a jump goes.", p.jumpHeight, "m", "pjump", 0, 1000,
                [](splash::Object& ob, float v) { ob.player->jumpHeight = v; });
+        number("psprint", "Sprint speed", "Running speed, while the sprint button is held.", p.sprintSpeed, "m/s", "psprint", 0, 1000,
+               [](splash::Object& ob, float v) { ob.player->sprintSpeed = v; });
+        number("pgravity", "Gravity", "How fast the player falls. Earth is about 9.8; higher feels snappier.", p.gravity,
+               "m/s\xc2\xb2", "pgravity", 0, 1000, [](splash::Object& ob, float v) { ob.player->gravity = v; });
+        number("pstep", "Step height", "Tallest step or ledge the player walks up without jumping. For the nav bake; a Navigation component in the scene overrides it.",
+               p.nav.maxStepHeight, "m", "pstep", 0, 100, [](splash::Object& ob, float v) { ob.player->nav.maxStepHeight = v; });
+        number("pslope", "Max slope", "Steepest ground the player can walk on. For the nav bake; a Navigation component in the scene overrides it.",
+               p.nav.walkableSlopeAngle, "deg", "pslope", 0, 90, [](splash::Object& ob, float v) { ob.player->nav.walkableSlopeAngle = v; });
         navNotes();
         sectionEnd(top);
     }
@@ -4489,6 +4525,59 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         compSection("s_interact", editor::ComponentKind::Interactable);
         number("iradius", "Radius", "How close the player has to be.", in.radius, "m", "iradius", 0, 1000,
                [](splash::Object& ob, float v) { ob.interactable->radius = v; });
+        {
+            // Menu order: face buttons, shoulders, Start/Select, d-pad, sticks.
+            // Values are psyqo's pad bits (AdvancedPad::Button), what psxsplash tests.
+            static const int bits[16] = {14, 13, 15, 12, 10, 11, 8, 9, 3, 0, 4, 6, 7, 5, 1, 2};
+            static const char* const names[16] = {"Cross", "Circle", "Square", "Triangle", "L1", "R1", "L2", "R2",
+                                                  "Start", "Select", "Up", "Down", "Left", "Right", "L3", "R3"};
+            int cur = -1;
+            for (int i = 0; i < 16; i++)
+                if (bits[i] == in.button) cur = i;
+            const ImRect br = row("libutton", "Button", "The pad button that uses the object.");
+            nameRect("obj.ibutton", br);
+            int pick = dropdownMenu("ibutton", br, nullptr, cur >= 0 ? names[cur] : "None", std::vector<const char*>(names, names + 16), cur);
+            if (pick >= 0) doc.edit(path, [&](splash::Object& ob) { ob.interactable->button = bits[pick]; });
+        }
+        toggleRow("irepeat", "Repeatable", "On, it can be used again after the cooldown. Off, it works once.", in.repeatable,
+                  [](splash::Object& ob) { ob.interactable->repeatable = !ob.interactable->repeatable; });
+        const float coolTop = y;
+        number("icooldown", "Cooldown",
+               in.repeatable ? "Wait before it can be used again. The console runs 60 frames a second (50 on PAL)."
+                             : "Not used: turn on Repeatable first. Wait before it can be used again, in frames.",
+               float(in.cooldownFrames), "frames", "icooldown", 0, 65535,
+               [](splash::Object& ob, float v) { ob.interactable->cooldownFrames = static_cast<uint16_t>(std::lround(v)); });
+        if (!in.repeatable) dimFrom(coolTop);
+        toggleRow("iprompt", "Show prompt", "Shows a UI canvas while the player is close enough to use it.", in.showPrompt,
+                  [](splash::Object& ob) { ob.interactable->showPrompt = !ob.interactable->showPrompt; });
+        {
+            const float promptTop = y;
+            std::vector<const char*> items{"None"};
+            int cur = in.promptCanvas.empty() ? 0 : -1;
+            for (const splash::UICanvas& c : doc.scene().canvases) {
+                if (c.name == in.promptCanvas) cur = int(items.size());
+                items.push_back(c.name.c_str());
+            }
+            std::string shown = in.promptCanvas.empty() ? std::string("None")
+                                : cur < 0                ? in.promptCanvas + "  (no such canvas)"
+                                                         : in.promptCanvas;
+            const ImRect cr = row("licanvas", "Prompt", in.showPrompt ? "The UI canvas shown as the prompt. Its name has to fit in 15 characters."
+                                                                       : "Not used: turn on Show prompt first. The UI canvas shown as the prompt.");
+            nameRect("obj.icanvas", cr);
+            int pick = dropdownMenu("icanvas", cr, nullptr, shown.c_str(), items, cur);
+            if (pick >= 0) {
+                std::string name = pick == 0 ? std::string() : std::string(items[size_t(pick)]);
+                doc.edit(path, [name](splash::Object& ob) { ob.interactable->promptCanvas = name; });
+            }
+            if (in.promptCanvas.size() > 15) {
+                const std::string t = "Only 15 characters of the canvas name are kept, so the console will not find '" + in.promptCanvas +
+                                      "'. Rename the canvas.";
+                const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+                dl->AddText(f.regular, type::caption, ImVec2(tx, y), color::warn, t.c_str(), nullptr, w);
+                y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str()).y + space::sm;
+            }
+            if (!in.showPrompt) dimFrom(promptTop);
+        }
         ImRect fv = row("lifacing", "Require facing", "The player has to be looking toward the object to use it.");
         if (toggle("ifacing", ImRect(ImVec2(fv.Min.x, fv.GetCenter().y - 8), ImVec2(fv.Min.x + 30, fv.GetCenter().y + 8)), in.lineOfSight))
             doc.edit(path, [](splash::Object& ob) { ob.interactable->lineOfSight = !ob.interactable->lineOfSight; });
@@ -4511,6 +4600,18 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                        found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr) |
             fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string()))
             pickAsset(AssetSlot::Clip, path);
+        std::string typed;
+        const ImRect nr = row("laname", "Name", "What scripts play it by, as in Audio.Play(\"name\").");
+        nameRect("obj.aname", nr);
+        if (textField("aname", nr, a.clipName, &typed, "No name", 255))
+            doc.edit(path, [typed](splash::Object& ob) { ob.audio->clipName = typed; });
+        number("arate", "Sample rate", "The clip is resampled to this at export. Lower takes less sound RAM and sounds duller; 22050 is a good middle.",
+               float(a.sampleRate), "Hz", "arate", 4000, 44100,
+               [](splash::Object& ob, float v) { ob.audio->sampleRate = static_cast<int>(std::lround(v)); });
+        toggleRow("aloop", "Loop", "Plays again from the start when it ends, until stopped.", a.loop,
+                  [](splash::Object& ob) { ob.audio->loop = !ob.audio->loop; });
+        toggleRow("atrim", "Trim silence", "Cuts the quiet part at the start of the file, so it plays the moment it is triggered.",
+                  a.trimLeadingSilence, [](splash::Object& ob) { ob.audio->trimLeadingSilence = !ob.audio->trimLeadingSilence; });
         sectionEnd(top);
     }
     if (o->skin) {

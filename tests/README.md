@@ -425,6 +425,15 @@ The editor prints `scripttabs: active <tab>` each time a click brings a tab to t
 
     python3 scripttabscheck.py <splashedit>
 
+`compfieldscheck.py` drives the object inspector's component rows on copies of the courtyard example
+(components are added to the copied scene before launch): Interactable Button (picked from its menu),
+Repeatable, Cooldown, Show prompt and Prompt canvas; Player Sprint speed, Gravity, Step height and Max
+slope; Audio Name, Sample rate, Loop and Trim silence; Mesh Smooth normals; Spot light Inner angle. Each
+run saves with Ctrl+S and reads the fields back from the saved scene; Ctrl+Z must take back the last
+edit and keep the rest. Controls are clicked by name. Needs a display.
+
+    python3 compfieldscheck.py <splashedit>
+
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
 ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is

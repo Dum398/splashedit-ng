@@ -35,6 +35,15 @@ MonoAudio loadWavMono(const std::filesystem::path& file) {
     return a;
 }
 
+WavInfo wavInfo(const std::filesystem::path& file) {
+    std::string path = file.string();
+    drwav wav;
+    if (!drwav_init_file(&wav, path.c_str(), nullptr)) throw std::runtime_error(path + ": not a readable WAV file");
+    WavInfo info{int(wav.sampleRate), int(wav.channels), uint64_t(wav.totalPCMFrameCount)};
+    drwav_uninit(&wav);
+    return info;
+}
+
 void trimLeadingSilence(MonoAudio& a) {
     const float floor = 1.f / 512.f;
     size_t first = a.samples.size();
@@ -49,13 +58,18 @@ void trimLeadingSilence(MonoAudio& a) {
     a.samples.erase(a.samples.begin(), a.samples.begin() + std::ptrdiff_t(first));
 }
 
+size_t resampledCount(size_t n, int from, int to) {
+    if (to == from || n == 0) return n;
+    return size_t(std::llround(double(n) * (double(to) / double(from))));
+}
+
 MonoAudio resample(const MonoAudio& a, int rate) {
     if (rate == a.rate || a.samples.empty()) return {a.samples, rate};
     const double ratio = double(rate) / double(a.rate);
     const double cutoff = 0.5 * std::min(1.0, ratio) * 0.95;  // cycles per input sample
     const int halfTaps = int(std::ceil(16.0 / std::min(1.0, ratio)));
     const double pi = 3.14159265358979323846;
-    size_t outCount = size_t(std::llround(double(a.samples.size()) * ratio));
+    size_t outCount = resampledCount(a.samples.size(), a.rate, rate);
     MonoAudio out;
     out.rate = rate;
     out.samples.resize(outCount);
@@ -105,6 +119,13 @@ std::vector<uint8_t> encodeSpuAdpcm(const std::vector<int16_t>& pcm, bool loop) 
     }
     out.resize((out.size() + 63) / 64 * 64, 0);
     return out;
+}
+
+size_t spuAdpcmBytes(size_t samples, bool loop) {
+    const size_t samplesPerBlock = PSX_AUDIO_SPU_SAMPLES_PER_BLOCK, blockSize = PSX_AUDIO_SPU_BLOCK_SIZE;
+    size_t bytes = blockSize + (samples + samplesPerBlock - 1) / samplesPerBlock * blockSize;  // silent lead + data
+    if (!loop) bytes += blockSize;                                                         // trap
+    return (bytes + 63) / 64 * 64;
 }
 
 std::vector<int16_t> decodeSpuAdpcm(const std::vector<uint8_t>& adpcm) {

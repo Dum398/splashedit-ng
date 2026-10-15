@@ -44,6 +44,7 @@
 #include "editor/texture_preview.hh"
 #include "editor/timeline.hh"
 #include "editor/unirom.hh"
+#include "audio.hh"
 #include "blend.hh"
 #include "editor/ui_canvas.hh"
 #include "budget.hh"
@@ -7547,6 +7548,131 @@ void testDiscExportSettings() {
     CHECK(!bad.exported.errors.empty() && bad.exported.errors[0].find("1000") != std::string::npos);
 }
 
+namespace fs = std::filesystem;
+
+// The size helpers the inspector estimates with match what export makes.
+void testAudioSizes() {
+    // 84 and 196 samples fill 3 and 7 blocks, where the trap block alone
+    // crosses the 64-byte padding.
+    for (size_t n : {size_t(0), size_t(1), size_t(27), size_t(28), size_t(29), size_t(84), size_t(196), size_t(1000)})
+        for (bool loop : {true, false}) {
+            std::vector<int16_t> pcm(n);
+            for (size_t i = 0; i < n; i++) pcm[i] = int16_t((i * 977) % 20000) - 10000;
+            CHECK(splash::spuAdpcmBytes(n, loop) == splash::encodeSpuAdpcm(pcm, loop).size());
+        }
+    struct Case {
+        size_t n;
+        int from, to;
+    };
+    for (Case c : {Case{0, 44100, 22050}, Case{1000, 22050, 22050}, Case{1000, 44100, 22050}, Case{1001, 44100, 11025},
+                   Case{777, 8000, 44100}, Case{12345, 32000, 22050}}) {
+        splash::MonoAudio a;
+        a.rate = c.from;
+        a.samples.assign(c.n, 0.25f);
+        CHECK(splash::resampledCount(c.n, c.from, c.to) == splash::resample(a, c.to).samples.size());
+    }
+}
+
+// A 16-bit PCM WAV with `frames` frames of `channels` channels at `rate`.
+static void writeWav16(const fs::path& p, int rate, int channels, uint32_t frames) {
+    std::ofstream out(p, std::ios::binary);
+    auto u32 = [&](uint32_t v) { for (int i = 0; i < 4; i++) out.put(char((v >> (8 * i)) & 0xff)); };
+    auto u16 = [&](uint16_t v) { out.put(char(v & 0xff)); out.put(char(v >> 8)); };
+    const uint32_t data = frames * uint32_t(channels) * 2;
+    out.write("RIFF", 4);
+    u32(36 + data);
+    out.write("WAVEfmt ", 8);
+    u32(16);
+    u16(1);
+    u16(uint16_t(channels));
+    u32(uint32_t(rate));
+    u32(uint32_t(rate * channels * 2));
+    u16(uint16_t(channels * 2));
+    u16(16);
+    out.write("data", 4);
+    u32(data);
+    for (uint32_t i = 0; i < frames * uint32_t(channels); i++) u16(uint16_t(int16_t((i * 131) % 8000 - 4000)));
+}
+
+// wavInfo reads the header; the document caches it for audio clips.
+void testWavInfo() {
+    const fs::path dir = g_outDir / "wavinfo";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    writeWav16(dir / "st.wav", 32000, 2, 4321);
+    splash::WavInfo w = splash::wavInfo(dir / "st.wav");
+    CHECK(w.rate == 32000 && w.channels == 2 && w.frames == 4321);
+    { std::ofstream(dir / "bad.wav", std::ios::binary) << "not a wav"; }
+    bool threw = false;
+    try {
+        splash::wavInfo(dir / "bad.wav");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    splash::Scene s;
+    splash::Object o = named("Sound");
+    o.audio.emplace();
+    o.audio->clip = "st.wav";
+    s.objects.push_back(o);
+    o.name = "Bad";
+    o.audio->clip = "bad.wav";
+    s.objects.push_back(o);
+    o.name = "Gone";
+    o.audio->clip = "gone.wav";
+    s.objects.push_back(o);
+    editor::Document d;
+    d.reset(s, dir);
+    const editor::AudioInfo* ai = d.audio("st.wav");
+    CHECK(ai && ai->status == editor::AssetStatus::Ok && ai->rate == 32000 && ai->channels == 2 && ai->frames == 4321);
+    CHECK(d.audio("bad.wav") && d.audio("bad.wav")->status == editor::AssetStatus::Unreadable);
+    CHECK(d.audio("gone.wav") && d.audio("gone.wav")->status == editor::AssetStatus::Missing);
+    CHECK(d.fileExists("st.wav"));
+    // A rewritten file is re-read.
+    writeWav16(dir / "st.wav", 11025, 1, 100);
+    d.refreshAssets({"st.wav"});
+    ai = d.audio("st.wav");
+    CHECK(ai && ai->rate == 11025 && ai->channels == 1 && ai->frames == 100);
+    CHECK(d.fileExists("st.wav"));
+}
+
+// Mesh colours on a mesh without vertex colours is a warning, fixed by baking.
+void testMeshColours() {
+    const fs::path dir = g_outDir / "meshcolours";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Mesh tri;
+    tri.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}};
+    tri.normals.assign(3, {0, 0, 1});
+    tri.submeshes = {{0, 1, 2}};
+    splash::saveMesh(tri, dir / "plain.mesh");
+    tri.colors.assign(3, {1, 0, 0, 1});
+    splash::saveMesh(tri, dir / "painted.mesh");
+
+    splash::Scene s;
+    splash::Object o = named("Plain");
+    o.mesh.emplace();
+    o.mesh->mesh = "plain.mesh";
+    o.mesh->vertexColors = splash::VertexColorMode::Mesh;
+    s.objects.push_back(o);
+    o.name = "Painted";
+    o.mesh->mesh = "painted.mesh";
+    s.objects.push_back(o);
+    editor::Document d;
+    d.reset(s, dir);
+    const editor::MeshInfo* plain = d.mesh("plain.mesh");
+    const editor::MeshInfo* painted = d.mesh("painted.mesh");
+    CHECK(plain && plain->status == editor::AssetStatus::Ok && !plain->hasColors);
+    CHECK(painted && painted->status == editor::AssetStatus::Ok && painted->hasColors);
+    CHECK(d.hasWarning(*d.object({0})));
+    CHECK(!d.hasWarning(*d.object({1})));
+    d.edit({0}, [](splash::Object& ob) { ob.mesh->vertexColors = splash::VertexColorMode::Baked; });
+    CHECK(!d.hasWarning(*d.object({0})));
+    d.undo();
+    CHECK(d.hasWarning(*d.object({0})));
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -7655,6 +7781,9 @@ int main(int argc, char** argv) {
     testDiscSettings();
     testDiscLicenceImage();
     testDiscExportSettings();
+    testAudioSizes();
+    testWavInfo();
+    testMeshColours();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

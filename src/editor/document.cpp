@@ -7,6 +7,7 @@
 #include <system_error>
 #include <unordered_set>
 
+#include "audio.hh"
 #include "texture.hh"
 
 namespace fs = std::filesystem;
@@ -75,6 +76,23 @@ MeshInfo analyseMesh(const fs::path& file) {
         size_t indices = 0;
         for (const auto& sm : m.submeshes) indices += sm.size();
         info.triangles = static_cast<int>(indices / 3);
+        info.hasColors = !m.positions.empty() && m.colors.size() == m.positions.size();
+        info.status = AssetStatus::Ok;
+    } catch (const std::exception& e) {
+        info.status = AssetStatus::Unreadable;
+        info.error = e.what();
+    }
+    return info;
+}
+
+AudioInfo analyseAudio(const fs::path& file) {
+    AudioInfo info;
+    if (!isFile(file)) return info;
+    try {
+        splash::WavInfo w = splash::wavInfo(file);
+        info.rate = w.rate;
+        info.channels = w.channels;
+        info.frames = w.frames;
         info.status = AssetStatus::Ok;
     } catch (const std::exception& e) {
         info.status = AssetStatus::Unreadable;
@@ -100,6 +118,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
     m_collapsed.clear();
     m_meshes.clear();
     m_textures.clear();
+    m_audio.clear();
     m_files.clear();
     m_objectCount = 0;
     m_projectFiles = 0;
@@ -136,6 +155,7 @@ void Document::reset(splash::Scene scene, const fs::path& project, const std::st
     m_collapsed.clear();
     m_meshes.clear();
     m_textures.clear();
+    m_audio.clear();
     m_files.clear();
     m_projectFiles = 0;
     recount();
@@ -146,7 +166,10 @@ void Document::refreshAssets(const std::vector<std::string>& projectPaths) {
     for (const std::string& p : projectPaths) {
         const fs::path ext = fs::path(p).extension();
         if (ext == ".mesh") m_meshes[p] = analyseMesh(resolve(p));
-        else if (ext == ".lua" || ext == ".wav" || ext == ".anim") m_files[p] = isFile(resolve(p));
+        else if (ext == ".lua" || ext == ".wav" || ext == ".anim") {
+            m_files[p] = isFile(resolve(p));
+            if (ext == ".wav") m_audio[p] = analyseAudio(resolve(p));
+        }
         else m_textures[p] = analyseTexture(resolve(p));
     }
     ++m_assetsId;
@@ -166,7 +189,10 @@ void Document::cacheAssets(const splash::Object& o) {
     };
     if (o.script) file(o.script->lua);
     if (o.trigger) file(o.trigger->lua);
-    if (o.audio) file(o.audio->clip);
+    if (o.audio) {
+        file(o.audio->clip);
+        if (!o.audio->clip.empty() && !m_audio.count(o.audio->clip)) m_audio[o.audio->clip] = analyseAudio(resolve(o.audio->clip));
+    }
     if (o.skin)
         for (const std::string& c : o.skin->clips) file(c);
     for (const splash::Object& c : o.children) cacheAssets(c);
@@ -745,6 +771,11 @@ const TextureInfo* Document::texture(const std::string& projectPath) const {
     return it == m_textures.end() ? nullptr : &it->second;
 }
 
+const AudioInfo* Document::audio(const std::string& projectPath) const {
+    auto it = m_audio.find(projectPath);
+    return it == m_audio.end() ? nullptr : &it->second;
+}
+
 bool Document::fileExists(const std::string& projectPath) const {
     auto it = m_files.find(projectPath);
     return it != m_files.end() && it->second;
@@ -756,12 +787,19 @@ bool Document::couldBe4bpp(const splash::MeshComponent& m) const {
     return t && t->status == AssetStatus::Ok && t->colors15 <= 16 && t->vramBytes4 < (m.bitDepth == splash::BitDepth::Bpp8 ? t->vramBytes8 : t->vramBytes16);
 }
 
+bool Document::missingMeshColors(const splash::MeshComponent& m) const {
+    if (m.vertexColors != splash::VertexColorMode::Mesh) return false;
+    const MeshInfo* mi = mesh(m.mesh);
+    return mi && mi->status == AssetStatus::Ok && !mi->hasColors;
+}
+
 bool Document::hasWarning(const splash::Object& o) const {
     if (o.mesh) {
         if (const MeshInfo* mi = mesh(o.mesh->mesh); !mi || mi->status != AssetStatus::Ok) return true;
         for (const splash::Material& mat : o.mesh->materials)
             if (const TextureInfo* t = texture(mat.texture); t && t->status != AssetStatus::Ok) return true;
         if (couldBe4bpp(*o.mesh)) return true;
+        if (missingMeshColors(*o.mesh)) return true;
     }
     if (o.script && !o.script->lua.empty() && !fileExists(o.script->lua)) return true;
     return false;

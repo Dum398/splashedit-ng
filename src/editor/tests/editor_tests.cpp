@@ -575,6 +575,27 @@ bool nearV(splash::Vec3 a, splash::Vec3 b, float eps = 1e-5f) {
     return std::fabs(a.x - b.x) < eps && std::fabs(a.y - b.y) < eps && std::fabs(a.z - b.z) < eps;
 }
 
+// A Trigger box in world space is the axis-aligned bounds of the turned,
+// scaled box: the splashpack stores it and the viewport draws it.
+void testTriggerWorldBox() {
+    splash::Object o;
+    o.trigger = splash::TriggerComponent{};
+    o.trigger->size = {2, 4, 6};
+    const float s45 = std::sqrt(0.5f);
+    splash::FlatObject fo{&o, {1, 2, 3}, splash::Quat{0, s45, 0, s45}, {1, 1, 1},
+                          splash::Mat34::trs({1, 2, 3}, splash::Quat{0, s45, 0, s45}, {1, 1, 1}), true};
+    splash::Vec3 mn, mx;
+    splash::triggerWorldBox(fo, &mn, &mx);
+    auto near = [](splash::Vec3 a, splash::Vec3 b) {
+        return std::fabs(a.x - b.x) < 1e-4f && std::fabs(a.y - b.y) < 1e-4f && std::fabs(a.z - b.z) < 1e-4f;
+    };
+    CHECK(near(mn, {-2, 0, 2}));  // a quarter turn about Y swaps the X and Z extents
+    CHECK(near(mx, {4, 4, 4}));
+    fo.localToWorld = splash::Mat34::trs({0, 0, 0}, splash::Quat{0, 0, 0, 1}, {2, 1, 0.5f});
+    splash::triggerWorldBox(fo, &mn, &mx);
+    CHECK(near(mn, {-2, -2, -1.5f}) && near(mx, {2, 2, 1.5f}));  // scale stretches the box
+}
+
 // The pure maths behind the rotate and scale gizmos.
 void testGizmoMath() {
     const float pi = editor::kPi;
@@ -2509,6 +2530,12 @@ void testNavBigWorld() {
     fs::create_directories(dir);
     splash::ExportResult ok = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
     CHECK(ok.ok() && ok.stats.navWanted && ok.stats.navRegions > 0 && !splash::navCoarsened(ok.stats));
+    // The viewport outlines every baked region, on the courtyard's ground.
+    CHECK(ok.stats.navOutlines.size() == size_t(ok.stats.navRegions));
+    for (const std::vector<splash::Vec3>& poly : ok.stats.navOutlines) {
+        CHECK(poly.size() >= 3);
+        for (const splash::Vec3& v : poly) CHECK(v.y > -1 && v.y < 3);
+    }
     CHECK(std::none_of(ok.warnings.begin(), ok.warnings.end(),
                        [](const std::string& w) { return w == splash::navEmptyWarning(); }));
     std::function<void(std::vector<splash::Object>&)> strip = [&](std::vector<splash::Object>& objs) {
@@ -2520,6 +2547,7 @@ void testNavBigWorld() {
     strip(scene.objects);
     splash::ExportResult none = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
     CHECK(none.ok() && none.stats.navWanted && none.stats.navRegions == 0);
+    CHECK(none.stats.navOutlines.empty());
     CHECK(std::any_of(none.warnings.begin(), none.warnings.end(),
                       [](const std::string& w) { return w == splash::navEmptyWarning(); }));
 }
@@ -6165,6 +6193,7 @@ int main(int argc, char** argv) {
     testStructure();
     testMove();
     testPick();
+    testTriggerWorldBox();
     testGizmoMath();
     testScaleClamp();
     testGizmoUndo();

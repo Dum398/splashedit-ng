@@ -73,6 +73,7 @@ struct State {
     // Gizmo snapping: move to 0.25 m, rotate to 15 degrees, scale to 0.1.
     // Ctrl snaps while it is off.
     bool snap = true;
+    bool gizmos = true;  // viewport draws trigger boxes, interaction radii and nav regions
 
     // Background dry-run export feeding the status bar's budget meters and problem count.
     editor::LiveExport live;

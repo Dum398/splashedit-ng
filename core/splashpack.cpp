@@ -1865,6 +1865,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.navCellSize = nav.cellSize;
     st.navExtentX = nav.extentX;
     st.navExtentZ = nav.extentZ;
+    for (const NavRegion& r : nav.regions) {
+        std::vector<Vec3>& o = st.navOutlines.emplace_back();
+        for (const Vec2& v : r.verts) o.push_back({v.x, r.planeA * v.x + r.planeB * v.y + r.planeD, v.y});
+    }
     if (st.navWanted && nav.regions.empty())
         res.warnings.push_back(navEmptyWarning());
 
@@ -2012,14 +2016,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     // ---- trigger boxes (32 bytes): world AABB of the transformed box
     for (const FlatObject* fo : triggers) {
         const TriggerComponent& t = *fo->object->trigger;
-        Vec3 half = t.size * 0.5f;
-        Vec3 mn{FLT_MAX, FLT_MAX, FLT_MAX}, mx{-FLT_MAX, -FLT_MAX, -FLT_MAX};
-        for (int i = 0; i < 8; i++) {
-            Vec3 c{(i & 1) ? half.x : -half.x, (i & 2) ? half.y : -half.y, (i & 4) ? half.z : -half.z};
-            Vec3 p = fo->localToWorld.point(c);
-            mn = vmin(mn, p);
-            mx = vmax(mx, p);
-        }
+        Vec3 mn, mx;
+        triggerWorldBox(*fo, &mn, &mx);
         w.i32(toWorldFixed12(mn.x / gte));
         w.i32(toWorldFixed12(-mx.y / gte));
         w.i32(toWorldFixed12(mn.z / gte));

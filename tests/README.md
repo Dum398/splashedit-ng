@@ -442,6 +442,13 @@ tree's rows are `tree.<object name>`). Needs a display.
 
     python3 inspectorscrollcheck.py <splashedit>
 
+`gizmocheck.py` adds a Trigger (Gate) and an Interactable (Lever) to a copy of the courtyard example
+and shoots the scene view twice, with the viewport's overlay toggle (`vp.gizmos`) on and off. Inside the
+viewport (`vp.view`), each pixel the "on" shot moved towards an overlay's colour counts for that
+overlay: the Trigger box, the Interactable's reach ring and the export's nav regions must each show up.
+
+    python3 gizmocheck.py <splashedit> [keep.png]
+
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
 ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is

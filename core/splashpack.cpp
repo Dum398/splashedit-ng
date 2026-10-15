@@ -1660,6 +1660,44 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (PsxTexture* t : cv)
             if (t) all.push_back(t);
     VramLayout vram = packVram(all, options.vram, res.errors);
+    {
+        using K = ExportStats::VramKind;
+        auto& map = res.stats.vramMap;
+        const VramSettings& vs = options.vram;
+        map.push_back({K::Framebuffer, 0, 0, vs.resolutionX, vs.resolutionY, "Framebuffer 0 (320x240)"});
+        if (vs.verticalBuffering)
+            map.push_back({K::Framebuffer, 0, 256, vs.resolutionX, vs.resolutionY, "Framebuffer 1 (320x240)"});
+        else
+            map.push_back({K::Framebuffer, vs.resolutionX, 0, vs.resolutionX, vs.resolutionY, "Framebuffer 1 (320x240)"});
+        map.push_back({K::Reserved, 960, 0, 64, kVramHeight, "Font column (x 960, reserved)"});
+        for (size_t i = 0; i < vs.prohibited.size(); i++) {
+            const auto& a = vs.prohibited[i];
+            map.push_back({K::Prohibited, a.x, a.y, a.w, a.h, "Prohibited area " + std::to_string(i + 1)});
+        }
+        for (const Atlas& a : vram.atlases) {
+            K k = a.bitDepth == BitDepth::Bpp16 ? K::Atlas16 : a.bitDepth == BitDepth::Bpp8 ? K::Atlas8 : K::Atlas4;
+            const char* bpp = a.bitDepth == BitDepth::Bpp16 ? "16" : a.bitDepth == BitDepth::Bpp8 ? "8" : "4";
+            size_t n = a.textures.size();
+            map.push_back({k, a.positionX, a.positionY, a.width, Atlas::kHeight,
+                           std::string(bpp) + " bpp atlas, " + std::to_string(n) + (n == 1 ? " texture" : " textures")});
+        }
+        std::set<std::array<int, 3>> cluts;
+        for (const Atlas& a : vram.atlases)
+            for (const PsxTexture* t : a.textures) {
+                if (!t->hasPalette || t->palette.empty()) continue;
+                std::array<int, 3> key{t->clutPackingX * 16, int(t->clutPackingY), int(t->palette.size())};
+                if (!cluts.insert(key).second) continue;
+                // A CLUT that did not fit keeps (0,0), inside framebuffer 0.
+                if (key[0] < vs.resolutionX && key[1] < vs.resolutionY) continue;
+                map.push_back({K::Clut, key[0], key[1], key[2], 1, "CLUT of " + t->source});
+            }
+        std::vector<std::string> fontNames(fontSheets.size());
+        for (const auto& [name, idx] : fontIndex)
+            if (idx >= 1 && size_t(idx) <= fontNames.size()) fontNames[idx - 1] = name;
+        for (size_t i = 0; i < fontSheets.size() && i < fontVram.size(); i++)
+            map.push_back({K::Font, fontVram[i][0], fontVram[i][1], 64, fontSheets[i].height,
+                           "Font '" + fontNames[i] + "'"});
+    }
     if (!res.ok()) return res;
 
     // Remap each object's texture list to the packed (deduplicated) textures.

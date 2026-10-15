@@ -1058,4 +1058,59 @@ void saveAnim(const AnimClip& c, const fs::path& file) {
     writeJson(j, file);
 }
 
+VramSettings::Area clampVramArea(VramSettings::Area a) {
+    a.x = std::clamp(a.x, 0, kVramWidth - 1);
+    a.y = std::clamp(a.y, 0, kVramHeight - 1);
+    a.w = std::clamp(a.w, 1, kVramWidth - a.x);
+    a.h = std::clamp(a.h, 1, kVramHeight - a.y);
+    return a;
+}
+
+VramSettings readVramSettings(const fs::path& file) {
+    VramSettings vs;
+    if (file.empty()) return vs;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return vs;
+    json j = json::parse(in, nullptr, false);
+    if (j.is_discarded() || !j.is_object() || !j.contains("prohibited") || !j["prohibited"].is_array()) return vs;
+    for (const json& e : j["prohibited"]) {
+        if (!e.is_object()) continue;
+        bool ok = true;
+        int v[4] = {};
+        const char* keys[4] = {"x", "y", "w", "h"};
+        for (int i = 0; i < 4 && ok; i++) {
+            auto it = e.find(keys[i]);
+            if (it == e.end() || !it->is_number()) {
+                ok = false;
+                break;
+            }
+            double d = it->get<double>();
+            if (!(d > -1e6 && d < 1e6)) ok = false;
+            else v[i] = int(d);
+        }
+        if (ok) vs.prohibited.push_back(clampVramArea({v[0], v[1], v[2], v[3]}));
+    }
+    return vs;
+}
+
+bool writeVramSettings(const fs::path& file, const VramSettings& vs) {
+    if (file.empty()) return false;
+    json areas = json::array();
+    for (const VramSettings::Area& a : vs.prohibited) {
+        json e = json::object();
+        e["x"] = a.x;
+        e["y"] = a.y;
+        e["w"] = a.w;
+        e["h"] = a.h;
+        areas.push_back(e);
+    }
+    json j = json::object();
+    j["prohibited"] = areas;
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << j.dump(2) << '\n';
+    out.close();
+    return !out.fail();
+}
+
 }  // namespace splash

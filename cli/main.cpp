@@ -332,7 +332,8 @@ static int discCmd(int argc, char** argv) {
         std::vector<const splash::Scene*> ptrs;
         for (const splash::Scene& s : scenes) ptrs.push_back(&s);
         fs::path root = project.empty() ? fs::path(scenePaths.front()).parent_path() : fs::path(project);
-        splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names);
+        splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names,
+                                                     splash::readVramSettings(root / "vram.json"));
         for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (!r.exported.ok()) return 1;
@@ -377,6 +378,7 @@ int main(int argc, char** argv) {
         splash::Scene scene = splash::loadScene(scenePath);
         fs::path root = project.empty() ? fs::path(scenePath).parent_path() : fs::path(project);
         splash::ExportOptions opt;
+        opt.vram = splash::readVramSettings(root / "vram.json");
         if (!orderFrom.empty()) opt.objectOrder = readNameTable(orderFrom);
         opt.luaBytecode = luaBytecode;
         splash::ExportResult r = splash::exportSplashpack(scene, root, outPath, opt);

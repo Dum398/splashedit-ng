@@ -1051,6 +1051,134 @@ void testBuildScenes() {
     CHECK(bytes("reload.flag") == "7");
 }
 
+// The project's VRAM layout: vram.json round trip, a missing file and
+// malformed entries; the export's vramMap (framebuffers, the font column,
+// atlases kept out of a prohibited area) on a dry run, and the live export
+// and Play packing with the project's areas.
+void testVramLayout() {
+    namespace fs = std::filesystem;
+    using K = splash::ExportStats::VramKind;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "vramlayout";
+    fs::remove_all(project);
+    fs::copy(src / "examples" / "courtyard", project, fs::copy_options::recursive);
+
+    // Missing file (or no project) = the defaults.
+    CHECK(editor::loadVramSettings(project).prohibited.empty());
+    CHECK(editor::loadVramSettings({}).prohibited.empty());
+    const splash::VramSettings def = editor::loadVramSettings(project);
+    CHECK(def.resolutionX == 320 && def.resolutionY == 240 && def.dualBuffering && def.verticalBuffering);
+    CHECK(!editor::saveVramSettings({}, def));
+
+    // Round trip.
+    splash::VramSettings vs;
+    vs.prohibited = {{512, 0, 64, 64}, {8, 300, 16, 24}};
+    CHECK(editor::saveVramSettings(project, vs));
+    const splash::VramSettings back = editor::loadVramSettings(project);
+    CHECK(back.prohibited.size() == 2);
+    if (back.prohibited.size() == 2) {
+        CHECK(back.prohibited[0].x == 512 && back.prohibited[0].y == 0 && back.prohibited[0].w == 64 && back.prohibited[0].h == 64);
+        CHECK(back.prohibited[1].x == 8 && back.prohibited[1].y == 300 && back.prohibited[1].w == 16 && back.prohibited[1].h == 24);
+    }
+
+    // Malformed entries are skipped, the rest clamped into VRAM; a file that
+    // is no JSON is the defaults.
+    {
+        std::ofstream(project / "vram.json", std::ios::binary)
+            << R"({"prohibited":[{"x":64,"y":8,"w":32,"h":16},{"x":"a","y":0,"w":1,"h":1},5,{"x":1,"y":2},)"
+            << R"({"x":1000,"y":500,"w":100,"h":0},{"x":-8,"y":0,"w":16,"h":16}]})";
+    }
+    const splash::VramSettings odd = editor::loadVramSettings(project);
+    CHECK(odd.prohibited.size() == 3);
+    if (odd.prohibited.size() == 3) {
+        CHECK(odd.prohibited[0].x == 64 && odd.prohibited[0].y == 8 && odd.prohibited[0].w == 32 && odd.prohibited[0].h == 16);
+        CHECK(odd.prohibited[1].x == 1000 && odd.prohibited[1].y == 500 && odd.prohibited[1].w == 24 && odd.prohibited[1].h == 1);
+        CHECK(odd.prohibited[2].x == 0 && odd.prohibited[2].w == 16);
+    }
+    { std::ofstream(project / "vram.json", std::ios::binary) << "not json"; }
+    CHECK(editor::loadVramSettings(project).prohibited.empty());
+    fs::remove(project / "vram.json");
+
+    // The map of a dry run: both framebuffers, the font column, the atlases.
+    const splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    splash::ExportOptions opt;
+    opt.dryRun = true;
+    const splash::ExportResult plain = splash::exportSplashpack(scene, project, project / "x.splashpack", opt);
+    CHECK(plain.ok());
+    CHECK(!fs::exists(project / "x.splashpack"));
+    auto has = [](const splash::ExportResult& r, K k, int x, int y, int w, int h) {
+        for (const auto& m : r.stats.vramMap)
+            if (m.kind == k && m.x == x && m.y == y && m.w == w && m.h == h) return true;
+        return false;
+    };
+    CHECK(has(plain, K::Framebuffer, 0, 0, 320, 240));
+    CHECK(has(plain, K::Framebuffer, 0, 256, 320, 240));
+    CHECK(has(plain, K::Reserved, 960, 0, 64, 512));
+    auto firstAtlas = [](const splash::ExportResult& r) -> const splash::ExportStats::VramRect* {
+        for (const auto& m : r.stats.vramMap)
+            if (m.kind == K::Atlas4 || m.kind == K::Atlas8 || m.kind == K::Atlas16) return &m;
+        return nullptr;
+    };
+    const auto* atlas0 = firstAtlas(plain);
+    CHECK(atlas0 != nullptr);
+    int cluts = 0;
+    for (const auto& m : plain.stats.vramMap)
+        if (m.kind == K::Clut) {
+            cluts++;
+            CHECK(m.h == 1 && m.w >= 1 && m.w <= 256);  // the palette's length, as packed
+        }
+    CHECK(cluts > 0);
+    if (!atlas0) return;
+
+    // A prohibited area over the spot the first atlas took moves it, and no
+    // atlas or CLUT overlaps the area.
+    const splash::VramSettings::Area area{atlas0->x, atlas0->y, 64, 64};
+    auto clean = [&](const splash::ExportResult& r) {
+        bool ok = true;
+        for (const auto& m : r.stats.vramMap) {
+            if (m.kind == K::Prohibited || m.kind == K::Framebuffer || m.kind == K::Reserved || m.kind == K::Font) continue;
+            if (m.x < area.x + area.w && area.x < m.x + m.w && m.y < area.y + area.h && area.y < m.y + m.h) ok = false;
+        }
+        return ok;
+    };
+    opt.vram.prohibited = {area};
+    const splash::ExportResult moved = splash::exportSplashpack(scene, project, project / "x.splashpack", opt);
+    CHECK(moved.ok());
+    const auto* atlas1 = firstAtlas(moved);
+    CHECK(atlas1 && (atlas1->x != area.x || atlas1->y != area.y));
+    CHECK(has(moved, K::Prohibited, area.x, area.y, area.w, area.h));
+    CHECK(clean(moved));
+    CHECK(!clean(plain));
+
+    // The live export packs with the project's vram.json, and exports again
+    // when it changes though the scene did not.
+    editor::Document d;
+    CHECK(!d.load(project, "courtyard.scene"));
+    editor::LiveExport live(0.3);
+    live.update(d, 10.0);
+    live.update(d, 10.4);
+    live.wait();
+    CHECK(live.result() && live.result()->ok() && !has(*live.result(), K::Prohibited, area.x, area.y, area.w, area.h));
+    live.update(d, 11.0);
+    CHECK(!live.busy());
+    splash::VramSettings saved;
+    saved.prohibited = {area};
+    CHECK(editor::saveVramSettings(project, saved));
+    live.settingsChanged();
+    live.update(d, 11.1);
+    CHECK(!live.busy());  // settles first
+    live.update(d, 11.5);
+    CHECK(live.busy());
+    live.wait();
+    CHECK(live.result() && has(*live.result(), K::Prohibited, area.x, area.y, area.w, area.h) && clean(*live.result()));
+
+    // Play packs with it too.
+    const fs::path dir = g_outDir / "vramplay";
+    fs::remove_all(dir);
+    const splash::ExportResult played = editor::exportForPlay(scene, project, dir);
+    CHECK(played.ok() && has(played, K::Prohibited, area.x, area.y, area.w, area.h) && clean(played));
+}
+
 static void setEnv(const char* k, const char* v) {
 #ifdef _WIN32
     _putenv_s(k, v);
@@ -6324,6 +6452,7 @@ int main(int argc, char** argv) {
     testBlendCancel();
     testPlay();
     testBuildScenes();
+    testVramLayout();
     testProject();
     testAdoptAsset();
     testNewScript();

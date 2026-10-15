@@ -9,6 +9,7 @@
 #include <string>
 #include <system_error>
 
+#include "editor/project.hh"
 #include "scene.hh"
 
 namespace fs = std::filesystem;
@@ -173,6 +174,7 @@ static splash::ExportResult exportScene(const splash::Scene& scene, const fs::pa
     for (const char* ext : kSceneExts) fs::remove(dir / (sceneStem(i) + ext), ec);
     splash::ExportOptions opt;
     opt.luaBytecode = true;
+    opt.vram = loadVramSettings(projectRoot);
     try {
         r = splash::exportSplashpack(scene, projectRoot, dir / (sceneStem(i) + ".splashpack"), opt);
     } catch (const std::exception& e) {

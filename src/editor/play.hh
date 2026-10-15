@@ -45,6 +45,8 @@ std::vector<std::string> missingHardwareTools(const PlayTools& tools);
 // an earlier export numbered past the last scene are removed. With more than
 // one scene, each error and warning starts with its scene's index and, when
 // `names` gives one, its name ("scene 1 (cave): ..."). The stats are scene 0's.
+// Every scene packs VRAM with the project's vram.json (loadVramSettings),
+// as does reloadForPlay.
 splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scenes,
                                    const std::filesystem::path& projectRoot, const std::filesystem::path& dir,
                                    const std::vector<std::string>& names = {});

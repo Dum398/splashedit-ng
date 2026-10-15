@@ -238,6 +238,19 @@ struct VramSettings {
     };
     std::vector<Area> prohibited;
 };
+// VRAM is 1024 x 512 16-bit words.
+constexpr int kVramWidth = 1024, kVramHeight = 512;
+
+// A project's VRAM settings file (vram.json): only the prohibited areas are
+// stored, as {"prohibited": [{"x":..,"y":..,"w":..,"h":..}]}; resolution and
+// buffering are psxsplash's fixed 320x240 dual vertical layout. A missing or
+// unreadable file reads as the defaults; entries that are not objects with
+// four numbers are skipped; areas are clamped into VRAM with w, h >= 1.
+// writeVramSettings returns false when the file cannot be written.
+VramSettings readVramSettings(const std::filesystem::path& file);
+bool writeVramSettings(const std::filesystem::path& file, const VramSettings& vs);
+// One area clamped as readVramSettings clamps it.
+VramSettings::Area clampVramArea(VramSettings::Area a);
 
 // A custom font for UI text, rasterised at export. Either `source` (a TTF/OTF
 // rasterised at `size` pixels per em) or `bitmap` (a 256-wide PNG of glyph

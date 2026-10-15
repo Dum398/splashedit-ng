@@ -390,7 +390,8 @@ EngineKind engineKind(const std::vector<uint8_t>& exe) {
 }
 
 DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
-                      const fs::path& bin, const std::string& title, const std::vector<std::string>& names) {
+                      const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
+                      const VramSettings& vram) {
     DiscResult r;
     if (scenes.empty()) {
         r.exported.errors.push_back("No scene to put on the disc.");
@@ -426,6 +427,7 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
     try {
         ExportOptions opt;
         opt.luaBytecode = true;
+        opt.vram = vram;
         const char* cnf = "BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFF00\r\n";
         std::vector<DiscFile> files;
         files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
@@ -472,8 +474,8 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
 }
 
 DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs::path& engine, const fs::path& bin,
-                      const std::string& title) {
-    return exportDisc(std::vector<const Scene*>{&scene}, projectRoot, engine, bin, title);
+                      const std::string& title, const VramSettings& vram) {
+    return exportDisc(std::vector<const Scene*>{&scene}, projectRoot, engine, bin, title, {}, vram);
 }
 
 }  // namespace splash

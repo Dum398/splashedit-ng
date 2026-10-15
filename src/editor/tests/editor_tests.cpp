@@ -3067,6 +3067,59 @@ void testRoomsErrors() {
 }
 
 // Room and Portal components survive save and load, unknown keys included.
+// The editor's side of rooms: the pickers add and remove both kinds, a
+// portal's room edit is one undo step, the inspector's warnings are the
+// exporter's, and the viewport arrow's frame points from room A into room B.
+void testRoomsEditor() {
+    using namespace roomtest;
+    using editor::ComponentKind;
+    splash::Object o;
+    o.name = "Hall";
+    CHECK(editor::cannotAdd(o, ComponentKind::Room).empty() && editor::cannotAdd(o, ComponentKind::Portal).empty());
+    CHECK(editor::addComponent(o, ComponentKind::Room) && o.room && o.room->size.x == 1 && o.room->offset.y == 0);
+    CHECK(editor::addComponent(o, ComponentKind::Portal) && o.portal && o.portal->width == 2 && o.portal->height == 3 &&
+          o.portal->roomA.empty());
+    CHECK(editor::cannotAdd(o, ComponentKind::Room) == "Already added" && !editor::addComponent(o, ComponentKind::Portal));
+    CHECK(editor::removeComponent(o, ComponentKind::Room) && !o.room && o.portal);
+    CHECK(editor::removeComponent(o, ComponentKind::Portal) && !o.portal && !editor::removeComponent(o, ComponentKind::Portal));
+    std::vector<std::pair<const char*, const char*>> items;
+    for (const editor::ObjectPreset& p : editor::presets()) items.push_back({p.label, p.keywords});
+    CHECK(std::string(editor::presets()[size_t(editor::rank("portal", items)[0])].label) == "Portal");
+    CHECK(std::string(editor::presets()[size_t(editor::rank("room", items)[0])].label) == "Room");
+    CHECK(std::string(editor::info(ComponentKind::Portal).label) == "Portal");
+
+    const splash::Scene scene = twoRooms(g_outDir / "rooms-editor");
+    editor::Document d;
+    d.reset(scene);
+    CHECK(d.edit({2}, [](splash::Object& ob) { ob.portal->roomB = ""; }));
+    CHECK(d.edit({2}, [](splash::Object& ob) { ob.portal->roomA = "Room B"; }));
+    CHECK(d.object({2})->portal->roomA == "Room B" && d.object({2})->portal->roomB.empty());
+    CHECK(d.undo() && d.object({2})->portal->roomA == "Room A" && d.object({2})->portal->roomB.empty());
+    CHECK(d.undo() && d.object({2})->portal->roomB == "Room B");
+
+    auto problems = [](const splash::Scene& sc) {
+        const std::vector<splash::FlatObject> flat = splash::flatten(sc);
+        std::vector<const splash::FlatObject*> rooms;
+        for (const splash::FlatObject& fo : flat)
+            if (fo.object->room) rooms.push_back(&fo);
+        return splash::portalProblems(rooms, flat[2]);
+    };
+    CHECK(problems(scene).empty());
+    splash::Scene unset = scene;
+    unset.objects[2].portal->roomB.clear();
+    CHECK(problems(unset) == std::vector<std::string>{"portal Door room B: not set, pick a Room object"});
+    unset.objects[2].portal->roomB = "Room A";
+    CHECK(problems(unset) == std::vector<std::string>{"portal Door: room A and room B are the same Room 'Room A'"});
+
+    // The door faces -X; A is at -3 and B at +3, so the frame turns to +X.
+    const std::vector<splash::FlatObject> flat = splash::flatten(scene);
+    splash::PortalFrame ab = splash::portalFrameAtoB(flat[2], flat[0], flat[1]);
+    splash::PortalFrame ba = splash::portalFrameAtoB(flat[2], flat[1], flat[0]);
+    CHECK(splash::portalWorldFrame(flat[2]).normal.x < -0.99f);
+    CHECK(ab.normal.x > 0.99f && ba.normal.x < -0.99f && ab.right.z == -ba.right.z);
+    CHECK(std::fabs(ab.halfW - 1) < 1e-5f && std::fabs(ab.halfH - 1) < 1e-5f);
+}
+
 void testRoomsSceneRoundTrip() {
     using namespace roomtest;
     const fs::path dir = g_outDir / "rooms-roundtrip";
@@ -6775,6 +6828,7 @@ int main(int argc, char** argv) {
     testRoomsExport();
     testRoomsErrors();
     testRoomsSceneRoundTrip();
+    testRoomsEditor();
     testEditMany();
     testTimelineSample();
     testTimelineEdit();

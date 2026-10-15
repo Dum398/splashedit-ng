@@ -454,6 +454,16 @@ edit and keep the rest. Controls are clicked by name. Needs a display.
 
     python3 compfieldscheck.py <splashedit>
 
+`roomscheck.py` splits a copy of the courtyard example into two Rooms (West, East) with a Door portal
+between them. It adds a Room and a Portal through the Add component picker, picks the portal's Room A
+and Room B from their dropdowns (`obj.pa`, `pa/West`), types its width, and reads the saved scene and
+the `portal: Door a=... b=... WxH [problems N]` lines the editor prints under scripted runs; one Ctrl+Z
+takes the width back. With the portal linked, West's `room: West N triangles, M cells, K portals` line
+must follow a first-frame placeholder. Last, the scene view is shot with the overlay toggle (`vp.gizmos`)
+on and off and the room boxes and portal opening are counted by colour, as in `gizmocheck.py`.
+
+    python3 roomscheck.py <splashedit> [keep.png]
+
 `inspectorscrollcheck.py` gives two objects on a copy of the courtyard example a spot Light, an
 Interactable and an Audio clip, so their inspector is taller than the panel. Add component starts below
 the panel; the wheel over the inspector brings it into view and a click on it opens the picker; and

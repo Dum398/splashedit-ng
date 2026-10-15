@@ -93,6 +93,7 @@ jobs:
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
           "$py" tests/bvhstatscheck.py "$cli"
+          "$py" tests/navstatscheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Game view keys
@@ -170,6 +171,9 @@ jobs:
       - name: BVH preview in the editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/bvhcheck.py build/splashedit
+      - name: Nav region inspection in the editor
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/navinspectcheck.py build/splashedit
       - name: Object inspector scrolls
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/inspectorscrollcheck.py build/splashedit

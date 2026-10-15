@@ -3171,6 +3171,74 @@ void testBvhBoxes() {
     CHECK(e.stats.bvhBoxes.empty() && e.stats.bvhDepth == 0);
 }
 
+// What the Navigation inspector shows per nav region (ExportStats::navInfo):
+// one entry per outline, the centroid on the region's floor plane (the plane
+// is linear, so its height at the vertex average is the average of the
+// outline's heights), portals listed from both sides, and the room either a
+// Room index or, with no Room objects, a connectivity island.
+void testNavInfo() {
+    using namespace roomtest;
+    const fs::path dir = g_outDir / "navinfo";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    auto checkShape = [](const splash::ExportStats& s) {
+        CHECK(s.navInfo.size() == size_t(s.navRegions));
+        CHECK(s.navOutlines.size() == s.navInfo.size());
+        size_t listed = 0;
+        for (size_t i = 0; i < s.navInfo.size() && i < s.navOutlines.size(); i++) {
+            const auto& info = s.navInfo[i];
+            const auto& poly = s.navOutlines[i];
+            CHECK(!poly.empty());
+            if (poly.empty()) continue;
+            double x = 0, y = 0, z = 0;
+            for (const splash::Vec3& v : poly) x += v.x, y += v.y, z += v.z;
+            x /= double(poly.size()), y /= double(poly.size()), z /= double(poly.size());
+            CHECK(std::fabs(info.centroid.x - x) < 1e-4 && std::fabs(info.centroid.z - z) < 1e-4);
+            CHECK(std::fabs(info.centroid.y - y) < 1e-4);
+            CHECK(info.floorY == info.centroid.y);
+            CHECK(info.surface >= 0 && info.surface <= 2);
+            listed += info.portals.size();
+            for (const auto& p : info.portals) {
+                CHECK(p.neighbor >= 0 && size_t(p.neighbor) < s.navInfo.size() && size_t(p.neighbor) != i);
+                if (p.neighbor < 0 || size_t(p.neighbor) >= s.navInfo.size()) continue;
+                bool back = false;
+                for (const auto& q : s.navInfo[size_t(p.neighbor)].portals) back = back || size_t(q.neighbor) == i;
+                CHECK(back);
+            }
+        }
+        CHECK(listed == size_t(s.navPortals));
+    };
+
+    // The courtyard has no Room objects: islands, one connected walkable area.
+    const fs::path court = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const splash::Scene cs = splash::loadScene(court / "courtyard.scene");
+    const splash::ExportResult c = splash::exportSplashpack(cs, court, dir / "court.splashpack", dry);
+    CHECK(c.ok());
+    if (!c.ok()) return;
+    CHECK(c.stats.navRegions > 1 && c.stats.navPortals > 0);
+    CHECK(c.stats.navIslands);
+    checkShape(c.stats);
+    for (const auto& info : c.stats.navInfo) CHECK(info.room >= 0);
+
+    // Two Rooms: every region's room is one of them, or none.
+    const fs::path project = dir / "rooms";
+    const splash::Scene rs = twoRooms(project);
+    const splash::ExportResult r = splash::exportSplashpack(rs, project, project / "scene.splashpack", dry);
+    CHECK(r.ok());
+    if (!r.ok()) return;
+    CHECK(r.stats.navRegions > 0);
+    CHECK(!r.stats.navIslands);
+    checkShape(r.stats);
+    bool inRoom = false;
+    for (const auto& info : r.stats.navInfo) {
+        CHECK(info.room >= -1 && info.room < int(r.stats.rooms.size()));
+        inRoom = inRoom || info.room >= 0;
+    }
+    CHECK(inRoom);
+}
+
 void testRoomsErrors() {
     using namespace roomtest;
     const fs::path project = g_outDir / "rooms-errors";
@@ -7440,6 +7508,7 @@ int main(int argc, char** argv) {
     testNavBigWorld();
     testRoomsExport();
     testBvhBoxes();
+    testNavInfo();
     testRoomsErrors();
     testRoomsSceneRoundTrip();
     testRoomsEditor();

@@ -429,8 +429,9 @@ int main(int argc, char** argv) {
                 std::printf("texture bpp=%d cutout=%d size=%dx%d vram=%d,%d clut=%d,%d,%d %s\n", t.bitDepth, t.cutout ? 1 : 0,
                             t.width, t.height, t.x, t.y, t.clutX, t.clutY, t.clutLength, t.source.c_str());
             if (st.navWanted)
-                std::printf("nav regions=%d cell=%g (asked %g) extent=%gx%g\n", st.navRegions, double(st.navCellSize),
-                            double(st.navCellSizeAsked), double(st.navExtentX), double(st.navExtentZ));
+                std::printf("nav regions=%d cell=%g (asked %g) extent=%gx%g portals=%d\n", st.navRegions,
+                            double(st.navCellSize), double(st.navCellSizeAsked), double(st.navExtentX),
+                            double(st.navExtentZ), st.navPortals);
             {
                 int leaves = 0;
                 for (const auto& b : st.bvhBoxes) leaves += b.leaf ? 1 : 0;

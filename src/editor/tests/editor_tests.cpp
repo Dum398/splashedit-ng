@@ -3471,6 +3471,52 @@ void testRoomsEditor() {
     CHECK(std::fabs(ab.halfW - 1) < 1e-5f && std::fabs(ab.halfH - 1) < 1e-5f);
 }
 
+// Renaming a Room carries the portals naming it, on either side and at any
+// depth, as one undo step; a second Room still holding the old name keeps
+// them where they are, and renaming a non-room touches none.
+void testRoomRename() {
+    using namespace roomtest;
+    splash::Scene scene = twoRooms(g_outDir / "rooms-rename");
+    splash::Object back;
+    back.name = "Back door";
+    back.portal = splash::PortalComponent{"Room B", "Room A", 2, 2, {}};
+    scene.objects[1].children.push_back(back);  // {1, 0}: Room A on its B side
+    auto a = [](const editor::Document& d, const editor::ObjectPath& p) { return d.object(p)->portal->roomA; };
+    auto b = [](const editor::Document& d, const editor::ObjectPath& p) { return d.object(p)->portal->roomB; };
+
+    editor::Document d;
+    d.reset(scene);
+    CHECK(d.renameObject({0}, "Hall") == 2);
+    CHECK(d.object({0})->name == "Hall" && a(d, {2}) == "Hall" && b(d, {2}) == "Room B");
+    CHECK(a(d, {1, 0}) == "Room B" && b(d, {1, 0}) == "Hall");
+    CHECK(d.undo() && d.object({0})->name == "Room A" && a(d, {2}) == "Room A" && b(d, {1, 0}) == "Room A");
+    CHECK(d.redo() && d.object({0})->name == "Hall" && a(d, {2}) == "Hall" && b(d, {1, 0}) == "Hall");
+    CHECK(d.undo());
+    CHECK(d.renameObject({1}, "Kitchen") == 2 && b(d, {2}) == "Kitchen" && a(d, {1, 0}) == "Kitchen");
+    CHECK(d.undo());
+
+    CHECK(d.renameObject({0}, "Room A") == -1 && d.renameObject({0}, "") == -1 && d.renameObject({99}, "X") == -1);
+    CHECK(!d.canUndo());
+
+    // A second Room named "Room A": the portals still resolve to it.
+    splash::Scene twin = scene;
+    twin.objects.push_back(roomObject("Room A", {0, 1, 9}, {2, 2, 2}));
+    editor::Document t;
+    t.reset(twin);
+    CHECK(t.renameObject({0}, "Hall") == 0);
+    CHECK(t.object({0})->name == "Hall" && a(t, {2}) == "Room A" && b(t, {1, 0}) == "Room A");
+
+    // A non-room named like a room: only the name changes.
+    splash::Scene plain = scene;
+    plain.objects[3].name = "Room B";
+    plain.objects[1].name = "Lobby";
+    plain.objects[2].portal->roomB = "Room B";
+    editor::Document n;
+    n.reset(plain);
+    CHECK(!n.object({3})->room && n.renameObject({3}, "Floor") == 0);
+    CHECK(n.object({3})->name == "Floor" && b(n, {2}) == "Room B" && a(n, {1, 0}) == "Room B");
+}
+
 void testRoomsSceneRoundTrip() {
     using namespace roomtest;
     const fs::path dir = g_outDir / "rooms-roundtrip";
@@ -7785,6 +7831,7 @@ int main(int argc, char** argv) {
     testRoomsErrors();
     testRoomsSceneRoundTrip();
     testRoomsEditor();
+    testRoomRename();
     testEditMany();
     testTimelineSample();
     testTimelineEdit();

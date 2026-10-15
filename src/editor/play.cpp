@@ -137,7 +137,16 @@ PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
 
 fs::path overlayEngine(const fs::path& engine, bool perf, bool rooms) {
     if ((!perf && !rooms) || engine.empty()) return engine;
-    fs::path name = engine.stem();
+    // A variant picked as the psxsplash build names the same family as the plain build.
+    std::string stem = utf8(engine.stem());
+    for (const char* suffix : {"-perf-rooms", "-perf", "-rooms"}) {
+        const std::string sfx = suffix;
+        if (stem.size() > sfx.size() && stem.compare(stem.size() - sfx.size(), sfx.size(), sfx) == 0) {
+            stem.resize(stem.size() - sfx.size());
+            break;
+        }
+    }
+    fs::path name = fromUtf8(stem);
     name += fromUtf8(perf && rooms ? "-perf-rooms" : perf ? "-perf" : "-rooms");
     name += engine.extension();
     return engine.parent_path() / name;

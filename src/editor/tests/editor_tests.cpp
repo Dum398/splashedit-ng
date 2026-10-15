@@ -1337,6 +1337,9 @@ void testPlayOverlays() {
     CHECK(editor::overlayEngine(e, false, false) == e);
     CHECK(editor::overlayEngine(e, true, false) == fs::path("/x/engine/psxsplash-perf.ps-exe"));
     CHECK(editor::overlayEngine(e, false, true) == fs::path("/x/engine/psxsplash-rooms.ps-exe"));
+    // A variant located as the psxsplash build maps to its siblings, never "-rooms-rooms".
+    CHECK(editor::overlayEngine(fs::path("/x/engine/psxsplash-rooms.ps-exe"), false, true) == fs::path("/x/engine/psxsplash-rooms.ps-exe"));
+    CHECK(editor::overlayEngine(fs::path("/x/engine/psxsplash-perf-rooms.ps-exe"), true, false) == fs::path("/x/engine/psxsplash-perf.ps-exe"));
     CHECK(editor::overlayEngine(e, true, true) == fs::path("/x/engine/psxsplash-perf-rooms.ps-exe"));
     CHECK(editor::overlayEngine("/y/my build.exe", true, false) == fs::path("/y/my build-perf.exe"));
     CHECK(editor::overlayEngine({}, true, true).empty());

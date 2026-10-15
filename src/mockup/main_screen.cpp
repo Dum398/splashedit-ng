@@ -243,6 +243,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
         else {
             p.hwPort = eff.port;
             p.hw.start(editor::HardwareRun::port(eff.port), editor::engineFor(eff), hardwareDir());
+            editor::restartLog(p.hwLog);
         }
     }
     p.emu.poll();
@@ -273,8 +274,10 @@ static void updatePlay(State& st, const editor::Document& doc) {
     std::string err;
     if (!p.emu.start(editor::reduxCommand(editor::withDefaults(p.tools, p.bundleDir), playDir()), &err))
         p.message = "Could not start pcsx-redux: " + err;
-    else
+    else {
         p.startedAt = SDL_GetTicks();
+        editor::restartLog(p.playLog);
+    }
 }
 
 // A file dialog answers on its own thread; the setup popup picks it up next frame.
@@ -5964,6 +5967,82 @@ static std::string mb(size_t bytes) {
     return b;
 }
 
+// Scripted runs print `line`; with a `tag`, only when it differs from the
+// last line printed under that tag.
+static void scriptLine(const char* tag, const std::string& line) {
+    if (!namedRectsOn()) return;
+    if (tag) {
+        static std::map<std::string, std::string> printed;
+        std::string& last = printed[tag];
+        if (last == line) return;
+        last = line;
+    }
+    std::printf("%s\n", line.c_str());
+    std::fflush(stdout);
+}
+
+// The body of an output popup: a toolbar (filter, Wrap, Copy, Clear and how
+// many lines show), then the lines after the clear point that match the
+// filter, errors in red, kept at the newest while scrolled to the bottom.
+// `who` ("play", "hw") names the controls and the scripted console: lines.
+static void outputLog(State& st, const char* who, const std::deque<std::string>& lines, uint64_t total, editor::LogView& v) {
+    const std::string w = who;
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x;
+    const float rowH = size::field + 6;
+    const ImRect fr(o, ImVec2(o.x + 240, o.y + rowH));
+    searchField((w + "filter").c_str(), fr, "Filter", nullptr, &v.filter);
+    nameRect(w + ".filter", fr);
+    std::vector<size_t> shown = editor::visibleLines(lines, total, v);
+
+    float bw = 0;
+    ImVec2 bp(fr.Max.x + space::sm, o.y);
+    if (button((w + "wrap").c_str(), bp, nullptr, "Wrap", v.wrap ? ButtonKind::Secondary : ButtonKind::Ghost, &bw,
+               v.wrap ? "Long lines wrap. Click to scroll them sideways instead." : "Wrap long lines instead of scrolling sideways."))
+        v.wrap = !v.wrap;
+    nameRect(w + ".wrap", ImRect(bp, bp + ImVec2(bw, rowH)));
+    bp.x += bw + space::xs;
+    if (button((w + "copy").c_str(), bp, icon::copy, "Copy", ButtonKind::Ghost, &bw, "Copy the lines shown to the clipboard.")) {
+        const std::string text = editor::joinLines(lines, shown);
+        if (!text.empty() && !SDL_SetClipboardText(text.c_str())) notify(st, std::string("Cannot copy: ") + SDL_GetError(), true);
+        scriptLine(nullptr, "console: " + w + " copied " + std::to_string(shown.size()) + " lines");
+    }
+    nameRect(w + ".copy", ImRect(bp, bp + ImVec2(bw, rowH)));
+    bp.x += bw + space::xs;
+    if (button((w + "clear").c_str(), bp, icon::trash, "Clear", ButtonKind::Ghost, &bw,
+               "Hide the lines printed so far; new ones still show.")) {
+        v.clearedAt = total;
+        shown = editor::visibleLines(lines, total, v);
+        scriptLine(nullptr, "console: " + w + " cleared");
+    }
+    nameRect(w + ".clear", ImRect(bp, bp + ImVec2(bw, rowH)));
+
+    const uint64_t since = editor::linesSinceClear(total, v);
+    const std::string count = std::to_string(shown.size()) + " of " + std::to_string(since) + " lines";
+    Fonts& f = fonts();
+    const ImVec2 cs = measure(f.regular, type::caption, count.c_str());
+    text(ImGui::GetWindowDrawList(), ImVec2(o.x + width - cs.x, o.y + (rowH - cs.y) * 0.5f), f.regular, type::caption,
+         color::textFaint, count.c_str());
+    scriptLine((w + "shown").c_str(), "console: " + w + " shown " + std::to_string(shown.size()) + " of " + std::to_string(since));
+
+    ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + rowH + space::sm));
+    ImGui::PushFont(f.regular, type::caption);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
+    ImGui::BeginChild((w + "lines").c_str(), ImVec2(0, 360), ImGuiChildFlags_None, v.wrap ? 0 : ImGuiWindowFlags_HorizontalScrollbar);
+    if (v.wrap) ImGui::PushTextWrapPos(0.0f);
+    for (size_t i : shown) {
+        ImGui::PushStyleColor(ImGuiCol_Text, editor::containsNoCase(lines[i], "error") ? color::bad : color::textDim);
+        ImGui::TextUnformatted(lines[i].c_str());
+        ImGui::PopStyleColor();
+    }
+    if (v.wrap) ImGui::PopTextWrapPos();
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+    ImGui::PopFont();
+}
+
+
 // Status bar entry for Play: building, running (click for its output), how
 // it ended, or why it did not start.
 static float playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
@@ -5991,6 +6070,7 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     ImRect r(ImVec2(x, bar.Min.y + 5), ImVec2(x + pad + ls.x + 10, bar.Max.y - 5));
     const bool hasOutput = !p.emu.output().empty();
     Hit h = interact("playstatus", r);
+    nameRect("playstatus", r);
     if (hasOutput) {
         dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
         if (h.clicked) ImGui::OpenPopup("##playoutput");
@@ -5999,21 +6079,13 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     text(dl, ImVec2(r.Min.x + pad, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, tone, label.c_str());
 
     ImGui::SetNextWindowPos(ImVec2(r.Min.x, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
-    ImGui::SetNextWindowSize(ImVec2(640, 0));
+    ImGui::SetNextWindowSize(ImVec2(720, 0));
     pushPopupStyle();
     const bool open = ImGui::BeginPopup("##playoutput", ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor(2);
     if (!open) return r.Max.x + space::md;
-    ImGui::PushFont(f.regular, type::caption);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
-    ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
-    ImGui::BeginChild("##lines", ImVec2(0, 320), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
-    for (const std::string& line : p.emu.output()) ImGui::TextUnformatted(line.c_str());
-    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
-    ImGui::EndChild();
-    ImGui::PopStyleColor(2);
-    ImGui::PopFont();
+    outputLog(st, "play", p.emu.output(), p.emu.lineCount(), p.playLog);
     if (p.emu.running()) {
         ImVec2 c = ImGui::GetCursorScreenPos();
         if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary)) p.emu.stop();
@@ -6055,6 +6127,7 @@ static float hardwareStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     float pad = dot ? 22 : 10;
     ImRect r(ImVec2(x, bar.Min.y + 5), ImVec2(x + pad + ls.x + 10, bar.Max.y - 5));
     Hit h = interact("hwstatus", r);
+    nameRect("hwstatus", r);
     const bool hasOutput = p.hw.lineCount() > 0;
     if (hasOutput) {
         dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
@@ -6064,21 +6137,15 @@ static float hardwareStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     text(dl, ImVec2(r.Min.x + pad, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, tone, label.c_str());
 
     ImGui::SetNextWindowPos(ImVec2(r.Min.x, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
-    ImGui::SetNextWindowSize(ImVec2(640, 0));
+    ImGui::SetNextWindowSize(ImVec2(720, 0));
     pushPopupStyle();
     const bool open = ImGui::BeginPopup("##hwoutput", ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor(2);
     if (!open) return r.Max.x + space::md;
-    ImGui::PushFont(f.regular, type::caption);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
-    ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
-    ImGui::BeginChild("##hwlines", ImVec2(0, 320), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
-    for (const std::string& line : p.hw.lines()) ImGui::TextUnformatted(line.c_str());
-    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
-    ImGui::EndChild();
-    ImGui::PopStyleColor(2);
-    ImGui::PopFont();
+    uint64_t total = 0;
+    const std::deque<std::string> lines = p.hw.lines(&total);
+    outputLog(st, "hw", lines, total, p.hwLog);
     if (p.hw.active()) {
         ImVec2 c = ImGui::GetCursorScreenPos();
         if (button("stophw", c, icon::square, "Stop", ButtonKind::Secondary)) p.hw.stop();

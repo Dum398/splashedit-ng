@@ -41,6 +41,8 @@ class HardwareRun {
     // The console's text and the file calls, oldest first, the newest 2000.
     std::deque<std::string> lines() const;
     uint64_t lineCount() const;
+    // lines() and lineCount() taken together, so they agree.
+    std::deque<std::string> lines(uint64_t* total) const;
 
   private:
     void add(std::string line);

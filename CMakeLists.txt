@@ -85,6 +85,7 @@ add_library(splasheditdoc STATIC
     src/editor/serial.cpp
     src/editor/timeline.cpp
     src/editor/hardware.cpp
+    src/editor/log_view.cpp
     src/editor/psxmon.cpp
     src/editor/texture_preview.cpp
     src/editor/unirom.cpp

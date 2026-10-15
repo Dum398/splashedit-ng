@@ -18,6 +18,7 @@
 #include "editor/asset_browser_view.hh"
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
+#include "editor/log_view.hh"
 #include "editor/model_import.hh"
 #include "editor/texture_preview_view.hh"
 #include "editor/lua_editor_view.hh"
@@ -118,6 +119,8 @@ struct State {
         std::optional<editor::RenderPeak> peak;
         unsigned peakScene = 0;
         uint64_t linesSeen = 0;
+        // The output popups: filter, clear point and wrapping, for Play and Run on hardware.
+        editor::LogView playLog, hwLog;
         // Live edits: the document revision the running game was last sent,
         // the revision seen last frame and since when, the export in flight,
         // the count written to reload.flag, and the open scene's place in the

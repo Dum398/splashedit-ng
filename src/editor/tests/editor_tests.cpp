@@ -32,6 +32,7 @@
 #include "editor/hardware.hh"
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
+#include "editor/log_view.hh"
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/model_import.hh"
@@ -3169,6 +3170,72 @@ void testBvhBoxes() {
     empty.settings = scene.settings;
     const splash::ExportResult e = splash::exportSplashpack(empty, project, dir / "empty.splashpack", dry);
     CHECK(e.stats.bvhBoxes.empty() && e.stats.bvhDepth == 0);
+}
+
+// The output popups' filter, clear point and Copy text (editor::LogView).
+void testLogViewFilter() {
+    const std::deque<std::string> lines = {"tick 1", "Lua ERROR: boom", "tick 2", "lua error: again", "Errorless? no: erro"};
+    editor::LogView v;
+    CHECK(editor::visibleLines(lines, 5, v) == (std::vector<size_t>{0, 1, 2, 3, 4}));
+    v.filter = "error";
+    CHECK(editor::visibleLines(lines, 5, v) == (std::vector<size_t>{1, 3, 4}));
+    v.filter = "ErRoR:";
+    CHECK(editor::visibleLines(lines, 5, v) == (std::vector<size_t>{1, 3}));
+    v.filter = "nothing";
+    CHECK(editor::visibleLines(lines, 5, v).empty());
+    CHECK(editor::containsNoCase("ABC", "") && editor::containsNoCase("xAbC", "bc") && !editor::containsNoCase("ab", "abc"));
+}
+
+void testLogViewClear() {
+    // 10 lines printed, the newest 4 kept (lines 6..9): a clear at 8 leaves 8 and 9.
+    const std::deque<std::string> kept = {"line 6", "line 7", "line 8", "line 9"};
+    editor::LogView v;
+    v.clearedAt = 8;
+    CHECK(editor::visibleLines(kept, 10, v) == (std::vector<size_t>{2, 3}));
+    CHECK(editor::linesSinceClear(10, v) == 2);
+    // A clear before what is kept hides nothing that is left.
+    v.clearedAt = 3;
+    CHECK(editor::visibleLines(kept, 10, v) == (std::vector<size_t>{0, 1, 2, 3}));
+    CHECK(editor::linesSinceClear(10, v) == 7);
+    // Cleared at the end: nothing until more lines arrive.
+    v.clearedAt = 10;
+    CHECK(editor::visibleLines(kept, 10, v).empty());
+    CHECK(editor::linesSinceClear(10, v) == 0);
+    const std::deque<std::string> more = {"line 7", "line 8", "line 9", "line 10"};
+    CHECK(editor::visibleLines(more, 11, v) == (std::vector<size_t>{3}));
+    // With a filter, both apply.
+    v.clearedAt = 8;
+    v.filter = "9";
+    CHECK(editor::visibleLines(kept, 10, v) == (std::vector<size_t>{3}));
+    // A total below the clear point is a new run: nothing is cleared.
+    const std::deque<std::string> fresh = {"a", "b", "c"};
+    editor::LogView r;
+    r.clearedAt = 50;
+    CHECK(editor::visibleLines(fresh, 3, r) == (std::vector<size_t>{0, 1, 2}));
+    CHECK(editor::linesSinceClear(3, r) == 3);
+}
+
+// A new run drops the clear point but keeps the filter and wrapping, so a
+// run that soon prints past the old clear point still shows from its start.
+void testLogViewRestart() {
+    editor::LogView v;
+    v.filter = "tick";
+    v.wrap = true;
+    v.clearedAt = 3;
+    editor::restartLog(v);
+    CHECK(v.clearedAt == 0);
+    CHECK(v.filter == "tick" && v.wrap);
+    const std::deque<std::string> run = {"tick 0", "tick 1", "tick 2", "tick 3", "tick 4"};
+    CHECK(editor::visibleLines(run, 5, v).size() == 5);
+    CHECK(editor::linesSinceClear(5, v) == 5);
+}
+
+void testLogViewJoin() {
+    const std::deque<std::string> lines = {"one", "two", "three"};
+    CHECK(editor::joinLines(lines, {}).empty());
+    CHECK(editor::joinLines(lines, {1}) == "two\n");
+    CHECK(editor::joinLines(lines, {0, 2}) == "one\nthree\n");
+    CHECK(editor::joinLines(lines, {0, 7}) == "one\n");  // an index past the end is skipped
 }
 
 // What the Navigation inspector shows per nav region (ExportStats::navInfo):
@@ -7509,6 +7576,10 @@ int main(int argc, char** argv) {
     testRoomsExport();
     testBvhBoxes();
     testNavInfo();
+    testLogViewFilter();
+    testLogViewClear();
+    testLogViewRestart();
+    testLogViewJoin();
     testRoomsErrors();
     testRoomsSceneRoundTrip();
     testRoomsEditor();

@@ -3930,9 +3930,14 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             y += lh + space::sm;
         }
 
-        if (stats) {
-            const std::string used = "VRAM used: " + kb(stats->vramBytes()) + " KB of 1024 KB";
-            text(dl, ImVec2(mx0, centerY(f.regular, type::body, y, y + 20)), f.regular, type::body, color::text, used.c_str());
+        // The line is there before the first export lands too, so the rows
+        // and Add area below it do not move when it does.
+        {
+            const std::string used =
+                stats ? "VRAM used: " + kb(stats->vramBytes()) + " KB of 1024 KB"
+                      : std::string(res ? "VRAM used: unknown, the export failed" : "VRAM used: measuring...");
+            text(dl, ImVec2(mx0, centerY(f.regular, type::body, y, y + 20)), f.regular, type::body,
+                 stats ? color::text : color::textFaint, used.c_str());
             y += 20 + space::xs;
         }
         if (res)

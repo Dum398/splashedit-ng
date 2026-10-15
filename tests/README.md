@@ -484,6 +484,14 @@ on and off and the room boxes and portal opening are counted by colour, as in `g
 
     python3 roomscheck.py <splashedit> [keep.png]
 
+`bvhcheck.py` opens a copy of the courtyard example, folds the Scene inspector's sections above BVH
+and opens BVH (`s_bvh`, closed by default). The editor prints `bvh: nodes N leaves L depth D` once the
+live export lands, and `bvh: hidden` or `bvh: showing depth K boxes B` for what the viewport draws:
+`bvh.show` must draw all N boxes at depth D, typing 0 into `bvh.depth` must leave one box, and the
+toggle again hides them. The scene view shot with the boxes hidden and shown must differ.
+
+    python3 bvhcheck.py <splashedit> [keep.png]
+
 `inspectorscrollcheck.py` gives two objects on a copy of the courtyard example a spot Light, an
 Interactable and an Audio clip, so their inspector is taller than the panel. Add component starts below
 the panel; the wheel over the inspector brings it into view and a click on it opens the picker; and

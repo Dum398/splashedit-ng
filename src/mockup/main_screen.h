@@ -74,6 +74,10 @@ struct State {
     // Ctrl snaps while it is off.
     bool snap = true;
     bool gizmos = true;  // viewport draws trigger boxes, interaction radii and nav regions
+    // The viewport draws the exported BVH's boxes down to bvhDepth (-1: every
+    // level). Its own toggle, independent of gizmos.
+    bool bvhShow = false;
+    int bvhDepth = -1;
 
     // Background dry-run export feeding the status bar's budget meters and problem count.
     editor::LiveExport live;

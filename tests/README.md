@@ -423,6 +423,15 @@ display.
 
     python3 scenefogcheck.py <splashedit>
 
+`loadingscreencheck.py` drives the scene inspector's Loading screen section on copies of the courtyard
+example given two UI canvases, Title (a progress bar named `loading`) and Bare (no bar, a Line): picks
+each from the Canvas menu (`@scene.loading/Title`), then None, saves with Ctrl+S and reads
+`settings.loadingCanvas` back, and reads the inspector's `scene: loading ...` and `scene: loading
+warnings ...` lines (Bare: `bar,line`; Title: none). One Ctrl+Z takes a pick back. Two optional PNG
+paths keep the Title and Bare screenshots. Needs a display.
+
+    python3 loadingscreencheck.py <splashedit> [title.png [bare.png]]
+
 `buildscenescheck.py` drives the scene inspector's Build scenes section on copies of the courtyard example
 with a second scene, `level2.scene`, beside it: adds both from the Add menu (`@build.add/level2.scene`),
 moves level2 up (`@build.up.1`) and removes the other (`@build.remove.1`), checking the editor's

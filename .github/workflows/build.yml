@@ -128,6 +128,9 @@ jobs:
       - name: Scene fog, GTE scaling and scene type
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/scenefogcheck.py build/splashedit
+      - name: Scene loading screen
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/loadingscreencheck.py build/splashedit
       - name: Build scenes list
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/buildscenescheck.py build/splashedit

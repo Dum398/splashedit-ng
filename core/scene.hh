@@ -416,7 +416,7 @@ struct FlatObject {
     Quat worldRotation;
     Vec3 lossyScale;
     Mat34 localToWorld;
-    bool activeInHierarchy;
+    bool activeInHierarchy;  // Unity's meaning: the object's own active flag and every ancestor's are on
 };
 
 // An object's Trigger box in world space: the axis-aligned bounds of the

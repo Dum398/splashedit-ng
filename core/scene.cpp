@@ -418,13 +418,13 @@ void flattenInto(const Object& o, const FlatObject* parent, std::vector<FlatObje
         fo.worldPosition = t.position;
         fo.worldRotation = t.rotation;
         fo.lossyScale = t.scale;
-        fo.activeInHierarchy = true;
+        fo.activeInHierarchy = o.active;
     } else {
         // Nested transforms are not yet checked against Unity's composition.
         fo.worldPosition = parent->localToWorld.point(t.position);
         fo.worldRotation = mul(parent->worldRotation, t.rotation);
         fo.lossyScale = scale(parent->lossyScale, t.scale);
-        fo.activeInHierarchy = parent->activeInHierarchy;
+        fo.activeInHierarchy = parent->activeInHierarchy && o.active;
     }
     fo.localToWorld = Mat34::trs(fo.worldPosition, fo.worldRotation, fo.lossyScale);
     out.push_back(fo);

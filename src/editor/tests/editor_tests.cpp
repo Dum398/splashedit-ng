@@ -1379,7 +1379,10 @@ void testPlayOverlays() {
         CHECK(eff.disc == bundle / "engine" / "psxsplash-cdrom.ps-exe");
         CHECK(editor::missingTools(eff).empty() && editor::missingHardwareTools(eff).empty());
         const std::vector<std::string> cmd = editor::reduxCommand(eff, "/b");
-        CHECK(std::find(cmd.begin(), cmd.end(), (bundle / "engine" / names[k]).string()) != cmd.end());
+        // Compared as paths: the bundle default keeps "engine/..." with a forward slash on Windows.
+        CHECK(std::find_if(cmd.begin(), cmd.end(), [&](const std::string& a) {
+                  return fs::path(a) == bundle / "engine" / names[k];
+              }) != cmd.end());
     }
     // A missing variant is reported by name, not swapped for the plain build.
     fs::remove(bundle / "engine" / "psxsplash-rooms.ps-exe", ec);

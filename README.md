@@ -6,6 +6,8 @@ Standalone scene editor for [psxsplash](https://github.com/psxsplash/psxsplash),
 
 [Nightly build](https://github.com/psxsplash/splashedit-ng/releases/tag/nightly), rebuilt from every push to `main`: one archive per OS with the editor, the psxsplash engine and pcsx-redux. Per-OS notes are on the release page.
 
+`engine/` holds psxsplash.ps-exe, which Play and Run on hardware boot, psxsplash-cdrom.ps-exe for disc images, and builds with on-screen debug overlays: Build > Performance Overlay (FPS counter and heap bar) and Room Debug Overlay (room wireframe) make Play and Run on hardware boot psxsplash-perf, psxsplash-rooms or psxsplash-perf-rooms instead. Disc images always get the plain CD-ROM build.
+
 ## Building
 
 Needs CMake 3.24+, a C++20 compiler, SDL3 and FreeType. Dear ImGui and stb are fetched at configure time.

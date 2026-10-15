@@ -15,12 +15,17 @@ namespace editor {
 
 // The programs Play runs. `bios` is optional: empty lets pcsx-redux use its own.
 // `disc` is the CD-ROM build of psxsplash that Export puts on the disc.
+// overlayPerf and overlayRooms pick the psxsplash build Play and Run on
+// hardware boot: one with the FPS counter and heap bar, the room wireframe,
+// or both (see overlayEngine). The disc never gets them.
 struct PlayTools {
     std::filesystem::path redux, psxsplash, bios, disc;
     std::string port;  // Run on hardware: a serial port, or tcp:HOST:PORT
+    bool overlayPerf = false, overlayRooms = false;
 };
 
-// key=value lines: redux=, psxsplash=, bios=, disc=, port=. A missing file reads as empty.
+// key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
+// overlay_rooms= (1 or 0). A missing file or key reads as empty or off.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 
@@ -29,6 +34,16 @@ bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 // `bundle` (the directory holding the editor: redux/ and engine/), then looks
 // for pcsx-redux on PATH.
 PlayTools withDefaults(PlayTools tools, const std::filesystem::path& bundle = {});
+
+// The psxsplash build with the overlays asked for, beside `engine`:
+// <stem>-perf, <stem>-rooms or <stem>-perf-rooms with engine's extension;
+// `engine` itself with neither.
+std::filesystem::path overlayEngine(const std::filesystem::path& engine, bool perf, bool rooms);
+
+// The build Play and Run on hardware boot for `effective` (withDefaults'
+// result): overlayEngine of its psxsplash, whether or not that file exists,
+// so a missing overlay build is reported rather than booted without.
+std::filesystem::path engineFor(const PlayTools& effective);
 
 // One line per thing Play still needs; empty when it can run.
 std::vector<std::string> missingTools(const PlayTools& tools);

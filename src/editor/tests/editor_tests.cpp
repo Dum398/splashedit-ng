@@ -1326,6 +1326,77 @@ void testPlay() {
     CHECK(cmd.size() == want.size() + 2 && cmd[5] == "-bios" && cmd[6] == "/x/openbios.bin");
 }
 
+// Build > Performance / Room Debug Overlay: Play and Run on hardware boot the
+// psxsplash build beside the chosen one that has them; the disc never does.
+void testPlayOverlays() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "play-overlays";
+    fs::remove_all(dir, ec);
+    const fs::path e = "/x/engine/psxsplash.ps-exe";
+    CHECK(editor::overlayEngine(e, false, false) == e);
+    CHECK(editor::overlayEngine(e, true, false) == fs::path("/x/engine/psxsplash-perf.ps-exe"));
+    CHECK(editor::overlayEngine(e, false, true) == fs::path("/x/engine/psxsplash-rooms.ps-exe"));
+    // A variant located as the psxsplash build maps to its siblings, never "-rooms-rooms".
+    CHECK(editor::overlayEngine(fs::path("/x/engine/psxsplash-rooms.ps-exe"), false, true) == fs::path("/x/engine/psxsplash-rooms.ps-exe"));
+    CHECK(editor::overlayEngine(fs::path("/x/engine/psxsplash-perf-rooms.ps-exe"), true, false) == fs::path("/x/engine/psxsplash-perf.ps-exe"));
+    CHECK(editor::overlayEngine(e, true, true) == fs::path("/x/engine/psxsplash-perf-rooms.ps-exe"));
+    CHECK(editor::overlayEngine("/y/my build.exe", true, false) == fs::path("/y/my build-perf.exe"));
+    CHECK(editor::overlayEngine({}, true, true).empty());
+
+    // The two keys round-trip; a file written before them reads both off.
+    const fs::path cfg = dir / "play.cfg";
+    for (int k = 0; k < 4; ++k) {
+        editor::PlayTools t;
+        t.psxsplash = e;
+        t.overlayPerf = k & 1;
+        t.overlayRooms = k & 2;
+        CHECK(editor::savePlayTools(cfg, t));
+        const editor::PlayTools l = editor::loadPlayTools(cfg);
+        CHECK(l.overlayPerf == t.overlayPerf && l.overlayRooms == t.overlayRooms && l.psxsplash == e);
+    }
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\npsxsplash=/p.ps-exe\nport=COM3\n"; }
+    const editor::PlayTools old = editor::loadPlayTools(cfg);
+    CHECK(!old.overlayPerf && !old.overlayRooms && old.port == "COM3");
+
+    // A bundle carrying the variants: Play's command boots them, Export keeps the disc build.
+    setEnv("SPLASHEDIT_PSXSPLASH", "");
+    setEnv("SPLASHEDIT_DISC_ENGINE", "");
+    const fs::path bundle = dir / "bundle";
+    fs::create_directories(bundle / "engine");
+    for (const char* n : {"psxsplash.ps-exe", "psxsplash-cdrom.ps-exe", "psxsplash-perf.ps-exe", "psxsplash-rooms.ps-exe",
+                          "psxsplash-perf-rooms.ps-exe"})
+        std::ofstream(bundle / "engine" / n) << "x";
+    editor::PlayTools want;
+    want.redux = cfg;  // any existing file stands in for pcsx-redux
+    want.port = "COM3";
+    const char* names[4] = {"psxsplash.ps-exe", "psxsplash-perf.ps-exe", "psxsplash-rooms.ps-exe", "psxsplash-perf-rooms.ps-exe"};
+    for (int k = 0; k < 4; ++k) {
+        want.overlayPerf = k & 1;
+        want.overlayRooms = k & 2;
+        const editor::PlayTools eff = editor::withDefaults(want, bundle);
+        CHECK(editor::engineFor(eff) == bundle / "engine" / names[k]);
+        CHECK(eff.disc == bundle / "engine" / "psxsplash-cdrom.ps-exe");
+        CHECK(editor::missingTools(eff).empty() && editor::missingHardwareTools(eff).empty());
+        const std::vector<std::string> cmd = editor::reduxCommand(eff, "/b");
+        // Compared as paths: the bundle default keeps "engine/..." with a forward slash on Windows.
+        CHECK(std::find_if(cmd.begin(), cmd.end(), [&](const std::string& a) {
+                  return fs::path(a) == bundle / "engine" / names[k];
+              }) != cmd.end());
+    }
+    // A missing variant is reported by name, not swapped for the plain build.
+    fs::remove(bundle / "engine" / "psxsplash-rooms.ps-exe", ec);
+    want.overlayPerf = false;
+    want.overlayRooms = true;
+    const editor::PlayTools eff = editor::withDefaults(want, bundle);
+    CHECK(editor::engineFor(eff) == bundle / "engine" / "psxsplash-rooms.ps-exe");
+    const std::vector<std::string> miss = editor::missingTools(eff), hwMiss = editor::missingHardwareTools(eff);
+    CHECK(miss.size() == 1 && miss[0].find("room debug overlay") != std::string::npos &&
+          miss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
+    CHECK(hwMiss.size() == 1 && hwMiss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
+    CHECK(editor::missingDiscTools(eff).empty());
+}
+
 // File menu: a new project on disk, Save As inside it, and the recent list.
 void testProject() {
     namespace fs = std::filesystem;
@@ -7337,6 +7408,7 @@ int main(int argc, char** argv) {
     testLiveExport();
     testBlendCancel();
     testPlay();
+    testPlayOverlays();
     testBuildScenes();
     testVramLayout();
     testProject();

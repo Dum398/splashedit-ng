@@ -8,8 +8,10 @@ on:
 
 jobs:
   # psxsplash.ps-exe is MIPS code, identical on every OS, so it is built once
-  # and shipped in each package: the PCdrv build Play boots, and the CD-ROM
-  # build (psxsplash-cdrom.ps-exe) Export puts on a disc.
+  # and shipped in each package: the PCdrv build Play boots, the CD-ROM build
+  # (psxsplash-cdrom.ps-exe) Export puts on a disc, and the PCdrv builds with
+  # Build > Performance / Room Debug Overlay on: psxsplash-perf (FPS counter
+  # and heap bar), psxsplash-rooms (room wireframe) and psxsplash-perf-rooms.
   engine:
     runs-on: ubuntu-24.04
     steps:
@@ -23,19 +25,31 @@ jobs:
           sudo apt-get install -y g++-mipsel-linux-gnu
       - name: Build
         run: |
+          # make clean deletes every *.ps-exe, so park each build outside the tree.
           make -j4 LOADER=cdrom PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
-          # make clean deletes every *.ps-exe, so park the CD-ROM build elsewhere.
           mv psxsplash.ps-exe ../psxsplash-cdrom
           make clean
+          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips FPSOVERLAY=1 MEMOVERLAY=1
+          mv psxsplash.ps-exe ../psxsplash-perf
+          make clean
+          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips ROOMDEBUG=1
+          mv psxsplash.ps-exe ../psxsplash-rooms
+          make clean
+          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips FPSOVERLAY=1 MEMOVERLAY=1 ROOMDEBUG=1
+          mv psxsplash.ps-exe ../psxsplash-perf-rooms
+          make clean
           make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
-          mv ../psxsplash-cdrom psxsplash-cdrom.ps-exe
-          test -f psxsplash.ps-exe && test -f psxsplash-cdrom.ps-exe
+          for v in cdrom perf rooms perf-rooms; do mv ../psxsplash-$v psxsplash-$v.ps-exe; done
+          for v in "" -cdrom -perf -rooms -perf-rooms; do test -f psxsplash$v.ps-exe; done
       - uses: actions/upload-artifact@v4
         with:
           name: engine
           path: |
             psxsplash.ps-exe
             psxsplash-cdrom.ps-exe
+            psxsplash-perf.ps-exe
+            psxsplash-rooms.ps-exe
+            psxsplash-perf-rooms.ps-exe
 
   build:
     needs: engine
@@ -140,6 +154,9 @@ jobs:
       - name: Disc settings
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/discsettingscheck.py build/splashedit
+      - name: Debug overlays
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/overlaycheck.py build/splashedit
       - name: Centre panel tabs
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/scripttabscheck.py build/splashedit
@@ -212,6 +229,9 @@ jobs:
           ls pkg pkg/engine pkg/redux
           test -f pkg/engine/psxsplash.ps-exe
           test -f pkg/engine/psxsplash-cdrom.ps-exe
+          test -f pkg/engine/psxsplash-perf.ps-exe
+          test -f pkg/engine/psxsplash-rooms.ps-exe
+          test -f pkg/engine/psxsplash-perf-rooms.ps-exe
           test -f pkg/redux/pcsx-redux.exe || test -f pkg/redux/pcsx-redux || test -d pkg/redux/PCSX-Redux.app
           # Nothing outside the OS may be linked in.
           case "${{ runner.os }}" in

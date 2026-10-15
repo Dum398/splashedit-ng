@@ -242,7 +242,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
         if (!r.ok()) p.message = "Run on hardware: " + r.errors.front();
         else {
             p.hwPort = eff.port;
-            p.hw.start(editor::HardwareRun::port(eff.port), eff.psxsplash, hardwareDir());
+            p.hw.start(editor::HardwareRun::port(eff.port), editor::engineFor(eff), hardwareDir());
         }
     }
     p.emu.poll();
@@ -365,13 +365,19 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     y += 30;
 
     const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
+    // With an overlay on, Play and Run boot the build beside it that has it: that file is the one shown.
+    const std::filesystem::path engine = editor::engineFor(eff);
+    const char* engineLabel = eff.overlayPerf && eff.overlayRooms ? "psxsplash build (perf + rooms overlays)"
+                              : eff.overlayPerf                   ? "psxsplash build (performance overlay)"
+                              : eff.overlayRooms                  ? "psxsplash build (room debug overlay)"
+                                                                  : "psxsplash build";
     struct Row {
         const char* label;
         const std::filesystem::path* path;
         bool optional;
         const char* filter;
     } rows[] = {{"pcsx-redux", &eff.redux, false, nullptr},
-                {"psxsplash build", &eff.psxsplash, false, "ps-exe"},
+                {engineLabel, &engine, false, "ps-exe"},
                 {"BIOS", &eff.bios, true, "bin"},
                 {"psxsplash disc build", &eff.disc, false, "ps-exe"}};
     static const SDL_DialogFileFilter exeFilter[] = {{"PlayStation executable", "ps-exe;exe"}};
@@ -546,6 +552,7 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
         ImRect r(ImVec2(x, bar.Min.y + 7), ImVec2(x + s.x + space::md * 2 - 4, bar.Max.y - 7));
         g_menuRects[i] = r;
         Hit h = interact(m, r);
+        nameRect(std::string("menu.") + (i == 0 ? "file" : i == 1 ? "edit" : i == 2 ? "object" : i == 3 ? "build" : i == 4 ? "view" : "help"), r);
         const bool open = st.menuOpen == i;
         if (h.clicked) st.menuOpen = open || g_menuIgnoreClick == i ? -1 : i;
         else if (st.menuOpen >= 0 && h.hovered) st.menuOpen = i;
@@ -591,9 +598,30 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     float total = wPlay + wRun + wExport + space::sm * 2;
     float ax = std::floor(size.x * 0.5f + 90 - total * 0.5f);
     float ay = bar.Min.y + (bar.GetHeight() - (size::field + 6)) * 0.5f;
-    if (button("play", ImVec2(ax, ay), playIcon, playLabel, ButtonKind::Primary, nullptr,
-               st.play.emu.running() ? "Stop pcsx-redux (F5)" : "Build and run in pcsx-redux (F5)"))
+    const editor::PlayTools& tools = st.play.tools;
+    const std::string playTip = st.play.emu.running() ? std::string("Stop pcsx-redux (F5)")
+                                : tools.overlayPerf && tools.overlayRooms
+                                    ? std::string("Build and run in pcsx-redux with the performance and room debug overlays (F5)")
+                                : tools.overlayPerf  ? std::string("Build and run in pcsx-redux with the performance overlay (F5)")
+                                : tools.overlayRooms ? std::string("Build and run in pcsx-redux with the room debug overlay (F5)")
+                                                     : std::string("Build and run in pcsx-redux (F5)");
+    if (button("play", ImVec2(ax, ay), playIcon, playLabel, ButtonKind::Primary, nullptr, playTip.c_str()))
         togglePlay(st, doc);
+    if (namedRectsOn()) {
+        // Scripted tests: the overlays and the build they boot, at the start and after every change.
+        static std::string reported;
+        const std::string ov = tools.overlayPerf && tools.overlayRooms ? "perf,rooms"
+                               : tools.overlayPerf                     ? "perf"
+                               : tools.overlayRooms                    ? "rooms"
+                                                                       : "none";
+        const std::string now = "play: overlays " + ov + " engine " +
+                                utf8(editor::engineFor(editor::withDefaults(tools, st.play.bundleDir)).filename());
+        if (now != reported) {
+            reported = now;
+            std::printf("%s\n", now.c_str());
+            std::fflush(stdout);
+        }
+    }
     if (button("run", ImVec2(ax + wPlay + space::sm, ay), runIcon, runLabel, ButtonKind::Secondary, nullptr,
                onHw ? "Stop serving the console (Ctrl+F5)" : "Upload to a console over serial (Ctrl+F5)"))
         toggleRun(st, doc);
@@ -1411,6 +1439,15 @@ static MenuEntry heading(std::string label) {
     return e;
 }
 
+// Build > Performance / Room Debug Overlay: which psxsplash build Play and
+// Run on hardware boot. Saved with the tools.
+static void setOverlays(State& st, bool perf, bool rooms) {
+    State::Play& p = st.play;
+    p.tools.overlayPerf = perf;
+    p.tools.overlayRooms = rooms;
+    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+}
+
 static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document& doc, viewport::Ps1View& view) {
     const std::optional<editor::ObjectPath> sel = doc.selection();
     const bool hasSel = sel.has_value();
@@ -1477,6 +1514,13 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
                              [&] { toggleRun(st, doc); }));
             m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
+            m.push_back(separator());
+            m.push_back(item("Performance Overlay", "", true,
+                             [&] { setOverlays(st, !st.play.tools.overlayPerf, st.play.tools.overlayRooms); },
+                             st.play.tools.overlayPerf));
+            m.push_back(item("Room Debug Overlay", "", true,
+                             [&] { setOverlays(st, st.play.tools.overlayPerf, !st.play.tools.overlayRooms); },
+                             st.play.tools.overlayRooms));
             break;
         case 4:  // View
             m.push_back(item("Hand", "Q", true, [&] { st.tool = 0; }, st.tool == 0));
@@ -1544,8 +1588,9 @@ static void menuSize(const std::vector<MenuEntry>& entries, float* outW, float* 
 }
 
 // Draws `entries` in the popup that is open (sized by menuSize) and returns
-// the action of the item clicked this frame, if any.
-static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, float w, float h) {
+// the action of the item clicked this frame, if any. With a `menu` name each
+// item is named "<menu>/<label>" for scripted clicks (menu.build/Room Debug Overlay).
+static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, float w, float h, const std::string& menu = {}) {
     Fonts& f = fonts();
     const float pad = space::xs, rowH = size::field + 4, sepH = 9, headH = 24;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -1568,6 +1613,7 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
         } else {
             ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
             Hit hit = interact("item", ir);
+            if (!menu.empty()) nameRect(menu + "/" + e.label, ir);
             const bool on = e.enabled && hit.hover > 0;
             if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
             if (e.checked) dl->AddCircleFilled(ImVec2(ir.Min.x + space::md, ir.GetCenter().y), 3.5f, color::accent, 12);
@@ -1619,7 +1665,8 @@ static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
                                                         ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(2);
     if (!open) return;
-    std::function<void()> run = menuRows(entries, w, h);
+    static const char* names[6] = {"menu.file", "menu.edit", "menu.object", "menu.build", "menu.view", "menu.help"};
+    std::function<void()> run = menuRows(entries, w, h, names[shown]);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) st.menuOpen = -1;
     if (run) st.menuOpen = -1;
     if (st.menuOpen < 0) {

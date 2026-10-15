@@ -696,6 +696,19 @@ std::string truncateBytes(const std::string& s, size_t bytes) {
     return s.substr(0, cut);
 }
 
+// Elements of a type this build does not know are left out.
+void stripUnknownElements(std::vector<UICanvas>& canvases, ExportResult& res) {
+    for (UICanvas& cv : canvases)
+        for (auto it = cv.elements.begin(); it != cv.elements.end();)
+            if (it->unknown.empty()) {
+                ++it;
+            } else {
+                res.warnings.push_back("canvas '" + cv.name + "': element '" + it->name +
+                                       "' has a type this build does not export");
+                it = cv.elements.erase(it);
+            }
+}
+
 template <typename ImageFor>
 void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const fs::path& root, const VramSettings& vs, ImageFor& imageFor,
                std::deque<PsxTexture>& store, std::vector<std::vector<PsxTexture*>>& uiTextures,
@@ -823,17 +836,18 @@ BakedAxis bakeAxis(float amin, float amax, int pos, int size, int res) {
 void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& canvases,
              const std::vector<std::vector<PsxTexture*>>& uiTextures, const std::vector<FontSheet>& sheets,
              const std::vector<std::array<int, 2>>& fontVram, const std::map<std::string, int>& fontIndex,
-             const VramSettings& vs) {
+             const VramSettings& vs, const std::vector<uint32_t>* fontDataOffsets = nullptr) {
     w.align4();
     w.patchU32(tableOffsetPos, uint32_t(w.pos()));
-    // Font descriptors (112 bytes). The pixels are in the .vram file.
+    // Font descriptors (112 bytes). In a splashpack the pixels are in the
+    // .vram file (offset 0); a loader pack carries them at fontDataOffsets.
     for (size_t i = 0; i < sheets.size(); i++) {
         w.u8(uint8_t(sheets[i].glyphWidth));
         w.u8(uint8_t(sheets[i].glyphHeight));
         w.u16(uint16_t(fontVram[i][0]));
         w.u16(uint16_t(fontVram[i][1]));
         w.u16(uint16_t(sheets[i].height));
-        w.u32(0);
+        w.u32(fontDataOffsets ? fontDataOffsets->at(i) : 0);
         w.u32(uint32_t(sheets[i].texels.size() / 2));
         w.bytes(sheets[i].advances.data(), 96);
     }
@@ -1637,16 +1651,16 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     // UI: image textures (packed after the object textures, as 2.4.0 does),
     // font sheets, and the checks the loader would otherwise fail silently.
     // Elements of a type this build does not know are left out.
+    // The loading canvas goes in the loader pack (exportLoaderPack) instead.
     std::vector<UICanvas> canvases = scene.canvases;
-    for (UICanvas& cv : canvases)
-        for (auto it = cv.elements.begin(); it != cv.elements.end();)
-            if (it->unknown.empty()) {
-                ++it;
-            } else {
-                res.warnings.push_back("canvas '" + cv.name + "': element '" + it->name +
-                                       "' has a type this build does not export");
-                it = cv.elements.erase(it);
-            }
+    if (const std::string& lc = scene.settings.loadingCanvas; !lc.empty()) {
+        auto it = std::find_if(canvases.begin(), canvases.end(), [&](const UICanvas& c) { return c.name == lc; });
+        if (it == canvases.end())
+            res.errors.push_back("loading screen: no canvas named '" + lc + "'");
+        else
+            canvases.erase(it);
+    }
+    stripUnknownElements(canvases, res);
     std::vector<std::vector<PsxTexture*>> uiTextures(canvases.size());
     std::vector<FontSheet> fontSheets;
     std::vector<std::array<int, 2>> fontVram;
@@ -2503,6 +2517,122 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (const std::vector<uint8_t>& d : audioData) st.spuEnd = ((st.spuEnd + 15) & ~size_t(15)) + ((d.size() + 15) & ~size_t(15));
     for (const ExpObject& e : exporters) st.triangles += int(e.tris.size());
     if (objectsBindRam(st)) res.warnings.push_back(objectRamWarning(st));
+    return res;
+}
+
+ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs::path& out,
+                              const ExportOptions& options) {
+    ExportResult res;
+    const std::string& lc = scene.settings.loadingCanvas;
+    if (lc.empty()) {
+        if (!options.dryRun) {
+            std::error_code ec;
+            fs::remove(out, ec);
+        }
+        return res;
+    }
+    auto found = std::find_if(scene.canvases.begin(), scene.canvases.end(), [&](const UICanvas& c) { return c.name == lc; });
+    if (found == scene.canvases.end()) {
+        res.errors.push_back("loading screen: no canvas named '" + lc + "'");
+        return res;
+    }
+    std::vector<UICanvas> canvases{*found};
+    stripUnknownElements(canvases, res);
+    for (const UIElement& e : canvases[0].elements)
+        if (e.type == UIElementType::Line)
+            res.warnings.push_back("loading screen '" + lc + "', element '" + e.name +
+                                   "': psxsplash does not draw lines on the loading screen");
+
+    // Only the fonts this canvas uses, in scene order.
+    Scene fontScene;
+    for (const UIFont& f : scene.fonts)
+        for (const UIElement& e : canvases[0].elements)
+            if (e.type == UIElementType::Text && e.font == f.name) {
+                fontScene.fonts.push_back(f);
+                break;
+            }
+
+    std::map<std::string, Image> images;
+    auto imageFor = [&](const std::string& p) -> const Image& {
+        auto it = images.find(p);
+        if (it == images.end()) it = images.emplace(p, loadImage(root / p)).first;
+        return it->second;
+    };
+    std::deque<PsxTexture> store;
+    std::vector<std::vector<PsxTexture*>> uiTextures(1);
+    std::vector<FontSheet> sheets;
+    std::vector<std::array<int, 2>> fontVram;
+    std::map<std::string, int> fontIndex;
+    prepareUi(fontScene, canvases, root, options.vram, imageFor, store, uiTextures, sheets, fontVram, fontIndex, res);
+    if (!res.ok()) return res;
+    std::vector<PsxTexture*> all;
+    for (PsxTexture* t : uiTextures[0])
+        if (t) all.push_back(t);
+    VramLayout vram = packVram(all, options.vram, res.errors);
+    if (!res.ok()) return res;
+    std::vector<const PsxTexture*> cluts;
+    for (const Atlas& a : vram.atlases)
+        for (const PsxTexture* t : a.textures)
+            if (t->hasPalette) cluts.push_back(t);
+    if (vram.atlases.size() > 255 || cluts.size() > 255 || sheets.size() > 255) {
+        res.errors.push_back("loading screen '" + lc + "': too many textures");
+        return res;
+    }
+
+    // Header (LoaderPackHeader, 16 bytes), atlas and CLUT records, then the
+    // 4-aligned pixel, CLUT and font blobs, then the splashpack's UI table.
+    BinWriter w;
+    w.u8('L');
+    w.u8('P');
+    w.u16(2);
+    w.u8(uint8_t(sheets.size()));
+    w.u8(1);
+    w.u16(uint16_t(options.vram.resolutionX));
+    w.u16(uint16_t(options.vram.resolutionY));
+    w.u8(uint8_t(vram.atlases.size()));
+    w.u8(uint8_t(cluts.size()));
+    const size_t tableOffsetPos = w.pos();
+    w.u32(0);
+    std::vector<size_t> atlasPos, clutPos;
+    for (const Atlas& a : vram.atlases) {
+        atlasPos.push_back(w.pos());
+        w.u32(0);
+        w.u16(uint16_t(a.width));
+        w.u16(uint16_t(Atlas::kHeight));
+        w.u16(uint16_t(a.positionX));
+        w.u16(uint16_t(a.positionY));
+    }
+    for (const PsxTexture* t : cluts) {
+        clutPos.push_back(w.pos());
+        w.u32(0);
+        w.u16(t->clutPackingX);
+        w.u16(t->clutPackingY);
+        w.u16(uint16_t(t->palette.size()));
+        w.u16(0);
+    }
+    for (size_t i = 0; i < vram.atlases.size(); i++) {
+        w.align4();
+        w.patchU32(atlasPos[i], uint32_t(w.pos()));
+        for (uint16_t px : vram.atlases[i].pixels) w.u16(px);
+    }
+    for (size_t i = 0; i < cluts.size(); i++) {
+        w.align4();
+        w.patchU32(clutPos[i], uint32_t(w.pos()));
+        for (uint16_t c : cluts[i]->palette) w.u16(c);
+    }
+    std::vector<uint32_t> fontOffsets;
+    for (const FontSheet& sh : sheets) {
+        w.align4();
+        fontOffsets.push_back(uint32_t(w.pos()));
+        std::vector<uint8_t> px = sh.packed4bpp();
+        w.bytes(px.data(), px.size());
+    }
+    writeUi(w, tableOffsetPos, canvases, uiTextures, sheets, fontVram, fontIndex, options.vram, &fontOffsets);
+    // The pack sits in RAM next to the old scene until it is drawn.
+    if (w.pos() > 128 * 1024)
+        res.warnings.push_back("loading screen '" + lc + "' is " + std::to_string(w.pos() / 1024) +
+                               " KB; it shares RAM with the previous scene while loading, keep it small");
+    if (!options.dryRun) w.save(out);
     return res;
 }
 

@@ -100,8 +100,10 @@ comparison against the exported `.vram` file and **is** in CI.
 ## Boot check
 
 `boot/boot.sh` boots psxsplash (a PCdrv build) on one exported scene in pcsx-redux, headless, and
-saves the screen at a given frame (default 600). The three files are copied to a temporary
-directory as `scene_0.*`, the names the PCdrv loader opens.
+saves the screen at a given frame (default 600). The three files (and `.geo` and `.loading` when
+present) are copied to a temporary directory as `scene_0.*`, the names the PCdrv loader opens.
+With a loading canvas the loading screen shows for a few frames after the boot logo (frames
+260-266 with psxsplash f671202 on tests/ui/ui.scene plus a canvas).
 
     boot/boot.sh <pcsx-redux> <openbios.bin> <psxsplash.ps-exe> <dir>/scene shot.png [frame]
 
@@ -420,6 +422,15 @@ take back the scene type, the typed density and the switch. Controls are clicked
 display.
 
     python3 scenefogcheck.py <splashedit>
+
+`loadingscreencheck.py` drives the scene inspector's Loading screen section on copies of the courtyard
+example given two UI canvases, Title (a progress bar named `loading`) and Bare (no bar, a Line): picks
+each from the Canvas menu (`@scene.loading/Title`), then None, saves with Ctrl+S and reads
+`settings.loadingCanvas` back, and reads the inspector's `scene: loading ...` and `scene: loading
+warnings ...` lines (Bare: `bar,line`; Title: none). One Ctrl+Z takes a pick back. Two optional PNG
+paths keep the Title and Bare screenshots. Needs a display.
+
+    python3 loadingscreencheck.py <splashedit> [title.png [bare.png]]
 
 `buildscenescheck.py` drives the scene inspector's Build scenes section on copies of the courtyard example
 with a second scene, `level2.scene`, beside it: adds both from the Add menu (`@build.add/level2.scene`),

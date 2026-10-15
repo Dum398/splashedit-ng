@@ -3665,6 +3665,84 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
 
+    // The loading screen: one of the scene's UI canvases, shown by psxsplash
+    // while the scene loads and left out of the scene itself.
+    {
+        const float stop = y;
+        const bool open = section("s_loading", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::layoutTemplate, color::textDim,
+                                  "Loading screen", true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const std::string& pickName = set.loadingCanvas;
+        const splash::UICanvas* picked = nullptr;
+        std::vector<const char*> items{"None"};
+        int current = pickName.empty() ? 0 : -1;
+        for (const splash::UICanvas& cv : doc.scene().canvases) {
+            if (!pickName.empty() && !picked && cv.name == pickName) {
+                picked = &cv;
+                current = int(items.size());
+            }
+            items.push_back(cv.name.c_str());
+        }
+        const ImRect canvasRow = row("lloading", "Canvas",
+                                     "A UI canvas of this scene that psxsplash draws while the scene loads. Its progress bar "
+                                     "named \"loading\" fills as the scene comes in.");
+        nameRect("scene.loading", canvasRow);
+        const int pick = dropdownMenu("scene.loading", canvasRow, icon::layoutTemplate, pickName.empty() ? "None" : pickName.c_str(),
+                                      items, current);
+        std::string chosen = pick > 0 ? std::string(items[size_t(pick)]) : std::string();
+        const bool isPick = pick >= 0;
+        caption(pickName.empty() ? "Shown while the scene loads. Pick a UI canvas."
+                                 : "Drawn while the scene loads; the canvas is left out of the scene.",
+                color::textFaint);
+        // What the engine will do with the pick: worked out from the scene, not an export.
+        bool noBar = false, lines = false;
+        const bool missing = !pickName.empty() && !picked;
+        if (picked) {
+            noBar = std::none_of(picked->elements.begin(), picked->elements.end(), [](const splash::UIElement& e) {
+                return e.type == splash::UIElementType::Progress && e.name == "loading";
+            });
+            lines = std::any_of(picked->elements.begin(), picked->elements.end(),
+                                [](const splash::UIElement& e) { return e.type == splash::UIElementType::Line; });
+        }
+        if (missing) caption("Canvas \"" + pickName + "\" no longer exists.", color::warn);
+        if (noBar) caption("No progress bar named \"loading\": the screen shows without one.", color::warn);
+        if (lines) caption("Lines are not drawn on the loading screen.", color::warn);
+        if (namedRectsOn()) {
+            // Scripted tests: the pick and its warnings when they change (not the scene's first frame).
+            std::string warns;
+            if (missing) warns += "missing";
+            if (noBar) warns += std::string(warns.empty() ? "" : ",") + "bar";
+            if (lines) warns += std::string(warns.empty() ? "" : ",") + "line";
+            const std::string now = "scene: loading " + (pickName.empty() ? std::string("none") : pickName);
+            const std::string nowWarn = "scene: loading warnings " + (warns.empty() ? std::string("none") : warns);
+            static unsigned seenLoad = ~0u;
+            static std::string reported, reportedWarn;
+            if (seenLoad != doc.loadId()) {
+                seenLoad = doc.loadId();
+                reported = now;
+                reportedWarn = nowWarn;
+            }
+            if (reported != now) {
+                reported = now;
+                std::printf("%s\n", now.c_str());
+            }
+            if (reportedWarn != nowWarn) {
+                reportedWarn = nowWarn;
+                std::printf("%s\n", nowWarn.c_str());
+            }
+            std::fflush(stdout);
+        }
+        if (isPick && chosen != pickName) doc.editSettings([chosen](splash::SceneSettings& s) { s.loadingCanvas = chosen; });
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
     // The build list (scenes.list): the scenes Play and Export write, in order.
     // A project setting, saved as soon as it changes and not part of undo.
     {

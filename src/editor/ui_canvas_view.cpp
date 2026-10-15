@@ -280,6 +280,7 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
         for (int i = 0; i < int(cvs.size()); i++) {
             ImGui::PushID(i);
             std::string meta = std::to_string(cvs[size_t(i)].elements.size()) + " el" + (cvs[size_t(i)].visible ? "" : ", hidden");
+            if (!cvs[size_t(i)].name.empty() && cvs[size_t(i)].name == doc.scene().settings.loadingCanvas) meta += ", loading screen";
             if (menuItem(i == sel.canvas ? icon::chevronRight : icon::layoutTemplate, rgb(0x5ccfe0), cvs[size_t(i)].name.c_str(),
                          meta.c_str()))
                 doc.selectUi({i, -1});

@@ -211,6 +211,12 @@ project = os.path.dirname(scene)
 cave = os.path.join(tmp, 'cave.scene')
 doc = json.load(open(scene, encoding='utf-8'))
 doc['settings'].setdefault('fog', {})['enabled'] = True
+# and a loading screen, which lands as SCENE1/SCENE_1.LDG.
+doc.setdefault('canvases', []).append({'name': 'Loading', 'elements': [
+    {'type': 'box', 'name': 'bg', 'rect': [0, 0, 320, 240], 'color': [0.1, 0.2, 0.5]},
+    {'type': 'progress', 'name': 'loading', 'rect': [40, 200, 240, 8], 'color': [1, 1, 1],
+     'background': [0.2, 0.2, 0.2], 'value': 0}]})
+doc['settings']['loadingCanvas'] = 'Loading'
 json.dump(doc, open(cave, 'w', encoding='utf-8'))
 ref1 = os.path.join(tmp, 'ref1.splashpack')
 r5 = subprocess.run([cli, 'export', cave, '--project', project, '-o', ref1, '--lua-bytecode'], capture_output=True, text=True)
@@ -249,6 +255,15 @@ if r4.returncode == 0:
                 check('SCENE%d/%s has the splashpack header' % (i, name.decode()), bool(got) and got[:2] == b'SP' and
                       got[:4] == open(ref, 'rb').read()[:4], got and got[:4])
     check('the two scenes are different packs', packs.get(0) and packs.get(1) and packs[0] != packs[1])
+    ldg = root.get(b'SCENE1') and records(root[b'SCENE1'][0], root[b'SCENE1'][1]).get(b'SCENE_1.LDG;1')
+    want = open(ref1[:-len('.splashpack')] + '.loading', 'rb').read() if os.path.exists(
+        ref1[:-len('.splashpack')] + '.loading') else None
+    got = ldg and user[ldg[0] * 2048:ldg[0] * 2048 + ldg[1]]
+    check('SCENE1/SCENE_1.LDG = loader pack of scene 1', bool(want) and got == want and got[:4] == b'LP\x02\x00',
+          (ldg, got and got[:4]))
+    check('no LDG at the root', not any(k.endswith(b'.LDG;1') for k in root), root.keys())
+    s0dir = root.get(b'SCENE0')
+    check('no SCENE0/SCENE_0.LDG', s0dir and b'SCENE_0.LDG;1' not in records(s0dir[0], s0dir[1]))
     check('no SCENE2', b'SCENE2' not in root, root.keys())
 
 print('%d checks, %d failed' % (checks, fails))

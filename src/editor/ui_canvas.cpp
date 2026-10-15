@@ -68,18 +68,21 @@ bool sameCanvas(const UICanvas& a, const UICanvas& b) {
 }
 
 // Every UI edit: the canvases before and after, and the UI selection with them.
+// Also the scene's loading canvas name, which follows a rename of that canvas.
 class UiCommand : public Command {
 public:
     UiCommand(std::vector<UICanvas> before, std::vector<UICanvas> after, Document::UiSelection selBefore,
-              Document::UiSelection selAfter, std::string key)
+              Document::UiSelection selAfter, std::string key, std::string loadBefore, std::string loadAfter)
         : m_before(std::move(before)), m_after(std::move(after)), m_selBefore(selBefore), m_selAfter(selAfter),
-          m_key(std::move(key)) {}
+          m_key(std::move(key)), m_loadBefore(std::move(loadBefore)), m_loadAfter(std::move(loadAfter)) {}
     void apply(Document& doc) override {
         doc.canvasesMut() = m_after;
+        doc.settingsMut().loadingCanvas = m_loadAfter;
         doc.selectUi(m_selAfter);
     }
     void revert(Document& doc) override {
         doc.canvasesMut() = m_before;
+        doc.settingsMut().loadingCanvas = m_loadBefore;
         doc.selectUi(m_selBefore);
     }
     bool merge(const Command& next) override {
@@ -87,17 +90,22 @@ public:
         if (!n || m_key.empty() || n->m_key != m_key) return false;
         m_after = n->m_after;
         m_selAfter = n->m_selAfter;
+        m_loadAfter = n->m_loadAfter;
         return true;
     }
 
 private:
     std::vector<UICanvas> m_before, m_after;
     Document::UiSelection m_selBefore, m_selAfter;
-    std::string m_key;
+    std::string m_key, m_loadBefore, m_loadAfter;
 };
 
-void commit(Document& doc, std::vector<UICanvas> after, Document::UiSelection sel, const std::string& key = {}) {
-    doc.execute(std::make_unique<UiCommand>(doc.scene().canvases, std::move(after), doc.uiSelection(), sel, key), !key.empty());
+void commit(Document& doc, std::vector<UICanvas> after, Document::UiSelection sel, const std::string& key = {},
+            const std::string* loading = nullptr) {
+    const std::string& now = doc.scene().settings.loadingCanvas;
+    doc.execute(std::make_unique<UiCommand>(doc.scene().canvases, std::move(after), doc.uiSelection(), sel, key, now,
+                                            loading ? *loading : now),
+                !key.empty());
 }
 
 bool validCanvas(const Document& doc, int c) { return c >= 0 && c < int(doc.scene().canvases.size()); }
@@ -443,8 +451,12 @@ bool editCanvas(Document& doc, int c, const std::function<void(UICanvas&)>& fn, 
     if (!validCanvas(doc, c)) return false;
     std::vector<UICanvas> after = doc.scene().canvases;
     fn(after[size_t(c)]);
-    if (sameCanvas(after[size_t(c)], doc.scene().canvases[size_t(c)])) return false;
-    commit(doc, std::move(after), doc.uiSelection(), mergeKey);
+    const UICanvas& was = doc.scene().canvases[size_t(c)];
+    if (sameCanvas(after[size_t(c)], was)) return false;
+    // A rename of the loading canvas renames the scene's pick with it.
+    std::string loading = doc.scene().settings.loadingCanvas;
+    if (!loading.empty() && was.name == loading && after[size_t(c)].name != was.name) loading = after[size_t(c)].name;
+    commit(doc, std::move(after), doc.uiSelection(), mergeKey, &loading);
     return true;
 }
 

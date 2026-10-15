@@ -18,7 +18,7 @@ One scene export produces up to four files, all next to each other (writer: `PSX
 | SPU | `ChangeExtension(path,".spu")` | yes | ADPCM audio |
 | geo | `ChangeExtension(path,".geo")` | only if world streaming is active (else a stale one is deleted) | streamed Tri blobs |
 
-A fifth, separate format `.loading` ("LP" magic, `PSXLoaderPackWriter`) exists for loading-screen canvases. It is NOT part of the splashpack; it reuses the UI table layout (font desc 112 B, canvas desc 12 B, element 48 B). Out of scope here except where noted.
+A fifth, separate format `.loading` ("LP" magic, `PSXLoaderPackWriter`; ng `exportLoaderPack`) holds a scene's loading screen. It is NOT part of the splashpack; it reuses the UI table layout (font desc 112 B, canvas desc 12 B, element 48 B). See 4.6.
 
 ---
 
@@ -440,6 +440,22 @@ public static int ConvertWorldToFixed12(float value)
 
 ### 4.5 `.spu` file
 `{ 'S','A'; u16 clipCount }`, then per clip `{u32 sizeBytes, u16 sampleRate, u8 loop, u8 0}` + ADPCM + pad to 4. Clip bytes come from `AudioConvertDelegate(AudioClip, sampleRate, loop, trimLeadingSilence)` (registered by an editor-only `PSXAudioConverter`, source not part of the files read).
+
+### 4.6 `.loading` loader pack (psxsplash `LoadingScreen`, `loadingscreen.hh`)
+Written when the scene's `settings.loadingCanvas` names one of its canvases; that canvas is then left out of the splashpack's UI table and `.vram`. psxsplash opens `scene_<i>.loading` (PCdrv) or `SCENE<i>/SCENE_<i>.LDG;1` (CD), draws it once into both framebuffers (y 0 and 256) before every scene load, then only redraws the Progress element named `loading` with the engine's load percentage. Line elements are not drawn. A missing file or other version shows a black screen.
+
+| off | size | type | field |
+|---|---|---|---|
+| 0 | 2 | char[2] | `'L','P'` |
+| 2 | 2 | u16 | version = 2 |
+| 4 | 1 | u8 | fontCount |
+| 5 | 1 | u8 | canvasCount = 1 |
+| 6 | 4 | u16 x2 | resW, resH (320, 240) |
+| 10 | 1 | u8 | atlasCount |
+| 11 | 1 | u8 | clutCount |
+| 12 | 4 | u32 | tableOffset (UI table) |
+
+Then `atlasCount` x 12 B `{u32 pixelDataOffset, u16 width (VRAM words), u16 height (256), u16 x, u16 y}`, then `clutCount` x 12 B `{u32 clutDataOffset, u16 clutX (16-word units), u16 clutY, u16 length, u16 0}`. Then the atlas pixels, CLUT entries and font sheets (4bpp, as in `.vram`), each 4-aligned, at the absolute offsets the records give. Atlases are packed with the project's VRAM settings (framebuffers, font column and prohibited areas free). At `tableOffset` the UI table is identical to the splashpack's (2.18), except that each font descriptor's `dataOffset` is the absolute offset of its sheet in this file (the engine skips a font with 0) and `dataSize` its byte size. Only fonts the canvas's text uses are included.
 
 ---
 

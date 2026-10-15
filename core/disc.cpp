@@ -443,6 +443,12 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             ExportResult one;
             try {
                 one = exportSplashpack(*scenes[i], projectRoot, spk, opt);
+                if (one.ok() && !scenes[i]->settings.loadingCanvas.empty()) {
+                    ExportResult lr = exportLoaderPack(*scenes[i], projectRoot,
+                                                       fs::path(spk).replace_extension(".loading"), opt);
+                    one.errors.insert(one.errors.end(), lr.errors.begin(), lr.errors.end());
+                    one.warnings.insert(one.warnings.end(), lr.warnings.begin(), lr.warnings.end());
+                }
             } catch (const std::exception& e) {
                 one.errors.push_back(e.what());
             }
@@ -457,6 +463,8 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             files.push_back({dir + ".SPU", readFile(part.replace_extension(".spu"))});
             // World streaming reads its regions from here while the game runs.
             if (fs::exists(part.replace_extension(".geo"))) files.push_back({dir + ".GEO", readFile(part)});
+            // The loading screen psxsplash draws while this scene loads.
+            if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
         }
         if (r.exported.errors.empty()) {
             std::string volume;

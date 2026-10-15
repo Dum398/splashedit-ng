@@ -128,6 +128,24 @@ struct TriggerComponent {
     ExtraKeys extra;
 };
 
+// PSXRoom: a box (offset +- size/2 in the object's local space) whose
+// static triangles render as one room. Rooms and portals together replace
+// the BVH for static rendering when at least one Room exists.
+struct RoomComponent {
+    Vec3 size{1, 1, 1};
+    Vec3 offset{};
+    ExtraKeys extra;
+};
+
+// PSXPortalLink: a width x height rectangle in the object's local XY plane
+// (normal = local +Z), joining two Room objects named by object name.
+struct PortalComponent {
+    std::string roomA, roomB;  // object names
+    float width = 2.0f;
+    float height = 3.0f;
+    ExtraKeys extra;
+};
+
 // PSXAudioClip: a WAV converted to SPU-ADPCM at export.
 struct AudioComponent {
     std::string clip;      // project-relative WAV path, empty = no data
@@ -172,6 +190,8 @@ struct Object {
     std::optional<PlayerComponent> player;
     std::optional<NavigationComponent> navigation;
     std::optional<TriggerComponent> trigger;
+    std::optional<RoomComponent> room;
+    std::optional<PortalComponent> portal;
     std::optional<InteractableComponent> interactable;
     std::optional<AudioComponent> audio;
     std::optional<SkinComponent> skin;
@@ -405,6 +425,43 @@ inline void triggerWorldBox(const FlatObject& fo, Vec3* mn, Vec3* mx) {
         *mn = i ? vmin(*mn, p) : p;
         *mx = i ? vmax(*mx, p) : p;
     }
+}
+
+// An object's Room box in world space: the axis-aligned bounds of the
+// 8 corners of offset +- size/2 after the object's transform.
+inline void roomWorldBox(const FlatObject& fo, Vec3* mn, Vec3* mx) {
+    const Vec3 half = fo.object->room ? fo.object->room->size * 0.5f : Vec3{};
+    const Vec3 off = fo.object->room ? fo.object->room->offset : Vec3{};
+    for (int i = 0; i < 8; i++) {
+        const Vec3 c{(i & 1) ? half.x : -half.x, (i & 2) ? half.y : -half.y, (i & 4) ? half.z : -half.z};
+        const Vec3 p = fo.localToWorld.point(off + c);
+        *mn = i ? vmin(*mn, p) : p;
+        *mx = i ? vmax(*mx, p) : p;
+    }
+}
+
+// A Portal's rectangle in world space. normal/right/up are unit vectors
+// along the object's local Z/X/Y axes; the half extents honour the
+// object's scale along right/up (Unity exports the raw size instead).
+struct PortalFrame {
+    Vec3 center, normal, right, up;
+    float halfW = 0, halfH = 0;
+};
+inline PortalFrame portalWorldFrame(const FlatObject& fo) {
+    PortalFrame f;
+    const Mat34& m = fo.localToWorld;
+    const Vec3 ax{m.m[0][0], m.m[1][0], m.m[2][0]};
+    const Vec3 ay{m.m[0][1], m.m[1][1], m.m[2][1]};
+    const Vec3 az{m.m[0][2], m.m[1][2], m.m[2][2]};
+    f.center = m.position();
+    f.right = normalized(ax);
+    f.up = normalized(ay);
+    f.normal = normalized(az);
+    const float w = fo.object->portal ? fo.object->portal->width : 0.f;
+    const float h = fo.object->portal ? fo.object->portal->height : 0.f;
+    f.halfW = w * 0.5f * magnitude(ax);
+    f.halfH = h * 0.5f * magnitude(ay);
+    return f;
 }
 
 std::vector<FlatObject> flatten(const Scene& scene);

@@ -190,6 +190,18 @@ json writeTrigger(const TriggerComponent& t) {
     return j;
 }
 
+json writeRoom(const RoomComponent& r) {
+    json j = {{"type", "room"}, {"size", vec3(r.size)}, {"offset", vec3(r.offset)}};
+    putExtras(j, r.extra);
+    return j;
+}
+
+json writePortal(const PortalComponent& p) {
+    json j = {{"type", "portal"}, {"roomA", p.roomA}, {"roomB", p.roomB}, {"width", p.width}, {"height", p.height}};
+    putExtras(j, p.extra);
+    return j;
+}
+
 json writeInteractable(const InteractableComponent& it) {
     json j = {{"type", "interactable"},       {"radius", it.radius},
               {"button", it.button},           {"repeatable", it.repeatable},
@@ -300,6 +312,20 @@ Object readObject(const json& j) {
             if (c.contains("lua") && !c["lua"].is_null()) t.lua = c["lua"].get<std::string>();
             t.extra = extrasOf(c, writeTrigger(t));
             o.trigger = t;
+        } else if (type == "room") {
+            RoomComponent r;
+            if (c.contains("size")) r.size = vec3(c["size"]);
+            if (c.contains("offset")) r.offset = vec3(c["offset"]);
+            r.extra = extrasOf(c, writeRoom(r));
+            o.room = r;
+        } else if (type == "portal") {
+            PortalComponent pc;
+            pc.roomA = c.value("roomA", pc.roomA);
+            pc.roomB = c.value("roomB", pc.roomB);
+            pc.width = c.value("width", pc.width);
+            pc.height = c.value("height", pc.height);
+            pc.extra = extrasOf(c, writePortal(pc));
+            o.portal = pc;
         } else if (type == "interactable") {
             InteractableComponent it;
             it.radius = c.value("radius", it.radius);
@@ -359,6 +385,8 @@ json writeObject(const Object& o) {
     if (o.player) comps.push_back(writePlayer(*o.player));
     if (o.navigation) comps.push_back(writeNavigation(*o.navigation));
     if (o.trigger) comps.push_back(writeTrigger(*o.trigger));
+    if (o.room) comps.push_back(writeRoom(*o.room));
+    if (o.portal) comps.push_back(writePortal(*o.portal));
     if (o.interactable) comps.push_back(writeInteractable(*o.interactable));
     if (o.audio) comps.push_back(writeAudio(*o.audio));
     if (o.skin) comps.push_back(writeSkin(*o.skin));

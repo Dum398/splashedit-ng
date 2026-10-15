@@ -113,15 +113,18 @@ FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, cons
 enum class TextEdit { Inactive, Editing, Commit, Cancel };
 void beginTextEdit(const char* id, const std::string& initial);
 bool textEditing(const char* id);
-// `maxLen` caps what can be typed, in bytes (at most 255).
+// `maxLen` caps what can be typed, in bytes (at most 255). `charFilter`, when
+// given, sees each typed character (ImGuiInputTextFlags_CallbackCharFilter):
+// it may change EventChar, or return 1 to drop it.
 TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out,
-                  size_t maxLen = 255);
+                  size_t maxLen = 255, ImGuiInputTextCallback charFilter = nullptr);
 // A one-line text value in a field well: a click starts typing, Enter or
 // clicking away commits, Esc cancels. Returns true on the frame a changed
 // value is committed, with it in `out`. `placeholder` shows faint while the
 // value is empty; with `maxLen`, typing stops there and a "12/32" count shows.
+// `charFilter` is textEdit's.
 bool textField(const char* id, ImRect r, const std::string& value, std::string* out, const char* placeholder = nullptr,
-               size_t maxLen = 0);
+               size_t maxLen = 0, ImGuiInputTextCallback charFilter = nullptr);
 
 void dropdown(const char* id, ImRect r, const char* icon, const char* value);
 // A dropdown that opens a themed list under it. Returns the picked index, or -1.

@@ -400,7 +400,10 @@ public static class NgParity
     static J.Obj DumpObject(Transform t, bool isRoot, string assets, Dictionary<Mesh, string> meshNames, Dictionary<Texture2D, string> texNames)
     {
         var exp = t.GetComponent<PSXObjectExporter>();
-        bool active = exp != null ? exp.IsActive : t.gameObject.activeSelf;
+        // ng's "active" is the GameObject's own flag (off: not exported at all);
+        // PSXObjectExporter.IsActive is the start-active flag (flag bit 0).
+        bool active = t.gameObject.activeSelf;
+        bool startActive = exp == null || exp.IsActive;
         Vector3 p = isRoot ? t.position : t.localPosition;
         Quaternion q = isRoot ? t.rotation : t.localRotation;
         Vector3 s = isRoot ? t.lossyScale : t.localScale;
@@ -466,9 +469,12 @@ public static class NgParity
         for (int i = 0; i < t.childCount; i++)
             children.Add(DumpObject(t.GetChild(i), false, assets, meshNames, texNames));
 
-        return new J.Obj()
+        var o = new J.Obj()
             .Add("name", t.gameObject.name)
-            .Add("active", active)
+            .Add("active", active);
+        // ng's scene writer leaves startActive out when it is on.
+        if (!startActive) o.Add("startActive", false);
+        return o
             .Add("transform", new J.Obj()
                 .Add("position", J.Arr(p.x, p.y, p.z))
                 .Add("rotation", J.Arr(q.x, q.y, q.z, q.w))

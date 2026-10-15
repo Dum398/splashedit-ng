@@ -70,6 +70,20 @@ struct RoomObjects {
 };
 RoomObjects collectRoomObjects(const std::vector<FlatObject>& flat, std::vector<std::string>& errors);
 
+// The errors collectRoomObjects reports for one Portal ("portal Door room A:
+// ..."), given the exported Room objects in flatten order. The inspector
+// shows the same lines under the portal.
+std::vector<std::string> portalProblems(const std::vector<const FlatObject*>& rooms, const FlatObject& portal);
+
+// The Room object a portal side names: its index in `rooms`, or -1 when no
+// Room or more than one Room has that name.
+int portalRoomIndex(const std::vector<const FlatObject*>& rooms, const std::string& name);
+
+// A Portal's world frame with normal (and right) turned to point from room A
+// into room B, by the two room boxes' centres: what the splashpack stores and
+// what the viewport's arrow shows.
+PortalFrame portalFrameAtoB(const FlatObject& portal, const FlatObject& roomA, const FlatObject& roomB);
+
 // World boxes of the rooms, unexpanded, in room order.
 std::vector<Bounds> roomBoxes(const RoomObjects& ro);
 

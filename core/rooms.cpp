@@ -33,6 +33,38 @@ uint32_t key(TriangleRef r) { return (uint32_t(r.objectIndex) << 16) | r.triangl
 
 }  // namespace
 
+int portalRoomIndex(const std::vector<const FlatObject*>& rooms, const std::string& name) {
+    int found = -1;
+    for (size_t i = 0; i < rooms.size(); i++) {
+        if (rooms[i]->object->name != name) continue;
+        if (found >= 0) return -1;
+        found = int(i);
+    }
+    return found;
+}
+
+std::vector<std::string> portalProblems(const std::vector<const FlatObject*>& rooms, const FlatObject& portal) {
+    std::vector<std::string> errors;
+    if (!portal.object->portal) return errors;
+    const PortalComponent& pc = *portal.object->portal;
+    const std::string where = "portal " + portal.object->name;
+    auto roomNamed = [&](const std::string& n, const std::string& side) -> int {
+        if (n.empty()) {
+            errors.push_back(side + ": not set, pick a Room object");
+            return -1;
+        }
+        int count = 0;
+        for (const FlatObject* r : rooms) count += r->object->name == n;
+        if (count > 1) errors.push_back(side + ": two Room objects are named '" + n + "'");
+        if (count == 0) errors.push_back(side + ": no exported Room object named '" + n + "'");
+        return count == 1 ? portalRoomIndex(rooms, n) : -1;
+    };
+    const int a = roomNamed(pc.roomA, where + " room A");
+    const int b = roomNamed(pc.roomB, where + " room B");
+    if (a >= 0 && a == b) errors.push_back(where + ": room A and room B are the same Room '" + pc.roomA + "'");
+    return errors;
+}
+
 RoomObjects collectRoomObjects(const std::vector<FlatObject>& flat, std::vector<std::string>& errors) {
     RoomObjects ro;
     for (const FlatObject& fo : flat) {
@@ -40,27 +72,23 @@ RoomObjects collectRoomObjects(const std::vector<FlatObject>& flat, std::vector<
         if (fo.object->room) ro.rooms.push_back(&fo);
         if (fo.object->portal) ro.portals.push_back(&fo);
     }
-    auto roomNamed = [&](const std::string& n, const std::string& where) -> int {
-        int found = -1;
-        for (size_t i = 0; i < ro.rooms.size(); i++) {
-            if (ro.rooms[i]->object->name != n) continue;
-            if (found >= 0) {
-                errors.push_back(where + ": two Room objects are named '" + n + "'");
-                return -1;
-            }
-            found = int(i);
-        }
-        if (found < 0) errors.push_back(where + ": no exported Room object named '" + n + "'");
-        return found;
-    };
-    for (const FlatObject* p : ro.portals) {
-        const PortalComponent& pc = *p->object->portal;
-        const std::string where = "portal " + p->object->name;
-        int a = roomNamed(pc.roomA, where + " room A");
-        int b = roomNamed(pc.roomB, where + " room B");
-        if (a >= 0 && a == b) errors.push_back(where + ": room A and room B are the same Room '" + pc.roomA + "'");
-    }
+    for (const FlatObject* p : ro.portals)
+        for (std::string& e : portalProblems(ro.rooms, *p)) errors.push_back(std::move(e));
     return ro;
+}
+
+PortalFrame portalFrameAtoB(const FlatObject& portal, const FlatObject& roomA, const FlatObject& roomB) {
+    PortalFrame f = portalWorldFrame(portal);
+    Vec3 aMin, aMax, bMin, bMax;
+    roomWorldBox(roomA, &aMin, &aMax);
+    roomWorldBox(roomB, &bMin, &bMax);
+    // Bounds::setMinMax's centre, so this matches the room boxes bit for bit.
+    const Vec3 ca = aMin + (aMax - aMin) * 0.5f, cb = bMin + (bMax - bMin) * 0.5f;
+    if (dot(f.normal, normalized(cb - ca)) < 0) {
+        f.normal = f.normal * -1.f;
+        f.right = f.right * -1.f;
+    }
+    return f;
 }
 
 std::vector<Bounds> roomBoxes(const RoomObjects& ro) {
@@ -119,24 +147,15 @@ RoomSet buildRooms(const RoomObjects& ro, const std::vector<RoomInputObject>& ob
     }
 
     // 2. Portals, normal (and right) turned to point from A to B.
-    auto roomIndex = [&](const std::string& name) {
-        for (size_t i = 0; i < n; i++)
-            if (ro.rooms[i]->object->name == name) return int(i);
-        return -1;
-    };
     for (const FlatObject* p : ro.portals) {
         const PortalComponent& pc = *p->object->portal;
-        const int a = roomIndex(pc.roomA), b = roomIndex(pc.roomB);
+        const int a = portalRoomIndex(ro.rooms, pc.roomA), b = portalRoomIndex(ro.rooms, pc.roomB);
         if (a < 0 || b < 0 || a == b) continue;  // reported by collectRoomObjects
         PortalOut po;
         po.name = p->object->name;
         po.roomA = uint16_t(a);
         po.roomB = uint16_t(b);
-        po.frame = portalWorldFrame(*p);
-        if (dot(po.frame.normal, normalized(box[size_t(b)].center - box[size_t(a)].center)) < 0) {
-            po.frame.normal = po.frame.normal * -1.f;
-            po.frame.right = po.frame.right * -1.f;
-        }
+        po.frame = portalFrameAtoB(*p, *ro.rooms[size_t(a)], *ro.rooms[size_t(b)]);
         rs.portals.push_back(po);
     }
 

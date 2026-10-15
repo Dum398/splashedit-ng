@@ -17,6 +17,7 @@
 #include <string>
 
 #include "budget.hh"
+#include "rooms.hh"
 #include "import.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
@@ -48,6 +49,8 @@ constexpr ImU32 collider = rgb(0x46c98a);
 constexpr ImU32 nav = rgb(0x9fd36b);
 constexpr ImU32 trigger = rgb(0xe08cff);
 constexpr ImU32 interact = rgb(0xffb86b);
+constexpr ImU32 room = rgb(0x40e0d0);
+constexpr ImU32 portal = rgb(0xffe14d);
 }  // namespace kind
 
 static void panel(ImDrawList* dl, ImRect r) {
@@ -628,6 +631,8 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Interactable: return {icon::pointer, kind::interact};
         case K::Audio: return {icon::volume, kind::audio};
         case K::Skin: return {icon::play, kind::camera};
+        case K::Room: return {icon::layoutTemplate, kind::room};
+        case K::Portal: return {icon::link, kind::portal};
     }
     return {icon::box, color::textDim};
 }
@@ -640,6 +645,8 @@ static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     if (o.trigger) return lookOf(K::Trigger);
     if (o.interactable) return lookOf(K::Interactable);
     if (o.audio) return lookOf(K::Audio);
+    if (o.portal) return lookOf(K::Portal);
+    if (o.room) return lookOf(K::Room);
     if (!o.children.empty() && !o.collider) return {expanded ? icon::folderOpen : icon::folder, kind::folder};
     return {icon::box, color::textDim};
 }
@@ -3121,7 +3128,8 @@ static void previewCamera(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
 
 static ImU32 overlayCol(ImU32 c, unsigned a) { return (c & 0x00ffffffu) | (a << IM_COL32_A_SHIFT); }
 
-// What the game reads off the scene but never draws: every Trigger box (the
+// What the game reads off the scene but never draws: every Room box and
+// Portal opening (with its A to B arrow), every Trigger box (the
 // world box the splashpack stores), every Interactable's reach as a ring on
 // the ground plane through its origin, and the last export's nav regions.
 // The selected object's shapes are drawn brighter.
@@ -3138,9 +3146,57 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
             dl->AddConvexPolyFilled(p.data(), (int)p.size(), overlayCol(kind::nav, 40));
             dl->AddPolyline(p.data(), (int)p.size(), overlayCol(kind::nav, 170), ImDrawFlags_Closed, 1.2f);
         }
+    // The Rooms a portal can join: the exported ones, as the exporter picks them.
+    std::vector<const splash::FlatObject*> rooms;
+    for (const splash::FlatObject& fo : shown)
+        if (fo.activeInHierarchy && fo.object->active && fo.object->room) rooms.push_back(&fo);
     for (size_t i = 0; i < flats.size() && i < shown.size(); ++i) {
         const splash::FlatObject& fo = shown[i];
         const bool hot = flats[i].object == sel;
+        if (fo.object->room) {
+            splash::Vec3 lo, hi;
+            splash::roomWorldBox(fo, &lo, &hi);
+            selectionOutline(dl, view, mn, sz, toGl(lo), toGl(hi), overlayCol(kind::room, hot ? 255 : 190), hot ? 2.0f : 1.5f);
+        }
+        if (fo.object->portal) {
+            // The opening, and once both rooms resolve an arrow along the
+            // normal the splashpack stores: from Room A into Room B.
+            const splash::PortalComponent& pc = *fo.object->portal;
+            const int a = splash::portalRoomIndex(rooms, pc.roomA), b = splash::portalRoomIndex(rooms, pc.roomB);
+            const bool linked = a >= 0 && b >= 0 && a != b;
+            const splash::PortalFrame pf =
+                linked ? splash::portalFrameAtoB(fo, *rooms[size_t(a)], *rooms[size_t(b)]) : splash::portalWorldFrame(fo);
+            const ImU32 col = overlayCol(kind::portal, hot ? 255 : 210);
+            const float w = hot ? 2.0f : 1.5f;
+            ImVec2 c[4];
+            bool ok = true;
+            const float sx[4] = {-1, 1, 1, -1}, sy[4] = {-1, -1, 1, 1};
+            for (int k = 0; k < 4 && ok; k++)
+                ok = view.project(toGl(pf.center + pf.right * (pf.halfW * sx[k]) + pf.up * (pf.halfH * sy[k])), mn, sz, &c[k]);
+            if (ok) {
+                dl->AddConvexPolyFilled(c, 4, overlayCol(kind::portal, hot ? 60 : 35));
+                dl->AddPolyline(c, 4, col, ImDrawFlags_Closed, w);
+            }
+            if (linked) {
+                const float len = std::clamp(std::max(pf.halfW, pf.halfH), 0.5f, 2.0f), head = std::min(0.3f, len * 0.3f);
+                const splash::Vec3 tip = pf.center + pf.normal * len;
+                ImVec2 p0, p1, h0, h1;
+                if (view.project(toGl(pf.center), mn, sz, &p0) && view.project(toGl(tip), mn, sz, &p1)) {
+                    dl->AddLine(p0, p1, col, w + 0.5f);
+                    if (view.project(toGl(tip - pf.normal * head + pf.up * head), mn, sz, &h0)) dl->AddLine(p1, h0, col, w + 0.5f);
+                    if (view.project(toGl(tip - pf.normal * head - pf.up * head), mn, sz, &h1)) dl->AddLine(p1, h1, col, w + 0.5f);
+                    if (view.project(toGl(tip - pf.normal * head + pf.right * head), mn, sz, &h0)) dl->AddLine(p1, h0, col, w + 0.5f);
+                    if (view.project(toGl(tip - pf.normal * head - pf.right * head), mn, sz, &h1)) dl->AddLine(p1, h1, col, w + 0.5f);
+                }
+                // Which side is which: A behind the opening, B past the arrow's tip.
+                Fonts& f = fonts();
+                ImVec2 la, lb;
+                if (view.project(toGl(pf.center - pf.normal * 0.35f + pf.up * 0.25f), mn, sz, &la))
+                    dl->AddText(f.semibold, type::body, la - measure(f.semibold, type::body, "A") * 0.5f, col, "A");
+                if (view.project(toGl(tip + pf.normal * 0.2f + pf.up * 0.25f), mn, sz, &lb))
+                    dl->AddText(f.semibold, type::body, lb - measure(f.semibold, type::body, "B") * 0.5f, col, "B");
+            }
+        }
         if (fo.object->trigger) {
             splash::Vec3 lo, hi;
             splash::triggerWorldBox(fo, &lo, &hi);
@@ -4562,7 +4618,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[10] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::Portal) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
@@ -5062,6 +5118,126 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         y += size::field + space::sm;
         sectionEnd(top);
     }
+    // Scripted checks name each axis of a vec3Field: <name>.x/.y/.z.
+    auto nameVec3 = [&](const std::string& name, ImRect r) {
+        const float gap = space::xs, w = (r.GetWidth() - gap * 2) / 3;
+        for (int i = 0; i < 3; ++i)
+            nameRect(name + "." + "xyz"[i],
+                     ImRect(ImVec2(r.Min.x + i * (w + gap), r.Min.y), ImVec2(r.Min.x + i * (w + gap) + w, r.Max.y)));
+    };
+    // A line printed once per change under scripted runs (the scene: line's pattern).
+    auto report = [&](const char* tag, const std::string& line) {
+        if (!namedRectsOn()) return;
+        static std::map<std::string, std::string> reported;
+        std::string& last = reported[tag];
+        if (last == line) return;
+        last = line;
+        std::printf("%s\n", line.c_str());
+        std::fflush(stdout);
+    };
+    if (o->room) {
+        const splash::RoomComponent& rm = *o->room;
+        top = y;
+        compSection("s_room", editor::ComponentKind::Room);
+        float sz[3] = {rm.size.x, rm.size.y, rm.size.z};
+        const ImRect szr = row("lrsize", "Size", "The room's box, in metres. Static geometry mostly inside it belongs to the room.");
+        nameVec3("obj.rsize", szr);
+        commit(vec3Field("rsize", szr, fmtFixed(rm.size.x).c_str(), fmtFixed(rm.size.y).c_str(), fmtFixed(rm.size.z).c_str(), nullptr, sz),
+               "rsize", [&](splash::Object& ob) { ob.room->size = {std::max(0.0f, sz[0]), std::max(0.0f, sz[1]), std::max(0.0f, sz[2])}; });
+        float off[3] = {rm.offset.x, rm.offset.y, rm.offset.z};
+        const ImRect ofr = row("lroffset", "Offset", "Where the box's centre sits, in metres, from the object.");
+        nameVec3("obj.roffset", ofr);
+        commit(vec3Field("roffset", ofr, fmtFixed(rm.offset.x).c_str(), fmtFixed(rm.offset.y).c_str(), fmtFixed(rm.offset.z).c_str(), nullptr, off),
+               "roffset", [&](splash::Object& ob) { ob.room->offset = {off[0], off[1], off[2]}; });
+        // What the last live export made of this room. Drawn from the first
+        // frame, so nothing below moves when the export lands.
+        const std::optional<splash::ExportResult>& res = st.live.result();
+        std::string line = "Not exported yet";
+        ImU32 tone = color::textFaint;
+        if (res && !res->ok()) {
+            line = "Export failed: see problems";
+            tone = color::bad;
+        } else if (res) {
+            line = o->active ? "Not in the last export" : "Not exported: the object is off";
+            for (const splash::ExportStats::RoomSummary& rs : res->stats.rooms)
+                if (rs.name == o->name) {
+                    line = std::to_string(rs.triRefs) + (rs.triRefs == 1 ? " triangle, " : " triangles, ") + std::to_string(rs.cells) +
+                           (rs.cells == 1 ? " cell, " : " cells, ") + std::to_string(rs.portals) + (rs.portals == 1 ? " portal" : " portals");
+                    tone = color::textDim;
+                }
+        }
+        const ImRect sr = row("lrstats", "Exported", "From the last export: the triangles drawn with this room (shared ones near a portal "
+                                                     "count in both rooms), the cells it is split into for culling, and its portals.");
+        nameRect("obj.rstats", sr);
+        text(dl, ImVec2(sr.Min.x, centerY(f.regular, type::body, sr.Min.y, sr.Max.y)), f.regular, type::body, tone, line.c_str());
+        report("room", "room: " + o->name + " " + line);
+        sectionEnd(top);
+    }
+    if (o->portal) {
+        const splash::PortalComponent& pc = *o->portal;
+        top = y;
+        compSection("s_portal", editor::ComponentKind::Portal);
+        // Every Room object in the scene, by name, for the two pickers.
+        std::vector<std::string> roomNames;
+        std::function<void(const std::vector<splash::Object>&)> walk = [&](const std::vector<splash::Object>& objs) {
+            for (const splash::Object& ob : objs) {
+                if (ob.room && std::find(roomNames.begin(), roomNames.end(), ob.name) == roomNames.end()) roomNames.push_back(ob.name);
+                walk(ob.children);
+            }
+        };
+        walk(doc.scene().objects);
+        auto roomPicker = [&](const char* id, const char* label, const char* tip, const std::string& cur, bool isA) {
+            std::vector<const char*> items{"None"};
+            int at = cur.empty() ? 0 : -1;
+            for (const std::string& n : roomNames) {
+                if (n == cur) at = int(items.size());
+                items.push_back(n.c_str());
+            }
+            const std::string shown = cur.empty() ? std::string("None") : at < 0 ? cur + "  (no such Room)" : cur;
+            const std::string lid = std::string("l") + id;
+            const ImRect rr = row(lid.c_str(), label, tip);
+            nameRect(std::string("obj.") + id, rr);
+            const int pick = dropdownMenu(id, rr, icon::layoutTemplate, shown.c_str(), items, at);
+            if (pick >= 0) {
+                const std::string name = pick == 0 ? std::string() : std::string(items[size_t(pick)]);
+                doc.edit(path, [name, isA](splash::Object& ob) { (isA ? ob.portal->roomA : ob.portal->roomB) = name; });
+            }
+        };
+        roomPicker("pa", "Room A", "One side of the opening. The camera in either room sees into the other through it.", pc.roomA, true);
+        roomPicker("pb", "Room B", "The other side. The viewport's arrow points from Room A into Room B.", pc.roomB, false);
+        number("pw", "Width", "The opening's width along the object's X axis, before scale.", pc.width, "m", "pw", 0.01f, 1000,
+               [](splash::Object& ob, float v) { ob.portal->width = v; });
+        number("ph", "Height", "The opening's height along the object's Y axis, before scale.", pc.height, "m", "ph", 0.01f, 1000,
+               [](splash::Object& ob, float v) { ob.portal->height = v; });
+        // The exporter's own complaints about this portal, below the fields so they never move them.
+        const std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
+        std::vector<const splash::FlatObject*> rooms;
+        const splash::FlatObject* self = nullptr;
+        for (const splash::FlatObject& fo : flat) {
+            if (fo.object == o) self = &fo;
+            if (fo.activeInHierarchy && fo.object->active && fo.object->room) rooms.push_back(&fo);
+        }
+        size_t problems = 0;
+        if (self) {
+            const std::string prefix = "portal " + o->name;
+            const std::vector<std::string> errs = splash::portalProblems(rooms, *self);
+            problems = errs.size();
+            for (std::string e : errs) {
+                if (e.compare(0, prefix.size(), prefix) == 0) e.erase(0, prefix.size());
+                e.erase(0, e.find_first_not_of(": "));
+                if (!e.empty()) e[0] = char(std::toupper(static_cast<unsigned char>(e[0])));
+                const std::string t = e + ". The export stops until this is fixed.";
+                const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+                dl->AddText(f.regular, type::caption, ImVec2(tx, y), color::warn, t.c_str(), nullptr, w);
+                y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str()).y + space::sm;
+            }
+        }
+        char dims[64];
+        std::snprintf(dims, sizeof dims, " %gx%g", double(pc.width), double(pc.height));
+        report("portal", "portal: " + o->name + " a=" + pc.roomA + " b=" + pc.roomB + dims +
+                             (problems ? " problems " + std::to_string(problems) : std::string()));
+        sectionEnd(top);
+    }
     if (o->interactable) {
         const splash::InteractableComponent& in = *o->interactable;
         top = y;
@@ -5450,6 +5626,14 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
         x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,
                    "Triangles in the exported meshes. How many are drawn depends on the camera.") +
              space::xl;
+        if (!s.rooms.empty()) {
+            char rs2[64];
+            std::snprintf(rs2, sizeof rs2, "%d, catch-all %d tris", int(s.rooms.size()), s.roomCatchAllTris);
+            x += meter("m_rooms", ImVec2(x, bar.Min.y), icon::layoutTemplate, "Rooms", -1, rs2,
+                       "Rooms the export built, and the triangles no Room box holds. Those go to the catch-all room, "
+                       "which psxsplash draws every frame wherever the camera is.") +
+                 space::xl;
+        }
     } else {
         const char* msg = res ? "Export failed: see problems" : "Measuring...";
         ImVec2 ms = measure(f.regular, type::caption, msg);

@@ -44,6 +44,7 @@ static int usage() {
                  "usage: splashpack-cli export <scene> -o <out.splashpack> [--project <dir>] [--order-from <ref.splashpack>]\n"
                  "                              [--lua-bytecode] [--stats]\n"
                  "  --project defaults to the directory holding the scene file\n"
+                 "  writes .vram and .spu next to <out>, and .loading when the scene has a loading canvas\n"
                  "  --lua-bytecode stores Lua scripts compiled (as luac_psx would) instead of as source\n"
                  "  --order-from (parity tests) orders objects like the name table of ref\n"                 "  --stats prints what the export takes in VRAM, SPU RAM and main RAM,\n"
                  "    and a texture line per packed texture with its VRAM and CLUT position\n"
@@ -382,6 +383,13 @@ int main(int argc, char** argv) {
         if (!orderFrom.empty()) opt.objectOrder = readNameTable(orderFrom);
         opt.luaBytecode = luaBytecode;
         splash::ExportResult r = splash::exportSplashpack(scene, root, outPath, opt);
+        if (r.ok() && !scene.settings.loadingCanvas.empty()) {
+            // The loading screen: <out>.loading, psxsplash's scene_<i>.loading.
+            splash::ExportResult lr =
+                splash::exportLoaderPack(scene, root, fs::path(outPath).replace_extension(".loading"), opt);
+            r.errors.insert(r.errors.end(), lr.errors.begin(), lr.errors.end());
+            r.warnings.insert(r.warnings.end(), lr.warnings.begin(), lr.warnings.end());
+        }
         for (auto& m : r.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (stats && r.ok()) {

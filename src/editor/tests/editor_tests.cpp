@@ -46,6 +46,7 @@
 #include "blend.hh"
 #include "editor/ui_canvas.hh"
 #include "budget.hh"
+#include "font.hh"
 #include "navregion.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
@@ -6799,6 +6800,172 @@ void testUiMatchesRuntime() {
     if (differ) std::fprintf(stderr, "UI preview: %d pixels differ from the runtime frame\n", differ);
 }
 
+// The loader pack (scene_<i>.loading) read back the way psxsplash reads it:
+// LoadingScreen::load / uploadTextures and UISystem::loadFromSplashpack.
+void testLoaderPack() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "loading";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "examples" / "courtyard", project, fs::copy_options::recursive);
+    fs::copy_file(src / "assets" / "fonts" / "Inter-Regular.ttf", project / "inter.ttf");
+    splash::Image img;
+    img.width = img.height = 16;
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++)
+            img.pixels.push_back({float((x / 4) & 1), float((y / 4) & 1), 0.5f, 1});
+    splash::savePng(img, project / "logo.png");
+
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    splash::UIFont font;
+    font.name = "inter";
+    font.source = "inter.ttf";
+    font.size = 12;
+    scene.fonts.push_back(font);
+    splash::UICanvas hud;
+    hud.name = "hud";
+    hud.elements.push_back(uiBox("hp", 4, 4, 40, 8));
+    scene.canvases.push_back(hud);
+    splash::UICanvas ld;
+    ld.name = "Loading";
+    ld.elements.push_back(uiBox("bg", 0, 0, 320, 240));
+    ld.elements.back().color = {0.1f, 0.2f, 0.6f};
+    splash::UIElement bar = uiBox("loading", 40, 200, 240, 8);
+    bar.type = splash::UIElementType::Progress;
+    ld.elements.push_back(bar);
+    splash::UIElement text = uiBox("title", 40, 100, 200, 16);
+    text.type = splash::UIElementType::Text;
+    text.text = "Loading...";
+    text.font = "inter";
+    ld.elements.push_back(text);
+    splash::UIElement im = uiBox("logo", 150, 40, 16, 16);
+    im.type = splash::UIElementType::Image;
+    im.texture = "logo.png";
+    im.bitDepth = splash::BitDepth::Bpp4;
+    ld.elements.push_back(im);
+    scene.canvases.push_back(ld);
+    scene.settings.loadingCanvas = "Loading";
+
+    // Scene file round trip keeps the name; an unset one is not written.
+    splash::saveScene(scene, project / "loading.scene");
+    CHECK(splash::loadScene(project / "loading.scene").settings.loadingCanvas == "Loading");
+    CHECK(readAll(project / "loading.scene").find("loadingCanvas") != std::string::npos);
+    splash::Scene plain = scene;
+    plain.settings.loadingCanvas.clear();
+    splash::saveScene(plain, project / "plain.scene");
+    CHECK(readAll(project / "plain.scene").find("loadingCanvas") == std::string::npos);
+
+    const fs::path out = project / "scene_0.loading";
+    splash::ExportResult r = splash::exportLoaderPack(scene, project, out);
+    for (const std::string& e : r.errors) std::fprintf(stderr, "loader pack: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string b = readAll(out);
+    CHECK(b.size() > 16);
+    if (!r.ok() || b.size() <= 16) return;
+    auto in = [&](size_t off, size_t n) { return off != 0 && off % 2 == 0 && off + n <= b.size(); };
+    auto fb = [](int x, int y, int w, int h) {
+        auto hit = [&](int ax, int ay, int aw, int ah) { return ax < x + w && x < ax + aw && ay < y + h && y < ay + ah; };
+        return hit(0, 0, 320, 240) || hit(0, 256, 320, 240);
+    };
+    CHECK(b[0] == 'L' && b[1] == 'P' && rd16(b, 2) == 2);
+    const size_t fontCount = uint8_t(b[4]), canvasCount = uint8_t(b[5]);
+    CHECK(fontCount == 1 && canvasCount == 1 && rd16(b, 6) == 320 && rd16(b, 8) == 240);
+    const size_t atlasCount = uint8_t(b[10]), clutCount = uint8_t(b[11]);
+    const size_t table = size_t(rd32(b, 12));
+    CHECK(atlasCount == 1 && clutCount == 1);
+    CHECK(in(table, fontCount * 112 + canvasCount * 12) && table % 4 == 0);
+    int atlasX = -1, atlasY = -1, atlasW = 0;
+    for (size_t i = 0; i < atlasCount; i++) {
+        const size_t at = 16 + 12 * i;
+        const size_t off = size_t(rd32(b, at));
+        const int w = rd16(b, at + 4), h = rd16(b, at + 6), x = rd16(b, at + 8), y = rd16(b, at + 10);
+        CHECK(in(off, size_t(w) * size_t(h) * 2));
+        CHECK(w > 0 && h > 0 && x + w <= 1024 && y + h <= 512 && !fb(x, y, w, h));
+        atlasX = x, atlasY = y, atlasW = w;
+    }
+    int clutX = -1, clutY = -1;
+    for (size_t i = 0; i < clutCount; i++) {
+        const size_t at = 16 + 12 * atlasCount + 12 * i;
+        const size_t off = size_t(rd32(b, at));
+        clutX = rd16(b, at + 4), clutY = rd16(b, at + 6);
+        const int len = rd16(b, at + 8);
+        CHECK(len >= 4 && len <= 16 && in(off, size_t(len) * 2));  // 4bpp, padded to 4 entries
+        CHECK(clutX * 16 + len <= 1024 && clutY < 512 && !fb(clutX * 16, clutY, len, 1));
+    }
+    // Fonts: the sheet's 4bpp texels at dataOffset, 64 words x textureH.
+    const std::vector<uint8_t> sheet = splash::buildFont(font, project).packed4bpp();
+    for (size_t i = 0; i < fontCount; i++) {
+        const size_t at = table + 112 * i;
+        const int vx = rd16(b, at + 2), vy = rd16(b, at + 4), th = rd16(b, at + 6);
+        const size_t off = size_t(rd32(b, at + 8)), size = size_t(rd32(b, at + 12));
+        CHECK(off != 0);
+        CHECK(off == 0 || (in(off, size) && size == sheet.size() && size == size_t(th) * 128 &&
+              std::memcmp(b.data() + off, sheet.data(), sheet.size()) == 0));
+        CHECK(!fb(vx, vy, 64, th) && vx + 64 <= 1024 && vy + th <= 464);
+    }
+    // The canvas descriptor follows the font descriptors with no gap.
+    const size_t cv = table + fontCount * 112;
+    const size_t elems = size_t(rd32(b, cv)), nameLen = uint8_t(b[cv + 4]), count = uint8_t(b[cv + 6]);
+    const size_t nameOff = size_t(rd32(b, cv + 8));
+    CHECK(nameLen == 7 && count == 4 && in(elems, count * 48) && (uint8_t(b[cv + 7]) & 1) &&
+          nameOff + 8 <= b.size() && b.compare(nameOff, 8, std::string("Loading\0", 8)) == 0);
+    if (!in(elems, count * 48)) return;
+    auto nameOf = [&](size_t e) {
+        const size_t off = size_t(rd32(b, e + 4)), len = uint8_t(b[e + 2]);
+        return off + len < b.size() ? b.substr(off, len) : std::string();
+    };
+    int found = 0;
+    for (size_t k = 0; k < count; k++) {
+        const size_t e = elems + 48 * k;
+        const std::string name = nameOf(e);
+        if (name == "loading") {
+            found++;
+            CHECK(uint8_t(b[e]) == 3);
+            CHECK(rdi16(b, e + 8) == 40 && rdi16(b, e + 10) == 200 && rdi16(b, e + 12) == 240 && rdi16(b, e + 14) == 8);
+        } else if (name == "title") {
+            const size_t t = size_t(rd32(b, e + 40));
+            CHECK(uint8_t(b[e]) == 2 && uint8_t(b[e + 24]) == 1 && uint8_t(b[e + 24]) <= fontCount);
+            CHECK(t + 11 <= b.size() && b.compare(t, 11, std::string("Loading...\0", 11)) == 0);
+        } else if (name == "logo") {
+            // 4bpp: the texture page and CLUT the atlas and CLUT records give.
+            CHECK(uint8_t(b[e]) == 0 && uint8_t(b[e + 34]) == 0);
+            CHECK(uint8_t(b[e + 24]) == atlasX / 64 && uint8_t(b[e + 25]) == atlasY / 256 && atlasW > 0);
+            CHECK(rd16(b, e + 26) == clutX && rd16(b, e + 28) == clutY);
+        }
+    }
+    CHECK(found == 1);
+
+    // The splashpack leaves the loading canvas (and its image) out: one
+    // canvas fewer, and the same pack and .vram as a scene without it.
+    splash::ExportResult sr = splash::exportSplashpack(scene, project, project / "with.splashpack");
+    CHECK(sr.ok());
+    CHECK(rd16(readAll(project / "with.splashpack"), 92) == scene.canvases.size() - 1);
+    splash::Scene without = scene;
+    without.canvases.pop_back();
+    without.settings.loadingCanvas.clear();
+    CHECK(splash::exportSplashpack(without, project, project / "without.splashpack").ok());
+    CHECK(readAll(project / "with.vram") == readAll(project / "without.vram"));
+    // Without a loading canvas every canvas stays in the pack.
+    CHECK(splash::exportSplashpack(plain, project, project / "plain.splashpack").ok());
+    CHECK(rd16(readAll(project / "plain.splashpack"), 92) == scene.canvases.size());
+
+    // A name that matches no canvas is an error from both exports.
+    splash::Scene missing = scene;
+    missing.settings.loadingCanvas = "Nope";
+    CHECK(hasError(splash::exportLoaderPack(missing, project, project / "nope.loading"), "'Nope'"));
+    CHECK(hasError(splash::exportSplashpack(missing, project, project / "nope.splashpack"), "'Nope'"));
+    CHECK(!fs::exists(project / "nope.loading"));
+
+    // Play writes scene_0.loading with the pack, and removes it once unset.
+    const fs::path dir = g_outDir / "loadingplay";
+    fs::remove_all(dir);
+    splash::ExportResult pr = editor::exportForPlay(scene, project, dir);
+    CHECK(pr.ok() && readAll(dir / "scene_0.loading") == b);
+    pr = editor::exportForPlay(plain, project, dir);
+    CHECK(pr.ok() && fs::exists(dir / "scene_0.splashpack") && !fs::exists(dir / "scene_0.loading"));
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -6894,6 +7061,7 @@ int main(int argc, char** argv) {
     testUiProblems();
     testUiRender();
     testUiMatchesRuntime();
+    testLoaderPack();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

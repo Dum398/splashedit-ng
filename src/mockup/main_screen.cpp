@@ -3191,9 +3191,9 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
                 // Which side is which: A behind the opening, B past the arrow's tip.
                 Fonts& f = fonts();
                 ImVec2 la, lb;
-                if (view.project(toGl(pf.center - pf.normal * 0.35f + pf.up * 0.25f), mn, sz, &la))
+                if (view.project(toGl(pf.center - pf.normal * 0.35f + pf.up * 0.6f), mn, sz, &la))
                     dl->AddText(f.semibold, type::body, la - measure(f.semibold, type::body, "A") * 0.5f, col, "A");
-                if (view.project(toGl(tip + pf.normal * 0.2f + pf.up * 0.25f), mn, sz, &lb))
+                if (view.project(toGl(tip + pf.normal * 0.2f + pf.up * 0.3f), mn, sz, &lb))
                     dl->AddText(f.semibold, type::body, lb - measure(f.semibold, type::body, "B") * 0.5f, col, "B");
             }
         }

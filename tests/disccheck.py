@@ -2,9 +2,10 @@
 # does: raw Mode 2 Form 1 sectors (sync, BCD address, subheader twice, EDC,
 # P/Q parity), then the ISO 9660 tree, then the files psxsplash's CD-ROM
 # loader opens (SCENE0/SCENE_0.{SPK,VRM,SPU};1); then a disc of two scenes,
-# the second under SCENE1/SCENE_1.*.
+# the second under SCENE1/SCENE_1.*; then a disc with the psxsplash licence
+# and --volume, the same from disc.json, and a licence of a bad size.
 # usage: python3 disccheck.py <splashpack-cli>
-import json, os, struct, subprocess, sys, tempfile
+import json, os, shutil, struct, subprocess, sys, tempfile
 
 cli = sys.argv[1]
 here = os.path.dirname(os.path.abspath(__file__))
@@ -265,6 +266,61 @@ if r4.returncode == 0:
     s0dir = root.get(b'SCENE0')
     check('no SCENE0/SCENE_0.LDG', s0dir and b'SCENE_0.LDG;1' not in records(s0dir[0], s0dir[1]))
     check('no SCENE2', b'SCENE2' not in root, root.keys())
+
+# A licensed disc with its own volume name: the built-in psxsplash licence at
+# LBA 0-11 (Form 1, its "Created with psxsplash" text at LBA 4), LBA 12-15
+# blank Form 2 (subheader 00 00 20 00 twice, EDC over 16..2347 at 2348).
+lic = os.path.join(tmp, 'lic.bin')
+r6 = subprocess.run([cli, 'disc', scene, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', lic,
+                     '--licence', 'psxsplash', '--volume', 'MyGame'], capture_output=True, text=True)
+check('licensed disc exits 0', r6.returncode == 0, r6.stderr)
+if r6.returncode == 0:
+    raw = open(lic, 'rb').read()
+    sec = lambda i: raw[i * 2352:(i + 1) * 2352]
+    check('PVD volume id from --volume', sec(16)[24 + 40:24 + 72] == b'MYGAME'.ljust(32), sec(16)[24 + 40:24 + 72])
+    check('LBA 4 carries the licence text', b'Created wit' in sec(4)[24:24 + 64] and
+          b'psxsplash' in sec(4)[24:24 + 64], sec(4)[24:24 + 64])
+    check('LBA 0-11 Form 1 data, EDC and parity', all(
+        sec(i)[16:24] == b'\0\0\x08\0\0\0\x08\0' and
+        struct.unpack_from('<I', sec(i), 0x818)[0] == edc(sec(i)[16:0x818]) for i in range(12)) and
+        sec(4)[0x81C:] == ecc(sec(4)), [sec(i)[16:24] for i in range(12)])
+    check('LBA 12-15 blank Form 2 with EDC at 2348', all(
+        sec(i)[16:24] == b'\0\0\x20\0\0\0\x20\0' and sec(i)[24:2348] == bytes(2324) and
+        struct.unpack_from('<I', sec(i), 2348)[0] == edc(sec(i)[16:2348]) for i in range(12, 16)),
+        [sec(i)[16:24] for i in range(12, 16)])
+    check('the rest as without a licence', sec(17) == open(binpath, 'rb').read()[17 * 2352:18 * 2352])
+
+# disc.json in the project gives the volume and the licence; --volume and
+# --licence none override it.
+proj = os.path.join(tmp, 'proj')
+shutil.copytree(os.path.dirname(scene), proj)
+json.dump({'volume': 'from json', 'licence': 'psxsplash'}, open(os.path.join(proj, 'disc.json'), 'w'))
+pj = os.path.join(tmp, 'pj.bin')
+r7 = subprocess.run([cli, 'disc', scene, '--project', proj, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', pj],
+                    capture_output=True, text=True)
+check('disc.json disc exits 0', r7.returncode == 0, r7.stderr)
+if r7.returncode == 0:
+    raw = open(pj, 'rb').read()
+    check('disc.json volume and licence', raw[16 * 2352 + 24 + 40:16 * 2352 + 24 + 72] == b'FROMJSON'.ljust(32) and
+          b'Created wit' in raw[4 * 2352 + 24:4 * 2352 + 88], raw[16 * 2352 + 64:16 * 2352 + 96])
+r8 = subprocess.run([cli, 'disc', scene, '--project', proj, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', pj,
+                     '--licence', 'none', '--volume', 'other'], capture_output=True, text=True)
+if r8.returncode == 0:
+    raw = open(pj, 'rb').read()
+    check('--licence none and --volume override disc.json',
+          raw[16 * 2352 + 24 + 40:16 * 2352 + 24 + 72] == b'OTHER'.ljust(32) and
+          raw[:16 * 2352] == open(binpath, 'rb').read()[:16 * 2352], raw[16 * 2352 + 64:16 * 2352 + 96])
+else:
+    check('--licence none and --volume override disc.json', False, r8.stderr)
+
+# A licence of the wrong size fails, names the size, and writes nothing.
+short = os.path.join(tmp, 'short.dat')
+open(short, 'wb').write(bytes(1000))
+badbin = os.path.join(tmp, 'bad.bin')
+r9 = subprocess.run([cli, 'disc', scene, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', badbin,
+                     '--licence', short], capture_output=True, text=True)
+check('bad-size licence refused', r9.returncode != 0 and '1000' in r9.stderr and not os.path.exists(badbin),
+      (r9.returncode, r9.stderr))
 
 print('%d checks, %d failed' % (checks, fails))
 sys.exit(1 if fails else 0)

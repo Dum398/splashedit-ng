@@ -59,6 +59,19 @@ struct ExportStats {
     // (Renderer::ReserveVisibleTriangles).
     uint32_t bvhTriangleRefs = 0;
     size_t visibleListBytes() const { return 4 * size_t(bvhTriangleRefs); }
+    // The BVH's nodes for the viewport, in node order (breadth first, so the
+    // root is first and a parent comes before its children): world space
+    // bounds, Y up, in the same frame as navOutlines. depth is 0 at the root,
+    // tris is the node's triangle count (non-zero on leaves only). bvhDepth is
+    // the deepest node's depth, 0 with no nodes.
+    struct BvhBox {
+        Vec3 lo, hi;
+        int depth = 0;
+        bool leaf = false;
+        int tris = 0;
+    };
+    std::vector<BvhBox> bvhBoxes;
+    int bvhDepth = 0;
     // Where each packed texture lands in VRAM (deduplicated, placement
     // order). x and clutX are in 16-bit words, absolute.
     struct TexturePlacement {

@@ -2211,6 +2211,26 @@ static void axisWidget(ImDrawList* dl, ImVec2 c, viewport::Ps1View& view) {
 // renderer is right-handed GL, so world points cross over by negating Z.
 static viewport::Vec3 toGl(splash::Vec3 p) { return {p.x, p.y, -p.z}; }
 
+// The BVH level the viewport shows down to: the State's depth clamped to the
+// tree, -1 meaning the deepest.
+static int bvhShownDepth(const State& st, const splash::ExportStats& s) {
+    return st.bvhDepth < 0 ? s.bvhDepth : std::min(st.bvhDepth, s.bvhDepth);
+}
+
+// The BVH's boxes down to `depth`, coloured by level; leaves are brighter.
+// Returns how many boxes it drew (offscreen ones included).
+static int bvhOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::ExportStats& s, int depth) {
+    static const ImU32 palette[] = {0x5ad1ff, 0xffb347, 0x7bed9f, 0xff6b9d, 0xc89bff, 0xf9f871};
+    int drawn = 0;
+    for (const splash::ExportStats::BvhBox& b : s.bvhBoxes) {
+        if (b.depth > depth) continue;
+        const ImU32 col = rgb(palette[size_t(b.depth) % (sizeof palette / sizeof palette[0])], b.leaf ? 230 : 120);
+        selectionOutline(dl, view, mn, sz, toGl(b.lo), toGl(b.hi), col, b.leaf ? 1.4f : 1.0f);
+        drawn++;
+    }
+    return drawn;
+}
+
 static float distToSegment(ImVec2 p, ImVec2 a, ImVec2 b) {
     ImVec2 ab = b - a, ap = p - a;
     float len2 = ab.x * ab.x + ab.y * ab.y;
@@ -3443,6 +3463,37 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         sceneOverlays(dl, view, mn, sz, flats, shown, sel, st.live.result());
     }
 
+    // The BVH, on its own toggle (Scene inspector, BVH section).
+    {
+        const std::optional<splash::ExportResult>& lr = st.live.result();
+        const splash::ExportStats* bs = lr && lr->ok() ? &lr->stats : nullptr;
+        int drawn = -1, depth = 0;
+        if (st.bvhShow && bs) {
+            dl->ChannelsSetCurrent(kScene);
+            depth = bvhShownDepth(st, *bs);
+            drawn = bvhOverlay(dl, view, mn, sz, *bs, depth);
+        }
+        if (namedRectsOn() && ImGui::GetFrameCount() > 1) {
+            // Scripted tests: the tree once it exports, and what the viewport draws.
+            static std::string reportedTree, reportedShow;
+            auto report = [](std::string& last, const std::string& now2) {
+                if (last == now2) return;
+                last = now2;
+                if (now2.empty()) return;
+                std::printf("%s\n", now2.c_str());
+                std::fflush(stdout);
+            };
+            if (bs) {
+                int leaves = 0;
+                for (const auto& b : bs->bvhBoxes) leaves += b.leaf ? 1 : 0;
+                report(reportedTree, "bvh: nodes " + std::to_string(bs->bvhBoxes.size()) + " leaves " + std::to_string(leaves) +
+                                         " depth " + std::to_string(bs->bvhDepth));
+                report(reportedShow, drawn >= 0 ? "bvh: showing depth " + std::to_string(depth) + " boxes " + std::to_string(drawn)
+                                                : std::string("bvh: hidden"));
+            }
+        }
+    }
+
     // Markers: a lightbulb for lights, a generic marker for objects with
     // neither mesh nor light (cameras, spawns, audio). Grouping nodes and
     // script-only objects get none. Clicking one selects its object.
@@ -4475,6 +4526,45 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     } else {
         dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
         y += space::sm + space::md;
+    }
+
+    // The exported BVH, which psxsplash culls static geometry with. Its
+    // boxes can be drawn in the viewport, down to a chosen depth.
+    {
+        const float stop = y;
+        const bool open = section("s_bvh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::layers, color::textDim, "BVH",
+                                  false, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        if (stats) {
+            int leaves = 0;
+            for (const auto& b : stats->bvhBoxes) leaves += b.leaf ? 1 : 0;
+            caption(std::to_string(stats->bvhBoxes.size()) + " nodes, " + std::to_string(leaves) + " leaves, depth " +
+                        std::to_string(stats->bvhDepth) + ", " + std::to_string(stats->bvhTriangleRefs) + " triangle refs",
+                    color::textFaint);
+        } else {
+            caption("Appears once the scene exports.", color::textFaint);
+        }
+        ImRect v = row("lbvhshow", "Show in viewport",
+                       "Draws the BVH's boxes over the scene, one colour per level; leaves are brighter. psxsplash draws "
+                       "only the triangles in boxes the camera can see.");
+        const ImRect sw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("bvh.show", sw);
+        if (toggle("bvhshow", sw, st.bvhShow)) st.bvhShow = !st.bvhShow;
+        const int maxDepth = stats ? stats->bvhDepth : 0;
+        const int shownDepth = stats ? bvhShownDepth(st, *stats) : std::max(st.bvhDepth, 0);
+        const ImRect dr = row("lbvhdepth", "Depth", "The deepest level drawn: 0 is the root box around the whole scene.");
+        nameRect("bvh.depth", dr);
+        float dv = float(shownDepth);
+        FieldEdit fe = numberField("bvhdepth", dr, std::to_string(shownDepth).c_str(), nullptr, 0, nullptr, &dv);
+        if (fe.changed) st.bvhDepth = std::clamp(int(std::lround(dv)), 0, maxDepth);
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
     }
 
     // An override below the estimate is allowed (the estimate has margin)

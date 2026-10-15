@@ -3104,6 +3104,73 @@ void testRoomsExport() {
 }
 
 // What the room block cannot carry is an export error, never a clamp.
+// The BVH boxes the viewport draws (ExportStats::bvhBoxes): one per node,
+// breadth first. buildBvh gives an inner node exactly two children, so in
+// breadth-first order the k-th inner node's children are nodes 2k+1 and 2k+2.
+void testBvhBoxes() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = src / "examples" / "courtyard";
+    const splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    const fs::path dir = g_outDir / "bvh";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    const splash::ExportResult d = splash::exportSplashpack(scene, project, dir / "scene.splashpack", dry);
+    const splash::ExportResult r = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(d.ok() && r.ok());
+    if (!d.ok() || !r.ok()) return;
+    const std::string b = readAll(dir / "scene.splashpack");
+    const auto& boxes = r.stats.bvhBoxes;
+    // The header's bvhNodeCount, and the dry run (the editor's live export) agrees.
+    CHECK(boxes.size() == rd16(b, 32));
+    CHECK(boxes.size() > 3);
+    CHECK(d.stats.bvhBoxes.size() == boxes.size() && d.stats.bvhDepth == r.stats.bvhDepth);
+    if (boxes.empty()) return;
+    CHECK(boxes[0].depth == 0);
+    int deepest = 0, leaves = 0, inner = 0;
+    long leafTris = 0;
+    const float eps = 1e-3f;
+    auto inside = [eps](const splash::ExportStats::BvhBox& in, const splash::ExportStats::BvhBox& out) {
+        return in.lo.x >= out.lo.x - eps && in.lo.y >= out.lo.y - eps && in.lo.z >= out.lo.z - eps &&
+               in.hi.x <= out.hi.x + eps && in.hi.y <= out.hi.y + eps && in.hi.z <= out.hi.z + eps;
+    };
+    for (size_t i = 0; i < boxes.size(); i++) {
+        const auto& n = boxes[i];
+        deepest = std::max(deepest, n.depth);
+        CHECK(n.lo.x <= n.hi.x && n.lo.y <= n.hi.y && n.lo.z <= n.hi.z);
+        if (n.leaf) {
+            leaves++;
+            leafTris += n.tris;
+            CHECK(n.tris > 0);
+            continue;
+        }
+        CHECK(n.tris == 0);
+        const size_t c0 = 2 * size_t(inner) + 1, c1 = c0 + 1;
+        inner++;
+        CHECK(c1 < boxes.size());
+        if (c1 >= boxes.size()) continue;
+        for (size_t c : {c0, c1}) {
+            CHECK(boxes[c].depth == n.depth + 1);
+            CHECK(inside(boxes[c], n));
+        }
+    }
+    CHECK(r.stats.bvhDepth == deepest);
+    CHECK(deepest > 0);
+    CHECK(leaves == inner + 1);
+    CHECK(leafTris == long(r.stats.bvhTriangleRefs));
+    CHECK(rd16(b, 34) == r.stats.bvhTriangleRefs);
+    // The root holds every triangle of the scene.
+    CHECK(r.stats.bvhTriangleRefs == uint32_t(r.stats.triangles));
+
+    // No geometry: no boxes, depth 0.
+    splash::Scene empty;
+    empty.settings = scene.settings;
+    const splash::ExportResult e = splash::exportSplashpack(empty, project, dir / "empty.splashpack", dry);
+    CHECK(e.stats.bvhBoxes.empty() && e.stats.bvhDepth == 0);
+}
+
 void testRoomsErrors() {
     using namespace roomtest;
     const fs::path project = g_outDir / "rooms-errors";
@@ -7372,6 +7439,7 @@ int main(int argc, char** argv) {
     testWorldStreamExport();
     testNavBigWorld();
     testRoomsExport();
+    testBvhBoxes();
     testRoomsErrors();
     testRoomsSceneRoundTrip();
     testRoomsEditor();

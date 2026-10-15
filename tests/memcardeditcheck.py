@@ -12,11 +12,11 @@ fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 # At 1600x960 with nothing selected the inspector shows the scene. Folding
 # Cutscenes and animations, Rendering, Loading screen, Build scenes, VRAM layout, Disc and
-# Render buffers (in that order: Render buffers sits below Disc, Disc below VRAM layout) brings the Memory card
+# Render buffers, then World streaming (in that order: each sits below the one before; the closed BVH section sits between the last two) brings the Memory card
 # section into view whether or not the background export has filled in its
 # sizes. Controls are clicked by name (--click @scene.mcenable): the editor aims
 # at where the frame before drew them, so no pixel positions live here.
-FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3', '--click', '@s_build', '--wait', '3', '--click', '@s_vram', '--wait', '5', '--click', '@s_disc', '--wait', '3', '--click', '@s_render', '--wait', '3']
+FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3', '--click', '@s_build', '--wait', '3', '--click', '@s_vram', '--wait', '5', '--click', '@s_disc', '--wait', '3', '--click', '@s_render', '--wait', '3', '--click', '@s_stream', '--wait', '3']
 ENABLE = '@scene.mcenable'  # the Enable saves switch
 TITLE = '@scene.mctitle'  # the Save title field
 TYPED = 'MY GAME 1'

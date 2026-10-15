@@ -1809,6 +1809,21 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         bvhIn.push_back(std::move(b));
     }
     Bvh bvh = buildBvh(bvhIn);
+    st.bvhBoxes.clear();
+    st.bvhDepth = 0;
+    st.bvhBoxes.resize(bvh.nodes.size());
+    for (size_t i = 0; i < bvh.nodes.size(); i++) {
+        const BvhNode& n = bvh.nodes[i];
+        ExportStats::BvhBox& b = st.bvhBoxes[i];
+        b.lo = n.bounds.min();
+        b.hi = n.bounds.max();
+        b.leaf = n.left < 0 && n.right < 0;
+        b.tris = n.triangleCount;
+        st.bvhDepth = std::max(st.bvhDepth, b.depth);
+        // Children come after their parent, so their depth is set before they are visited.
+        for (int c : {n.left, n.right})
+            if (c > int(i) && size_t(c) < bvh.nodes.size()) st.bvhBoxes[size_t(c)].depth = b.depth + 1;
+    }
 
     // Rooms and portals, over the same triangles as the BVH.
     RoomObjects roomObjs = collectRoomObjects(flat, res.errors);

@@ -14,7 +14,7 @@ import struct
 import sys
 from pathlib import Path
 
-HEADER = [  # (name, fmt) in order, 144 bytes (v23)
+HEADER = [  # (name, fmt) in order, 156 bytes (v27)
     ("magic", "2s"), ("version", "H"), ("luaFileCount", "H"), ("gameObjectCount", "H"),
     ("textureAtlasCount", "H"), ("clutCount", "H"), ("colliderCount", "H"), ("interactableCount", "H"),
     ("playerStartPos", "3h"), ("playerStartRot", "3h"), ("playerHeight", "H"), ("sceneLuaFileIndex", "h"),
@@ -30,14 +30,15 @@ HEADER = [  # (name, fmt) in order, 144 bytes (v23)
     ("animationTableOffset", "I"), ("skinnedMeshCount", "H"), ("agentCount", "H"), ("skinTableOffset", "I"),
     ("memcardTableOffset", "I"), ("streamTableOffset", "I"), ("spriteTableOffset", "I"),
     ("spriteSheetCount", "H"), ("spriteAnimCount", "H"), ("sceneHash", "I"), ("tilemapTableOffset", "I"),
+    ("lightTableOffset", "I"), ("orderingTableSize", "I"), ("bumpAllocatorSize", "I"),
 ]
 OFFSET_FIELDS = {"nameTableOffset", "audioTableOffset", "cutsceneTableOffset", "uiTableOffset",
                  "animationTableOffset", "skinTableOffset", "memcardTableOffset", "streamTableOffset",
-                 "spriteTableOffset", "tilemapTableOffset"}
+                 "spriteTableOffset", "tilemapTableOffset", "lightTableOffset"}
 UNSUPPORTED = ["triggerBoxCount", "roomCount", "interactableCount", "audioClipCount",
                "cutsceneCount", "animationCount", "skinnedMeshCount", "agentCount", "uiCanvasCount",
                "uiFontCount", "spriteSheetCount", "memcardTableOffset", "streamTableOffset",
-               "tilemapTableOffset"]
+               "tilemapTableOffset", "lightTableOffset"]
 
 
 class Pack:
@@ -53,9 +54,9 @@ class Pack:
             self.h[name] = v[0] if len(v) == 1 else v
         if self.h["magic"] != b"SP":
             raise ValueError(f"{path}: not a splashpack")
-        if self.h["version"] != 23:
-            raise ValueError(f"{path}: version {self.h['version']}, only v23 is decoded")
-        assert p == 144
+        if self.h["version"] != 27:
+            raise ValueError(f"{path}: version {self.h['version']}, only v27 is decoded")
+        assert p == 156
         h = self.h
         self.lua = []
         for _ in range(h["luaFileCount"]):
@@ -87,7 +88,7 @@ class Pack:
             p += 4
         p = (p + 3) & ~3
         self.cursorAfterBvh = p
-        p += h["interactableCount"] * 28
+        p += h["interactableCount"] * 32
         waypoints = 0
         for i in range(h["agentCount"]):
             waypoints += self.d[p + i * 28 + 3]

@@ -168,6 +168,14 @@ std::array<int, 2> uiPositionTrackStart(const UIElement& e, const VramSettings& 
 ExportResult exportSplashpack(const Scene& scene, const std::filesystem::path& projectRoot,
                               const std::filesystem::path& out, const ExportOptions& options = {});
 
+// The loader pack (psxsplash LoadingScreen, "LP" version 2): the canvas named
+// by scene.settings.loadingCanvas with its image atlases, CLUTs and font
+// sheets, drawn by psxsplash while the scene loads. `out` is the .loading
+// path. With no loadingCanvas nothing is written and an old `out` is removed;
+// a name that matches no canvas is an error. See docs/splashpack-format.md.
+ExportResult exportLoaderPack(const Scene& scene, const std::filesystem::path& projectRoot,
+                              const std::filesystem::path& out, const ExportOptions& options = {});
+
 // The vertex colours the exporter writes for `object`'s mesh, in mesh vertex
 // order, 0..1 per channel (the shipped byte is the value * 255, truncated).
 // Material colour on untextured submeshes is not included. Baked meshes get

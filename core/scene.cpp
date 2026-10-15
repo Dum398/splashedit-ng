@@ -476,6 +476,7 @@ json writeSettings(const SceneSettings& st) {
     if (st.orderingTableSize) j["orderingTableSize"] = st.orderingTableSize;
     if (st.bumpAllocatorSize) j["bumpAllocatorSize"] = st.bumpAllocatorSize;
     if (st.streamWorld) j["streamWorld"] = true;
+    if (!st.loadingCanvas.empty()) j["loadingCanvas"] = st.loadingCanvas;
     if (json mc = writeMemCard(st.memCard); !mc.empty()) j["memCard"] = mc;
     putExtras(j, st.extra);
     return j;
@@ -794,6 +795,7 @@ Scene loadScene(const fs::path& file) {
         s.settings.orderingTableSize = st.value("orderingTableSize", 0);
         s.settings.bumpAllocatorSize = st.value("bumpAllocatorSize", 0);
         s.settings.streamWorld = st.value("streamWorld", false);
+        s.settings.loadingCanvas = st.value("loadingCanvas", "");
         if (st.contains("memCard")) s.settings.memCard = readMemCard(st["memCard"]);
         s.settings.extra = extrasOf(st, writeSettings(s.settings));
         // A memCard left at its defaults is not written back.

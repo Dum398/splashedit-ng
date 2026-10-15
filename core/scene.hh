@@ -244,6 +244,10 @@ struct SceneSettings {
     // Stream static scenery off the disc by region while playing (psxsplash
     // WorldStreamer), for worlds bigger than RAM. Regions are automatic.
     bool streamWorld = false;
+    // Name of a UICanvas in this scene shown by psxsplash while the scene
+    // loads (the loader pack, scene_<i>.loading). Empty = none. That canvas
+    // is left out of the splashpack.
+    std::string loadingCanvas;
     MemCardSettings memCard;
     ExtraKeys extra;
 };

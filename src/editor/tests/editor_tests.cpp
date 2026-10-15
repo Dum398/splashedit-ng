@@ -46,6 +46,7 @@
 #include "blend.hh"
 #include "editor/ui_canvas.hh"
 #include "budget.hh"
+#include "disc.hh"
 #include "font.hh"
 #include "navregion.hh"
 #include "rooms.hh"
@@ -6992,6 +6993,269 @@ void testLoaderPack() {
     CHECK(pr.ok() && fs::exists(dir / "scene_0.splashpack") && !fs::exists(dir / "scene_0.loading"));
 }
 
+namespace disctest {
+
+namespace fs = std::filesystem;
+
+std::vector<uint8_t> bytesOf(const fs::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), {});
+}
+
+void writeBytes(const fs::path& p, const std::vector<uint8_t>& b) {
+    std::ofstream out(p, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+}
+
+uint64_t fnv(const uint8_t* p, size_t n) {
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+// The six accepted licence sizes, built from the psxsplash licence: 12
+// sectors as the file has them, 16 with sectors 0-3 again as 12-15.
+std::vector<std::vector<uint8_t>> fixtures() {
+    const std::vector<uint8_t>& lic = splash::psxsplashLicence();
+    std::vector<std::vector<uint8_t>> out;
+    for (size_t count : {size_t(12), size_t(16)}) {
+        std::vector<uint8_t> a, b, c;
+        for (size_t i = 0; i < count; i++) {
+            const uint8_t* s = lic.data() + (i < 12 ? i : i - 12) * 2336;
+            a.insert(a.end(), s, s + 2336);
+            uint8_t head[16] = {0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 2, uint8_t(i), 2};
+            b.insert(b.end(), head, head + 16);
+            b.insert(b.end(), s, s + 2336);
+            c.insert(c.end(), s + 8, s + 8 + 2048);
+        }
+        out.push_back(a);
+        out.push_back(b);
+        out.push_back(c);
+    }
+    return out;
+}
+
+bool sameSectors(const std::vector<splash::LicenceSector>& a, const std::vector<splash::LicenceSector>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); i++)
+        if (std::memcmp(a[i].sub, b[i].sub, 8) != 0 || std::memcmp(a[i].data, b[i].data, sizeof a[i].data) != 0)
+            return false;
+    return true;
+}
+
+// A stand-in CD-ROM engine: a PS-X EXE header and the loader's file names.
+std::vector<uint8_t> cdEngine() {
+    std::vector<uint8_t> e(2048, 0);
+    std::memcpy(e.data(), "PS-X EXE", 8);
+    const char* marker = "SCENE%d/SCENE_%d.SPK;1";
+    e.insert(e.end(), marker, marker + std::strlen(marker) + 1);
+    e.resize(e.size() + 100, 0);
+    return e;
+}
+
+const uint8_t* rawSector(const std::vector<uint8_t>& bin, uint32_t lba) { return bin.data() + size_t(lba) * 2352; }
+
+}  // namespace disctest
+
+// Licence files of every accepted size give the same sectors; another size is
+// an error that names it.
+void testDiscLicenceParse() {
+    using namespace disctest;
+    const std::vector<uint8_t>& lic = splash::psxsplashLicence();
+    CHECK(lic.size() == 28032);
+    std::vector<std::vector<uint8_t>> f = fixtures();
+    CHECK(f.size() == 6);
+    const size_t sizes[6] = {28032, 28224, 24576, 37376, 37632, 32768};
+    std::vector<std::vector<splash::LicenceSector>> parsed;
+    for (size_t k = 0; k < f.size(); k++) {
+        CHECK(f[k].size() == sizes[k]);
+        std::string error;
+        parsed.push_back(splash::parseLicence(f[k], error));
+        CHECK(error.empty());
+        CHECK(parsed[k].size() == (k < 3 ? 12u : 16u));
+    }
+    // Each sector: the file's subheader (00 00 08 00 x2) and its 2048 data
+    // bytes; past them zero.
+    bool payloads = true;
+    for (size_t k = 0; k < parsed.size(); k++)
+        for (size_t i = 0; i < parsed[k].size(); i++) {
+            const uint8_t* s = lic.data() + (i < 12 ? i : i - 12) * 2336;
+            const splash::LicenceSector& p = parsed[k][i];
+            bool tailZero = std::all_of(p.data + 2048, p.data + sizeof p.data, [](uint8_t v) { return v == 0; });
+            if (std::memcmp(p.sub, s, 8) != 0 || std::memcmp(p.data, s + 8, 2048) != 0 || !tailZero) {
+                std::fprintf(stderr, "licence fixture %zu (%zu bytes) sector %zu differs\n", k, f[k].size(), i);
+                payloads = false;
+            }
+        }
+    CHECK(payloads);
+    CHECK(sameSectors(parsed[0], parsed[1]) && sameSectors(parsed[0], parsed[2]));
+    CHECK(sameSectors(parsed[3], parsed[4]) && sameSectors(parsed[3], parsed[5]));
+
+    // A Form 2 sector keeps all 2324 data bytes and its subheader verbatim.
+    std::vector<uint8_t> form2 = f[3];
+    const uint8_t sub2[8] = {1, 2, 0x24, 3, 1, 2, 0x24, 3};
+    std::memcpy(&form2[13 * 2336], sub2, 8);
+    form2[13 * 2336 + 8 + 2323] = 0x5a;
+    std::string error;
+    std::vector<splash::LicenceSector> p2 = splash::parseLicence(form2, error);
+    CHECK(p2.size() == 16 && std::memcmp(p2[13].sub, sub2, 8) == 0 && p2[13].data[2323] == 0x5a);
+
+    // Any other size is refused, by size.
+    std::string bad;
+    CHECK(splash::parseLicence(std::vector<uint8_t>(1000, 0), bad).empty());
+    CHECK(bad.find("1000") != std::string::npos && bad.find("28032") != std::string::npos &&
+          bad.find("2048") != std::string::npos);
+    std::string none;
+    CHECK(splash::parseLicence({}, none).empty() && none.find(" 0 bytes") != std::string::npos);
+    std::string big;
+    CHECK(splash::parseLicence(std::vector<uint8_t>(28032 + 1, 0), big).empty() && big.find("28033") != std::string::npos);
+}
+
+// disc.json, and resolving a licence by name, by relative path and by a bad file.
+void testDiscSettings() {
+    using namespace disctest;
+    const fs::path dir = g_outDir / "discsettings";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "lic");
+
+    CHECK(splash::readDiscSettings(dir / "disc.json").volume.empty());
+    CHECK(splash::readDiscSettings({}).licence.empty());
+    CHECK(!splash::writeDiscSettings({}, {}));
+    splash::DiscSettings s;
+    s.volume = "My Game";
+    s.licence = "lic/system.sys";
+    CHECK(splash::writeDiscSettings(dir / "disc.json", s));
+    splash::DiscSettings back = splash::readDiscSettings(dir / "disc.json");
+    CHECK(back.volume == "My Game" && back.licence == "lic/system.sys");
+    std::ofstream(dir / "odd.json", std::ios::binary) << R"({"volume": 5, "licence": "psxsplash"})";
+    splash::DiscSettings odd = splash::readDiscSettings(dir / "odd.json");
+    CHECK(odd.volume.empty() && odd.licence == "psxsplash");
+    std::ofstream(dir / "junk.json", std::ios::binary) << "not json";
+    CHECK(splash::readDiscSettings(dir / "junk.json").licence.empty());
+
+    std::string error;
+    CHECK(splash::resolveLicence("", dir, error).empty() && error.empty());
+    CHECK(splash::resolveLicence("psxsplash", dir, error).size() == 12 && error.empty());
+    writeBytes(dir / "lic" / "system.sys", fixtures()[5]);
+    CHECK(splash::resolveLicence("lic/system.sys", dir, error).size() == 16 && error.empty());
+    writeBytes(dir / "lic" / "short.dat", std::vector<uint8_t>(1000, 0));
+    CHECK(splash::resolveLicence("lic/short.dat", dir, error).empty());
+    CHECK(error.find("short.dat") != std::string::npos && error.find("1000") != std::string::npos);
+    error.clear();
+    CHECK(splash::resolveLicence("lic/missing.dat", dir, error).empty() && error.find("missing.dat") != std::string::npos);
+}
+
+// Sectors 0-15 of the written image: unchanged without a licence, the
+// licence then blank Form 2 with one.
+void testDiscLicenceImage() {
+    using namespace disctest;
+    const fs::path dir = g_outDir / "disclicence";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const char* cnf = "BOOT = cdrom:\\PSX.EXE;1\r\n";
+    std::vector<splash::DiscFile> files = {{"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))}};
+
+    // No licence: the bytes the writer has always put there (FNV-1a of
+    // sectors 0-15 from the writer before licences, commit 61fba34).
+    splash::writeDiscImage(files, "PLAIN", dir / "plain.bin");
+    std::vector<uint8_t> plain = bytesOf(dir / "plain.bin");
+    CHECK(plain.size() >= 16 * 2352 && fnv(plain.data(), 16 * 2352) == 0x618f843db4644257ull);
+
+    std::string error;
+    std::vector<splash::LicenceSector> lic = splash::resolveLicence("psxsplash", {}, error);
+    splash::writeDiscImage(files, "LIC", dir / "lic.bin", lic);
+    std::vector<uint8_t> bin = bytesOf(dir / "lic.bin");
+    CHECK(bin.size() == plain.size());
+    if (bin.size() < 18 * 2352) return;
+    // LBA 0-11: Form 1 of the file's data with its 00 00 08 00 subheader.
+    const std::vector<uint8_t>& file = splash::psxsplashLicence();
+    uint8_t want[2352];
+    bool form1 = true;
+    for (uint32_t lba = 0; lba < 12; lba++) {
+        splash::encodeForm1(want, lba, file.data() + lba * 2336 + 8, 0x08);
+        form1 = form1 && std::memcmp(rawSector(bin, lba), want, 2352) == 0;
+    }
+    CHECK(form1);
+    const std::string text(reinterpret_cast<const char*>(rawSector(bin, 4) + 24), 64);
+    CHECK(text.find("Created wit") != std::string::npos && text.find("psxsplash") != std::string::npos);
+    // LBA 12-15: blank Form 2, subheader 00 00 20 00 x2, EDC at 2348.
+    const uint8_t sub2[8] = {0, 0, 0x20, 0, 0, 0, 0x20, 0};
+    for (uint32_t lba = 12; lba < 16; lba++) {
+        const uint8_t* s = rawSector(bin, lba);
+        CHECK(s[16 + 2] == 0x20);
+        CHECK(std::memcmp(s + 16, sub2, 8) == 0);
+        CHECK(std::all_of(s + 24, s + 2348, [](uint8_t v) { return v == 0; }));
+        CHECK(s[2348] | s[2349] | s[2350] | s[2351]);
+        splash::encodeForm2(want, lba, nullptr, 0x20);
+        CHECK(std::memcmp(s, want, 2352) == 0);
+    }
+    // From LBA 16 on the image is the one without a licence (dates aside).
+    CHECK(std::memcmp(rawSector(bin, 17), rawSector(plain, 17), 2352) == 0);
+
+    // A 16-sector licence fills 12-15 from the file, its Form 2 sector as Form 2.
+    std::vector<uint8_t> f16 = fixtures()[3];
+    const uint8_t xa[8] = {1, 0, 0x24, 0, 1, 0, 0x24, 0};
+    std::memcpy(&f16[13 * 2336], xa, 8);
+    std::vector<splash::LicenceSector> l16 = splash::parseLicence(f16, error);
+    splash::writeDiscImage(files, "LIC", dir / "lic16.bin", l16);
+    std::vector<uint8_t> b16 = bytesOf(dir / "lic16.bin");
+    if (b16.size() < 16 * 2352) return;
+    splash::encodeForm1(want, 12, file.data() + 8, 0x08);
+    CHECK(std::memcmp(rawSector(b16, 12), want, 2352) == 0);
+    CHECK(std::memcmp(rawSector(b16, 13) + 16, xa, 8) == 0);
+    CHECK(std::memcmp(rawSector(b16, 13) + 24, file.data() + 1 * 2336 + 8, 2048) == 0);
+    // Form 2: no ECC, so the EDC sits at 2348 and Form 1's EDC slot is data.
+    CHECK(std::all_of(rawSector(b16, 13) + 24 + 2048, rawSector(b16, 13) + 2348, [](uint8_t v) { return v == 0; }));
+    CHECK(rawSector(b16, 13)[2348] | rawSector(b16, 13)[2349] | rawSector(b16, 13)[2350] | rawSector(b16, 13)[2351]);
+}
+
+// exportDisc with disc settings: volume override, licence, a bad licence.
+void testDiscExportSettings() {
+    using namespace disctest;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "discexport";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    writeBytes(dir / "cd.ps-exe", cdEngine());
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+
+    auto volumeOf = [](const std::vector<uint8_t>& b) {
+        return b.size() < 17 * 2352 ? std::string() : std::string(reinterpret_cast<const char*>(rawSector(b, 16) + 24 + 40), 32);
+    };
+    splash::DiscResult plain = splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "plain.bin", "courtyard");
+    CHECK(plain.exported.ok());
+    std::vector<uint8_t> pb = bytesOf(dir / "plain.bin");
+    CHECK(volumeOf(pb).rfind("COURTYARD ", 0) == 0);
+    CHECK(pb.size() >= 16 * 2352 && fnv(pb.data(), 16 * 2352) == 0x618f843db4644257ull);
+
+    splash::DiscSettings ds;
+    ds.volume = "my game!";
+    ds.licence = "psxsplash";
+    splash::DiscResult r = splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "lic.bin", "courtyard", {}, ds);
+    CHECK(r.exported.ok());
+    std::vector<uint8_t> b = bytesOf(dir / "lic.bin");
+    CHECK(volumeOf(b) == "MYGAME" + std::string(26, ' '));
+    CHECK(b.size() == pb.size());
+    if (b.size() >= 16 * 2352) {
+        CHECK(std::string(reinterpret_cast<const char*>(rawSector(b, 4) + 24), 64).find("Created wit") != std::string::npos);
+        CHECK(rawSector(b, 12)[16 + 2] == 0x20 && rawSector(b, 15)[16 + 2] == 0x20);
+    }
+    // A volume with nothing usable in it falls back to the title.
+    ds.volume = "!!";
+    splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "fallback.bin", "courtyard", {}, ds);
+    CHECK(volumeOf(bytesOf(dir / "fallback.bin")).rfind("COURTYARD ", 0) == 0);
+
+    // A bad licence is an error and writes no image.
+    writeBytes(dir / "short.dat", std::vector<uint8_t>(1000, 0));
+    ds.licence = (dir / "short.dat").string();
+    splash::DiscResult bad = splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "bad.bin", "courtyard", {}, ds);
+    CHECK(!bad.exported.ok() && !fs::exists(dir / "bad.bin"));
+    CHECK(!bad.exported.errors.empty() && bad.exported.errors[0].find("1000") != std::string::npos);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -7089,6 +7353,10 @@ int main(int argc, char** argv) {
     testUiRender();
     testUiMatchesRuntime();
     testLoaderPack();
+    testDiscLicenceParse();
+    testDiscSettings();
+    testDiscLicenceImage();
+    testDiscExportSettings();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

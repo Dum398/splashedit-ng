@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <system_error>
 
+#include <nlohmann/json.hpp>
+
 namespace fs = std::filesystem;
 
 namespace splash {
@@ -177,7 +179,10 @@ std::vector<uint8_t> readFile(const fs::path& p) {
 
 }  // namespace
 
-void encodeForm1(uint8_t* out, uint32_t lba, const uint8_t* data, uint8_t submode) {
+namespace {
+
+// Sync, BCD header (lba + 150, mode 2) and the 8-byte subheader; the rest zero.
+void mode2Header(uint8_t* out, uint32_t lba, const uint8_t* sub) {
     std::memset(out, 0, kRawSectorSize);
     std::memset(out + 1, 0xff, 10);
     uint32_t a = lba + 150;
@@ -185,8 +190,11 @@ void encodeForm1(uint8_t* out, uint32_t lba, const uint8_t* data, uint8_t submod
     out[13] = bcd((a / 75) % 60);
     out[14] = bcd(a % 75);
     out[15] = 2;
-    out[18] = out[22] = submode;
-    if (data) std::memcpy(out + 24, data, kSector);
+    std::memcpy(out + 16, sub, 8);
+}
+
+// EDC and P/Q parity of a Form 1 sector whose header, subheader and data are in.
+void finishForm1(uint8_t* out) {
     le32(out + 24 + kSector, edc(out + 16, 8 + kSector));
     uint8_t address[4];
     std::memcpy(address, out + 12, 4);
@@ -196,7 +204,135 @@ void encodeForm1(uint8_t* out, uint32_t lba, const uint8_t* data, uint8_t submod
     std::memcpy(out + 12, address, 4);
 }
 
-DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& volume, const fs::path& bin) {
+constexpr size_t kForm2Data = 2324;
+
+}  // namespace
+
+void encodeForm2(uint8_t* out, uint32_t lba, const uint8_t* data, uint8_t submode) {
+    const uint8_t sub[8] = {0, 0, submode, 0, 0, 0, submode, 0};
+    mode2Header(out, lba, sub);
+    if (data) std::memcpy(out + 24, data, kForm2Data);
+    le32(out + 24 + kForm2Data, edc(out + 16, 8 + kForm2Data));
+}
+
+void encodeForm1(uint8_t* out, uint32_t lba, const uint8_t* data, uint8_t submode) {
+    const uint8_t sub[8] = {0, 0, submode, 0, 0, 0, submode, 0};
+    mode2Header(out, lba, sub);
+    if (data) std::memcpy(out + 24, data, kSector);
+    finishForm1(out);
+}
+
+namespace {
+
+// A licence sector at `lba`, its subheader as the file has it.
+void encodeLicence(uint8_t* out, uint32_t lba, const LicenceSector& s) {
+    mode2Header(out, lba, s.sub);
+    if (s.sub[2] & 0x20) {
+        std::memcpy(out + 24, s.data, kForm2Data);
+        le32(out + 24 + kForm2Data, edc(out + 16, 8 + kForm2Data));
+    } else {
+        std::memcpy(out + 24, s.data, kSector);
+        finishForm1(out);
+    }
+}
+
+const uint8_t kPsxsplashLicence[] = {
+#include "licence_psxsplash.inc"
+};
+
+}  // namespace
+
+std::vector<LicenceSector> parseLicence(const std::vector<uint8_t>& bytes, std::string& error) {
+    struct Layout {
+        size_t stride, skip;
+        bool sub;
+    };
+    const Layout layouts[] = {{2336, 0, true}, {kRawSectorSize, 16, true}, {kSector, 0, false}};
+    for (const Layout& l : layouts)
+        for (size_t count : {size_t(12), size_t(16)}) {
+            if (bytes.size() != l.stride * count) continue;
+            std::vector<LicenceSector> out(count);
+            for (size_t i = 0; i < count; i++) {
+                const uint8_t* p = bytes.data() + i * l.stride + l.skip;
+                LicenceSector& s = out[i];
+                std::memset(s.data, 0, sizeof s.data);
+                if (l.sub) {
+                    std::memcpy(s.sub, p, 8);
+                    std::memcpy(s.data, p + 8, l.stride - l.skip - 8 - 4);
+                    // Form 1: past the 2048 data bytes is the old EDC/ECC.
+                    if (!(s.sub[2] & 0x20)) std::memset(s.data + kSector, 0, kForm2Data - kSector);
+                } else {
+                    const uint8_t data[8] = {0, 0, kSubmodeData, 0, 0, 0, kSubmodeData, 0};
+                    std::memcpy(s.sub, data, 8);
+                    std::memcpy(s.data, p, kSector);
+                }
+            }
+            return out;
+        }
+    error = "A licence file of " + std::to_string(bytes.size()) +
+            " bytes; expected 12 or 16 sectors of 2336 bytes (28032, 37376), 2352 bytes (28224, 37632) "
+            "or 2048 bytes (24576, 32768)";
+    return {};
+}
+
+const std::vector<uint8_t>& psxsplashLicence() {
+    static const std::vector<uint8_t> bytes(std::begin(kPsxsplashLicence), std::end(kPsxsplashLicence));
+    return bytes;
+}
+
+DiscSettings readDiscSettings(const fs::path& file) {
+    DiscSettings s;
+    if (file.empty()) return s;
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return s;
+    nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+    if (j.is_discarded() || !j.is_object()) return s;
+    auto str = [&](const char* key, std::string& v) {
+        auto it = j.find(key);
+        if (it != j.end() && it->is_string()) v = it->get<std::string>();
+    };
+    str("volume", s.volume);
+    str("licence", s.licence);
+    return s;
+}
+
+bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
+    if (file.empty()) return false;
+    nlohmann::json j = nlohmann::json::object();
+    j["volume"] = s.volume;
+    j["licence"] = s.licence;
+    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << j.dump(2) << '\n';
+    out.close();
+    return !out.fail();
+}
+
+std::vector<LicenceSector> resolveLicence(const std::string& licence, const fs::path& projectRoot, std::string& error) {
+    if (licence.empty()) return {};
+    std::vector<uint8_t> bytes;
+    std::string name = licence;
+    if (licence == "psxsplash") {
+        bytes = psxsplashLicence();
+    } else {
+        fs::path p = fs::path(std::u8string(licence.begin(), licence.end()));
+        if (p.is_relative() && !projectRoot.empty()) p = projectRoot / p;
+        name = utf8(p);
+        try {
+            bytes = readFile(p);
+        } catch (const std::exception& e) {
+            error = std::string("Licence: ") + e.what();
+            return {};
+        }
+    }
+    std::string why;
+    std::vector<LicenceSector> out = parseLicence(bytes, why);
+    if (out.empty()) error = name + ": " + why;
+    return out;
+}
+
+DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& volume, const fs::path& bin,
+                        const std::vector<LicenceSector>& licence) {
     // Directories: the root plus one level, which is all the loader uses.
     std::map<std::string, Dir> dirs;
     dirs[""];
@@ -348,7 +484,18 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
             emit(buf, uint8_t(kSubmodeData | (s + 1 == sectors ? kSubmodeEor | kSubmodeEof : 0)));
         }
     };
-    for (; lba < 16;) emit(nullptr, kSubmodeData);
+    if (licence.empty()) {
+        for (; lba < 16;) emit(nullptr, kSubmodeData);
+    } else {
+        // The licence, then blank Form 2 up to the PVD (mkpsxiso's LBA 12-15).
+        for (; lba < 16; lba++) {
+            if (lba < licence.size())
+                encodeLicence(raw, lba, licence[lba]);
+            else
+                encodeForm2(raw, lba, nullptr, 0x20);
+            out.write(reinterpret_cast<const char*>(raw), kRawSectorSize);
+        }
+    }
     emit(pvd.data(), kSubmodeData | kSubmodeEor);
     emit(term.data(), kSubmodeData | kSubmodeEor | kSubmodeEof);
     emitRun(lt.data(), lt.size(), tableSectors);
@@ -391,7 +538,7 @@ EngineKind engineKind(const std::vector<uint8_t>& exe) {
 
 DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
                       const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
-                      const VramSettings& vram) {
+                      const VramSettings& vram, const DiscSettings& disc) {
     DiscResult r;
     if (scenes.empty()) {
         r.exported.errors.push_back("No scene to put on the disc.");
@@ -414,6 +561,12 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             return r;
         case EngineKind::Cdrom:
             break;
+    }
+    std::string licenceError;
+    const std::vector<LicenceSector> licence = resolveLicence(disc.licence, projectRoot, licenceError);
+    if (!licenceError.empty()) {
+        r.exported.errors.push_back(licenceError);
+        return r;
     }
 
     std::error_code ec;
@@ -467,12 +620,17 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
         }
         if (r.exported.errors.empty()) {
-            std::string volume;
-            for (char ch : title) {
-                char u = (ch >= 'a' && ch <= 'z') ? char(ch - 32) : ch;
-                if (nameChar(u) && volume.size() < 31) volume += u;
-            }
-            r.disc = writeDiscImage(files, volume.empty() ? "PSXSPLASH" : volume, bin);
+            auto volumeName = [](const std::string& from) {
+                std::string v;
+                for (char ch : from) {
+                    char u = (ch >= 'a' && ch <= 'z') ? char(ch - 32) : ch;
+                    if (nameChar(u) && v.size() < 31) v += u;
+                }
+                return v;
+            };
+            std::string volume = volumeName(disc.volume);
+            if (volume.empty()) volume = volumeName(title);
+            r.disc = writeDiscImage(files, volume.empty() ? "PSXSPLASH" : volume, bin, licence);
         }
     } catch (const std::exception& e) {
         r.exported.errors.push_back(e.what());
@@ -482,8 +640,8 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
 }
 
 DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs::path& engine, const fs::path& bin,
-                      const std::string& title, const VramSettings& vram) {
-    return exportDisc(std::vector<const Scene*>{&scene}, projectRoot, engine, bin, title, {}, vram);
+                      const std::string& title, const VramSettings& vram, const DiscSettings& disc) {
+    return exportDisc(std::vector<const Scene*>{&scene}, projectRoot, engine, bin, title, {}, vram, disc);
 }
 
 }  // namespace splash

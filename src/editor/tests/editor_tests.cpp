@@ -3307,6 +3307,81 @@ void testNavInfo() {
     CHECK(inRoom);
 }
 
+// What the skin section of the inspector shows (ExportStats::skins): one
+// entry per skinned mesh with its bones, triangles and clips, and byte counts
+// that match the skin table layout psxsplash reads (recomputed here from the
+// format, not from the writer).
+void testSkinInfo() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skin";
+    const fs::path dir = g_outDir / "skininfo";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    const splash::Mesh mesh = splash::loadMesh(project / "arm.mesh");
+    CHECK(mesh.skin.has_value());
+    if (!mesh.skin) return;
+    const size_t bones = mesh.skin->joints.size();
+    auto pad = [](size_t n, size_t a) { return (n + a - 1) / a * a; };
+
+    auto exportAt = [&](int fps) {
+        splash::Scene sc = splash::loadScene(project / "skin.scene");
+        for (splash::Object& o : sc.objects)
+            if (o.skin) o.skin->fps = fps;
+        return splash::exportSplashpack(sc, project, dir / ("skin" + std::to_string(fps) + ".splashpack"), dry);
+    };
+    auto checkLayout = [&](const splash::ExportResult& r, int fps) {
+        CHECK(r.ok());
+        CHECK(r.stats.skins.size() == 1);
+        if (!r.ok() || r.stats.skins.size() != 1) return;
+        const splash::ExportStats::SkinInfo& s = r.stats.skins[0];
+        CHECK(s.object == "Arm");
+        CHECK(size_t(s.bones) == bones);
+        size_t meshTris = 0;
+        for (const auto& sm : mesh.submeshes) meshTris += sm.size() / 3;
+        CHECK(s.triangles > 0 && s.triangles == meshTris);
+        CHECK(s.clips.size() == 2);
+        if (s.clips.size() != 2) return;
+        CHECK(s.clips[0].name == "bend" && s.clips[1].name == "raise");
+        // The skin table starts 4-aligned and each entry is 12 bytes, so the
+        // data block starts 4-aligned too: no padding before it.
+        size_t expect = 12 + 4 + pad(s.triangles * 3, 4);
+        size_t clipSum = 0;
+        for (const auto& c : s.clips) {
+            CHECK(c.fps == fps);
+            CHECK(c.frames > 0);
+            // name length, name, terminator, loop, fps; pad to 2; frame count; matrices
+            const size_t head = pad(1 + c.name.size() + 1 + 1 + 1, 2) + 2;
+            const size_t want = head + size_t(c.frames) * bones * 24;
+            CHECK(c.bytes == want);
+            if (c.bytes != want) std::printf("  clip %s bytes %zu want %zu\n", c.name.c_str(), c.bytes, want);
+            clipSum += c.bytes;
+            expect += want;  // every clip ends 2-aligned, so the next starts unpadded
+        }
+        CHECK(clipSum < s.bytes);
+        expect = pad(expect, 2) + bones * 6;  // bind joint positions
+        for (const splash::Joint& j : mesh.skin->joints) expect += 1 + j.name.size() + 1;
+        expect += s.object.size() + 1;
+        CHECK(s.bytes == expect);
+        if (s.bytes != expect) std::printf("  skin bytes %zu want %zu\n", s.bytes, expect);
+    };
+
+    const splash::ExportResult r15 = exportAt(15);
+    checkLayout(r15, 15);
+    const splash::ExportResult r30 = exportAt(30);
+    checkLayout(r30, 30);
+    if (r15.stats.skins.size() != 1 || r30.stats.skins.size() != 1) return;
+    const auto& a = r15.stats.skins[0];
+    const auto& b = r30.stats.skins[0];
+    CHECK(b.bytes > a.bytes);
+    CHECK(a.clips.size() == b.clips.size());
+    for (size_t i = 0; i < a.clips.size() && i < b.clips.size(); i++) {
+        CHECK(b.clips[i].frames > a.clips[i].frames);
+        CHECK(b.clips[i].bytes > a.clips[i].bytes);
+    }
+}
+
 void testRoomsErrors() {
     using namespace roomtest;
     const fs::path project = g_outDir / "rooms-errors";
@@ -7702,6 +7777,7 @@ int main(int argc, char** argv) {
     testRoomsExport();
     testBvhBoxes();
     testNavInfo();
+    testSkinInfo();
     testLogViewFilter();
     testLogViewClear();
     testLogViewRestart();

@@ -2349,6 +2349,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (size_t i = 0; i < skins.size(); i++) {
             const SkinOut& so = skins[i];
             const ExpObject& e = exporters[so.exporter];
+            ExportStats::SkinInfo& info = st.skins.emplace_back();
+            info.object = e.obj->name;
+            info.bones = int(so.boneCount);
+            info.triangles = e.triBones.size() / 3;
+            size_t blockStart = w.pos();
             w.align4();
             w.patchU32(dataPos[i], uint32_t(w.pos()));
             w.u16(uint16_t(so.exporter));
@@ -2357,6 +2362,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             for (uint8_t b : e.triBones) w.u8(b);
             w.align4();
             for (const BakedClip& c : so.clips) {
+                size_t clipStart = w.pos();
                 w.u8(uint8_t(c.name.size()));
                 w.bytes(c.name);
                 w.u8(0);
@@ -2366,6 +2372,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                 w.u16(uint16_t(c.frameCount));
                 for (const BoneMatrix& m : c.frames)
                     for (int16_t v : m) w.i16(v);
+                info.clips.push_back({c.name, c.fps, c.frameCount, w.pos() - clipStart});
             }
             // v26: bind joint positions, then joint names.
             if (w.pos() & 1) w.u8(0);
@@ -2379,6 +2386,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.patchU32(namePos[i], uint32_t(w.pos()));
             w.bytes(truncateUtf16(e.obj->name, 24));
             w.u8(0);
+            info.bytes = 12 + (w.pos() - blockStart);
         }
     }
     if (!canvases.empty() || !fontSheets.empty())

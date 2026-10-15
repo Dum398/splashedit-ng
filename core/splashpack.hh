@@ -143,6 +143,24 @@ struct ExportStats {
     };
     std::vector<NavRegionInfo> navInfo;
     bool navIslands = false;
+
+    // Skinned meshes, in skin table order. bytes is the skin's 12-byte table
+    // entry plus its whole data block (alignment padding included); a clip's
+    // bytes run from its name length byte through its last matrix.
+    struct SkinClipInfo {
+        std::string name;
+        int fps = 0;
+        int frames = 0;
+        size_t bytes = 0;
+    };
+    struct SkinInfo {
+        std::string object;
+        int bones = 0;
+        size_t triangles = 0;
+        size_t bytes = 0;
+        std::vector<SkinClipInfo> clips;
+    };
+    std::vector<SkinInfo> skins;
     std::vector<StreamWarning> streamWarnings;  // also in ExportResult::warnings, as one line each
 
     // Rooms and portals (Room objects). Empty when the scene has none, and

@@ -430,6 +430,15 @@ the scene unchanged. Controls are clicked by name. Needs a display.
 
     python3 buildscenescheck.py <splashedit>
 
+`vramlayoutcheck.py` drives the scene inspector's VRAM layout section on copies of the courtyard example:
+Add area (`@vram.add`, a 64 x 64 area at 320,0), types a width into `@vram.w.0`, drags on the map
+(`--drag @vram.map,dx0,dy0,dx1,dy1`, offsets from the control's centre) to draw a second area snapped to
+8, and removes the first (`@vram.remove.0`), checking the editor's `vram: x,y,w,h | x,y,w,h` line after
+each change, `vram.json`, that it is no scene edit, and that the screenshot's map shows the area left in
+red (the map is the live export's, so this proves the live export packs with `vram.json`). Needs a display.
+
+    python3 vramlayoutcheck.py <splashedit>
+
 `scripttabscheck.py` clicks the centre panel's tabs by name (`@tab.scene`, `@tab.ui`, `@tab.0`) on copies of
 the courtyard example: back to Scene from an open script and from UI, and UI, the script and Scene in turn.
 The editor prints `scripttabs: active <tab>` each time a click brings a tab to the front. Needs a display.

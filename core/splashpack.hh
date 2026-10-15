@@ -70,6 +70,18 @@ struct ExportStats {
         int clutX = 0, clutY = 0, clutLength = 0;  // clutLength 0: no CLUT (16 bpp)
     };
     std::vector<TexturePlacement> textures;
+    // What occupies VRAM, as packing laid it out, in 16-bit words and lines
+    // (VRAM is 1024 x 512): the two framebuffers, the column at x 960 kept
+    // for fonts, the project's prohibited areas, each placed atlas, each CLUT
+    // (one line, 16 or 256 words) and each font sheet. Filled on dry runs too,
+    // and also when packing fails (with what did fit).
+    enum class VramKind : uint8_t { Framebuffer, Reserved, Prohibited, Atlas4, Atlas8, Atlas16, Clut, Font };
+    struct VramRect {
+        VramKind kind;
+        int x = 0, y = 0, w = 0, h = 0;
+        std::string label;
+    };
+    std::vector<VramRect> vramMap;
     // Game objects in the file, streaming's cut pieces included. psxsplash
     // allocates per object when the scene loads (objectLoadBytes, budget.hh).
     int gameObjects = 0;

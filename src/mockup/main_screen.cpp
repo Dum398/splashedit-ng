@@ -1127,7 +1127,8 @@ static void buildDisc(State& st, const editor::Document& doc, std::filesystem::p
             r.exported.errors = std::move(b.errors);
             return r;
         }
-        return splash::exportDisc(b.pointers(), root, engine, bin, title, b.names);
+        return splash::exportDisc(b.pointers(), root, engine, bin, title, b.names,
+                                  editor::loadVramSettings(root));
     });
 }
 
@@ -3728,6 +3729,308 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             if (reported != now) {
                 reported = now;
                 std::printf("%s\n", now.c_str());
+                std::fflush(stdout);
+            }
+        }
+        if (!sOpen) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // The project's VRAM layout (vram.json): a map of where export packs the
+    // framebuffers, atlases, CLUTs and fonts, and the prohibited areas the
+    // packer keeps textures and CLUTs out of. A project setting, saved as soon
+    // as it changes and not part of undo.
+    {
+        namespace fs = std::filesystem;
+        using K = splash::ExportStats::VramKind;
+        const fs::path root = doc.projectRoot();
+        static fs::path cachedRoot;
+        static splash::VramSettings vs;
+        static double readAt = -1;
+        const double now = ImGui::GetTime();
+        auto same = [](const splash::VramSettings& a, const splash::VramSettings& b) {
+            if (a.prohibited.size() != b.prohibited.size()) return false;
+            for (size_t i = 0; i < a.prohibited.size(); ++i) {
+                const auto &p = a.prohibited[i], &q = b.prohibited[i];
+                if (p.x != q.x || p.y != q.y || p.w != q.w || p.h != q.h) return false;
+            }
+            return true;
+        };
+        // Read again now and then, so an edit made outside shows up (and re-exports).
+        if (root != cachedRoot || now - readAt > 1.0) {
+            const bool moved = root != cachedRoot;
+            cachedRoot = root;
+            readAt = now;
+            splash::VramSettings disk = editor::loadVramSettings(root);
+            if (!same(disk, vs)) {
+                vs = std::move(disk);
+                if (!moved) st.live.settingsChanged();
+            }
+        }
+        auto save = [&](splash::VramSettings next) {
+            for (auto& a : next.prohibited) a = splash::clampVramArea(a);
+            if (editor::saveVramSettings(root, next)) {
+                vs = std::move(next);
+                st.live.settingsChanged();
+            } else {
+                notify(st, "Cannot write " + utf8(root / "vram.json"), true);
+            }
+            readAt = now;
+        };
+        auto note = [&](const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y), col, t.c_str(), nullptr, w);
+            y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str()).y + space::xs;
+        };
+
+        const float stop = y;
+        const bool sOpen = section("s_vram", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::grid, color::textDim, "VRAM layout",
+                                   true, true, false);
+        if (!sOpen) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+
+        // What occupies VRAM: the live export's map; before there is one, the
+        // fixed reservations and the areas as they are set.
+        std::vector<splash::ExportStats::VramRect> map;
+        if (res && !res->stats.vramMap.empty()) {
+            map = res->stats.vramMap;
+        } else {
+            map.push_back({K::Framebuffer, 0, 0, 320, 240, "Framebuffer 0 (320x240)"});
+            map.push_back({K::Framebuffer, 0, 256, 320, 240, "Framebuffer 1 (320x240)"});
+            map.push_back({K::Reserved, 960, 0, 64, 512, "Font column (x 960, reserved)"});
+            for (size_t i = 0; i < vs.prohibited.size(); ++i) {
+                const auto& a = vs.prohibited[i];
+                map.push_back({K::Prohibited, a.x, a.y, a.w, a.h, "Prohibited area " + std::to_string(i + 1)});
+            }
+        }
+        auto kindColor = [](K k) -> ImU32 {
+            switch (k) {
+                case K::Framebuffer: return rgb(0x4f9bef);
+                case K::Reserved: return rgb(0x7d8496);
+                case K::Prohibited: return color::bad;
+                case K::Atlas4: return rgb(0x5ccfe0);
+                case K::Atlas8: return color::good;
+                case K::Atlas16: return color::accent;
+                case K::Clut: return color::warn;
+                case K::Font: return rgb(0xe8d36a);
+            }
+            return color::textDim;
+        };
+        auto withAlpha = [](ImU32 c, unsigned a) { return (c & 0x00ffffffu) | (a << IM_COL32_A_SHIFT); };
+
+        const float mx0 = x0 + space::sm, mx1 = x1 - space::sm;
+        const float scale = (mx1 - mx0) / float(splash::kVramWidth);
+        const ImRect mapR(ImVec2(mx0, y), ImVec2(mx1, y + std::floor(scale * splash::kVramHeight)));
+        nameRect("vram.map", mapR);
+        auto toScreen = [&](int x, int yy, int w, int h) {
+            ImVec2 a(mapR.Min.x + std::floor(x * scale), mapR.Min.y + std::floor(yy * scale));
+            ImVec2 b(mapR.Min.x + std::floor((x + w) * scale), mapR.Min.y + std::floor((yy + h) * scale));
+            // A CLUT is one line: keep it visible.
+            if (b.y - a.y < 2) b.y = a.y + 2;
+            if (b.x - a.x < 2) b.x = a.x + 2;
+            return ImRect(a, b);
+        };
+        auto snap8 = [&](float px, float py) {
+            int vx = int(std::lround((px - mapR.Min.x) / scale / 8.f)) * 8;
+            int vy = int(std::lround((py - mapR.Min.y) / scale / 8.f)) * 8;
+            return std::array<int, 2>{std::clamp(vx, 0, splash::kVramWidth), std::clamp(vy, 0, splash::kVramHeight)};
+        };
+
+        dl->AddRectFilled(mapR.Min, mapR.Max, color::field, radius::field);
+        // Texture pages are 64 words by 256 lines.
+        for (int gx = 64; gx < splash::kVramWidth; gx += 64)
+            dl->AddLine(ImVec2(mapR.Min.x + std::floor(gx * scale), mapR.Min.y),
+                        ImVec2(mapR.Min.x + std::floor(gx * scale), mapR.Max.y), rgb(0xffffff, 10));
+        dl->AddLine(ImVec2(mapR.Min.x, mapR.Min.y + std::floor(256 * scale)), ImVec2(mapR.Max.x, mapR.Min.y + std::floor(256 * scale)),
+                    rgb(0xffffff, 22));
+
+        const Hit mh = interact("vram.map", mapR);
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        int hovered = -1;
+        // Drawn back to front: prohibited areas last, over what they cover.
+        const K order[] = {K::Framebuffer, K::Reserved, K::Atlas16, K::Atlas8, K::Atlas4, K::Font, K::Clut, K::Prohibited};
+        for (K k : order)
+            for (size_t i = 0; i < map.size(); ++i) {
+                const auto& m = map[i];
+                if (m.kind != k) continue;
+                const ImRect rr = toScreen(m.x, m.y, m.w, m.h);
+                const ImU32 c = kindColor(k);
+                const bool prohibited = k == K::Prohibited;
+                dl->AddRectFilled(rr.Min, rr.Max, withAlpha(c, prohibited ? 120u : k == K::Clut ? 230u : 80u));
+                if (k != K::Clut) dl->AddRect(rr.Min, rr.Max, withAlpha(c, prohibited ? 255u : 200u));
+                if (k == K::Framebuffer && rr.GetWidth() > 90) {
+                    const std::string t = "Framebuffer " + std::to_string(m.y >= 256 ? 1 : 0);
+                    textCentered(dl, rr, f.regular, type::caption, withAlpha(c, 220u), t.c_str());
+                }
+                if (mh.hovered && rr.Contains(mouse)) hovered = int(i);  // last drawn wins
+            }
+        // A drag on the map draws a new prohibited area, snapped to 8 words and lines.
+        static bool dragging = false;
+        static std::array<int, 2> dragFrom{}, dragTo{};
+        if (mh.held && ImGui::IsMouseDragPastThreshold(0, 3.f)) {
+            dragging = true;
+            dragFrom = snap8(ImGui::GetIO().MouseClickedPos[0].x, ImGui::GetIO().MouseClickedPos[0].y);
+            dragTo = snap8(mouse.x, mouse.y);
+        }
+        if (dragging) {
+            const int ax = std::min(dragFrom[0], dragTo[0]), ay = std::min(dragFrom[1], dragTo[1]);
+            const int aw = std::abs(dragTo[0] - dragFrom[0]), ah = std::abs(dragTo[1] - dragFrom[1]);
+            if (mh.held) {
+                const ImRect rr = toScreen(ax, ay, std::max(aw, 1), std::max(ah, 1));
+                dl->AddRectFilled(rr.Min, rr.Max, withAlpha(color::bad, 90u));
+                dl->AddRect(rr.Min, rr.Max, color::text);
+                const std::string t = std::to_string(ax) + "," + std::to_string(ay) + "  " + std::to_string(aw) + "x" + std::to_string(ah);
+                text(dl, ImVec2(rr.Max.x + 4, rr.Max.y + 2), f.regular, type::caption, color::text, t.c_str());
+            } else {
+                dragging = false;
+                if (aw >= 8 && ah >= 8) {
+                    splash::VramSettings next = vs;
+                    next.prohibited.push_back({ax, ay, aw, ah});
+                    save(std::move(next));
+                }
+            }
+        }
+        if (hovered >= 0 && !dragging) {
+            const auto& m = map[size_t(hovered)];
+            const ImRect rr = toScreen(m.x, m.y, m.w, m.h);
+            dl->AddRect(rr.Min - ImVec2(1, 1), rr.Max + ImVec2(1, 1), color::text);
+            const std::string t = m.label + "\n" + std::to_string(m.x) + ", " + std::to_string(m.y) + "   " + std::to_string(m.w) + " x " +
+                                  std::to_string(m.h);
+            tooltip(t.c_str());
+        } else if (mh.hovered && !dragging) {
+            tooltip("Drag to mark an area textures and CLUTs must stay out of.");
+        }
+        dl->AddRect(mapR.Min, mapR.Max, color::borderStrong, radius::field);
+        y = mapR.Max.y + space::sm;
+
+        // Legend: the kinds on the map, wrapping.
+        {
+            const std::pair<K, const char*> kinds[] = {{K::Framebuffer, "Framebuffer"}, {K::Reserved, "Reserved"}, {K::Atlas16, "16 bpp"},
+                                                       {K::Atlas8, "8 bpp"},           {K::Atlas4, "4 bpp"},     {K::Clut, "CLUT"},
+                                                       {K::Font, "Font"},              {K::Prohibited, "Prohibited"}};
+            float lx = mx0;
+            const float lh = 16;
+            for (const auto& [k, name] : kinds) {
+                const float w = 10 + space::xs + measure(f.regular, type::caption, name).x;
+                if (lx + w > mx1 && lx > mx0) {
+                    lx = mx0;
+                    y += lh;
+                }
+                const float cy = y + lh * 0.5f;
+                dl->AddRectFilled(ImVec2(lx, cy - 5), ImVec2(lx + 10, cy + 5), withAlpha(kindColor(k), k == K::Prohibited ? 160u : 140u), 2);
+                text(dl, ImVec2(lx + 10 + space::xs, centerY(f.regular, type::caption, y, y + lh)), f.regular, type::caption, color::textDim,
+                     name);
+                lx += w + space::md;
+            }
+            y += lh + space::sm;
+        }
+
+        // The line is there before the first export lands too, so the rows
+        // and Add area below it do not move when it does.
+        {
+            const std::string used =
+                stats ? "VRAM used: " + kb(stats->vramBytes()) + " KB of 1024 KB"
+                      : std::string(res ? "VRAM used: unknown, the export failed" : "VRAM used: measuring...");
+            text(dl, ImVec2(mx0, centerY(f.regular, type::body, y, y + 20)), f.regular, type::body,
+                 stats ? color::text : color::textFaint, used.c_str());
+            y += 20 + space::xs;
+        }
+        if (res)
+            for (const std::string& e : res->errors)
+                if (e.find("does not fit") != std::string::npos) note(e, color::bad);
+
+        // One row per area: x, y, w, h and a remove button.
+        text(dl, ImVec2(mx0, centerY(f.medium, type::label, y, y + 22)), f.medium, type::label, color::textDim, "Prohibited areas");
+        y += 22;
+        int remove = -1;
+        for (size_t i = 0; i < vs.prohibited.size(); ++i) {
+            const auto& a = vs.prohibited[i];
+            const ImRect rr(ImVec2(mx0, y), ImVec2(mx1, y + 28));
+            ImGui::PushID(int(i) + 7000);
+            const float numW = 22, bw = 22, gap = space::xs;
+            const float fx0 = rr.Min.x + numW, fx1 = rr.Max.x - bw - gap;
+            const float fw = (fx1 - fx0 - 3 * gap) / 4;
+            const std::string num = std::to_string(i + 1);
+            text(dl, ImVec2(rr.Min.x + 2, centerY(f.medium, type::body, rr.Min.y, rr.Max.y)), f.medium, type::body, color::textFaint,
+                 num.c_str());
+            const char* ids[4] = {"x", "y", "w", "h"};
+            const char* labels[4] = {"X", "Y", "W", "H"};
+            const ImU32 axes[4] = {color::axisX, color::axisY, color::axisZ, color::accent};
+            const int vals[4] = {a.x, a.y, a.w, a.h};
+            for (int k = 0; k < 4; ++k) {
+                const ImRect fr(ImVec2(fx0 + k * (fw + gap), rr.Min.y + 2), ImVec2(fx0 + k * (fw + gap) + fw, rr.Max.y - 2));
+                nameRect("vram." + std::string(ids[k]) + "." + std::to_string(i), fr);
+                float v = float(vals[k]);
+                const std::string shown = std::to_string(vals[k]);
+                FieldEdit fe = numberField(ids[k], fr, shown.c_str(), nullptr, axes[k], labels[k], &v);
+                if (fe.changed) {
+                    splash::VramSettings next = vs;
+                    auto& n = next.prohibited[i];
+                    int* fld[4] = {&n.x, &n.y, &n.w, &n.h};
+                    *fld[k] = int(std::lround(v));
+                    save(std::move(next));
+                }
+            }
+            const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
+            nameRect("vram.remove." + std::to_string(i), del);
+            if (iconButton("vremove", del, icon::x, false, "Remove this area")) remove = int(i);
+            ImGui::PopID();
+            y += 28 + space::xxs;
+        }
+        if (remove >= 0) {
+            splash::VramSettings next = vs;
+            next.prohibited.erase(next.prohibited.begin() + remove);
+            save(std::move(next));
+        }
+        if (vs.prohibited.empty()) note("None: the packer may use all of VRAM but the framebuffers and x 960.", color::textFaint);
+
+        // Add area: 64 x 64 at the first spot clear of the framebuffers, the
+        // font column and the other areas.
+        float addW = 0;
+        const ImVec2 addAt(mx0, y + space::xs);
+        if (button("vram.add", addAt, icon::plus, "Add area", ButtonKind::Secondary, &addW,
+                   "A 64 x 64 area at the first free spot; drag on the map for any size")) {
+            auto clear = [&](int ax, int ay) {
+                auto hit = [&](int bx, int by, int bw2, int bh) { return ax < bx + bw2 && bx < ax + 64 && ay < by + bh && by < ay + 64; };
+                if (hit(0, 0, 320, 240) || hit(0, 256, 320, 240) || hit(960, 0, 64, 512)) return false;
+                for (const auto& p : vs.prohibited)
+                    if (hit(p.x, p.y, p.w, p.h)) return false;
+                return true;
+            };
+            splash::VramSettings next = vs;
+            bool found = false;
+            for (int ay = 0; ay + 64 <= splash::kVramHeight && !found; ay += 8)
+                for (int ax = 0; ax + 64 <= splash::kVramWidth && !found; ax += 8)
+                    if (clear(ax, ay)) {
+                        next.prohibited.push_back({ax, ay, 64, 64});
+                        found = true;
+                    }
+            if (found) save(std::move(next));
+            else notify(st, "No free 64 x 64 spot left in VRAM", true);
+        }
+        nameRect("vram.add", ImRect(addAt, addAt + ImVec2(addW, size::field + 6)));
+        y += size::field + 6 + space::xs + space::sm;
+        note("Areas are in 16-bit words and lines (VRAM is 1024 x 512). Textures and CLUTs stay out of them; saved in vram.json "
+             "for every scene.",
+             color::textFaint);
+        if (namedRectsOn()) {
+            // Scripted tests: the areas after every change.
+            std::string now2 = "vram:";
+            for (size_t i = 0; i < vs.prohibited.size(); ++i) {
+                const auto& a = vs.prohibited[i];
+                now2 += std::string(i ? " | " : " ") + std::to_string(a.x) + "," + std::to_string(a.y) + "," + std::to_string(a.w) + "," +
+                        std::to_string(a.h);
+            }
+            if (vs.prohibited.empty()) now2 += " none";
+            static std::string reported;
+            if (reported != now2) {
+                reported = now2;
+                std::printf("%s\n", now2.c_str());
                 std::fflush(stdout);
             }
         }

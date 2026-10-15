@@ -1,5 +1,7 @@
 #include "editor/live_export.hh"
 
+#include "editor/project.hh"
+
 #include <chrono>
 #include <exception>
 
@@ -22,8 +24,9 @@ void LiveExport::wait() {
 
 void LiveExport::update(const Document& doc, double now) {
     collect();
-    if (!m_seenRev || *m_seenRev != doc.revision()) {
+    if (!m_seenRev || *m_seenRev != doc.revision() || m_seenGen != m_settingsGen) {
         m_seenRev = doc.revision();
+        m_seenGen = m_settingsGen;
         m_seenAt = now;
         m_started = false;
     }
@@ -34,6 +37,7 @@ void LiveExport::update(const Document& doc, double now) {
     m_job = std::async(std::launch::async, [scene = doc.scene(), root] {
         splash::ExportOptions opt;
         opt.dryRun = true;
+        opt.vram = loadVramSettings(root);
         try {
             return splash::exportSplashpack(scene, root, root / "scene.splashpack", opt);
         } catch (const std::exception& e) {

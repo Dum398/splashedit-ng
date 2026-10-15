@@ -23,6 +23,10 @@ public:
     const std::optional<splash::ExportResult>& result() const { return m_result; }
     unsigned resultRevision() const { return m_resultRev; }
     bool busy() const { return m_job.valid(); }
+    // Something the export reads besides the scene changed (the project's
+    // vram.json): the next update() exports again, after the settle time,
+    // though the scene's revision is the same.
+    void settingsChanged() { m_settingsGen++; }
 
 private:
     void collect();
@@ -30,6 +34,7 @@ private:
     std::future<splash::ExportResult> m_job;
     unsigned m_jobRev = 0, m_resultRev = 0;
     std::optional<unsigned> m_seenRev;  // revision last seen by update()
+    unsigned m_settingsGen = 0, m_seenGen = 0;
     double m_seenAt = 0;
     bool m_started = false;  // an export has been started for m_seenRev
     std::optional<splash::ExportResult> m_result;

@@ -45,17 +45,18 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
 // kept, upper-cased). Errors land in the result; with more than one scene,
 // each error and warning starts with its scene's index and, when `names`
 // gives one, its name ("scene 1 (cave): ..."). No image is written when any
-// scene fails. The stats are scene 0's.
+// scene fails. The stats are scene 0's. Every scene packs VRAM with `vram`
+// (the app passes the project's vram.json, see readVramSettings).
 struct DiscResult {
     ExportResult exported;
     DiscInfo disc;
 };
 DiscResult exportDisc(const std::vector<const Scene*>& scenes, const std::filesystem::path& projectRoot,
                       const std::filesystem::path& engine, const std::filesystem::path& bin, const std::string& title,
-                      const std::vector<std::string>& names = {});
+                      const std::vector<std::string>& names = {}, const VramSettings& vram = {});
 // The same for one scene, as scene 0.
 DiscResult exportDisc(const Scene& scene, const std::filesystem::path& projectRoot, const std::filesystem::path& engine,
-                      const std::filesystem::path& bin, const std::string& title);
+                      const std::filesystem::path& bin, const std::string& title, const VramSettings& vram = {});
 
 // What the engine file is: a CD-ROM build, a PCdrv build, or not a PS-X EXE.
 enum class EngineKind { NotExe, Cdrom, Pcdrv };

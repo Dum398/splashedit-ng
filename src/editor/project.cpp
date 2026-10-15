@@ -55,6 +55,16 @@ bool saveBuildList(const fs::path& project, const std::vector<fs::path>& list) {
     return !out.fail();
 }
 
+splash::VramSettings loadVramSettings(const fs::path& project) {
+    if (project.empty()) return {};
+    return splash::readVramSettings(project / "vram.json");
+}
+
+bool saveVramSettings(const fs::path& project, const splash::VramSettings& vs) {
+    if (project.empty()) return false;
+    return splash::writeVramSettings(project / "vram.json", vs);
+}
+
 std::vector<fs::path> buildScenes(const fs::path& project, const fs::path& openScene) {
     std::vector<fs::path> out;
     std::error_code ec;

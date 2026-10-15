@@ -27,6 +27,19 @@ std::filesystem::path firstScene(const std::filesystem::path& project);
 std::vector<std::filesystem::path> loadBuildList(const std::filesystem::path& project);
 bool saveBuildList(const std::filesystem::path& project, const std::vector<std::filesystem::path>& list);
 
+// The project's VRAM layout: `project`/vram.json, holding the prohibited
+// areas (rectangles of VRAM, in 16-bit words and lines, that the packer
+// keeps textures and CLUTs out of) as
+// {"prohibited": [{"x": 512, "y": 0, "w": 64, "h": 64}]}. Resolution and
+// buffering are not stored: psxsplash always draws 320x240 into framebuffers
+// at (0,0) and (0,256). loadVramSettings reads it; a missing or unreadable
+// file, or an empty `project`, reads as the defaults (no areas); malformed
+// entries are skipped and areas are clamped into the 1024x512 VRAM with w,
+// h >= 1. saveVramSettings writes it whole; false when it cannot be written.
+// Live export, Play and Export all pack with it.
+splash::VramSettings loadVramSettings(const std::filesystem::path& project);
+bool saveVramSettings(const std::filesystem::path& project, const splash::VramSettings& vs);
+
 // The project-relative scenes a build writes, in order: the build list with
 // the entries whose file is gone left out. When that leaves nothing (the list
 // is empty or missing) it is `openScene` alone, the open scene's

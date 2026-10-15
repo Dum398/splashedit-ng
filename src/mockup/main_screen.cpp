@@ -770,10 +770,14 @@ static bool chevronClicked(ImRect rr, int depth) {
     return ImGui::GetIO().MousePos.x < rr.Min.x + space::xs + depth * 16.0f + 16;
 }
 
-static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, editor::ObjectPath& path) {
+// `ancestorOff`: an object above these is switched off, so they are off in
+// the hierarchy whatever their own flag says.
+static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, editor::ObjectPath& path,
+                        bool ancestorOff = false) {
     for (size_t i = 0; i < objs.size(); ++i) {
         const splash::Object& o = objs[i];
         if (!c.filter.empty() && !treeMatches(o, c.filter)) continue;
+        const bool childrenOff = ancestorOff || !o.active;  // read before any edit below
         path.push_back(static_cast<int>(i));
         // A filter shows every match with the rows above it, opened.
         bool open = !c.filter.empty() || c.doc.expanded(path);
@@ -793,6 +797,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         row.selected = c.doc.selection() && *c.doc.selection() == path;
         row.warning = c.doc.hasWarning(o);
         row.hidden = !o.active;
+        row.inheritedOff = ancestorOff;
         ImRect rr(ImVec2(c.panel.Min.x + space::xs + 2, c.y), ImVec2(c.panel.Max.x - space::xs - 2, c.y + size::row));
         ImGui::PushID(static_cast<int>(i));
         bool flipActive = false;
@@ -848,7 +853,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             if (res != TextEdit::Editing) c.st.renaming = false;
         }
         c.y += size::row;
-        if (row.hasChildren && open) treeObjects(c, o.children, path);
+        if (row.hasChildren && open) treeObjects(c, o.children, path, childrenOff);
         ImGui::PopID();
         path.pop_back();
     }
@@ -5112,6 +5117,24 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         doc.edit(path, [](splash::Object& ob) { ob.active = !ob.active; });
     tooltip("Off leaves the object out of the game entirely. To have it in the game but switched off, turn off Start active.");
     y += 40 + space::lg;
+    // On, but under an off parent: it is left out all the same. The nearest
+    // off ancestor, found by path (a name copy, no pointer kept past an edit).
+    std::string offVia;
+    if (const splash::Object* self = doc.object(path); self && self->active)
+        for (size_t k = path.size(); k-- > 1;) {
+            const splash::Object* a = doc.object(editor::ObjectPath(path.begin(), path.begin() + static_cast<long>(k)));
+            if (a && !a->active) {
+                offVia = a->name;
+                break;
+            }
+        }
+    if (!offVia.empty()) {
+        const std::string s = "Off because '" + offVia + "' is off";
+        const ImVec2 at(x0, y);
+        text(dl, at, f.regular, type::caption, color::warn, s.c_str());
+        nameRect("obj.inheritedoff", ImRect(at, at + measure(f.regular, type::caption, s.c_str())));
+        y += 16 + space::md;
+    }
 
     const float lw = 96, rowH = 32;
     auto row = [&](const char* id, const char* label, const char* tip) {
@@ -5389,6 +5412,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         std::printf("%s\n", line.c_str());
         std::fflush(stdout);
     };
+    report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
     std::string meshColLine, audioLine, skinLine;
 
@@ -5733,7 +5757,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             line = "Export failed: see problems";
             tone = color::bad;
         } else if (res) {
-            line = o->active ? "Not in the last export" : "Not exported: the object is off";
+            line = !o->active        ? "Not exported: the object is off"
+                   : !offVia.empty() ? "Not exported: '" + offVia + "' is off"
+                                     : "Not in the last export";
             for (const splash::ExportStats::RoomSummary& rs : res->stats.rooms)
                 if (rs.name == o->name) {
                     line = std::to_string(rs.triRefs) + (rs.triRefs == 1 ? " triangle, " : " triangles, ") + std::to_string(rs.cells) +

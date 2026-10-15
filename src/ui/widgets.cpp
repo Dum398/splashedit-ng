@@ -296,14 +296,15 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicke
         dl->AddRectFilled(r.Min, r.Max, rgb(0x2a2f39, (int)(160 * rowHover)), radius::field);
     }
     float x = r.Min.x + space::xs + row.depth * 16.0f;
-    ImU32 dimmed = row.hidden ? color::textFaint : color::text;
+    const bool faint = row.hidden || row.inheritedOff;
+    ImU32 dimmed = faint ? color::textFaint : color::text;
     if (row.hasChildren)
         text(dl, ImVec2(x, centerY(f.medium, type::label, r.Min.y, r.Max.y)), f.medium, type::label, color::textFaint,
              row.expanded ? icon::chevronDown : icon::chevronRight);
     x += 16;
     if (row.icon) {
         text(dl, ImVec2(x, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1,
-             row.hidden ? color::textFaint : row.iconColor, row.icon);
+             faint ? color::textFaint : row.iconColor, row.icon);
         x += 22;
     }
     text(dl, ImVec2(x, centerY(f.regular, type::body, r.Min.y, r.Max.y)), row.selected ? f.medium : f.regular, type::body, dimmed,

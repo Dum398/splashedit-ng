@@ -75,7 +75,8 @@ struct TreeRow {
     bool expanded = false;
     bool selected = false;
     bool warning = false;
-    bool hidden = false;
+    bool hidden = false;        // the object's own flag: dims the row and shows the eye crossed out
+    bool inheritedOff = false;  // under an off ancestor: dims the row, the eye keeps the row's own state
 };
 // Returns the row's hit state so the caller can tell a chevron click from a row click.
 // With `visibilityClicked` the row draws an eye that sets it when clicked; the eye wins over the row.

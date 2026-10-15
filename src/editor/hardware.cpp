@@ -30,6 +30,12 @@ uint64_t HardwareRun::lineCount() const {
     return count_;
 }
 
+std::deque<std::string> HardwareRun::lines(uint64_t* total) const {
+    std::lock_guard<std::mutex> lock(m_);
+    if (total) *total = count_;
+    return lines_;
+}
+
 void HardwareRun::add(std::string line) {
     std::lock_guard<std::mutex> lock(m_);
     lines_.push_back(std::move(line));

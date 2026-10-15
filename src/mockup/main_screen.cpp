@@ -714,6 +714,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         ImGui::PushID(static_cast<int>(i));
         bool flipActive = false;
         Hit h = treeRow("row", rr, row, &flipActive);
+        nameRect("tree." + o.name, rr);
         ++c.shown;
         if (ImGui::IsRectVisible(rr.Min, rr.Max)) {
             ImRect shown = rr;
@@ -3923,6 +3924,16 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         return;
     }
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    // Taller than the panel (several components), it scrolls with the wheel;
+    // inspecting another object starts back at the top.
+    static float scroll = 0;
+    static editor::ObjectPath scrolled;
+    if (scrolled != *target) {
+        scrolled = *target;
+        scroll = 0;
+    }
+    const float top0 = y;
+    y -= scroll;
 
     float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
     // Object header.
@@ -4633,6 +4644,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // Add component.
     ImRect add(ImVec2(x0, y), ImVec2(x1, y + 34));
     Hit h = interact("addcomp", add);
+    nameRect("obj.addcomp", add);
     dl->AddRect(add.Min, add.Max, h.hover > 0.5f ? color::accent : color::borderStrong, radius::card, 0, 1.0f);
     if (h.hover > 0) dl->AddRectFilled(add.Min, add.Max, rgb(0x8b7bff, (int)(28 * h.hover)), radius::card);
     const char* lbl = "Add component";
@@ -4642,6 +4654,17 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     text(dl, ImVec2(lx + 22, add.Min.y + 8), f.medium, type::body, color::textDim, lbl);
     if (h.clicked) st.openAddComponent = true;
     ImGui::PopClipRect();
+    {
+        const float content = add.Max.y + space::xl - (top0 - scroll), view = r.Max.y - top0;
+        const float maxScroll = std::max(0.0f, content - view);
+        if (maxScroll > 0 && ImGui::IsMouseHoveringRect(r.Min, r.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+            scroll -= ImGui::GetIO().MouseWheel * 48.0f;
+        scroll = std::clamp(scroll, 0.0f, maxScroll);
+        if (maxScroll > 0) {
+            const float bh = view * view / content, t = top0 + (view - bh) * (scroll / maxScroll);
+            dl->AddRectFilled(ImVec2(r.Max.x - 5, t + 2), ImVec2(r.Max.x - 2, t + bh - 2), rgb(0xffffff, 40), 2);
+        }
+    }
 
     // The Add component picker, under the button. Components already on the
     // object are left out; ones it cannot take yet show why.

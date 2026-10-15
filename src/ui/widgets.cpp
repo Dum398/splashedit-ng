@@ -930,7 +930,8 @@ float problemCard(const char* id, ImVec2 pos, float width, const char* title, co
     float pad = space::md;
     float textW = width - pad * 2 - 24;
     ImVec2 bodySize = f.regular->CalcTextSizeA(type::label, FLT_MAX, textW, body);
-    float h = pad + 18 + space::xs + bodySize.y + space::md + size::field + 6 + pad;
+    const float buttonH = fixLabel ? space::md + size::field + 6 : 0;
+    float h = pad + 18 + space::xs + bodySize.y + buttonH + pad;
     ImRect r(pos, pos + ImVec2(width, h));
     dl->AddRectFilled(r.Min, r.Max, color::warnSoft, radius::card);
     dl->AddRect(r.Min, r.Max, rgb(0xf0a43a, 70), radius::card);
@@ -938,6 +939,11 @@ float problemCard(const char* id, ImVec2 pos, float width, const char* title, co
     float x = r.Min.x + pad + 24;
     text(dl, ImVec2(x, r.Min.y + pad), f.semibold, type::body, color::text, title);
     dl->AddText(f.regular, type::label, ImVec2(x, r.Min.y + pad + 18 + space::xs), color::textDim, body, nullptr, textW);
+    if (!fixLabel) {
+        if (fixed) *fixed = false;
+        if (fixRect) *fixRect = ImRect();
+        return h;
+    }
     const ImVec2 bp(x, r.Max.y - pad - size::field - 6);
     float bw = 0;
     bool hit = button(id, bp, icon::wand, fixLabel, ButtonKind::Secondary, &bw);

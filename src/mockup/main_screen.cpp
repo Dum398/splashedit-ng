@@ -115,6 +115,34 @@ static bool saveScriptsForBuild(State& st) {
     return false;
 }
 
+// The open scene's path relative to the project, as the build list names it.
+static std::filesystem::path openSceneFile(const editor::Document& doc) {
+    if (doc.projectRoot().empty()) return doc.scenePath();
+    return doc.scenePath().lexically_relative(doc.projectRoot());
+}
+
+// The build list's scenes for Play and Run on hardware, run on the worker
+// thread: the open one is `scene` (unsaved edits included), the rest are read
+// from disk; a file that does not load is an export error naming it.
+static splash::ExportResult exportBuild(const std::vector<std::filesystem::path>& files, const std::filesystem::path& open,
+                                        const splash::Scene& scene, const std::filesystem::path& root,
+                                        const std::filesystem::path& dir) {
+    editor::BuildScenes b = editor::loadBuildScenes(root, files, open, scene);
+    if (!b.errors.empty()) {
+        splash::ExportResult r;
+        r.errors = std::move(b.errors);
+        return r;
+    }
+    return editor::exportForPlay(b.pointers(), root, dir, b.names);
+}
+
+// Where the open scene is in `files`; -1 when it is not there.
+static int indexIn(const std::vector<std::filesystem::path>& files, const std::filesystem::path& open) {
+    for (size_t i = 0; i < files.size(); ++i)
+        if (files[i].lexically_normal() == open.lexically_normal()) return int(i);
+    return -1;
+}
+
 // F5 and the Play button: start, or stop what is running.
 static void togglePlay(State& st, const editor::Document& doc) {
     State::Play& p = st.play;
@@ -135,8 +163,11 @@ static void togglePlay(State& st, const editor::Document& doc) {
     }
     p.sentRev = p.seenRev = doc.revision();
     p.reloadGeneration = 0;
-    p.build = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot()] {
-        splash::ExportResult r = editor::exportForPlay(scene, root, playDir());
+    std::vector<std::filesystem::path> files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc));
+    p.reloadIndex = indexIn(files, openSceneFile(doc));
+    p.build = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(),
+                                              root = doc.projectRoot()] {
+        splash::ExportResult r = exportBuild(files, open, scene, root, playDir());
         // Its presence at boot is what makes the game watch for live edits.
         if (r.ok() && !editor::writeReloadFlag(playDir(), 0)) r.errors.push_back("Cannot write reload.flag");
         return r;
@@ -166,8 +197,9 @@ static void toggleRun(State& st, const editor::Document& doc) {
         p.setupFor = 2;
         return;
     }
-    p.hwBuild = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot()] {
-        return editor::exportForPlay(scene, root, hardwareDir());
+    p.hwBuild = std::async(std::launch::async, [files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc)),
+                                                open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot()] {
+        return exportBuild(files, open, scene, root, hardwareDir());
     });
 }
 
@@ -184,7 +216,7 @@ static void sendEdits(State& st, const editor::Document& doc) {
         splash::ExportResult r = p.reload.get();
         p.message = r.ok() ? std::string() : "Live edit not sent: " + r.errors.front();
     }
-    if (!p.emu.running() || p.build.valid() || doc.loadId() != p.peakScene) return;
+    if (!p.emu.running() || p.build.valid() || doc.loadId() != p.peakScene || p.reloadIndex < 0) return;
     if (doc.revision() != p.seenRev) {
         p.seenRev = doc.revision();
         p.seenAt = now;
@@ -192,8 +224,8 @@ static void sendEdits(State& st, const editor::Document& doc) {
     if (doc.revision() == p.sentRev || now - p.seenAt < 0.3) return;
     p.sentRev = doc.revision();
     const unsigned gen = ++p.reloadGeneration;
-    p.reload = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot(), gen] {
-        return editor::reloadForPlay(scene, root, playDir(), gen);
+    p.reload = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot(), gen, index = size_t(p.reloadIndex)] {
+        return editor::reloadForPlay(scene, root, playDir(), gen, index);
     });
 }
 
@@ -1085,10 +1117,17 @@ static void buildDisc(State& st, const editor::Document& doc, std::filesystem::p
     State::Play& p = st.play;
     if (bin.extension() != ".bin") bin += ".bin";
     p.discOut = bin;
-    p.disc = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot(),
+    p.disc = std::async(std::launch::async, [files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc)),
+                                             open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot(),
                                              engine = editor::withDefaults(p.tools, p.bundleDir).disc, bin,
                                              title = doc.sceneStem()] {
-        return splash::exportDisc(scene, root, engine, bin, title);
+        editor::BuildScenes b = editor::loadBuildScenes(root, files, open, scene);
+        if (!b.errors.empty()) {
+            splash::DiscResult r;
+            r.exported.errors = std::move(b.errors);
+            return r;
+        }
+        return splash::exportDisc(b.pointers(), root, engine, bin, title, b.names);
     });
 }
 
@@ -3561,6 +3600,138 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             }
         }
         if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // The build list (scenes.list): the scenes Play and Export write, in order.
+    // A project setting, saved as soon as it changes and not part of undo.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = doc.projectRoot();
+        static fs::path cachedRoot;
+        static std::vector<fs::path> list, scenes;
+        static double readAt = -1;
+        const double now = ImGui::GetTime();
+        // Read again now and then, so files added or a list edited outside show up.
+        if (root != cachedRoot || now - readAt > 1.0) {
+            cachedRoot = root;
+            readAt = now;
+            list = editor::loadBuildList(root);
+            scenes.clear();
+            std::error_code ec;
+            if (!root.empty())
+                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+                     !ec && it != end; it.increment(ec))
+                    if (it->path().extension() == ".scene" && it->is_regular_file(ec))
+                        scenes.push_back(it->path().lexically_relative(root));
+            std::sort(scenes.begin(), scenes.end());
+        }
+        auto save = [&](std::vector<fs::path> next) {
+            if (editor::saveBuildList(root, next)) list = std::move(next);
+            else notify(st, "Cannot write " + utf8(root / "scenes.list"), true);
+            readAt = now;
+        };
+        const fs::path open = openSceneFile(doc);
+        auto note = [&](const char* t) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y), color::textFaint, t, nullptr, w);
+            y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t).y + space::xs;
+        };
+        auto listed = [&](const fs::path& p) {
+            for (const fs::path& e : list)
+                if (e.lexically_normal() == p.lexically_normal()) return true;
+            return false;
+        };
+
+        const float stop = y;
+        const bool sOpen = section("s_build", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::layers, color::textDim, "Build scenes",
+                                   true, true, false);
+        if (!sOpen) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        int move = -1, moveBy = 0, remove = -1, shown = 0;
+        std::error_code ec;
+        for (size_t i = 0; i < list.size(); ++i) {
+            const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 28));
+            const bool there = fs::is_regular_file(root / list[i], ec);
+            const bool isOpen = list[i].lexically_normal() == open.lexically_normal();
+            // Missing files are left out of the build, so they get no number.
+            const std::string num = there ? std::to_string(shown++) : "-";
+            const float ty = centerY(f.regular, type::body, rr.Min.y, rr.Max.y);
+            text(dl, ImVec2(rr.Min.x + space::xs, ty), f.medium, type::body, color::textFaint, num.c_str());
+            const std::string label = utf8(list[i].generic_u8string()) + (there ? (isOpen ? "  (open)" : "") : "  (missing)");
+            dl->AddText(f.regular, type::body, ImVec2(rr.Min.x + 28, ty), there ? (isOpen ? color::text : color::textDim) : color::warn,
+                        label.c_str(), nullptr);
+            ImGui::PushID(int(i));
+            const float bw = 22;
+            const ImRect up(ImVec2(rr.Max.x - 3 * bw - 4, rr.Min.y + 3), ImVec2(rr.Max.x - 2 * bw - 4, rr.Max.y - 3));
+            const ImRect down(ImVec2(rr.Max.x - 2 * bw - 2, rr.Min.y + 3), ImVec2(rr.Max.x - bw - 2, rr.Max.y - 3));
+            const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
+            nameRect("build.up." + std::to_string(i), up);
+            nameRect("build.down." + std::to_string(i), down);
+            nameRect("build.remove." + std::to_string(i), del);
+            if (iconButton("bup", up, icon::arrowUp, false, "Move up", color::textDim, i > 0)) {
+                move = int(i);
+                moveBy = -1;
+            }
+            if (iconButton("bdown", down, icon::arrowDown, false, "Move down", color::textDim, i + 1 < list.size())) {
+                move = int(i);
+                moveBy = 1;
+            }
+            if (iconButton("bremove", del, icon::x, false, "Take out of the build")) remove = int(i);
+            ImGui::PopID();
+            y += 28;
+        }
+        if (move >= 0) {
+            std::vector<fs::path> next = list;
+            std::swap(next[size_t(move)], next[size_t(move + moveBy)]);
+            save(std::move(next));
+        } else if (remove >= 0) {
+            std::vector<fs::path> next = list;
+            next.erase(next.begin() + remove);
+            save(std::move(next));
+        }
+        if (list.empty())
+            note("Empty: Play and Export write the open scene alone.");
+        std::vector<std::string> names;
+        for (const fs::path& p : scenes)
+            if (!listed(p)) names.push_back(utf8(p.generic_u8string()));
+        std::vector<const char*> items;
+        for (const std::string& n : names) items.push_back(n.c_str());
+        const ImRect addRow(ImVec2(x0 + space::sm, y + space::xs), ImVec2(x0 + space::sm + 220, y + space::xs + size::field));
+        nameRect("build.add", addRow);
+        const int pick = dropdownMenu("build.add", addRow, icon::plus, names.empty() ? "Every scene is listed" : "Add scene", items, -1);
+        if (pick >= 0) {
+            std::vector<fs::path> next = list;
+            const fs::path picked = fromUtf8(names[size_t(pick)]);
+            // The first scene added to an empty list goes after the open one,
+            // which stays scene 0 as it was before there was a list.
+            if (next.empty() && !open.empty() && picked.lexically_normal() != open.lexically_normal() &&
+                fs::is_regular_file(root / open, ec))
+                next.push_back(open.generic_u8string());
+            next.push_back(picked);
+            save(std::move(next));
+        }
+        y += size::field + space::xs + space::sm;
+        note("Play and Export start at scene 0. Scene.Load(i) opens scene i.");
+        if (namedRectsOn()) {
+            // Scripted tests: the list after every change.
+            std::string now = "build:";
+            for (size_t i = 0; i < list.size(); ++i)
+                now += (i ? " | " : " ") + std::to_string(i) + " " + utf8(list[i].generic_u8string());
+            if (list.empty()) now += " (empty)";
+            static std::string reported;
+            if (reported != now) {
+                reported = now;
+                std::printf("%s\n", now.c_str());
+                std::fflush(stdout);
+            }
+        }
+        if (!sOpen) {
             ImGui::PopClipRect();
             y = stop + 34 + space::md;
         } else {

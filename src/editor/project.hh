@@ -18,6 +18,22 @@ namespace editor {
 // The first .scene directly in `project`, by name; empty when there is none.
 std::filesystem::path firstScene(const std::filesystem::path& project);
 
+// The build list: `project`/scenes.list, one project-relative .scene path per
+// line ('/'-separated, UTF-8), in the order Play and Export number the scenes
+// (scene 0 is the one the game starts in; Lua's Scene.Load(i) opens scene i).
+// loadBuildList reads it, skipping blank lines; a missing file, or an empty
+// `project`, reads as an empty list. saveBuildList writes it whole (an empty
+// list as an empty file); false when it cannot be written.
+std::vector<std::filesystem::path> loadBuildList(const std::filesystem::path& project);
+bool saveBuildList(const std::filesystem::path& project, const std::vector<std::filesystem::path>& list);
+
+// The project-relative scenes a build writes, in order: the build list with
+// the entries whose file is gone left out. When that leaves nothing (the list
+// is empty or missing) it is `openScene` alone, the open scene's
+// project-relative path.
+std::vector<std::filesystem::path> buildScenes(const std::filesystem::path& project,
+                                               const std::filesystem::path& openScene);
+
 // Makes `dir` a project: creates it and meshes/, textures/, scripts/, and
 // writes an empty scene named after the folder. A folder that already holds a
 // scene is refused, so New never overwrites one; open it instead. On success

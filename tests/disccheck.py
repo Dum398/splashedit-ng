@@ -1,9 +1,10 @@
 # Build a disc image of examples/courtyard and read it back the way a PS1
 # does: raw Mode 2 Form 1 sectors (sync, BCD address, subheader twice, EDC,
 # P/Q parity), then the ISO 9660 tree, then the files psxsplash's CD-ROM
-# loader opens (SCENE0/SCENE_0.{SPK,VRM,SPU};1).
+# loader opens (SCENE0/SCENE_0.{SPK,VRM,SPU};1); then a disc of two scenes,
+# the second under SCENE1/SCENE_1.*.
 # usage: python3 disccheck.py <splashpack-cli>
-import os, struct, subprocess, sys, tempfile
+import json, os, struct, subprocess, sys, tempfile
 
 cli = sys.argv[1]
 here = os.path.dirname(os.path.abspath(__file__))
@@ -202,6 +203,53 @@ lt = struct.unpack_from('<I', pvd, 140)[0]
 pt = sector(lt)
 check('path table root', struct.unpack_from('<I', pt, 2)[0] == root_lba)
 check('path table SCENE0', s0 and pt[18:24] == b'SCENE0' and struct.unpack_from('<I', pt, 12)[0] == s0[0], pt[:24])
+
+# Two scenes: each lands under SCENE<i>/SCENE_<i>, in the order given, and each
+# is the export of its own scene. The second is the courtyard with fog on, so
+# the two packs differ.
+project = os.path.dirname(scene)
+cave = os.path.join(tmp, 'cave.scene')
+doc = json.load(open(scene, encoding='utf-8'))
+doc['settings'].setdefault('fog', {})['enabled'] = True
+json.dump(doc, open(cave, 'w', encoding='utf-8'))
+ref1 = os.path.join(tmp, 'ref1.splashpack')
+r5 = subprocess.run([cli, 'export', cave, '--project', project, '-o', ref1, '--lua-bytecode'], capture_output=True, text=True)
+check('reference export of the second scene', r5.returncode == 0, r5.stderr)
+two = os.path.join(tmp, 'two.bin')
+r4 = subprocess.run([cli, 'disc', scene, cave, '--project', project, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', two],
+                    capture_output=True, text=True)
+check('two-scene disc exits 0', r4.returncode == 0, r4.stderr)
+if r4.returncode == 0:
+    raw = open(two, 'rb').read()
+    n = len(raw) // 2352
+    check('two-scene disc: whole raw sectors, EDC on every sector',
+          len(raw) % 2352 == 0 and all(struct.unpack_from('<I', raw, i * 2352 + 0x818)[0] ==
+                                       edc(raw[i * 2352 + 16:i * 2352 + 0x818]) for i in range(n)))
+    user = b''.join(raw[i * 2352 + 24:i * 2352 + 24 + 2048] for i in range(n))
+    pvd = sector(16)
+    root_lba = struct.unpack_from('<I', pvd, 158)[0]
+    root = records(root_lba, struct.unpack_from('<I', pvd, 166)[0])
+    check('volume name from the first scene', pvd[40:49] == b'COURTYARD', pvd[40:72])
+    packs = {}
+    for i, base in ((0, ref), (1, ref1)):
+        d = root.get(b'SCENE%d' % i)
+        check('SCENE%d is a directory' % i, d is not None and d[2] == 2, root.keys())
+        if not d:
+            continue
+        sub = records(d[0], d[1])
+        for ext3, ext in (('SPK', '.splashpack'), ('VRM', '.vram'), ('SPU', '.spu')):
+            name = b'SCENE_%d.%s;1' % (i, ext3.encode())
+            e = sub.get(name)
+            got = e and user[e[0] * 2048:e[0] * 2048 + e[1]]
+            want = open(base[:-len('.splashpack')] + ext, 'rb').read()
+            check('SCENE%d/%s = export of scene %d' % (i, name.decode(), i), got == want, e)
+            if ext3 == 'SPK':
+                packs[i] = got
+                # Magic and version, as scene 0's pack has them.
+                check('SCENE%d/%s has the splashpack header' % (i, name.decode()), bool(got) and got[:2] == b'SP' and
+                      got[:4] == open(ref, 'rb').read()[:4], got and got[:4])
+    check('the two scenes are different packs', packs.get(0) and packs.get(1) and packs[0] != packs[1])
+    check('no SCENE2', b'SCENE2' not in root, root.keys())
 
 print('%d checks, %d failed' % (checks, fails))
 sys.exit(1 if fails else 0)

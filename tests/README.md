@@ -7,7 +7,10 @@ The exporter is not a port of 2.4.0 and does not try to match its output where 2
 
 `unity/NgParity.cs` builds small scenes in Unity, exports them with 2.4.0 and dumps each one as a
 scene file (`unity/README.md` has the setup). `splashpack-cli` exports the dump, and
-`splashdiff.py` compares the two section by section, matching objects by name.
+`splashdiff.py` compares the two section by section, matching objects by name. It decodes v27, the
+version this exporter writes, including the room block (rooms, portals, room triangle refs, cells);
+sections it does not decode are reported as not compared. The table below was measured with its
+earlier v23 decoder; it now refuses a v23 file. `splashdiffcheck.py` checks it on a scene with rooms.
 
     splashpack-cli export <out>/<case>/ir/scene.scene -o cpp/<case>.splashpack \
         --order-from <out>/<case>/unity/scene.splashpack

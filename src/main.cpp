@@ -73,9 +73,10 @@ struct Action {
     bool hold = false;  // a drag that never lets go (mid-drag screenshots)
     bool importCancel = false;  // a Click on the status bar's import Cancel, wherever it was drawn last frame
     // "@name[,dx,dy]" for x,y: the centre (plus dx, dy) of the control ui::nameRect() named, as the frame
-    // before the action drew it (a Click, DoubleClick or Move).
+    // before the action drew it (a Click, DoubleClick or Move). A Drag takes "@name,dx0,dy0,dx1,dy1":
+    // from the centre plus dx0, dy0 to the centre plus dx1, dy1.
     std::string target;
-    float dx = 0, dy = 0;
+    float dx = 0, dy = 0, dx1 = 0, dy1 = 0;
     std::string text, text2;  // Text: the characters; Drop: the file; Shot: the PNG to write; CopyFile: from, to
     int waitFrames = 0;
 };
@@ -305,7 +306,16 @@ Args parse(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--drag") || !std::strcmp(argv[i], "--drag-hold")) {
             Action act(Action::Drag);
             act.hold = !std::strcmp(argv[i], "--drag-hold");
-            std::sscanf(next(), "%f,%f,%f,%f,%d", &act.x0, &act.y0, &act.x1, &act.y1, &act.button);
+            const char* v = next();
+            if (v[0] == '@') {
+                std::string s = v + 1;
+                const size_t comma = s.find(',');
+                if (comma != std::string::npos)
+                    std::sscanf(s.c_str() + comma + 1, "%f,%f,%f,%f", &act.dx, &act.dy, &act.dx1, &act.dy1);
+                act.target = s.substr(0, comma);
+            } else {
+                std::sscanf(v, "%f,%f,%f,%f,%d", &act.x0, &act.y0, &act.x1, &act.y1, &act.button);
+            }
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--wheel")) {
             Action act(Action::Wheel);
@@ -657,6 +667,7 @@ int main(int argc, char** argv) {
                     const ImVec2 c = it == ui::namedRects().end() ? ImVec2(-100, -100) : ImVec2(it->second.GetCenter().x + a.dx, it->second.GetCenter().y + a.dy);
                     if (a.kind == Action::Move) a.x1 = c.x, a.y1 = c.y;
                     else a.x0 = c.x, a.y0 = c.y;
+                    if (a.kind == Action::Drag) a.x1 = c.x - a.dx + a.dx1, a.y1 = c.y - a.dy + a.dy1;
                 }
                 if (frame >= actionStart[i] && frame < actionStart[i] + actionFrames(a)) playAction(io, a, frame - actionStart[i]);
                 if (frame != actionStart[i] || held) continue;

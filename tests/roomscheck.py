@@ -7,13 +7,15 @@
 # hides them. Controls are clicked by name (--click @obj.pa); the overlay
 # pixels are classified by colour the way gizmocheck.py does.
 # Renaming a Room (F2 in the hierarchy, or the inspector title) carries the
-# portals naming it along.
-# usage: python3 roomscheck.py <splashedit> [keep.png] [rename.png]   (needs a display: xvfb-run -a)
+# portals naming it along. A Room that is off is skipped by the export, so
+# the pickers mark it "(off)".
+# usage: python3 roomscheck.py <splashedit> [keep.png] [rename.png] [off.png]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
 editor = os.path.abspath(sys.argv[1])
 keep = sys.argv[2] if len(sys.argv) > 2 else None
 keep_rename = sys.argv[3] if len(sys.argv) > 3 else None
+keep_off = sys.argv[4] if len(sys.argv) > 4 else None
 here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
@@ -81,10 +83,10 @@ def room(size):
     return {'type': 'room', 'size': list(size), 'offset': [0, 0, 0]}
 
 
-def project_copy(linked):
+def project_copy(linked, off=False):
     """The courtyard split in two Rooms, West and East, with a Door portal
     between them facing +X (unlinked unless `linked`), and two bare objects,
-    Hall and Gap, to add components to."""
+    Hall and Gap, to add components to. With `off`, East is switched off."""
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     scene = os.path.join(project, 'courtyard.scene')
@@ -96,6 +98,8 @@ def project_copy(linked):
                             (0, 0.70710678, 0, 0.70710678)))
     s['objects'].append(obj('Hall', (0, 0, 8), []))
     s['objects'].append(obj('Gap', (0, 0, 9), []))
+    if off:
+        s['objects'][-4]['active'] = False  # East
     json.dump(s, open(scene, 'w', encoding='utf-8'), indent=2)
     return project
 
@@ -104,12 +108,12 @@ mid = None
 last_shot = None
 
 
-def run(select, args, linked=False, env=None):
+def run(select, args, linked=False, env=None, off=False):
     """Runs the editor on a fresh copy with `select` selected, then `args`
     and Ctrl+S; returns the saved scene and the editor's output lines
     (without its list of named controls)."""
     global mid, last_shot
-    project = project_copy(linked)
+    project = project_copy(linked, off)
     scene = os.path.join(project, 'courtyard.scene')
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
     args = [a.replace('{scene}', scene).replace('{snap}', snap) for a in args]
@@ -121,6 +125,7 @@ def run(select, args, linked=False, env=None):
     lines = (r.stdout + r.stderr).strip().splitlines()
     missing = [l for l in lines if 'no such control drawn' in l or 'no object named' in l]
     check('every control the script names was drawn', not missing, missing)
+    run.controls = [l.split(' at ')[0][8:] for l in lines if l.startswith('control ')]
     return json.load(open(scene, encoding='utf-8')), [l for l in lines if not l.startswith('control ')]
 
 
@@ -201,8 +206,21 @@ check('inspector rename of East prints that one portal followed', 'rename: East 
 check('the portal follows the inspector rename', portal(s) == ('West', 'Kitchen', 2, 3) and
       printed[-1:] == ['portal: Door a=West b=Kitchen 2x3'], (portal(s), printed))
 
+# 5. Rooms that are off stay in the pickers, marked, and a pick of one stores the plain name.
+s, out = run('Door', ['--wait', '5'] + click('obj.pa'), linked=True, off=True)
+if keep_off and last_shot: shutil.copyfile(last_shot, keep_off)
+printed = [l for l in out if l.startswith('portal: Door')]
+check('a portal naming an off Room says so, and the export flags it', printed[-1:] == ['portal: Door a=West b=East(off) 2x3 problems 1'],
+      printed)
+offered = sorted(c for c in run.controls if c.startswith('pa/'))
+check('the picker marks the off Room, and only that one', offered == ['pa/East  (off)', 'pa/None', 'pa/West'], offered)
+s, out = run('Door', click('obj.pa') + click('pa/East  (off)'), linked=True, off=True)
+printed = [l for l in out if l.startswith('portal: Door')]
+check('picking an off Room saves its plain name', portal(s) == ('East', 'East', 2, 3) and
+      printed[-1:] == ['portal: Door a=East(off) b=East(off) 2x3 problems 2'], (portal(s), printed))
 
-# 5. The viewport draws the rooms and the portal; the box toggle hides them.
+
+# 6. The viewport draws the rooms and the portal; the box toggle hides them.
 def shot(name, args):
     project = shot.project
     path = os.path.join(project, name + '.png')

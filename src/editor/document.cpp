@@ -522,6 +522,45 @@ int Document::editMany(const std::vector<ObjectPath>& paths, const std::function
     return n;
 }
 
+int Document::renameObject(const ObjectPath& path, const std::string& name) {
+    const splash::Object* target = object(path);
+    if (!target || name.empty() || target->name == name) return -1;
+    const std::string oldName = target->name;
+    bool retarget = target->room.has_value();
+    std::vector<ObjectPath> portals;
+    for (const ObjectPath& p : flatPaths()) {
+        const splash::Object* o = object(p);
+        if (p != path && o->room && o->name == oldName) retarget = false;
+        if (o->portal && (o->portal->roomA == oldName || o->portal->roomB == oldName)) portals.push_back(p);
+    }
+    if (!retarget) portals.clear();
+    auto follow = [&](splash::Object& ob) {
+        if (ob.portal && ob.portal->roomA == oldName) ob.portal->roomA = name;
+        if (ob.portal && ob.portal->roomB == oldName) ob.portal->roomB = name;
+    };
+    // One command per path: the renamed object retargets its own portal (if
+    // it has one) in its rename edit.
+    const bool selfPortal = std::find(portals.begin(), portals.end(), path) != portals.end();
+
+    std::vector<std::unique_ptr<Command>> parts;
+    auto add = [&](const ObjectPath& p, const std::function<void(splash::Object&)>& fn) {
+        splash::Object before = shallowCopy(*objectMut(p));
+        splash::Object after = before;
+        fn(after);
+        after.children.clear();
+        parts.push_back(std::make_unique<EditCommand>(p, std::move(before), std::move(after), std::string()));
+    };
+    add(path, [&](splash::Object& ob) {
+        ob.name = name;
+        if (selfPortal) follow(ob);
+    });
+    for (const ObjectPath& p : portals)
+        if (p != path) add(p, follow);
+    const int n = int(portals.size());
+    execute(std::make_unique<GroupCommand>(std::move(parts)));
+    return n;
+}
+
 int Document::replaceTrees(std::vector<std::pair<ObjectPath, splash::Object>> trees) {
     std::vector<std::unique_ptr<Command>> parts;
     for (auto& [path, obj] : trees) {

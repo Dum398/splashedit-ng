@@ -133,6 +133,12 @@ public:
     bool edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey = {});
     // Runs `fn` on each object in `paths` as one undo step. Returns how many it changed.
     int editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn);
+    // Renames the object at `path` as one undo step. Portals name their rooms
+    // by object name, so when the object is a Room and no other Room still
+    // carries the old name, every Portal's roomA/roomB that held the old name
+    // follows it. Returns -1 if the path is invalid or the name is empty or
+    // unchanged, else how many portals were retargeted.
+    int renameObject(const ObjectPath& path, const std::string& name);
     // Puts each object, children included, in place of the one at its path,
     // as one undo step. The paths must not lie inside one another. A
     // selection or pin inside a replaced object that no longer resolves moves

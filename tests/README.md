@@ -479,7 +479,10 @@ the `portal: Door a=... b=... WxH [problems N]` lines the editor prints under sc
 takes the width back. With the portal linked, West's `room: West N triangles, M cells, K portals` line
 must follow a first-frame placeholder: `SPLASHEDIT_EXPORT_DELAY_MS` stretches the live export so a fast
 build still shows the placeholder, and `--wait-export` holds the script until the export matches the
-scene. Last, the scene view is shot with the overlay toggle (`vp.gizmos`)
+scene. A Room switched off (East), and a Room that is on under an off parent (Wing > Annex), are
+listed `<name>  (off)` in the pickers; selecting Annex draws the inspector caption `obj.inheritedoff`
+inside `obj.panel`, prints `object: Annex off via Wing` once, and its room line names Wing once the
+export lands. Last, the scene view is shot with the overlay toggle (`vp.gizmos`)
 on and off and the room boxes and portal opening are counted by colour, as in `gizmocheck.py`.
 
     python3 roomscheck.py <splashedit> [keep.png]

@@ -1953,7 +1953,30 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (const NavRegion& r : nav.regions) {
         std::vector<Vec3>& o = st.navOutlines.emplace_back();
         for (const Vec2& v : r.verts) o.push_back({v.x, r.planeA * v.x + r.planeB * v.y + r.planeD, v.y});
+        ExportStats::NavRegionInfo& info = st.navInfo.emplace_back();
+        float cx = 0, cz = 0;
+        for (const Vec2& v : r.verts) {
+            cx += v.x;
+            cz += v.y;
+        }
+        if (!r.verts.empty()) {
+            cx /= float(r.verts.size());
+            cz /= float(r.verts.size());
+        }
+        info.centroid = {cx, r.planeA * cx + r.planeB * cz + r.planeD, cz};
+        info.floorY = info.centroid.y;
+        info.room = r.roomIndex == 0xFF ? -1 : int(r.roomIndex);
+        info.surface = int(r.surfaceType);
+        info.platform = (r.flags & 1) != 0;
+        for (int p = r.portalStart; p < r.portalStart + r.portalCount; p++) {
+            const NavPortal& np2 = nav.portals[size_t(p)];
+            info.portals.push_back({np2.neighborRegion, np2.heightDelta,
+                                    {np2.a.x, r.planeA * np2.a.x + r.planeB * np2.a.y + r.planeD, np2.a.y},
+                                    {np2.b.x, r.planeA * np2.b.x + r.planeB * np2.b.y + r.planeD, np2.b.y}});
+        }
     }
+    st.navPortals = int(nav.portals.size());
+    st.navIslands = roomBoxes(roomObjs).empty();
     if (st.navWanted && nav.regions.empty())
         res.warnings.push_back(navEmptyWarning());
 

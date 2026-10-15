@@ -104,6 +104,7 @@ struct ExportStats {
     // camera that ignores the pad.
     bool navWanted = false;            // the scene has a Player or Navigation object
     int navRegions = 0;
+    int navPortals = 0;  // one per direction: a shared edge counts once for each side
     float navCellSize = 0, navCellSizeAsked = 0;  // metres
     float navExtentX = 0, navExtentZ = 0;         // walkable geometry, metres
 
@@ -124,6 +125,24 @@ struct ExportStats {
     std::vector<float> streamRegionFloor;  // per region, its lowest point in world units (Y up)
     // Each baked nav region's outline, in world metres (Y up), for the viewport.
     std::vector<std::vector<Vec3>> navOutlines;
+    // Each baked nav region's facts for the inspector, in navOutlines order.
+    struct NavPortalInfo {
+        int neighbor = 0;
+        float heightDelta = 0;  // metres
+        Vec3 a, b;              // the shared edge, world metres, Y on this region's floor plane
+    };
+    struct NavRegionInfo {
+        Vec3 centroid;  // XZ = vertex average, Y on the region's floor plane
+        float floorY = 0;  // centroid.y
+        // Index into rooms, -1 for none. When navIslands is set the scene has
+        // no Room objects and this is the region's connectivity island.
+        int room = -1;
+        int surface = 0;  // 0 flat, 1 ramp, 2 stairs
+        bool platform = false;
+        std::vector<NavPortalInfo> portals;
+    };
+    std::vector<NavRegionInfo> navInfo;
+    bool navIslands = false;
     std::vector<StreamWarning> streamWarnings;  // also in ExportResult::warnings, as one line each
 
     // Rooms and portals (Room objects). Empty when the scene has none, and

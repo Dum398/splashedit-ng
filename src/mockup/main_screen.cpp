@@ -4294,7 +4294,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         // One dim line, then room for the error, there from the first frame
         // so nothing below moves when one shows.
         const std::string about = cur == 0   ? "No licence data: boots in emulators and on modded consoles"
-                                  : cur == 1 ? "psxsplash licence (shows the psxsplash logo on boot)"
+                                  : cur == 1 ? "psxsplash licence: the boot logo reads Created with psxsplash"
                                              : licenceFile;
         {
             // Fixed heights (two lines, then three), whatever the text wraps to.

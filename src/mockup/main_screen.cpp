@@ -110,6 +110,17 @@ static std::filesystem::path playDir() {
 }
 
 static void notify(State& st, std::string msg, bool bad);
+static void scriptLine(const char* tag, const std::string& line);
+
+// Renames from the hierarchy (F2) or the inspector title: portals naming a
+// renamed Room follow it. Scripted runs print `rename: <old> -> <new> portals N`.
+static void renameFromUi(editor::Document& doc, const editor::ObjectPath& path, const std::string& typed) {
+    const splash::Object* o = doc.object(path);
+    if (!o) return;
+    const std::string before = o->name;
+    const int n = doc.renameObject(path, typed);
+    if (n >= 0) scriptLine(nullptr, "rename: " + before + " -> " + typed + " portals " + std::to_string(n));
+}
 
 // A build reads scripts from disk, so the script editor's unsaved tabs are
 // saved first: what runs is what is on screen. False if one could not be.
@@ -833,7 +844,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             std::string typed;
             TextEdit res = textEdit("rename", field, fonts().medium, type::body, lx, field.Max.x - space::xs, &typed);
             if (res == TextEdit::Commit && !typed.empty() && typed != o.name)
-                c.doc.edit(path, [&](splash::Object& ob) { ob.name = typed; });
+                renameFromUi(c.doc, path, typed);
             if (res != TextEdit::Editing) c.st.renaming = false;
         }
         c.y += size::row;
@@ -5088,11 +5099,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             ImVec2 ns = measure(f.semibold, type::title, o->name.c_str());
             ImRect hit(np, np + ImVec2(std::max(ns.x, 40.0f), ns.y));
             interact("objname", hit);
+            nameRect("obj.name", hit);
             tooltip("Double-click to rename (F2)");
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) beginTextEdit("objname", o->name);
             text(dl, np, f.semibold, type::title, color::text, o->name.c_str());
         } else if (res == TextEdit::Commit && !typed.empty() && typed != o->name) {
-            doc.edit(path, [&](splash::Object& ob) { ob.name = typed; });
+            renameFromUi(doc, path, typed);
         }
     }
     text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, where.c_str());

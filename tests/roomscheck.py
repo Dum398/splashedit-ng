@@ -6,11 +6,14 @@
 # boxes and the portal's opening and arrow, and the box toggle (vp.gizmos)
 # hides them. Controls are clicked by name (--click @obj.pa); the overlay
 # pixels are classified by colour the way gizmocheck.py does.
-# usage: python3 roomscheck.py <splashedit> [keep.png]   (needs a display: xvfb-run -a)
+# Renaming a Room (F2 in the hierarchy, or the inspector title) carries the
+# portals naming it along.
+# usage: python3 roomscheck.py <splashedit> [keep.png] [rename.png]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
 editor = os.path.abspath(sys.argv[1])
 keep = sys.argv[2] if len(sys.argv) > 2 else None
+keep_rename = sys.argv[3] if len(sys.argv) > 3 else None
 here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
@@ -98,13 +101,14 @@ def project_copy(linked):
 
 
 mid = None
+last_shot = None
 
 
 def run(select, args, linked=False, env=None):
     """Runs the editor on a fresh copy with `select` selected, then `args`
     and Ctrl+S; returns the saved scene and the editor's output lines
     (without its list of named controls)."""
-    global mid
+    global mid, last_shot
     project = project_copy(linked)
     scene = os.path.join(project, 'courtyard.scene')
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
@@ -112,6 +116,7 @@ def run(select, args, linked=False, env=None):
     cmd = [editor, '--size', '1600x960', '--project', project, '--select', select, '--wait', '5'] + args + [
         '--key', 'ctrl+s', '--wait', '10', '--screenshot', os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=dict(ENV, **(env or {})), timeout=180)
+    last_shot = cmd[-1]
     mid = json.load(open(snap, encoding='utf-8')) if os.path.exists(snap) else None
     lines = (r.stdout + r.stderr).strip().splitlines()
     missing = [l for l in lines if 'no such control drawn' in l or 'no object named' in l]
@@ -180,8 +185,24 @@ m = re.match(r'room: West (\d+) triangles?, (\d+) cells?, (\d+) portals?$', room
 check('West shows its triangles, cells and the one portal', m and int(m.group(1)) > 0 and int(m.group(2)) >= 1 and m.group(3) == '1',
       rooms)
 
+# 4. Renaming a Room retargets the portal naming it: F2 in the hierarchy, then the inspector title.
+s, out = run('West', ['--key', 'f2', '--wait', '3', '--key', 'ctrl+a', '--text', 'Lobby', '--key', 'enter', '--wait', '3'] +
+             click('tree.Door') + ['--wait', '5'], linked=True)
+if keep_rename and last_shot: shutil.copyfile(last_shot, keep_rename)
+printed = [l for l in out if l.startswith('portal: Door')]
+check('F2 rename of West prints that one portal followed', 'rename: West -> Lobby portals 1' in out,
+      [l for l in out if l.startswith('rename:')])
+check('the saved portal names the renamed Room', portal(s) == ('Lobby', 'East', 2, 3), portal(s))
+check('the portal inspector shows the new name with no missing room', printed[-1:] == ['portal: Door a=Lobby b=East 2x3'], printed)
+s, out = run('East', typed('obj.name', 'Kitchen') + click('tree.Door') + ['--wait', '5'], linked=True)
+printed = [l for l in out if l.startswith('portal: Door')]
+check('inspector rename of East prints that one portal followed', 'rename: East -> Kitchen portals 1' in out,
+      [l for l in out if l.startswith('rename:')])
+check('the portal follows the inspector rename', portal(s) == ('West', 'Kitchen', 2, 3) and
+      printed[-1:] == ['portal: Door a=West b=Kitchen 2x3'], (portal(s), printed))
 
-# 4. The viewport draws the rooms and the portal; the box toggle hides them.
+
+# 5. The viewport draws the rooms and the portal; the box toggle hides them.
 def shot(name, args):
     project = shot.project
     path = os.path.join(project, name + '.png')

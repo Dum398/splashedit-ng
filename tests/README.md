@@ -459,7 +459,9 @@ between them. It adds a Room and a Portal through the Add component picker, pick
 and Room B from their dropdowns (`obj.pa`, `pa/West`), types its width, and reads the saved scene and
 the `portal: Door a=... b=... WxH [problems N]` lines the editor prints under scripted runs; one Ctrl+Z
 takes the width back. With the portal linked, West's `room: West N triangles, M cells, K portals` line
-must follow a first-frame placeholder. Last, the scene view is shot with the overlay toggle (`vp.gizmos`)
+must follow a first-frame placeholder: `SPLASHEDIT_EXPORT_DELAY_MS` stretches the live export so a fast
+build still shows the placeholder, and `--wait-export` holds the script until the export matches the
+scene. Last, the scene view is shot with the overlay toggle (`vp.gizmos`)
 on and off and the room boxes and portal opening are counted by colour, as in `gizmocheck.py`.
 
     python3 roomscheck.py <splashedit> [keep.png]

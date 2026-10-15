@@ -100,7 +100,7 @@ def project_copy(linked):
 mid = None
 
 
-def run(select, args, linked=False):
+def run(select, args, linked=False, env=None):
     """Runs the editor on a fresh copy with `select` selected, then `args`
     and Ctrl+S; returns the saved scene and the editor's output lines
     (without its list of named controls)."""
@@ -111,7 +111,7 @@ def run(select, args, linked=False):
     args = [a.replace('{scene}', scene).replace('{snap}', snap) for a in args]
     cmd = [editor, '--size', '1600x960', '--project', project, '--select', select, '--wait', '5'] + args + [
         '--key', 'ctrl+s', '--wait', '10', '--screenshot', os.path.join(project, 'shot.png')]
-    r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=180)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=dict(ENV, **(env or {})), timeout=180)
     mid = json.load(open(snap, encoding='utf-8')) if os.path.exists(snap) else None
     lines = (r.stdout + r.stderr).strip().splitlines()
     missing = [l for l in lines if 'no such control drawn' in l or 'no object named' in l]
@@ -169,7 +169,10 @@ check('the same room on both sides is flagged as the exporter flags it',
       portal(s) == ('East', 'East', 2, 3) and printed[-1:] == ['portal: Door a=East b=East 2x3 problems 1'], (portal(s), printed))
 
 # 3. Once the portal is linked the export builds the rooms; West shows its share.
-s, out = run('Door', PICK + click('tree.West') + ['--wait', '40'])
+# The export is stretched so even a Release build shows the placeholder first; the export that
+# started before the picks (portal unlinked, so it fails) finishes before the linked one runs;
+# --wait-export holds until the result matches the scene, whatever the frame rate.
+s, out = run('Door', PICK + click('tree.West') + ['--wait-export'], env={'SPLASHEDIT_EXPORT_DELAY_MS': '1000'})
 rooms = [l for l in out if l.startswith('room: West')]
 check('the room line is there before the export lands', rooms[:1] in (['room: West Not exported yet'],
                                                                       ['room: West Export failed: see problems']), rooms)

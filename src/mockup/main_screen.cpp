@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 
+#include "audio.hh"
 #include "budget.hh"
 #include "disc.hh"
 #include "rooms.hh"
@@ -5055,6 +5056,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         return;
     }
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    // The object inspector's visible body: scripted tests check controls lie in it.
+    nameRect("obj.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
     // Taller than the panel (several components), it scrolls with the wheel;
     // inspecting another object starts back at the top.
     static float scroll = 0;
@@ -5121,10 +5124,16 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
         y += space::sm + space::md;
     };
-    // Returns true on the frame its fix button is clicked.
+    // Returns true on the frame its fix button is clicked. Named obj.<id>,
+    // its fix button obj.<id>.fix, for scripted tests.
     auto card = [&](const char* id, const char* title, const std::string& body, const char* fix) {
         bool fixed = false;
-        float h = problemCard(id, ImVec2(x0 + space::sm, y + space::xs), x1 - x0 - space::sm * 2, title, body.c_str(), fix, &fixed);
+        ImRect fr;
+        const ImVec2 at(x0 + space::sm, y + space::xs);
+        const float w = x1 - x0 - space::sm * 2;
+        float h = problemCard(id, at, w, title, body.c_str(), fix, &fixed, &fr);
+        nameRect(std::string("obj.") + id, ImRect(at, at + ImVec2(w, h)));
+        nameRect(std::string("obj.") + id + ".fix", fr);
         y += h + space::sm;
         return fixed;
     };
@@ -5356,6 +5365,21 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         }
     }
 
+    // A line printed once per change under scripted runs (the scene: line's
+    // pattern). An empty line prints nothing and lets the next one print again.
+    auto report = [&](const char* tag, const std::string& line) {
+        if (!namedRectsOn()) return;
+        static std::map<std::string, std::string> reported;
+        std::string& last = reported[tag];
+        if (last == line) return;
+        last = line;
+        if (line.empty()) return;
+        std::printf("%s\n", line.c_str());
+        std::fflush(stdout);
+    };
+    // This object's mesh colour and audio lines; cleared when it has none.
+    std::string meshColLine, audioLine;
+
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
     // Named obj.<id> for scripted tests.
@@ -5430,6 +5454,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                     icon::sun, lightingLabel(m.vertexColors), {"Baked vertex", "Flat", "Mesh colours"}, curMode);
         if (pickMode >= 0 && modes[pickMode] != m.vertexColors)
             doc.edit(path, [&](splash::Object& ob) { ob.mesh->vertexColors = modes[pickMode]; });
+        if (doc.missingMeshColors(m)) {
+            meshColLine = "mesh: colours missing " + m.mesh;
+            std::string body = modelName + " has no vertex colours, so it shows flat grey (127, 127, 127) on the console.";
+            if (card("fixmeshcol", "No mesh colours", body, "Use baked lighting"))
+                doc.edit(path, [](splash::Object& ob) { ob.mesh->vertexColors = splash::VertexColorMode::Baked; });
+        }
         // Smoothed normals only feed baked vertex lighting.
         const bool baked = m.vertexColors == splash::VertexColorMode::Baked;
         const float smoothTop = y;
@@ -5668,16 +5698,6 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             nameRect(name + "." + "xyz"[i],
                      ImRect(ImVec2(r.Min.x + i * (w + gap), r.Min.y), ImVec2(r.Min.x + i * (w + gap) + w, r.Max.y)));
     };
-    // A line printed once per change under scripted runs (the scene: line's pattern).
-    auto report = [&](const char* tag, const std::string& line) {
-        if (!namedRectsOn()) return;
-        static std::map<std::string, std::string> reported;
-        std::string& last = reported[tag];
-        if (last == line) return;
-        last = line;
-        std::printf("%s\n", line.c_str());
-        std::fflush(stdout);
-    };
     if (o->room) {
         const splash::RoomComponent& rm = *o->room;
         top = y;
@@ -5862,6 +5882,28 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                        found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr) |
             fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string()))
             pickAsset(AssetSlot::Clip, path);
+        // The source and what export makes of it: trim, resample, then ADPCM.
+        if (const editor::AudioInfo* ai = found ? doc.audio(a.clip) : nullptr; ai && ai->status == editor::AssetStatus::Ok && ai->rate > 0) {
+            const size_t bytes = splash::spuAdpcmBytes(splash::resampledCount(size_t(ai->frames), ai->rate, a.sampleRate), a.loop);
+            const double secs = double(ai->frames) / double(ai->rate);
+            char sec[32];
+            std::snprintf(sec, sizeof sec, "%.2f", secs);
+            const std::string chans = ai->channels == 1 ? "mono" : ai->channels == 2 ? "stereo" : std::to_string(ai->channels) + " ch";
+            // Two lines, the source then the export, so it fits the field's width.
+            const std::string src = std::to_string(ai->rate) + " Hz, " + sec + " s, " + chans;
+            const std::string out = "-> " + std::to_string(a.sampleRate) + " Hz ADPCM, " + (a.trimLeadingSilence ? "at most " : "") +
+                                    fmtKB(int(bytes));
+            const float lineH = 18;
+            const ImRect ir = row("lainfo", "Source", "The WAV file as it is, and the sound RAM the exported clip takes. With Trim silence "
+                                                    "it can take less: how much depends on the file's quiet start.");
+            y += lineH;
+            nameRect("obj.ainfo", ImRect(ir.Min, ImVec2(ir.Max.x, ir.Max.y + lineH)));
+            const float ty = centerY(f.regular, type::body, ir.Min.y, ir.Max.y);
+            text(dl, ImVec2(ir.Min.x, ty), f.regular, type::body, color::textDim, src.c_str());
+            text(dl, ImVec2(ir.Min.x, ty + lineH), f.regular, type::body, color::textDim, out.c_str());
+            audioLine = "audio: source " + std::to_string(ai->rate) + " " + sec + " " + std::to_string(ai->channels) + " adpcm " +
+                        std::to_string(bytes);
+        }
         std::string typed;
         const ImRect nr = row("laname", "Name", "What scripts play it by, as in Audio.Play(\"name\").");
         nameRect("obj.aname", nr);
@@ -5891,6 +5933,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
 
     for (const editor::ComponentInfo& c : editor::components())
         if (removedFlags[static_cast<int>(c.kind)]) toRemove = c.kind;
+
+    report("meshcol", meshColLine);
+    report("audio", audioLine);
 
     // Add component.
     ImRect add(ImVec2(x0, y), ImVec2(x1, y + 34));

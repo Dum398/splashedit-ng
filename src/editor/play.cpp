@@ -38,6 +38,8 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "bios") t.bios = p;
         else if (key == "disc") t.disc = p;
         else if (key == "port") t.port = value;
+        else if (key == "overlay_perf") t.overlayPerf = value == "1";
+        else if (key == "overlay_rooms") t.overlayRooms = value == "1";
     }
     return t;
 }
@@ -50,7 +52,9 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "psxsplash=" << utf8(t.psxsplash) << "\n"
         << "bios=" << utf8(t.bios) << "\n"
         << "disc=" << utf8(t.disc) << "\n"
-        << "port=" << t.port << "\n";
+        << "port=" << t.port << "\n"
+        << "overlay_perf=" << (t.overlayPerf ? 1 : 0) << "\n"
+        << "overlay_rooms=" << (t.overlayRooms ? 1 : 0) << "\n";
     return bool(out);
 }
 
@@ -131,6 +135,25 @@ PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
     return t;
 }
 
+fs::path overlayEngine(const fs::path& engine, bool perf, bool rooms) {
+    if ((!perf && !rooms) || engine.empty()) return engine;
+    fs::path name = engine.stem();
+    name += fromUtf8(perf && rooms ? "-perf-rooms" : perf ? "-perf" : "-rooms");
+    name += engine.extension();
+    return engine.parent_path() / name;
+}
+
+fs::path engineFor(const PlayTools& t) { return overlayEngine(t.psxsplash, t.overlayPerf, t.overlayRooms); }
+
+// "The psxsplash build", naming the overlays it is asked to have.
+static std::string engineWhat(const PlayTools& t) {
+    std::string s = "The psxsplash build";
+    if (t.overlayPerf && t.overlayRooms) s += " with the performance and room debug overlays";
+    else if (t.overlayPerf) s += " with the performance overlay";
+    else if (t.overlayRooms) s += " with the room debug overlay";
+    return s;
+}
+
 std::vector<std::string> missingTools(const PlayTools& t) {
     std::vector<std::string> out;
     std::error_code ec;
@@ -139,7 +162,8 @@ std::vector<std::string> missingTools(const PlayTools& t) {
         else if (!fs::is_regular_file(p, ec)) out.push_back(std::string(what) + " not found: " + utf8(p));
     };
     need(t.redux, "pcsx-redux");
-    need(t.psxsplash, "The psxsplash build (.ps-exe)");
+    if (t.psxsplash.empty()) need(t.psxsplash, "The psxsplash build (.ps-exe)");
+    else need(engineFor(t), engineWhat(t).c_str());
     if (!t.bios.empty() && !fs::is_regular_file(t.bios, ec)) out.push_back("BIOS not found: " + utf8(t.bios));
     return out;
 }
@@ -156,7 +180,7 @@ std::vector<std::string> missingHardwareTools(const PlayTools& t) {
     std::vector<std::string> out;
     std::error_code ec;
     if (t.psxsplash.empty()) out.push_back("The psxsplash build (.ps-exe) is not set.");
-    else if (!fs::is_regular_file(t.psxsplash, ec)) out.push_back("The psxsplash build not found: " + utf8(t.psxsplash));
+    else if (!fs::is_regular_file(engineFor(t), ec)) out.push_back(engineWhat(t) + " not found: " + utf8(engineFor(t)));
     if (t.port.empty()) out.push_back("No serial port is set.");
     return out;
 }
@@ -310,7 +334,7 @@ std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir) {
         a.push_back("-bios");
         a.push_back(utf8(t.bios));
     }
-    a.insert(a.end(), {"-loadexe", utf8(t.psxsplash), "-pcdrv", "-pcdrvbase", utf8(dir)});
+    a.insert(a.end(), {"-loadexe", utf8(engineFor(t)), "-pcdrv", "-pcdrvbase", utf8(dir)});
     return a;
 }
 

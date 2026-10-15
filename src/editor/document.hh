@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -27,6 +28,15 @@ enum class AssetStatus { Ok, Missing, Unreadable };
 struct MeshInfo {
     AssetStatus status = AssetStatus::Missing;
     int triangles = 0;  // sum of submesh index counts / 3, valid when Ok
+    bool hasColors = false;  // vertex colours cover every vertex, as the exporter requires
+    std::string error;
+};
+
+// A WAV clip's header, for the inspector's size estimate.
+struct AudioInfo {
+    AssetStatus status = AssetStatus::Missing;
+    int rate = 0, channels = 0;
+    uint64_t frames = 0;
     std::string error;
 };
 
@@ -207,6 +217,7 @@ public:
     // Cached on load; nullptr when the path is empty.
     const MeshInfo* mesh(const std::string& projectPath) const;
     const TextureInfo* texture(const std::string& projectPath) const;
+    const AudioInfo* audio(const std::string& projectPath) const;
     // Re-reads these files after something rewrote them on disk (a model
     // import), and bumps revision() and assetsId() so views reload them.
     void refreshAssets(const std::vector<std::string>& projectPaths);
@@ -216,11 +227,14 @@ public:
     bool fileExists(const std::string& projectPath) const;
 
     // Something about this object needs attention: a missing or unreadable
-    // mesh, texture or script, or a texture that would lose nothing at 4 bpp.
+    // mesh, texture or script, a texture that would lose nothing at 4 bpp,
+    // or Mesh colours on a mesh without vertex colours.
     bool hasWarning(const splash::Object& o) const;
     // The texture is stored deeper than its colours need: it has at most 16
     // distinct 15-bit colours but is set to 8 or 16 bpp.
     bool couldBe4bpp(const splash::MeshComponent& m) const;
+    // Set to Mesh colours, but the mesh has none, so it exports flat grey.
+    bool missingMeshColors(const splash::MeshComponent& m) const;
 
     std::filesystem::path resolve(const std::string& projectPath) const { return m_project / projectPath; }
 
@@ -249,6 +263,7 @@ private:
     UiSelection m_uiSelection;
     std::map<std::string, MeshInfo> m_meshes;
     std::map<std::string, TextureInfo> m_textures;
+    std::map<std::string, AudioInfo> m_audio;
     std::map<std::string, bool> m_files;
     std::map<std::string, std::vector<std::string>> m_importWarnings;  // by project-relative model path
 

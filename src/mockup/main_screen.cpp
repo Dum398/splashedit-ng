@@ -5377,8 +5377,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         std::printf("%s\n", line.c_str());
         std::fflush(stdout);
     };
-    // This object's mesh colour and audio lines; cleared when it has none.
-    std::string meshColLine, audioLine;
+    // This object's mesh colour, audio and skin lines; cleared when it has none.
+    std::string meshColLine, audioLine, skinLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -5928,6 +5928,48 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             pickAsset(AssetSlot::SkinClips, path);
         number("sfps", "Bake rate", "Frames per second the clips are sampled at.", static_cast<float>(sk.fps), "fps", "sfps", 1, 30,
                [](splash::Object& ob, float v) { ob.skin->fps = static_cast<int>(std::lround(v)); });
+        // What the last live export baked for this object, matched by name.
+        // The height is fixed by the clip list, so nothing below moves when
+        // the export lands.
+        {
+            const std::optional<splash::ExportResult>& lr = st.live.result();
+            const splash::ExportStats::SkinInfo* si = nullptr;
+            if (lr && lr->ok())
+                for (const splash::ExportStats::SkinInfo& k : lr->stats.skins)
+                    if (k.object == o->name && k.clips.size() == sk.clips.size()) si = &k;
+            const float lineH = 18;
+            const size_t lines = sk.clips.size() + 2;
+            const ImRect ir = row("lsinfo", "Baked", "What the export makes of the clips at this bake rate: the bones, the triangles, "
+                                                    "and the bytes each clip and the whole skin take in the splashpack.");
+            y += lineH * float(lines - 1);
+            nameRect("obj.skininfo", ImRect(ir.Min, ImVec2(ir.Max.x, ir.Max.y + lineH * float(lines - 1))));
+            const float ty = centerY(f.regular, type::body, ir.Min.y, ir.Max.y);
+            auto line = [&](size_t i, const std::string& t) {
+                text(dl, ImVec2(ir.Min.x, ty + lineH * float(i)), f.regular, type::body, color::textDim, t.c_str());
+            };
+            if (!si) {
+                line(0, "Sizes appear after the next export.");
+            } else {
+                line(0, "Bones " + std::to_string(si->bones) + ", " + std::to_string(si->triangles) + " triangles");
+                skinLine = "skin: " + si->object + " bones " + std::to_string(si->bones) + " clips " +
+                           std::to_string(si->clips.size()) + " bytes " + std::to_string(si->bytes);
+                for (size_t i = 0; i < si->clips.size(); i++) {
+                    const splash::ExportStats::SkinClipInfo& c = si->clips[i];
+                    line(i + 1, c.name + "  " + std::to_string(c.frames) + " frames @ " + std::to_string(c.fps) + " fps, " +
+                                    fmtKB(int(c.bytes)));
+                    skinLine += "\nskin: clip " + c.name + " frames " + std::to_string(c.frames) + " bytes " + std::to_string(c.bytes);
+                }
+                line(lines - 1, "Skin data " + fmtKB(int(si->bytes)));
+                // A clip this long is most of the skin's RAM; usually the rate
+                // or the clip's range is the mistake.
+                std::string body;
+                for (const splash::ExportStats::SkinClipInfo& c : si->clips)
+                    if (c.frames > 1000)
+                        body += std::string(body.empty() ? "" : " ") + "Clip '" + c.name + "' bakes " + std::to_string(c.frames) +
+                                " frames (" + fmtKB(int(c.bytes)) + ").";
+                if (!body.empty()) card("skinlong", "Long clip", body + " Lower the bake rate or trim the clip.", nullptr);
+            }
+        }
         sectionEnd(top);
     }
 
@@ -5936,6 +5978,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
 
     report("meshcol", meshColLine);
     report("audio", audioLine);
+    report("skin", skinLine);
 
     // Add component.
     ImRect add(ImVec2(x0, y), ImVec2(x1, y + 34));

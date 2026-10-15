@@ -92,6 +92,7 @@ jobs:
           "$py" tests/importcheck.py "$cli"
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
+          "$py" tests/bvhstatscheck.py "$cli"
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Game view keys

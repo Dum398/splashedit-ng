@@ -123,6 +123,13 @@ that scene's own export, and no `SCENE2`.
 
     python3 disccheck.py <splashpack-cli>
 
+`bvhstatscheck.py` exports the courtyard example with `--stats` and reads the
+`bvh nodes=N leaves=L depth=D refs=R` line: nodes and refs must match the splashpack header, refs the
+triangle count, leaves (N + 1) / 2 (every inner node has two children) and the depth at least
+log2(L). A copy without objects must print an empty BVH.
+
+    python3 bvhstatscheck.py <splashpack-cli>
+
 Without nav regions psxsplash does not attach the camera to the player, so the camera stays at the
 origin facing +Z and the player start in the file has no effect. Put the objects at positive Z.
 A scene with a Player always gets nav regions when it has ground to stand on: on big worlds the

@@ -431,6 +431,12 @@ int main(int argc, char** argv) {
             if (st.navWanted)
                 std::printf("nav regions=%d cell=%g (asked %g) extent=%gx%g\n", st.navRegions, double(st.navCellSize),
                             double(st.navCellSizeAsked), double(st.navExtentX), double(st.navExtentZ));
+            {
+                int leaves = 0;
+                for (const auto& b : st.bvhBoxes) leaves += b.leaf ? 1 : 0;
+                std::printf("bvh nodes=%zu leaves=%d depth=%d refs=%u\n", st.bvhBoxes.size(), leaves, st.bvhDepth,
+                            st.bvhTriangleRefs);
+            }
             if (!st.rooms.empty()) {
                 std::printf("rooms=%zu portals=%d catch_all_tris=%d\n", st.rooms.size(), st.roomPortals,
                             st.roomCatchAllTris);

@@ -102,6 +102,8 @@ struct Args {
     std::string dropFile;
     // --export-to <file.bin>: Export writes there instead of asking.
     std::string exportTo;
+    // --play-settings <file>: a screenshot run reads and saves Play's tools there.
+    std::string playSettings;
     float dropX = -1, dropY = -1;
     float dragX = -1, dragY = -1;
 };
@@ -292,6 +294,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--timeline")) a.timeline = next();
         else if (!std::strcmp(argv[i], "--ui")) a.ui = true;
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
+        else if (!std::strcmp(argv[i], "--play-settings")) a.playSettings = next();
         else if (!std::strcmp(argv[i], "--click") || !std::strcmp(argv[i], "--dblclick")) {
             Action act(!std::strcmp(argv[i], "--click") ? Action::Click : Action::DoubleClick);
             const char* v = next();
@@ -573,6 +576,9 @@ int main(int argc, char** argv) {
             state.recent = editor::RecentScenes(prefDir / "recent.cfg");
             state.recent.load();
         }
+    } else if (!args.playSettings.empty()) {
+        state.play.settingsFile = std::filesystem::path(std::u8string(args.playSettings.begin(), args.playSettings.end()));
+        state.play.tools = editor::loadPlayTools(state.play.settingsFile);
     }
     editor::Document doc;
     openDocument(doc, args);

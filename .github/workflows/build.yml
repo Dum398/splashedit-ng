@@ -137,6 +137,9 @@ jobs:
       - name: VRAM layout
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/vramlayoutcheck.py build/splashedit
+      - name: Disc settings
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/discsettingscheck.py build/splashedit
       - name: Centre panel tabs
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/scripttabscheck.py build/splashedit

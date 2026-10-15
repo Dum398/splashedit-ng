@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "disc.hh"
 #include "editor/document.hh"
 #include "import.hh"
 
@@ -39,6 +40,14 @@ bool saveBuildList(const std::filesystem::path& project, const std::vector<std::
 // Live export, Play and Export all pack with it.
 splash::VramSettings loadVramSettings(const std::filesystem::path& project);
 bool saveVramSettings(const std::filesystem::path& project, const splash::VramSettings& vs);
+
+// The project's disc settings: `project`/disc.json (see splash::DiscSettings:
+// the volume name and the licence). loadDiscSettings reads it; a missing or
+// unreadable file, or an empty `project`, reads as the defaults (volume from
+// the title, no licence). saveDiscSettings writes it whole; false when it
+// cannot be written. Export passes it to the disc writer.
+splash::DiscSettings loadDiscSettings(const std::filesystem::path& project);
+bool saveDiscSettings(const std::filesystem::path& project, const splash::DiscSettings& s);
 
 // The project-relative scenes a build writes, in order: the build list with
 // the entries whose file is gone left out. When that leaves nothing (the list

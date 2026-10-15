@@ -17,6 +17,7 @@
 #include <string>
 
 #include "budget.hh"
+#include "disc.hh"
 #include "rooms.hh"
 #include "import.hh"
 #include "editor/catalog.hh"
@@ -1120,6 +1121,28 @@ static void SDLCALL onFilePicked(void* kind, const char* const* files, int) {
 static const SDL_DialogFileFilter kSceneFilter[] = {{"psxsplash scene", "scene"}};
 static const SDL_DialogFileFilter kDiscFilter[] = {{"Disc image", "bin"}};
 
+// The licence file the Disc section's Choose file... picked, until it is saved.
+static std::mutex g_licenceMutex;
+static std::optional<std::string> g_licencePicked;
+
+static void SDLCALL onLicencePicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_licenceMutex);
+    g_licencePicked = files[0];
+}
+
+static const SDL_DialogFileFilter kLicenceFilter[] = {{"Disc licence", "dat"}, {"All files", "*"}};
+
+// A typed volume name character: upper-cased, dropped unless the volume name
+// keeps it (splash::volumeName's rule).
+static int volumeChar(ImGuiInputTextCallbackData* d) {
+    if (d->EventChar >= 0x80) return 1;
+    const std::string kept = splash::volumeName(std::string(1, char(d->EventChar)));
+    if (kept.empty()) return 1;
+    d->EventChar = ImWchar(static_cast<unsigned char>(kept[0]));
+    return 0;
+}
+
 static void buildDisc(State& st, const editor::Document& doc, std::filesystem::path bin) {
     State::Play& p = st.play;
     if (bin.extension() != ".bin") bin += ".bin";
@@ -1135,7 +1158,7 @@ static void buildDisc(State& st, const editor::Document& doc, std::filesystem::p
             return r;
         }
         return splash::exportDisc(b.pointers(), root, engine, bin, title, b.names,
-                                  editor::loadVramSettings(root));
+                                  editor::loadVramSettings(root), editor::loadDiscSettings(root));
     });
 }
 
@@ -4167,6 +4190,150 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 std::printf("%s\n", now2.c_str());
                 std::fflush(stdout);
             }
+        }
+        if (!sOpen) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // The project's disc settings (disc.json): the volume name and the
+    // licence data Export writes into sectors 0-15. A project setting like
+    // vram.json, saved as soon as it changes and not part of undo.
+    {
+        namespace fs = std::filesystem;
+        const fs::path root = doc.projectRoot();
+        static fs::path cachedRoot;
+        static splash::DiscSettings ds;
+        static std::string licenceError;
+        static double readAt = -1;
+        const double now = ImGui::GetTime();
+        auto resolve = [&] {
+            licenceError.clear();
+            if (!root.empty()) splash::resolveLicence(ds.licence, root, licenceError);
+        };
+        // Read again now and then, so an edit made outside (or a licence
+        // file that appears or changes) shows up.
+        if (root != cachedRoot || now - readAt > 1.0) {
+            cachedRoot = root;
+            readAt = now;
+            ds = editor::loadDiscSettings(root);
+            resolve();
+        }
+        auto save = [&](splash::DiscSettings next) {
+            if (editor::saveDiscSettings(root, next)) {
+                ds = std::move(next);
+                resolve();
+            } else {
+                notify(st, "Cannot write " + utf8(root / "disc.json"), true);
+            }
+            readAt = now;
+        };
+        {
+            std::optional<std::string> picked;
+            {
+                std::lock_guard<std::mutex> lock(g_licenceMutex);
+                picked.swap(g_licencePicked);
+            }
+            if (picked && !root.empty()) {
+                // Inside the project it is kept relative, so the project can move.
+                std::error_code ec;
+                const fs::path abs = fs::weakly_canonical(fs::path(std::u8string(picked->begin(), picked->end())), ec);
+                const fs::path base = fs::weakly_canonical(root, ec);
+                const fs::path rel = abs.lexically_relative(base);
+                const std::u8string u = (!rel.empty() && *rel.begin() != "..") ? rel.generic_u8string() : abs.generic_u8string();
+                splash::DiscSettings next = ds;
+                next.licence = std::string(u.begin(), u.end());
+                save(std::move(next));
+            }
+        }
+        const std::string licenceFile = [&] {
+            const fs::path p(std::u8string(ds.licence.begin(), ds.licence.end()));
+            return utf8(p.filename());
+        }();
+
+        const float stop = y;
+        const bool sOpen = section("s_disc", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::hardDrive, color::textDim, "Disc", true,
+                                   true, false);
+        if (!sOpen) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+
+        // Volume label: empty = what Export takes from the scene name.
+        const std::string fallback = splash::discVolume("", doc.sceneStem());
+        const ImRect vr = row("ldiscvolume", "Volume label",
+                              "The disc's volume name: A-Z, 0-9 and _, at most 31. Empty, Export uses the scene name.");
+        nameRect("disc.volume", vr);
+        std::string typed;
+        if (textField("discvolume", vr, ds.volume, &typed, fallback.c_str(), 31, volumeChar)) {
+            splash::DiscSettings next = ds;
+            next.volume = typed;  // volumeChar kept it to the volume name's characters
+            save(std::move(next));
+        }
+
+        // Licence: none, the built-in psxsplash one, or a file.
+        const int cur = ds.licence.empty() ? 0 : ds.licence == "psxsplash" ? 1 : 2;
+        const std::string shown = cur == 0 ? "None" : cur == 1 ? "psxsplash" : licenceFile;
+        const ImRect lr = row("ldisclicence", "Licence",
+                              "The licence data in the disc's first 16 sectors. A retail console's BIOS checks it before booting; "
+                              "emulators and modded consoles do not need it.");
+        nameRect("disc.licence", lr);
+        const int pick = dropdownMenu("disc.licence", lr, nullptr, shown.c_str(), {"None", "psxsplash", "Choose file..."}, cur);
+        if (pick == 0 || pick == 1) {
+            if (pick != cur) {
+                splash::DiscSettings next = ds;
+                next.licence = pick == 0 ? "" : "psxsplash";
+                save(std::move(next));
+            }
+        } else if (pick == 2) {
+            const std::string loc = utf8(root);
+            SDL_ShowOpenFileDialog(onLicencePicked, nullptr, nullptr, kLicenceFilter, 2, root.empty() ? nullptr : loc.c_str(), false);
+        }
+        // One dim line, then room for the error, there from the first frame
+        // so nothing below moves when one shows.
+        const std::string about = cur == 0   ? "No licence data: boots in emulators and on modded consoles"
+                                  : cur == 1 ? "psxsplash licence: the boot logo reads Created with psxsplash"
+                                             : licenceFile;
+        {
+            // Fixed heights (two lines, then three), whatever the text wraps to.
+            const float tx = x0 + space::sm, tw = x1 - space::sm - tx;
+            const float lineH = f.regular->CalcTextSizeA(type::caption, FLT_MAX, 0, "A").y;
+            const ImRect ar(ImVec2(tx, y - 2), ImVec2(tx + tw, y - 2 + 2 * lineH));
+            const ImVec4 aclip(ar.Min.x, ar.Min.y, ar.Max.x, ar.Max.y);
+            dl->AddText(f.regular, type::caption, ar.Min, color::textFaint, about.c_str(), nullptr, tw, &aclip);
+            y += 2 * lineH + space::xs;
+            const float errH = 3 * lineH;
+            const ImRect er(ImVec2(tx, y - 2), ImVec2(tx + tw, y - 2 + errH));
+            if (!licenceError.empty()) {
+                // The full path is long and the line above names the file.
+                std::string msg = licenceError;
+                const fs::path p(std::u8string(ds.licence.begin(), ds.licence.end()));
+                const std::string full = utf8(p.is_relative() ? root / p : p);
+                if (!full.empty() && msg.rfind(full + ": ", 0) == 0) msg.erase(0, full.size() + 2);
+                for (size_t at; !full.empty() && (at = msg.find(full)) != std::string::npos;) msg.replace(at, full.size(), licenceFile);
+                const ImVec4 clip(er.Min.x, er.Min.y, er.Max.x, er.Max.y);
+                dl->AddText(f.regular, type::caption, er.Min, color::warn, msg.c_str(), nullptr, tw, &clip);
+                nameRect("disc.error", er);
+                interact("discerror", er);
+                tooltip(licenceError.c_str());
+            }
+            y += errH + space::xs;
+        }
+        if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
+            // Scripted tests: the settings after every change.
+            static std::string reportedVolume, reportedLicence, reportedError;
+            auto report = [](std::string& last, const std::string& now2) {
+                if (last == now2) return;
+                last = now2;
+                if (now2.empty()) return;
+                std::printf("%s\n", now2.c_str());
+                std::fflush(stdout);
+            };
+            report(reportedVolume, "disc: volume " + (ds.volume.empty() ? std::string("default") : ds.volume));
+            report(reportedLicence, "disc: licence " + (cur == 0 ? std::string("none") : cur == 1 ? std::string("psxsplash") : licenceFile));
+            report(reportedError, licenceError.empty() ? std::string() : "disc: licence error " + licenceError);
         }
         if (!sOpen) {
             ImGui::PopClipRect();

@@ -65,6 +65,16 @@ bool saveVramSettings(const fs::path& project, const splash::VramSettings& vs) {
     return splash::writeVramSettings(project / "vram.json", vs);
 }
 
+splash::DiscSettings loadDiscSettings(const fs::path& project) {
+    if (project.empty()) return {};
+    return splash::readDiscSettings(project / "disc.json");
+}
+
+bool saveDiscSettings(const fs::path& project, const splash::DiscSettings& s) {
+    if (project.empty()) return false;
+    return splash::writeDiscSettings(project / "disc.json", s);
+}
+
 std::vector<fs::path> buildScenes(const fs::path& project, const fs::path& openScene) {
     std::vector<fs::path> out;
     std::error_code ec;

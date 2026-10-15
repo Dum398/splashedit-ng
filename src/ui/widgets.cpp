@@ -450,7 +450,7 @@ void beginTextEdit(const char* id, const std::string& initial) {
 bool textEditing(const char* id) { return textState().id != 0 && textState().id == ImGui::GetID(id); }
 
 TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float textX, float textRight, std::string* out,
-                  size_t maxLen) {
+                  size_t maxLen, ImGuiInputTextCallback charFilter) {
     TextEditState& s = textState();
     if (s.id == 0 || s.id != ImGui::GetID(id)) return TextEdit::Inactive;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -477,7 +477,9 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
     ImGui::SetNextItemWidth(std::max(8.0f, textRight - textX));
     if (s.frames == 0) ImGui::SetKeyboardFocusHere();
     ImGui::PushID(id);
-    bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+    ImGuiInputTextFlags flags = ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll;
+    if (charFilter) flags |= ImGuiInputTextFlags_CallbackCharFilter;
+    bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), flags, charFilter);
     bool deactivated = ImGui::IsItemDeactivated();
     bool active = ImGui::IsItemActive();
     ImGui::PopID();
@@ -493,7 +495,8 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
     return TextEdit::Editing;
 }
 
-bool textField(const char* id, ImRect r, const std::string& value, std::string* out, const char* placeholder, size_t maxLen) {
+bool textField(const char* id, ImRect r, const std::string& value, std::string* out, const char* placeholder, size_t maxLen,
+               ImGuiInputTextCallback charFilter) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // A value already past the cap stays editable, so it can be shortened.
@@ -509,7 +512,7 @@ bool textField(const char* id, ImRect r, const std::string& value, std::string* 
     };
     if (textEditing(id)) {
         std::string typed;
-        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed, cap);
+        TextEdit res = textEdit(id, r, f.regular, type::body, x, right, &typed, cap, charFilter);
         drawCount(std::strlen(textState().buf));
         if (res == TextEdit::Commit && typed != value) {
             *out = typed;

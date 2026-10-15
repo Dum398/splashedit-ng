@@ -63,8 +63,15 @@ static int usage() {
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
                  "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
+                 "    [--licence <file|psxsplash|none>] [--volume <name>]\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
                  "  (the game starts in the first); the engine is a LOADER=cdrom build\n"
+                 "  with --project, the volume and licence come from <dir>/disc.json; the options override it\n"
+                 "  --licence writes sectors 0-15 from a licence file (12 or 16 sectors of 2336, 2352 or\n"
+                 "    2048 bytes), the built-in psxsplash one, or none (the default); in disc.json a\n"
+                 "    relative licence path is relative to the project\n"
+                 "  --volume names the volume (A-Z, 0-9 and _ kept, upper-cased, 31 at most); the default\n"
+                 "    is the first scene's file name\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n");
@@ -303,11 +310,19 @@ static int font(int argc, char** argv) {
 
 static int discCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
-    std::string outPath, project, engine;
+    std::string outPath, project, engine, licence, volume;
+    bool hasLicence = false, hasVolume = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
             outPath = argv[++i];
+        else if (a == "--licence" && i + 1 < argc) {
+            licence = argv[++i];
+            hasLicence = true;
+        } else if (a == "--volume" && i + 1 < argc) {
+            volume = argv[++i];
+            hasVolume = true;
+        }
         else if (a == "--project" && i + 1 < argc)
             project = argv[++i];
         else if (a == "--engine" && i + 1 < argc)
@@ -333,8 +348,18 @@ static int discCmd(int argc, char** argv) {
         std::vector<const splash::Scene*> ptrs;
         for (const splash::Scene& s : scenes) ptrs.push_back(&s);
         fs::path root = project.empty() ? fs::path(scenePaths.front()).parent_path() : fs::path(project);
+        splash::DiscSettings disc;
+        if (!project.empty()) disc = splash::readDiscSettings(root / "disc.json");
+        // On the command line a licence file is relative to the working directory.
+        if (hasLicence && (licence == "none" || licence == "psxsplash")) {
+            disc.licence = licence == "none" ? "" : licence;
+        } else if (hasLicence) {
+            std::u8string u = fs::absolute(fs::path(licence)).u8string();
+            disc.licence = std::string(u.begin(), u.end());
+        }
+        if (hasVolume) disc.volume = volume;
         splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names,
-                                                     splash::readVramSettings(root / "vram.json"));
+                                                     splash::readVramSettings(root / "vram.json"), disc);
         for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (!r.exported.ok()) return 1;

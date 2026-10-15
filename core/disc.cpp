@@ -308,6 +308,21 @@ bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
     return !out.fail();
 }
 
+std::string volumeName(const std::string& from) {
+    std::string v;
+    for (char ch : from) {
+        char u = (ch >= 'a' && ch <= 'z') ? char(ch - 32) : ch;
+        if (nameChar(u) && v.size() < 31) v += u;
+    }
+    return v;
+}
+
+std::string discVolume(const std::string& volume, const std::string& title) {
+    std::string v = volumeName(volume);
+    if (v.empty()) v = volumeName(title);
+    return v.empty() ? "PSXSPLASH" : v;
+}
+
 std::vector<LicenceSector> resolveLicence(const std::string& licence, const fs::path& projectRoot, std::string& error) {
     if (licence.empty()) return {};
     std::vector<uint8_t> bytes;
@@ -620,17 +635,7 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
         }
         if (r.exported.errors.empty()) {
-            auto volumeName = [](const std::string& from) {
-                std::string v;
-                for (char ch : from) {
-                    char u = (ch >= 'a' && ch <= 'z') ? char(ch - 32) : ch;
-                    if (nameChar(u) && v.size() < 31) v += u;
-                }
-                return v;
-            };
-            std::string volume = volumeName(disc.volume);
-            if (volume.empty()) volume = volumeName(title);
-            r.disc = writeDiscImage(files, volume.empty() ? "PSXSPLASH" : volume, bin, licence);
+            r.disc = writeDiscImage(files, discVolume(disc.volume, title), bin, licence);
         }
     } catch (const std::exception& e) {
         r.exported.errors.push_back(e.what());

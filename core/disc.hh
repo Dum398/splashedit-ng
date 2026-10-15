@@ -58,6 +58,13 @@ struct DiscSettings {
 DiscSettings readDiscSettings(const std::filesystem::path& file);
 bool writeDiscSettings(const std::filesystem::path& file, const DiscSettings& s);
 
+// `from` as a volume name: letters upper-cased, everything but A-Z 0-9 _
+// dropped, at most 31 characters (possibly empty).
+std::string volumeName(const std::string& from);
+// The volume name a disc gets: volumeName(volume), or volumeName(title) when
+// that is empty, or PSXSPLASH when both are.
+std::string discVolume(const std::string& volume, const std::string& title);
+
 // The licence sectors `licence` names (as DiscSettings::licence): none for
 // "", else parseLicence of the file or the built-in bytes. Sets `error` (and
 // returns none) when the file cannot be read or has a bad size.

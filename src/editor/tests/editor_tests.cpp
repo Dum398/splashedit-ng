@@ -7146,6 +7146,24 @@ void testDiscSettings() {
     CHECK(error.find("short.dat") != std::string::npos && error.find("1000") != std::string::npos);
     error.clear();
     CHECK(splash::resolveLicence("lic/missing.dat", dir, error).empty() && error.find("missing.dat") != std::string::npos);
+
+    // The volume name rule the editor's Disc section shows and types by.
+    CHECK(splash::volumeName("my game-1_x") == "MYGAME1_X");
+    CHECK(splash::volumeName(" -.").empty());
+    CHECK(splash::volumeName(std::string(40, 'a')) == std::string(31, 'A'));
+    CHECK(splash::discVolume("", "courtyard") == "COURTYARD");
+    CHECK(splash::discVolume("disc 2", "courtyard") == "DISC2");
+    CHECK(splash::discVolume("", "-.-") == "PSXSPLASH");
+
+    // The editor's wrappers on <project>/disc.json.
+    CHECK(editor::loadDiscSettings({}).volume.empty());
+    CHECK(!editor::saveDiscSettings({}, s));
+    CHECK(editor::loadDiscSettings(dir).licence == "lic/system.sys");
+    splash::DiscSettings next;
+    next.licence = "psxsplash";
+    CHECK(editor::saveDiscSettings(dir, next));
+    back = splash::readDiscSettings(dir / "disc.json");
+    CHECK(back.volume.empty() && back.licence == "psxsplash");
 }
 
 // Sectors 0-15 of the written image: unchanged without a licence, the

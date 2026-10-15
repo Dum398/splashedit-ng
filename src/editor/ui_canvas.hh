@@ -117,6 +117,8 @@ bool editElement(Document& doc, int c, int e, const std::function<void(splash::U
 // Runs `fn` on each element of `idx` (and its place in `idx`) as ONE edit.
 bool editElements(Document& doc, int c, const std::vector<int>& idx,
                   const std::function<void(splash::UIElement&, size_t)>& fn, const std::string& mergeKey = {});
+// Renaming the scene's loading canvas (SceneSettings::loadingCanvas) renames
+// that setting too, in the same undo step; deleting it leaves the name.
 bool editCanvas(Document& doc, int c, const std::function<void(splash::UICanvas&)>& fn, const std::string& mergeKey = {});
 // A new element of `type` on top of canvas `c`, centred, named after its type
 // and numbered when taken. Selects it and returns its index (-1: no canvas).

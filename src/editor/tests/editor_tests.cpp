@@ -6467,6 +6467,32 @@ void testUiUndo() {
     CHECK((layout(back.canvases[0].elements[0], s) == Rect{5, 6, 7, 8}));
 }
 
+// The scene's loading canvas follows a rename of that canvas in the same undo
+// step; renaming another canvas or deleting it leaves the name alone.
+void testUiLoadingRename() {
+    using namespace editor::uic;
+    editor::Document d;
+    splash::Scene sc = uiScene();
+    sc.settings.loadingCanvas = "menu";
+    d.reset(sc);
+    CHECK(editCanvas(d, 1, [](splash::UICanvas& cv) { cv.name = "Loading"; }));
+    CHECK(d.scene().settings.loadingCanvas == "Loading" && d.historySize() == 1);
+    CHECK(d.undo() && d.scene().canvases[1].name == "menu" && d.scene().settings.loadingCanvas == "menu");
+    CHECK(d.redo() && d.scene().settings.loadingCanvas == "Loading");
+    CHECK(editCanvas(d, 0, [](splash::UICanvas& cv) { cv.name = "hud2"; }) && d.scene().settings.loadingCanvas == "Loading");
+    CHECK(editCanvas(d, 1, [](splash::UICanvas& cv) { cv.visible = false; }) && d.scene().settings.loadingCanvas == "Loading");
+    CHECK(deleteCanvas(d, 1) && d.scene().canvases.size() == 1 && d.scene().settings.loadingCanvas == "Loading");
+    CHECK(d.undo() && d.scene().canvases.size() == 2 && d.scene().settings.loadingCanvas == "Loading");
+    // A setting changed after a UI edit comes back on undo, the UI edit's own name with it.
+    d.editSettings([](splash::SceneSettings& st) { st.loadingCanvas = "hud2"; });
+    CHECK(editCanvas(d, 0, [](splash::UICanvas& cv) { cv.name = "HUD"; }) && d.scene().settings.loadingCanvas == "HUD");
+    CHECK(d.undo() && d.scene().settings.loadingCanvas == "hud2");
+    CHECK(d.undo() && d.scene().settings.loadingCanvas == "Loading");
+    // No loading canvas: a rename sets none.
+    d.reset(uiScene());
+    CHECK(editCanvas(d, 0, [](splash::UICanvas& cv) { cv.name = "x"; }) && d.scene().settings.loadingCanvas.empty());
+}
+
 // Copy, cut and paste of UI elements: the clipboard text, the offset, the
 // names, one undo step each, and text of the other kind refused both ways.
 void testUiClipboard() {
@@ -7056,6 +7082,7 @@ int main(int argc, char** argv) {
     testUiSnap();
     testUiZOrder();
     testUiUndo();
+    testUiLoadingRename();
     testUiClipboard();
     testUiMultiSelect();
     testUiProblems();

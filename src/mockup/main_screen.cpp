@@ -5752,29 +5752,40 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         const splash::PortalComponent& pc = *o->portal;
         top = y;
         compSection("s_portal", editor::ComponentKind::Portal);
-        // Every Room object in the scene, by name, for the two pickers.
-        std::vector<std::string> roomNames;
-        std::function<void(const std::vector<splash::Object>&)> walk = [&](const std::vector<splash::Object>& objs) {
-            for (const splash::Object& ob : objs) {
-                if (ob.room && std::find(roomNames.begin(), roomNames.end(), ob.name) == roomNames.end()) roomNames.push_back(ob.name);
-                walk(ob.children);
-            }
+        // Every Room object in the scene, by name, for the two pickers. A name is
+        // on when some Room carrying it is exported (on, under parents that are
+        // on); the rest stay pickable but are marked, since the export skips them.
+        std::vector<std::pair<std::string, bool>> roomNames;
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+            if (!fo.object->room) continue;
+            const bool on = fo.activeInHierarchy && fo.object->active;
+            auto it = std::find_if(roomNames.begin(), roomNames.end(), [&](const auto& r) { return r.first == fo.object->name; });
+            if (it == roomNames.end())
+                roomNames.push_back({fo.object->name, on});
+            else
+                it->second = it->second || on;
+        }
+        auto roomOff = [&](const std::string& n) {
+            for (const auto& r : roomNames)
+                if (r.first == n) return !r.second;
+            return false;
         };
-        walk(doc.scene().objects);
         auto roomPicker = [&](const char* id, const char* label, const char* tip, const std::string& cur, bool isA) {
-            std::vector<const char*> items{"None"};
+            std::vector<std::string> labels{"None"};
             int at = cur.empty() ? 0 : -1;
-            for (const std::string& n : roomNames) {
-                if (n == cur) at = int(items.size());
-                items.push_back(n.c_str());
+            for (const auto& [n, on] : roomNames) {
+                if (n == cur) at = int(labels.size());
+                labels.push_back(on ? n : n + "  (off)");
             }
-            const std::string shown = cur.empty() ? std::string("None") : at < 0 ? cur + "  (no such Room)" : cur;
+            std::vector<const char*> items;
+            for (const std::string& l : labels) items.push_back(l.c_str());
+            const std::string shown = cur.empty() ? std::string("None") : at < 0 ? cur + "  (no such Room)" : labels[size_t(at)];
             const std::string lid = std::string("l") + id;
             const ImRect rr = row(lid.c_str(), label, tip);
             nameRect(std::string("obj.") + id, rr);
             const int pick = dropdownMenu(id, rr, icon::layoutTemplate, shown.c_str(), items, at);
             if (pick >= 0) {
-                const std::string name = pick == 0 ? std::string() : std::string(items[size_t(pick)]);
+                const std::string name = pick == 0 ? std::string() : roomNames[size_t(pick) - 1].first;
                 doc.edit(path, [name, isA](splash::Object& ob) { (isA ? ob.portal->roomA : ob.portal->roomB) = name; });
             }
         };
@@ -5809,7 +5820,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         }
         char dims[64];
         std::snprintf(dims, sizeof dims, " %gx%g", double(pc.width), double(pc.height));
-        report("portal", "portal: " + o->name + " a=" + pc.roomA + " b=" + pc.roomB + dims +
+        report("portal", "portal: " + o->name + " a=" + pc.roomA + (roomOff(pc.roomA) ? "(off)" : "") + " b=" + pc.roomB +
+                             (roomOff(pc.roomB) ? "(off)" : "") + dims +
                              (problems ? " problems " + std::to_string(problems) : std::string()));
         sectionEnd(top);
     }

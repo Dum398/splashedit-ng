@@ -854,7 +854,9 @@ std::vector<std::string> targetsFor(const Document& doc, TrackType type) {
     }
     const bool light = ti >= 14;
     for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
-        if (light ? (fo.object->light && fo.object->light->runtime) : (fo.object->mesh && fo.object->active))
+        // What the export ships: nothing that is off or under an off parent.
+        if (!fo.activeInHierarchy) continue;
+        if (light ? (fo.object->light && fo.object->light->runtime) : bool(fo.object->mesh))
             out.push_back(fo.object->name);
     }
     return out;

@@ -976,8 +976,8 @@ struct SkinTarget {
 };
 
 void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Sequence>& cutscenes, bool animation,
-                    const std::vector<std::string>& objectNames, const std::vector<std::string>& clipNames,
-                    const std::vector<SkinTarget>& skinTargets, const std::vector<UICanvas>& canvases,
+                    const std::vector<std::string>& objectNames, const std::set<std::string>& offObjectNames,
+                    const std::vector<std::string>& clipNames, const std::vector<SkinTarget>& skinTargets, const std::vector<UICanvas>& canvases,
                     const std::vector<std::string>& lightNames, const VramSettings& vs, float gte,
                     ExportResult& res) {
     const std::string kind = animation ? "animation" : "cutscene";
@@ -1052,8 +1052,13 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
             if (animation && camera)
                 res.errors.push_back(where + ": camera tracks only play in cutscenes");
             bool object = (ty >= 2 && ty <= 4) || t.type == TrackType::ObjectUVOffset;
-            if (object && std::find(objectNames.begin(), objectNames.end(), truncateUtf16(t.target, 24)) == objectNames.end())
-                res.errors.push_back(where + ": no exported object named '" + t.target + "' (objects need a mesh)");
+            if (object && std::find(objectNames.begin(), objectNames.end(), truncateUtf16(t.target, 24)) == objectNames.end()) {
+                if (offObjectNames.count(truncateUtf16(t.target, 24)))
+                    res.errors.push_back(where + ": '" + t.target +
+                                         "' is switched off (or under an off parent), so it is not exported");
+                else
+                    res.errors.push_back(where + ": no exported object named '" + t.target + "' (objects need a mesh)");
+            }
             if (t.type == TrackType::UICanvasVisible && !hasCanvas(t.target))
                 res.errors.push_back(where + ": no canvas named '" + t.target + "'");
             if (ty >= 6 && ty <= 9 && !findElement(t.target))
@@ -1474,10 +1479,13 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     std::vector<SceneLight> lights, bakedOnlyLights;
     std::vector<RuntimeLight> runtimeLights;
     for (const FlatObject& fo : flat) {
-        if (!fo.object->light) continue;
+        // Lights on an off object, or under an off parent, neither bake nor ship
+        // (Unity's FindObjectsByType<Light> skips them).
+        if (!fo.object->light || !fo.activeInHierarchy) continue;
         const LightComponent& l = *fo.object->light;
-        // Disabled runtime lights are still exported so Lua can switch them on.
-        if (l.runtime && fo.activeInHierarchy) runtimeLights.push_back({&fo, &l});
+        // Disabled runtime lights on an active object are still exported so Lua
+        // can switch them on.
+        if (l.runtime) runtimeLights.push_back({&fo, &l});
         if (!l.enabled) continue;
         SceneLight sl = sceneLight(fo);
         lights.push_back(sl);
@@ -1495,6 +1503,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
 
     std::vector<ExpObject> exporters;
     for (const FlatObject& fo : flat) {
+        // An object that is off, or under an off parent, is not in the pack at
+        // all (Unity's FindObjectsByType skips it), so its components are not
+        // checked either.
+        if (!fo.activeInHierarchy) continue;
         if (fo.object->skin && !fo.object->mesh)
             res.errors.push_back(fo.object->name + ": a skin component needs a mesh component");
         if (!fo.object->mesh) {
@@ -2310,6 +2322,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     if (!scene.cutscenes.empty() || !scene.animations.empty()) {
         std::vector<std::string> objectNames, clipNames;
         for (ExpObject& e : exporters) objectNames.push_back(truncateUtf16(e.obj->name, 24));
+        std::set<std::string> offObjectNames;
+        for (const FlatObject& fo : flat)
+            if (!fo.activeInHierarchy) offObjectNames.insert(truncateUtf16(fo.object->name, 24));
         std::vector<std::string> lightNames;
         for (const RuntimeLight& rl : runtimeLights) lightNames.push_back(rl.flat->object->name);
         for (const FlatObject* fo : audioSources) clipNames.push_back(fo->object->audio->clipName);
@@ -2325,10 +2340,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (const Animation& a : scene.animations)
             as.push_back({a.name, a.durationFrames, a.tracks, nullptr, a.skinEvents});
         if (!cs.empty())
-            writeSequences(w, cutsceneTableOffsetPos, cs, false, objectNames, clipNames, skinTargets, canvases,
+            writeSequences(w, cutsceneTableOffsetPos, cs, false, objectNames, offObjectNames, clipNames, skinTargets, canvases,
                            lightNames, options.vram, gte, res);
         if (res.ok() && !as.empty())
-            writeSequences(w, animationTableOffsetPos, as, true, objectNames, clipNames, skinTargets, canvases,
+            writeSequences(w, animationTableOffsetPos, as, true, objectNames, offObjectNames, clipNames, skinTargets, canvases,
                            lightNames, options.vram, gte, res);
         if (!res.ok()) return res;
     }
@@ -2688,7 +2703,7 @@ std::vector<Vec3> exportVertexColors(const std::vector<FlatObject>& flat, const 
     if (!object.object->mesh || mesh.normals.size() != mesh.positions.size()) return out;
     std::vector<SceneLight> lights;
     for (const FlatObject& fo : flat)
-        if (fo.object->light && fo.object->light->enabled) lights.push_back(sceneLight(fo));
+        if (fo.activeInHierarchy && fo.object->light && fo.object->light->enabled) lights.push_back(sceneLight(fo));
     for (const Color& c : meshColors(object, *object.object->mesh, mesh, lights)) out.push_back({c.r, c.g, c.b});
     return out;
 }

@@ -3105,6 +3105,133 @@ void testRoomsExport() {
     CHECK(rd16(pb, 78) == 0 && rd16(pb, 80) == 0 && rd16(pb, 82) == 0 && rd16(pb, 86) == 0 && rd16(pb, 106) == 0);
 }
 
+// An object that is off, or under an off parent, is off in the hierarchy
+// (Unity's activeInHierarchy): flatten says so, the export leaves it out
+// (its broken components unchecked), its lights neither bake nor ship, and a
+// cutscene track naming it says it is switched off. Start active off still
+// exports the object.
+void testActiveInHierarchyExport() {
+    using namespace roomtest;
+    const fs::path project = g_outDir / "hieractive";
+    fs::remove_all(project);
+    fs::create_directories(project / "meshes");
+    splash::Mesh quad;
+    quad.positions = {{-2, 0, -2}, {-2, 0, 2}, {2, 0, 2}, {2, 0, -2}};
+    quad.normals.assign(4, {0, 1, 0});
+    quad.submeshes = {{0, 1, 2, 0, 2, 3}};
+    splash::saveMesh(quad, project / "meshes/quad.mesh");
+
+    splash::Scene base;
+    base.objects.push_back(meshObject("Ground", "meshes/quad.mesh", {0, 0, 0}, false));
+    base.objects.push_back(meshObject("OnSibling", "meshes/quad.mesh", {6, 0, 0}, false));
+    splash::Object offParent = meshObject("OffParent", "meshes/quad.mesh", {-6, 0, 0}, false);
+    offParent.active = false;
+    offParent.children.push_back(meshObject("HiddenKid", "meshes/quad.mesh", {0, 1, 0}, false));
+    base.objects.push_back(offParent);
+    splash::Object selfOff = meshObject("SelfOff", "meshes/quad.mesh", {0, 0, 6}, false);
+    selfOff.active = false;
+    base.objects.push_back(selfOff);
+    splash::Object sleeper = meshObject("Sleeper", "meshes/quad.mesh", {0, 0, -6}, false);
+    sleeper.startActive = false;
+    base.objects.push_back(sleeper);
+
+    // (vi) flatten: off itself, under an off parent, and an on sibling.
+    {
+        const std::vector<splash::FlatObject> flat = splash::flatten(base);
+        auto inHierarchy = [&](const std::string& n) {
+            for (const splash::FlatObject& fo : flat)
+                if (fo.object->name == n) return int(fo.activeInHierarchy);
+            return -1;
+        };
+        CHECK(inHierarchy("OffParent") == 0);
+        CHECK(inHierarchy("HiddenKid") == 0);  // its own flag is on
+        CHECK(inHierarchy("SelfOff") == 0);
+        CHECK(inHierarchy("OnSibling") == 1);
+        CHECK(inHierarchy("Ground") == 1 && inHierarchy("Sleeper") == 1);
+    }
+
+    // (i)-(iii) What the pack holds.
+    splash::ExportResult r = splash::exportSplashpack(base, project, project / "base.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "hieractive export: %s\n", e.c_str());
+    CHECK(r.ok());
+    CHECK(r.stats.gameObjects == 3);  // Ground, OnSibling, Sleeper
+    const std::string b = readAll(project / "base.splashpack");
+    CHECK(b.find("OnSibling") != std::string::npos && b.find("Sleeper") != std::string::npos);
+    CHECK(b.find("HiddenKid") == std::string::npos);  // child of an off parent
+    CHECK(b.find("OffParent") == std::string::npos);
+    CHECK(b.find("SelfOff") == std::string::npos);
+    // An off object's components are not checked: a mesh file that does not
+    // exist is never loaded, so it is no error.
+    {
+        splash::Scene broken = base;
+        broken.objects[3].mesh->mesh = "meshes/missing.mesh";  // SelfOff
+        broken.objects[2].children[0].mesh->mesh = "meshes/missing.mesh";  // HiddenKid
+        CHECK(splash::exportSplashpack(broken, project, project / "broken.splashpack").ok());
+    }
+
+    // (iv) Lights on an off object or under an off parent change nothing.
+    auto lamp = [](const char* name, splash::LightKind kind, bool runtime) {
+        splash::Object o = named(name);
+        o.transform.position = {0, 1, 0};
+        splash::LightComponent l;
+        l.kind = kind;
+        l.color = {1, 0.2f, 0.2f};
+        l.intensity = 2;
+        l.runtime = runtime;
+        o.light = l;
+        return o;
+    };
+    splash::Scene lit = base;
+    splash::Object offLamp = lamp("OffLamp", splash::LightKind::Point, false);
+    offLamp.active = false;
+    lit.objects.push_back(offLamp);
+    splash::Object offSun = lamp("OffSun", splash::LightKind::Directional, false);
+    offSun.active = false;
+    lit.objects.push_back(offSun);
+    splash::Object offRuntime = lamp("OffRuntime", splash::LightKind::Point, true);
+    offRuntime.active = false;
+    lit.objects.push_back(offRuntime);
+    lit.objects[2].children.push_back(lamp("KidLamp", splash::LightKind::Point, false));       // under OffParent
+    lit.objects[2].children.push_back(lamp("KidSun", splash::LightKind::Directional, false));  // under OffParent
+    splash::ExportResult rl = splash::exportSplashpack(lit, project, project / "lit.splashpack");
+    CHECK(rl.ok());
+    CHECK(readAll(project / "lit.splashpack") == b);
+    {
+        const std::vector<splash::FlatObject> fb = splash::flatten(base), fl = splash::flatten(lit);
+        CHECK(splash::exportVertexColors(fl, fl[0], quad) == splash::exportVertexColors(fb, fb[0], quad));
+    }
+    // The same lamp switched on does change the pack: the comparison can fail.
+    splash::Scene onLit = base;
+    onLit.objects.push_back(lamp("OnLamp", splash::LightKind::Point, false));
+    CHECK(splash::exportSplashpack(onLit, project, project / "onlit.splashpack").ok());
+    CHECK(readAll(project / "onlit.splashpack") != b);
+
+    // (v) A cutscene track naming an off object says why it is missing.
+    auto withTrack = [&](const char* target) {
+        splash::Scene s = base;
+        splash::Cutscene cs;
+        cs.name = "intro";
+        splash::CutsceneTrack t;
+        t.type = splash::TrackType::ObjectPosition;
+        t.target = target;
+        t.keyframes.push_back(splash::Keyframe{});
+        cs.tracks.push_back(t);
+        s.cutscenes.push_back(cs);
+        return splash::exportSplashpack(s, project, project / "cs.splashpack");
+    };
+    auto hasError = [](const splash::ExportResult& res, const std::string& text) {
+        return std::any_of(res.errors.begin(), res.errors.end(),
+                           [&](const std::string& e) { return e.find(text) != std::string::npos; });
+    };
+    const splash::ExportResult cOff = withTrack("SelfOff");
+    CHECK(!cOff.ok() && hasError(cOff, "'SelfOff' is switched off (or under an off parent), so it is not exported"));
+    const splash::ExportResult cKid = withTrack("HiddenKid");
+    CHECK(!cKid.ok() && hasError(cKid, "'HiddenKid' is switched off (or under an off parent), so it is not exported"));
+    const splash::ExportResult cNone = withTrack("Nobody");
+    CHECK(!cNone.ok() && hasError(cNone, "no exported object named 'Nobody'"));
+    CHECK(withTrack("Sleeper").ok());
+}
+
 // What the room block cannot carry is an export error, never a clamp.
 // The BVH boxes the viewport draws (ExportStats::bvhBoxes): one per node,
 // breadth first. buildBvh gives an inner node exactly two children, so in
@@ -7821,6 +7948,7 @@ int main(int argc, char** argv) {
     testWorldStreamExport();
     testNavBigWorld();
     testRoomsExport();
+    testActiveInHierarchyExport();
     testBvhBoxes();
     testNavInfo();
     testSkinInfo();

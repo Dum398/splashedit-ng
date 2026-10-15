@@ -8,7 +8,9 @@
 # pixels are classified by colour the way gizmocheck.py does.
 # Renaming a Room (F2 in the hierarchy, or the inspector title) carries the
 # portals naming it along. A Room that is off is skipped by the export, so
-# the pickers mark it "(off)".
+# the pickers mark it "(off)". So is a Room that is on under an off parent
+# (Wing > Annex): its hierarchy row is dimmed and its inspector says which
+# ancestor switches it off (obj.inheritedoff).
 # usage: python3 roomscheck.py <splashedit> [keep.png] [rename.png] [off.png]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
@@ -83,10 +85,12 @@ def room(size):
     return {'type': 'room', 'size': list(size), 'offset': [0, 0, 0]}
 
 
-def project_copy(linked, off=False):
+def project_copy(linked, off=False, wing=None):
     """The courtyard split in two Rooms, West and East, with a Door portal
     between them facing +X (unlinked unless `linked`), and two bare objects,
-    Hall and Gap, to add components to. With `off`, East is switched off."""
+    Hall and Gap, to add components to. With `off`, East is switched off
+    and Wing, switched off, holds Annex: a Room that is on itself (`wing`
+    adds Wing alone, with East on)."""
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     scene = os.path.join(project, 'courtyard.scene')
@@ -100,6 +104,11 @@ def project_copy(linked, off=False):
     s['objects'].append(obj('Gap', (0, 0, 9), []))
     if off:
         s['objects'][-4]['active'] = False  # East
+    if off if wing is None else wing:
+        parent = obj('Wing', (0, 0, 14), [])
+        parent['active'] = False
+        parent['children'].append(obj('Annex', (0, 2, 0), [room((4, 4.4, 4))]))
+        s['objects'].append(parent)
     json.dump(s, open(scene, 'w', encoding='utf-8'), indent=2)
     return project
 
@@ -108,12 +117,12 @@ mid = None
 last_shot = None
 
 
-def run(select, args, linked=False, env=None, off=False):
+def run(select, args, linked=False, env=None, off=False, wing=None):
     """Runs the editor on a fresh copy with `select` selected, then `args`
     and Ctrl+S; returns the saved scene and the editor's output lines
     (without its list of named controls)."""
     global mid, last_shot
-    project = project_copy(linked, off)
+    project = project_copy(linked, off, wing)
     scene = os.path.join(project, 'courtyard.scene')
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
     args = [a.replace('{scene}', scene).replace('{snap}', snap) for a in args]
@@ -126,6 +135,10 @@ def run(select, args, linked=False, env=None, off=False):
     missing = [l for l in lines if 'no such control drawn' in l or 'no object named' in l]
     check('every control the script names was drawn', not missing, missing)
     run.controls = [l.split(' at ')[0][8:] for l in lines if l.startswith('control ')]
+    run.rects = {}
+    for l in lines:
+        mm = re.match(r'control (.+) at (-?\d+),(-?\d+) (-?\d+),(-?\d+)$', l)
+        if mm: run.rects[mm.group(1)] = tuple(int(v) for v in mm.groups()[1:])
     return json.load(open(scene, encoding='utf-8')), [l for l in lines if not l.startswith('control ')]
 
 
@@ -213,11 +226,48 @@ printed = [l for l in out if l.startswith('portal: Door')]
 check('a portal naming an off Room says so, and the export flags it', printed[-1:] == ['portal: Door a=West b=East(off) 2x3 problems 1'],
       printed)
 offered = sorted(c for c in run.controls if c.startswith('pa/'))
-check('the picker marks the off Room, and only that one', offered == ['pa/East  (off)', 'pa/None', 'pa/West'], offered)
+check('the picker marks the off Rooms (East, and Annex under the off Wing), and only those',
+      offered == ['pa/Annex  (off)', 'pa/East  (off)', 'pa/None', 'pa/West'], offered)
 s, out = run('Door', click('obj.pa') + click('pa/East  (off)'), linked=True, off=True)
 printed = [l for l in out if l.startswith('portal: Door')]
 check('picking an off Room saves its plain name', portal(s) == ('East', 'East', 2, 3) and
       printed[-1:] == ['portal: Door a=East(off) b=East(off) 2x3 problems 2'], (portal(s), printed))
+
+# Annex is on but under the off Wing: its row is drawn, its inspector says why it is off from
+# the first frame, and once the export lands (East on, so it succeeds) the room line names Wing.
+s, out = run('Annex', ['--wait-export', '--wait', '5'], linked=True, wing=True, env={'SPLASHEDIT_EXPORT_DELAY_MS': '1000'})
+r = run.rects
+
+
+def label_peak(png, rect, depth):
+    """The brightest channel sum in a tree row's label (past its chevron and
+    icon): full text is near 0xe4e7ee, dimmed text near 0x6b7283."""
+    w, h, rows = png
+    x0 = rect[0] + 4 + depth * 16 + 16 + 22
+    peak = 0
+    for y in range(max(0, rect[1]), min(h, rect[3])):
+        for x in range(max(0, x0), min(w, x0 + 40)):
+            peak = max(peak, sum(rows[y][3 * x:3 * x + 3]))
+    return peak
+
+
+check('the Annex row is drawn under Wing', 'tree.Annex' in r and 'tree.Wing' in r and r['tree.Annex'][1] > r['tree.Wing'][1],
+      (r.get('tree.Wing'), r.get('tree.Annex')))
+if 'tree.Annex' in r and 'tree.Gap' in r and 'tree.Wing' in r:
+    png = png_rgb(last_shot)
+    peaks = {n: label_peak(png, r['tree.' + n], d) for n, d in (('Gap', 1), ('Wing', 1), ('Annex', 2))}
+    check('Annex, on under the off Wing, is dimmed like Wing and unlike Gap',
+          peaks['Gap'] > 3 * 0xc8 and peaks['Wing'] < 3 * 0xa0 and peaks['Annex'] < 3 * 0xa0, peaks)
+cap, body = r.get('obj.inheritedoff'), r.get('obj.panel')
+check('the inspector caption says Annex is off through its parent, inside the panel',
+      cap is not None and body is not None and body[0] <= cap[0] and cap[2] <= body[2] and body[1] <= cap[1] and cap[3] <= body[3],
+      (cap, body))
+check('the off-via line is printed once', [l for l in out if l.startswith('object: ')] == ['object: Annex off via Wing'],
+      [l for l in out if l.startswith('object: ')])
+rooms = [l for l in out if l.startswith('room: Annex')]
+check('the Annex room line names the off parent', rooms[-1:] == ["room: Annex Not exported: 'Wing' is off"], rooms)
+check('Annex keeps its own active flag on in the saved scene',
+      next(o for o in s['objects'] if o['name'] == 'Wing')['children'][0]['active'] is True)
 
 
 # 6. The viewport draws the rooms and the portal; the box toggle hides them.

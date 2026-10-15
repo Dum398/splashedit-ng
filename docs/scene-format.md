@@ -52,6 +52,10 @@ version as it is.
   position (game objects, name table, mesh data, Lua files, texture packing ties) is depth-first
   pre-order over this tree in file order. The editor never reorders on save, so the order is the
   one the user sees in the hierarchy panel.
+- `active: false` leaves the object, its lights and everything under it out of the pack: an object
+  is exported only when it and every ancestor are active (Unity's `activeInHierarchy`), and the
+  canonical order above skips the rest. `startActive: false` (written only when false) keeps the
+  object in the pack but loads it hidden and without collision (object flag bit 0).
 - Floats are written with the shortest representation that round-trips a 32-bit float.
 
 Components so far (more are added feature by feature, matching the splashpack sections):

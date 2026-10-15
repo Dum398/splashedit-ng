@@ -37,14 +37,23 @@ struct DiscInfo {
 // licence data). Throws std::runtime_error on a bad name or a write error.
 DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& volume, const std::filesystem::path& bin);
 
-// A bootable disc for one scene: SYSTEM.CNF, the engine as PSX.EXE, and the
-// scene's three files under SCENE0/, where psxsplash's CD-ROM loader opens
-// them. `engine` must be a LOADER=cdrom build. `title` becomes the volume
-// name (letters, digits and _ kept, upper-cased). Errors land in the result.
+// A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
+// under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
+// where psxsplash's CD-ROM loader opens them; scene 0 is the one the game
+// starts in and Lua's Scene.Load(i) opens scene i. `engine` must be a
+// LOADER=cdrom build. `title` becomes the volume name (letters, digits and _
+// kept, upper-cased). Errors land in the result; with more than one scene,
+// each error and warning starts with its scene's index and, when `names`
+// gives one, its name ("scene 1 (cave): ..."). No image is written when any
+// scene fails. The stats are scene 0's.
 struct DiscResult {
     ExportResult exported;
     DiscInfo disc;
 };
+DiscResult exportDisc(const std::vector<const Scene*>& scenes, const std::filesystem::path& projectRoot,
+                      const std::filesystem::path& engine, const std::filesystem::path& bin, const std::string& title,
+                      const std::vector<std::string>& names = {});
+// The same for one scene, as scene 0.
 DiscResult exportDisc(const Scene& scene, const std::filesystem::path& projectRoot, const std::filesystem::path& engine,
                       const std::filesystem::path& bin, const std::string& title);
 

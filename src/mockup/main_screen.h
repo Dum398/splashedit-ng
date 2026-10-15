@@ -109,9 +109,11 @@ struct State {
         uint64_t linesSeen = 0;
         // Live edits: the document revision the running game was last sent,
         // the revision seen last frame and since when, the export in flight,
-        // and the count written to reload.flag.
+        // the count written to reload.flag, and the open scene's place in the
+        // build list Play exported (-1 when it is not in it: no live edits).
         std::future<splash::ExportResult> reload;
         unsigned sentRev = 0, seenRev = 0, reloadGeneration = 0;
+        int reloadIndex = 0;
         double seenAt = 0;
     } play;
 

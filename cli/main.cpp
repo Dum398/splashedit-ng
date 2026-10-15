@@ -61,8 +61,9 @@ static int usage() {
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
                  "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n"
-                 "usage: splashpack-cli disc <scene> --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
-                 "  builds a bootable disc image (.bin + .cue) of one scene; the engine is a LOADER=cdrom build\n"
+                 "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
+                 "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
+                 "  (the game starts in the first); the engine is a LOADER=cdrom build\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n");
@@ -300,7 +301,8 @@ static int font(int argc, char** argv) {
 }
 
 static int discCmd(int argc, char** argv) {
-    std::string scenePath, outPath, project, engine;
+    std::vector<std::string> scenePaths;
+    std::string outPath, project, engine;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc)
@@ -309,16 +311,28 @@ static int discCmd(int argc, char** argv) {
             project = argv[++i];
         else if (a == "--engine" && i + 1 < argc)
             engine = argv[++i];
-        else if (scenePath.empty())
-            scenePath = a;
+        else if (!a.empty() && a[0] != '-')
+            scenePaths.push_back(a);
         else
             return usage();
     }
-    if (scenePath.empty() || outPath.empty() || engine.empty()) return usage();
+    if (scenePaths.empty() || outPath.empty() || engine.empty()) return usage();
+    std::vector<splash::Scene> scenes;
+    std::vector<std::string> names;
+    for (const std::string& path : scenePaths) {
+        try {
+            scenes.push_back(splash::loadScene(path));
+            names.push_back(fs::path(path).stem().string());
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: %s: %s\n", path.c_str(), e.what());
+            return 1;
+        }
+    }
     try {
-        splash::Scene scene = splash::loadScene(scenePath);
-        fs::path root = project.empty() ? fs::path(scenePath).parent_path() : fs::path(project);
-        splash::DiscResult r = splash::exportDisc(scene, root, engine, outPath, fs::path(scenePath).stem().string());
+        std::vector<const splash::Scene*> ptrs;
+        for (const splash::Scene& s : scenes) ptrs.push_back(&s);
+        fs::path root = project.empty() ? fs::path(scenePaths.front()).parent_path() : fs::path(project);
+        splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names);
         for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (!r.exported.ok()) return 1;

@@ -389,9 +389,13 @@ EngineKind engineKind(const std::vector<uint8_t>& exe) {
     return EngineKind::Cdrom;
 }
 
-DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs::path& engine, const fs::path& bin,
-                      const std::string& title) {
+DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
+                      const fs::path& bin, const std::string& title, const std::vector<std::string>& names) {
     DiscResult r;
+    if (scenes.empty()) {
+        r.exported.errors.push_back("No scene to put on the disc.");
+        return r;
+    }
     std::vector<uint8_t> exe;
     try {
         exe = readFile(engine);
@@ -422,17 +426,37 @@ DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs:
     try {
         ExportOptions opt;
         opt.luaBytecode = true;
-        r.exported = exportSplashpack(scene, projectRoot, tmp / "scene.splashpack", opt);
-        if (r.exported.errors.empty()) {
-            const char* cnf = "BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFF00\r\n";
-            std::vector<DiscFile> files;
-            files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
-            files.push_back({"PSX.EXE", std::move(exe)});
-            files.push_back({"SCENE0/SCENE_0.SPK", readFile(tmp / "scene.splashpack")});
-            files.push_back({"SCENE0/SCENE_0.VRM", readFile(tmp / "scene.vram")});
-            files.push_back({"SCENE0/SCENE_0.SPU", readFile(tmp / "scene.spu")});
+        const char* cnf = "BOOT = cdrom:\\PSX.EXE;1\r\nTCB = 4\r\nEVENT = 10\r\nSTACK = 801FFF00\r\n";
+        std::vector<DiscFile> files;
+        files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
+        files.push_back({"PSX.EXE", std::move(exe)});
+        for (size_t i = 0; i < scenes.size(); ++i) {
+            std::string tag;
+            if (scenes.size() > 1) {
+                tag = "scene " + std::to_string(i);
+                if (i < names.size() && !names[i].empty()) tag += " (" + names[i] + ")";
+                tag += ": ";
+            }
+            const fs::path spk = tmp / ("scene_" + std::to_string(i) + ".splashpack");
+            ExportResult one;
+            try {
+                one = exportSplashpack(*scenes[i], projectRoot, spk, opt);
+            } catch (const std::exception& e) {
+                one.errors.push_back(e.what());
+            }
+            for (const std::string& m : one.errors) r.exported.errors.push_back(tag + m);
+            for (const std::string& m : one.warnings) r.exported.warnings.push_back(tag + m);
+            if (i == 0) r.exported.stats = std::move(one.stats);
+            if (!one.errors.empty()) continue;
+            const std::string dir = "SCENE" + std::to_string(i) + "/SCENE_" + std::to_string(i);
+            fs::path part = spk;
+            files.push_back({dir + ".SPK", readFile(spk)});
+            files.push_back({dir + ".VRM", readFile(part.replace_extension(".vram"))});
+            files.push_back({dir + ".SPU", readFile(part.replace_extension(".spu"))});
             // World streaming reads its regions from here while the game runs.
-            if (fs::exists(tmp / "scene.geo")) files.push_back({"SCENE0/SCENE_0.GEO", readFile(tmp / "scene.geo")});
+            if (fs::exists(part.replace_extension(".geo"))) files.push_back({dir + ".GEO", readFile(part)});
+        }
+        if (r.exported.errors.empty()) {
             std::string volume;
             for (char ch : title) {
                 char u = (ch >= 'a' && ch <= 'z') ? char(ch - 32) : ch;
@@ -445,6 +469,11 @@ DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs:
     }
     fs::remove_all(tmp, ec);
     return r;
+}
+
+DiscResult exportDisc(const Scene& scene, const fs::path& projectRoot, const fs::path& engine, const fs::path& bin,
+                      const std::string& title) {
+    return exportDisc(std::vector<const Scene*>{&scene}, projectRoot, engine, bin, title);
 }
 
 }  // namespace splash

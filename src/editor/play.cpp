@@ -6,7 +6,10 @@
 #include <exception>
 #include <fstream>
 #include <initializer_list>
+#include <string>
 #include <system_error>
+
+#include "scene.hh"
 
 namespace fs = std::filesystem;
 
@@ -157,7 +160,29 @@ std::vector<std::string> missingHardwareTools(const PlayTools& t) {
     return out;
 }
 
-splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir) {
+static const char* const kSceneExts[] = {".splashpack", ".vram", ".spu", ".geo"};
+
+static std::string sceneStem(size_t i) { return "scene_" + std::to_string(i); }
+
+// Exports `scene` as dir/scene_<i>.*, removing that scene's old files first so
+// a failed export leaves none of them to boot.
+static splash::ExportResult exportScene(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir,
+                                        size_t i) {
+    splash::ExportResult r;
+    std::error_code ec;
+    for (const char* ext : kSceneExts) fs::remove(dir / (sceneStem(i) + ext), ec);
+    splash::ExportOptions opt;
+    opt.luaBytecode = true;
+    try {
+        r = splash::exportSplashpack(scene, projectRoot, dir / (sceneStem(i) + ".splashpack"), opt);
+    } catch (const std::exception& e) {
+        r.errors.push_back(e.what());
+    }
+    return r;
+}
+
+splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scenes, const fs::path& projectRoot,
+                                   const fs::path& dir, const std::vector<std::string>& names) {
     splash::ExportResult r;
     std::error_code ec;
     fs::create_directories(dir, ec);
@@ -165,17 +190,63 @@ splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& p
         r.errors.push_back("Cannot create " + utf8(dir) + ": " + ec.message());
         return r;
     }
-    // Stale files from an earlier play must not be booted if this export fails.
-    for (const char* ext : {".splashpack", ".vram", ".spu", ".geo"}) fs::remove(dir / (std::string("scene_0") + ext), ec);
+    // Stale files from an earlier play must not be booted if this export fails,
+    // nor scenes the list no longer has be opened by Scene.Load.
+    std::vector<fs::path> stale;
+    for (const fs::directory_entry& e : fs::directory_iterator(dir, ec)) {
+        const std::string name = utf8(e.path().filename());
+        unsigned long n = 0;
+        int used = 0;
+        if (std::sscanf(name.c_str(), "scene_%lu%n", &n, &used) != 1 || n < scenes.size()) continue;
+        const std::string ext = name.substr(size_t(used));
+        for (const char* known : kSceneExts)
+            if (ext == known) stale.push_back(e.path());
+    }
+    for (const fs::path& f : stale) fs::remove(f, ec);
     fs::remove(dir / "reload.flag", ec);
-    splash::ExportOptions opt;
-    opt.luaBytecode = true;
-    try {
-        r = splash::exportSplashpack(scene, projectRoot, dir / "scene_0.splashpack", opt);
-    } catch (const std::exception& e) {
-        r.errors.push_back(e.what());
+    for (size_t i = 0; i < scenes.size(); ++i) {
+        std::string tag;
+        if (scenes.size() > 1) {
+            tag = "scene " + std::to_string(i);
+            if (i < names.size() && !names[i].empty()) tag += " (" + names[i] + ")";
+            tag += ": ";
+        }
+        splash::ExportResult one = exportScene(*scenes[i], projectRoot, dir, i);
+        for (const std::string& m : one.errors) r.errors.push_back(tag + m);
+        for (const std::string& m : one.warnings) r.warnings.push_back(tag + m);
+        if (i == 0) r.stats = std::move(one.stats);
     }
     return r;
+}
+
+splash::ExportResult exportForPlay(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir) {
+    return exportForPlay(std::vector<const splash::Scene*>{&scene}, projectRoot, dir);
+}
+
+std::vector<const splash::Scene*> BuildScenes::pointers() const {
+    std::vector<const splash::Scene*> out;
+    for (const splash::Scene& s : scenes) out.push_back(&s);
+    return out;
+}
+
+BuildScenes loadBuildScenes(const fs::path& project, const std::vector<fs::path>& files, const fs::path& openFile,
+                            const splash::Scene& open) {
+    BuildScenes b;
+    const fs::path openKey = openFile.lexically_normal();
+    for (const fs::path& f : files) {
+        b.names.push_back(utf8(f.stem()));
+        if (f.lexically_normal() == openKey) {
+            b.scenes.push_back(open);
+            continue;
+        }
+        try {
+            b.scenes.push_back(splash::loadScene(project / f));
+        } catch (const std::exception& e) {
+            b.scenes.emplace_back();
+            b.errors.push_back("Cannot load " + utf8(f) + ": " + e.what());
+        }
+    }
+    return b;
 }
 
 bool parseRenderPeak(const std::string& line, RenderPeak* out) {
@@ -203,11 +274,17 @@ bool writeReloadFlag(const fs::path& dir, unsigned generation) {
 }
 
 splash::ExportResult reloadForPlay(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir,
-                                   unsigned generation) {
+                                   unsigned generation, size_t index) {
     const fs::path next = dir / "next";
     std::error_code ec;
     fs::remove_all(next, ec);
-    splash::ExportResult r = exportForPlay(scene, projectRoot, next);
+    fs::create_directories(next, ec);
+    if (ec) {
+        splash::ExportResult r;
+        r.errors.push_back("Cannot create " + utf8(next) + ": " + ec.message());
+        return r;
+    }
+    splash::ExportResult r = exportScene(scene, projectRoot, next, index);
     if (!r.ok()) return r;
     for (const fs::directory_entry& e : fs::directory_iterator(next, ec)) {
         fs::rename(e.path(), dir / e.path().filename(), ec);

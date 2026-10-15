@@ -965,6 +965,92 @@ void testLiveExport() {
     CHECK(!live.busy());  // nothing changed since the last export
 }
 
+// The build list and a Play of several scenes: scenes.list round trip, what
+// buildScenes makes of missing files and an empty list, exportForPlay writing
+// scene_<i> per scene and dropping stale ones, and a live reload of one index.
+void testBuildScenes() {
+    namespace fs = std::filesystem;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "multiscene";
+    fs::remove_all(project);
+    fs::copy(src / "examples" / "courtyard", project, fs::copy_options::recursive);
+    fs::create_directories(project / "levels");
+    fs::copy_file(project / "courtyard.scene", project / "levels" / fs::path(u8"höhle.scene"));
+
+    // Round trip, '/'-separated and UTF-8; a missing file is an empty list.
+    CHECK(editor::loadBuildList(project).empty());
+    const std::vector<fs::path> list = {"courtyard.scene", fs::path(u8"levels/höhle.scene"), "gone.scene"};
+    CHECK(editor::saveBuildList(project, list));
+    CHECK(editor::loadBuildList(project) == list);
+    {
+        std::ifstream in(project / "scenes.list", std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text == "courtyard.scene\nlevels/h\xc3\xb6hle.scene\ngone.scene\n");
+    }
+
+    // A listed file that is gone is left out; an empty list is the open scene.
+    const std::vector<fs::path> built = editor::buildScenes(project, "courtyard.scene");
+    CHECK(built.size() == 2 && built[0] == "courtyard.scene" && built[1] == fs::path(u8"levels/höhle.scene"));
+    CHECK(editor::saveBuildList(project, {}));
+    CHECK(editor::loadBuildList(project).empty());
+    CHECK(editor::buildScenes(project, "courtyard.scene") == std::vector<fs::path>{"courtyard.scene"});
+    CHECK(editor::saveBuildList(project, {"gone.scene"}));
+    CHECK(editor::buildScenes(project, "courtyard.scene") == std::vector<fs::path>{"courtyard.scene"});
+
+    // The open scene comes from memory, the rest from disk; a file that does
+    // not load is an error naming it.
+    splash::Scene open = splash::loadScene(project / "courtyard.scene");
+    open.objects.push_back(named("unsaved"));
+    open.settings.fog.enabled = !open.settings.fog.enabled;  // an edit the pack shows
+    editor::BuildScenes b = editor::loadBuildScenes(project, built, "courtyard.scene", open);
+    CHECK(b.errors.empty() && b.scenes.size() == 2 && b.names.size() == 2 && b.names[1] == "h\xc3\xb6hle");
+    CHECK(b.scenes.size() == 2 && b.scenes[0].objects.size() == open.objects.size() &&
+          b.scenes[1].objects.size() + 1 == open.objects.size());
+    { std::ofstream(project / "broken.scene", std::ios::binary) << "not a scene"; }
+    editor::BuildScenes bad = editor::loadBuildScenes(project, {"courtyard.scene", "broken.scene"}, "courtyard.scene", open);
+    CHECK(bad.errors.size() == 1 && bad.errors[0].find("broken.scene") != std::string::npos);
+
+    // Two scenes: scene_0.* and scene_1.*, and an earlier scene_2 is gone.
+    const fs::path dir = g_outDir / "multiplay";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    for (const char* ext : {".splashpack", ".vram", ".spu"}) std::ofstream(dir / (std::string("scene_2") + ext), std::ios::binary) << "old";
+    splash::ExportResult r = editor::exportForPlay(b.pointers(), project, dir, b.names);
+    CHECK(r.ok());
+    for (const char* ext : {".splashpack", ".vram", ".spu"}) {
+        CHECK(fs::exists(dir / (std::string("scene_0") + ext)));
+        CHECK(fs::exists(dir / (std::string("scene_1") + ext)));
+        CHECK(!fs::exists(dir / (std::string("scene_2") + ext)));
+    }
+    auto bytes = [&](const char* name) {
+        std::ifstream in(dir / name, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    std::error_code ec;
+    CHECK(fs::file_size(dir / "scene_0.splashpack", ec) == r.stats.splashpackBytes);
+    CHECK(!bytes("scene_1.splashpack").empty() && bytes("scene_1.splashpack") != bytes("scene_0.splashpack"));
+
+    // An error names the scene it is in.
+    splash::Scene broken = b.scenes[1];
+    splash::Object o = named("broken");
+    o.mesh = splash::MeshComponent{};
+    o.mesh->mesh = "no/such.mesh";
+    broken.objects.push_back(o);
+    splash::ExportResult e = editor::exportForPlay({&b.scenes[0], &broken}, project, g_outDir / "multiplay-bad", b.names);
+    CHECK(!e.ok() && e.errors.front().rfind(std::string("scene 1 (") + b.names[1] + "): ", 0) == 0);
+
+    // A live reload of index 1 rewrites scene_1 and leaves scene_0 alone.
+    const std::string pack0 = bytes("scene_0.splashpack"), vram0 = bytes("scene_0.vram"), pack1 = bytes("scene_1.splashpack");
+    splash::Scene edited = b.scenes[1];
+    edited.settings.fog.color = {0.25f, 0.5f, 0.75f};
+    splash::ExportResult lr = editor::reloadForPlay(edited, project, dir, 7, 1);
+    CHECK(lr.ok());
+    CHECK(bytes("scene_1.splashpack").size() == lr.stats.splashpackBytes && bytes("scene_1.splashpack") != pack1);
+    CHECK(bytes("scene_0.splashpack") == pack0 && bytes("scene_0.vram") == vram0);
+    CHECK(!fs::exists(dir / "scene_0.splashpack.tmp") && !fs::exists(dir / "next" / "scene_1.splashpack"));
+    CHECK(bytes("reload.flag") == "7");
+}
+
 static void setEnv(const char* k, const char* v) {
 #ifdef _WIN32
     _putenv_s(k, v);
@@ -6237,6 +6323,7 @@ int main(int argc, char** argv) {
     testLiveExport();
     testBlendCancel();
     testPlay();
+    testBuildScenes();
     testProject();
     testAdoptAsset();
     testNewScript();

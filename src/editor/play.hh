@@ -2,6 +2,7 @@
 // boot it in pcsx-redux. This half has no SDL; the process lives in the app.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -38,19 +39,41 @@ std::vector<std::string> missingDiscTools(const PlayTools& tools);
 // The same for Run on hardware: the psxsplash build and a port.
 std::vector<std::string> missingHardwareTools(const PlayTools& tools);
 
-// Writes dir/scene_0.{splashpack,vram,spu}, the names psxsplash's PCdrv
-// loader opens for the first scene.
+// Writes dir/scene_<i>.{splashpack,vram,spu} (and .geo when it streams) for
+// each scene in order, the names psxsplash's PCdrv loader opens: the game
+// starts in scene 0 and Lua's Scene.Load(i) opens scene i. Scene files from
+// an earlier export numbered past the last scene are removed. With more than
+// one scene, each error and warning starts with its scene's index and, when
+// `names` gives one, its name ("scene 1 (cave): ..."). The stats are scene 0's.
+splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scenes,
+                                   const std::filesystem::path& projectRoot, const std::filesystem::path& dir,
+                                   const std::vector<std::string>& names = {});
+// The same for one scene, as scene 0.
 splash::ExportResult exportForPlay(const splash::Scene& scene, const std::filesystem::path& projectRoot,
                                    const std::filesystem::path& dir);
+
+// The scenes of a build, loaded in `files` order (project-relative paths, as
+// buildScenes gives them). The entry naming `openFile` is `open` itself, so
+// unsaved edits are what plays; every other is read from `project`. A file
+// that does not load is an error naming it. `names` are the file stems.
+struct BuildScenes {
+    std::vector<splash::Scene> scenes;
+    std::vector<std::string> names;
+    std::vector<std::string> errors;
+    std::vector<const splash::Scene*> pointers() const;
+};
+BuildScenes loadBuildScenes(const std::filesystem::path& project, const std::vector<std::filesystem::path>& files,
+                            const std::filesystem::path& openFile, const splash::Scene& open);
 
 // Live edits while the game runs. psxsplash re-reads dir/reload.flag every
 // few frames when it existed at boot, and reloads the scene in place when its
 // contents change. writeReloadFlag stores `generation` there; reloadForPlay
-// exports into dir/next, moves the files over the ones the game loads, then
-// bumps the flag. A failed export leaves the running scene's files alone.
+// exports `scene` as scene `index` into dir/next, moves its files over
+// dir/scene_<index>.*, then bumps the flag; the other scenes' files are left
+// as they are. A failed export leaves the running scene's files alone.
 bool writeReloadFlag(const std::filesystem::path& dir, unsigned generation);
 splash::ExportResult reloadForPlay(const splash::Scene& scene, const std::filesystem::path& projectRoot,
-                                   const std::filesystem::path& dir, unsigned generation);
+                                   const std::filesystem::path& dir, unsigned generation, size_t index = 0);
 
 // What a development (PCdrv) psxsplash reports using, from its line
 // "psxsplash: render peak depth D of N, bump B of M".

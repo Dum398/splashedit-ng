@@ -32,6 +32,38 @@ fs::path firstScene(const fs::path& project) {
     return best;
 }
 
+std::vector<fs::path> loadBuildList(const fs::path& project) {
+    std::vector<fs::path> out;
+    if (project.empty()) return out;
+    std::ifstream in(project / "scenes.list", std::ios::binary);
+    std::string line;
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        if (!line.empty()) out.push_back(fromUtf8(line));
+    }
+    return out;
+}
+
+bool saveBuildList(const fs::path& project, const std::vector<fs::path>& list) {
+    if (project.empty()) return false;
+    std::ofstream out(project / "scenes.list", std::ios::binary | std::ios::trunc);
+    for (const fs::path& p : list) {
+        std::u8string u = p.generic_u8string();
+        out << std::string(u.begin(), u.end()) << '\n';
+    }
+    out.close();
+    return !out.fail();
+}
+
+std::vector<fs::path> buildScenes(const fs::path& project, const fs::path& openScene) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    for (const fs::path& p : loadBuildList(project))
+        if (fs::is_regular_file(project / p, ec)) out.push_back(p);
+    if (out.empty()) out.push_back(openScene);
+    return out;
+}
+
 NewProject createProject(const fs::path& dir) {
     NewProject r;
     if (dir.empty()) {

@@ -115,7 +115,9 @@ Courtyard at frame 900 is pixel-identical between the disc and the PCdrv boot.
 `disccheck.py` builds a disc of the courtyard example with stand-in engines and reads it back: sync,
 BCD address, subheader, EDC on every sector, P/Q parity on a sample (recomputed in Python from the
 Reed-Solomon generator), the ISO 9660 tree, SYSTEM.CNF in the first root sector, and the scene files
-byte-equal to `export --lua-bytecode`. A PCdrv engine must be refused.
+byte-equal to `export --lua-bytecode`. A PCdrv engine must be refused. A second disc of two scenes
+(the courtyard, then a copy with fog on) must hold each under `SCENE<i>/SCENE_<i>.*`, byte-equal to
+that scene's own export, and no `SCENE2`.
 
     python3 disccheck.py <splashpack-cli>
 
@@ -418,6 +420,15 @@ take back the scene type, the typed density and the switch. Controls are clicked
 display.
 
     python3 scenefogcheck.py <splashedit>
+
+`buildscenescheck.py` drives the scene inspector's Build scenes section on copies of the courtyard example
+with a second scene, `level2.scene`, beside it: adds both from the Add menu (`@build.add/level2.scene`),
+moves level2 up (`@build.up.1`) and removes the other (`@build.remove.1`), checking the editor's
+`build: 0 a.scene | 1 b.scene` line after each change, `scenes.list` and what the Add menu still offers;
+then adds level2 to an empty list, which puts the open scene first, and checks Ctrl+Z leaves the list and
+the scene unchanged. Controls are clicked by name. Needs a display.
+
+    python3 buildscenescheck.py <splashedit>
 
 `scripttabscheck.py` clicks the centre panel's tabs by name (`@tab.scene`, `@tab.ui`, `@tab.0`) on copies of
 the courtyard example: back to Scene from an open script and from UI, and UI, the script and Scene in turn.

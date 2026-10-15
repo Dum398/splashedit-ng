@@ -434,6 +434,14 @@ edit and keep the rest. Controls are clicked by name. Needs a display.
 
     python3 compfieldscheck.py <splashedit>
 
+`inspectorscrollcheck.py` gives two objects on a copy of the courtyard example a spot Light, an
+Interactable and an Audio clip, so their inspector is taller than the panel. Add component starts below
+the panel; the wheel over the inspector brings it into view and a click on it opens the picker; and
+inspecting the other object, as tall, starts at the top again. Rows are found by name (the scene
+tree's rows are `tree.<object name>`). Needs a display.
+
+    python3 inspectorscrollcheck.py <splashedit>
+
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
 ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is

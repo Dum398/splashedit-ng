@@ -1,4 +1,4 @@
-# Check that splashdiff.py reads the current splashpack version and compares
+# Check that splashdiff.py reads the current splashpack version (and v23) and compares
 # the room block: courtyard copied with two Rooms and a Portal added, exported
 # twice and compared, then byte-patched copies and a scene edit that must show
 # up as room/portal differences.
@@ -135,6 +135,17 @@ rf2, f2 = export(json.loads(json.dumps(base)), 'plain_b')
 rc, out = diff(f1, f2)
 check('(f) courtyard without rooms: rc 0, EQUAL, no room line',
       rf1.returncode == 0 and rf2.returncode == 0 and rc == 0 and 'EQUAL' in out and 'room' not in out, out)
+
+# (g) a Unity 2.4.0 v23 pack (psxsplash tests/boot/fixture/scene_0) decodes and
+# compares equal with itself; against a v27 export the version is a difference
+v23 = os.path.join(here, 'splashdiff', 'v23.splashpack')
+rc, out = diff(v23, v23)
+check('(g) v23 fixture vs itself: rc 0, EQUAL', rc == 0 and 'EQUAL' in out, out)
+print('     ' + out.splitlines()[-1])
+rc, out = diff(v23, f1)
+got = lines(out, r'header\.version: 23 != 27$')
+check('(g) v23 vs v27: rc 1 (not refused) and a header.version line', rc == 1 and got, out)
+print('     ' + '\n     '.join(got))
 
 shutil.rmtree(tmp, ignore_errors=True)
 print('%d/%d checks passed' % (checks - fails, checks))

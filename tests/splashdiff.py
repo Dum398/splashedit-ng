@@ -7,6 +7,10 @@ Every object-index field (BVH refs, collider gameObjectIndex) is translated
 through the name mapping before comparing. Covers the sections the C++ writer
 emits so far; anything else present in either file is reported, not compared.
 
+Decodes v23..v27 by version (header size and interactable size, as the
+psxsplash reader does); packs of different versions are compared on what both
+carry and the version shows up as a header difference.
+
 usage: splashdiff.py A.splashpack B.splashpack [-v]
 exit 0 = equal, 1 = differences, 2 = cannot compare
 """
@@ -14,7 +18,7 @@ import struct
 import sys
 from pathlib import Path
 
-HEADER = [  # (name, fmt) in order, 156 bytes (v27)
+HEADER = [  # (name, fmt) in order, 156 bytes (v25+); 148 in v24, 144 in v22-v23
     ("magic", "2s"), ("version", "H"), ("luaFileCount", "H"), ("gameObjectCount", "H"),
     ("textureAtlasCount", "H"), ("clutCount", "H"), ("colliderCount", "H"), ("interactableCount", "H"),
     ("playerStartPos", "3h"), ("playerStartRot", "3h"), ("playerHeight", "H"), ("sceneLuaFileIndex", "h"),
@@ -35,6 +39,13 @@ HEADER = [  # (name, fmt) in order, 156 bytes (v27)
 OFFSET_FIELDS = {"nameTableOffset", "audioTableOffset", "cutsceneTableOffset", "uiTableOffset",
                  "animationTableOffset", "skinTableOffset", "memcardTableOffset", "streamTableOffset",
                  "spriteTableOffset", "tilemapTableOffset", "lightTableOffset"}
+VERSIONS = range(23, 28)
+
+
+def header_size(version):  # psxsplash splashpack.cpp splashpackHeaderSize
+    return 156 if version >= 25 else 148 if version >= 24 else 144
+
+
 UNSUPPORTED = ["triggerBoxCount", "interactableCount", "audioClipCount",
                "cutsceneCount", "animationCount", "skinnedMeshCount", "agentCount", "uiCanvasCount",
                "uiFontCount", "spriteSheetCount", "memcardTableOffset", "streamTableOffset",
@@ -46,17 +57,27 @@ class Pack:
         self.path = Path(path)
         self.d = self.path.read_bytes()
         self.vram = self.path.with_suffix(".vram").read_bytes()
+        if self.d[:2] != b"SP":
+            raise ValueError(f"{path}: not a splashpack")
+        version, = struct.unpack_from("<H", self.d, 2)
+        if version not in VERSIONS:
+            raise ValueError(f"{path}: version {version}, only v{VERSIONS[0]}..v{VERSIONS[-1]} are decoded")
+        size = header_size(version)
+        # Fields past this version's header are absent: read as 0, not compared.
         p = 0
         self.h = {}
+        self.present = set()
         for name, fmt in HEADER:
-            v = struct.unpack_from("<" + fmt, self.d, p)
-            p += struct.calcsize("<" + fmt)
-            self.h[name] = v[0] if len(v) == 1 else v
-        if self.h["magic"] != b"SP":
-            raise ValueError(f"{path}: not a splashpack")
-        if self.h["version"] != 27:
-            raise ValueError(f"{path}: version {self.h['version']}, only v27 is decoded")
+            n = struct.calcsize("<" + fmt)
+            if p + n <= size:
+                v = struct.unpack_from("<" + fmt, self.d, p)
+                self.h[name] = v[0] if len(v) == 1 else v
+                self.present.add(name)
+            else:
+                self.h[name] = 0
+            p += n
         assert p == 156
+        p = size
         h = self.h
         self.lua = []
         for _ in range(h["luaFileCount"]):
@@ -88,11 +109,15 @@ class Pack:
             p += 4
         p = (p + 3) & ~3
         self.cursorAfterBvh = p
-        p += h["interactableCount"] * 32
+        p += h["interactableCount"] * (32 if version >= 27 else 28)  # v26 and older: 28
         waypoints = 0
         for i in range(h["agentCount"]):
             waypoints += self.d[p + i * 28 + 3]
         p += h["agentCount"] * 28 + waypoints * 12
+        if h["worldCollisionMeshCount"]:  # legacy world collision, skipped as the engine does
+            p = (p + 3) & ~3
+            mc, tc, cw, ch = struct.unpack_from("<4H", self.d, p)
+            p += 20 + mc * 32 + tc * 52 + (cw * ch * 4 if cw and ch else 0)
         self.nav = None
         if h["navRegionCount"]:
             p = (p + 3) & ~3
@@ -258,7 +283,7 @@ def compare(a, b, verbose):
     out = lambda s: diffs.append(s)
 
     for name, _ in HEADER:
-        if name in OFFSET_FIELDS:
+        if name in OFFSET_FIELDS or name not in a.present or name not in b.present:
             continue
         if a.h[name] != b.h[name]:
             out(f"header.{name}: {a.h[name]} != {b.h[name]}")

@@ -1999,14 +1999,15 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         toggleProjectTab(st);
 }
 
-static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 a, viewport::Vec3 b) {
+static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 a, viewport::Vec3 b,
+                             ImU32 col = rgb(0xb3a8ff, 230), float thick = 1.5f) {
     viewport::Vec3 p[8] = {{a.x, a.y, a.z}, {b.x, a.y, a.z}, {b.x, a.y, b.z}, {a.x, a.y, b.z},
                            {a.x, b.y, a.z}, {b.x, b.y, a.z}, {b.x, b.y, b.z}, {a.x, b.y, b.z}};
     ImVec2 s[8];
     for (int i = 0; i < 8; ++i)
         if (!view.project(p[i], mn, sz, &s[i])) return;
     const int e[12][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}, {4, 5}, {5, 6}, {6, 7}, {7, 4}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
-    for (auto& ed : e) dl->AddLine(s[ed[0]], s[ed[1]], rgb(0xb3a8ff, 230), 1.5f);
+    for (auto& ed : e) dl->AddLine(s[ed[0]], s[ed[1]], col, thick);
 }
 
 // A clickable marker for an object without geometry. Returns true when clicked.
@@ -3078,6 +3079,50 @@ static void previewCamera(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
     ImGui::PopID();
 }
 
+static ImU32 overlayCol(ImU32 c, unsigned a) { return (c & 0x00ffffffu) | (a << IM_COL32_A_SHIFT); }
+
+// What the game reads off the scene but never draws: every Trigger box (the
+// world box the splashpack stores), every Interactable's reach as a ring on
+// the ground plane through its origin, and the last export's nav regions.
+// The selected object's shapes are drawn brighter.
+static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const std::vector<splash::FlatObject>& flats,
+                          const std::vector<splash::FlatObject>& shown, const splash::Object* sel,
+                          const std::optional<splash::ExportResult>& res) {
+    if (res && res->ok())
+        for (const std::vector<splash::Vec3>& poly : res->stats.navOutlines) {
+            if (poly.size() < 3) continue;
+            std::vector<ImVec2> p(poly.size());
+            bool ok = true;
+            for (size_t k = 0; k < poly.size() && ok; k++) ok = view.project(toGl(poly[k]), mn, sz, &p[k]);
+            if (!ok) continue;
+            dl->AddConvexPolyFilled(p.data(), (int)p.size(), overlayCol(kind::nav, 40));
+            dl->AddPolyline(p.data(), (int)p.size(), overlayCol(kind::nav, 170), ImDrawFlags_Closed, 1.2f);
+        }
+    for (size_t i = 0; i < flats.size() && i < shown.size(); ++i) {
+        const splash::FlatObject& fo = shown[i];
+        const bool hot = flats[i].object == sel;
+        if (fo.object->trigger) {
+            splash::Vec3 lo, hi;
+            splash::triggerWorldBox(fo, &lo, &hi);
+            selectionOutline(dl, view, mn, sz, toGl(lo), toGl(hi), overlayCol(kind::trigger, hot ? 255 : 200), hot ? 2.0f : 1.5f);
+        }
+        if (fo.object->interactable && fo.object->interactable->radius > 0) {
+            const splash::Vec3 c = fo.localToWorld.position();
+            const float rad = fo.object->interactable->radius;
+            constexpr int kSeg = 48;
+            ImVec2 p[kSeg];
+            bool ok[kSeg];
+            for (int k = 0; k < kSeg; k++) {
+                const float a = 6.2831853f * k / kSeg;
+                ok[k] = view.project(toGl(c + splash::Vec3{rad * std::cos(a), 0, rad * std::sin(a)}), mn, sz, &p[k]);
+            }
+            const ImU32 col = overlayCol(kind::interact, hot ? 255 : 210);
+            for (int k = 0; k < kSeg; k++)
+                if (ok[k] && ok[(k + 1) % kSeg]) dl->AddLine(p[k], p[(k + 1) % kSeg], col, hot ? 2.0f : 1.5f);
+        }
+    }
+}
+
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     Fonts& f = fonts();
     if (st.play.game.attached()) r = splitViewport(st, dl, r);
@@ -3086,6 +3131,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dl->AddImageRounded((ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
     ImVec2 mn = r.Min, sz = r.GetSize();
+    nameRect("vp.view", r);
     // Overlays follow the camera, so keep them inside the panel.
     ImGui::PushClipRect(r.Min, r.Max, true);
     std::vector<splash::FlatObject> flats = splash::flatten(doc.scene());
@@ -3125,6 +3171,13 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     if (iconButton("snap", ImRect(snap.Min + ImVec2(2, 2), snap.Max - ImVec2(2, 2)), icon::magnet, st.snap,
                    st.snap ? "Snap to grid: 0.25 m" : "Snap to grid: off (hold Ctrl to snap to 0.25 m)"))
         st.snap = !st.snap;
+    ImRect giz(ImVec2(snap.Max.x + space::sm, p.y), ImVec2(snap.Max.x + space::sm + 34, p.y + 32));
+    dl->AddRectFilled(giz.Min, giz.Max, rgb(0x0e1014, 210), radius::button + 2);
+    dl->AddRect(giz.Min, giz.Max, rgb(0xffffff, 14), radius::button + 2);
+    nameRect("vp.gizmos", giz);
+    if (iconButton("gizmos", ImRect(giz.Min + ImVec2(2, 2), giz.Max - ImVec2(2, 2)), icon::box, st.gizmos,
+                   st.gizmos ? "Trigger boxes, interaction radii and nav regions: shown" : "Trigger boxes, interaction radii and nav regions: hidden"))
+        st.gizmos = !st.gizmos;
 
     // Right side: view mode and camera.
     float segW = 0;
@@ -3217,6 +3270,11 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 dl->AddQuad(p[0], p[1], p[2], p[3], (color::accentHover & 0x00ffffffu) | (150u << IM_COL32_A_SHIFT), 1.2f);
             }
         }
+    }
+
+    if (st.gizmos) {
+        dl->ChannelsSetCurrent(kScene);
+        sceneOverlays(dl, view, mn, sz, flats, shown, sel, st.live.result());
     }
 
     // Markers: a lightbulb for lights, a generic marker for objects with

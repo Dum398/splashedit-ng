@@ -16,7 +16,7 @@ cmake --build build
 ./build/splashedit
 ```
 
-`--screenshot out.png [--size 1600x960] [--mouse x,y] [--clean]` renders a few frames and writes a PNG, which also works headless under `xvfb-run`. Screenshots skip the startup splash; `--splash` shows it (silent), `--frames N` picks the moment.
+`--screenshot out.png [--size 1600x960] [--mouse x,y] [--clean] [--no-overlays]` renders a few frames and writes a PNG (`--no-overlays` hides the scene view's trigger, interact and nav overlays), which also works headless under `xvfb-run`. Screenshots skip the startup splash; `--splash` shows it (silent), `--frames N` picks the moment.
 
 Fonts: Inter (SIL OFL 1.1) and Lucide (ISC), licences in `assets/fonts`.
 

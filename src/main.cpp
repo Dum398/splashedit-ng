@@ -87,6 +87,7 @@ struct Args {
     int frames = 30;
     int shotAt = -1;  // screenshot frame, overriding the padding after actions
     int viewMode = 0;
+    bool overlays = true;  // --no-overlays: the scene view hides trigger, interact and nav overlays
     const char* project = nullptr;  // project root; default: the bundled example
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
@@ -281,6 +282,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--frames")) a.frames = std::atoi(next());
         else if (!std::strcmp(argv[i], "--shot-at")) a.shotAt = std::atoi(next());
         else if (!std::strcmp(argv[i], "--clean")) a.viewMode = 1;
+        else if (!std::strcmp(argv[i], "--no-overlays")) a.overlays = false;
         else if (!std::strcmp(argv[i], "--project")) a.project = next();
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
@@ -543,6 +545,7 @@ int main(int argc, char** argv) {
     }
     mockup::State state;
     state.viewMode = args.viewMode;
+    state.gizmos = args.overlays;
     state.play.bundleDir = baseDir();
     state.play.exportTo = std::filesystem::path(std::u8string(args.exportTo.begin(), args.exportTo.end()));
     // Play's tool paths persist per user; screenshot runs read only the environment.

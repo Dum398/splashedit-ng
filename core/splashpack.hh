@@ -97,6 +97,8 @@ struct ExportStats {
     size_t streamTableBytes = 0, geoFileBytes = 0;
     std::vector<std::array<int32_t, 4>> streamRegionBounds;  // minX, minZ, maxX, maxZ
     std::vector<float> streamRegionFloor;  // per region, its lowest point in world units (Y up)
+    // Each baked nav region's outline, in world metres (Y up), for the viewport.
+    std::vector<std::vector<Vec3>> navOutlines;
     std::vector<StreamWarning> streamWarnings;  // also in ExportResult::warnings, as one line each
     size_t streamPoolBytes() const { return size_t(streamSlots) * streamSlotBytes; }
     // Negative when streaming costs more RAM than it frees.

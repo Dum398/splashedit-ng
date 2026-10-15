@@ -156,8 +156,11 @@ check('the same scrub draws the same view', n2 < 200, f'{n2} pixels differ')
 
 # No frame late: the click presses on frame 6 (actions start at 5), and that
 # frame's Scene view already draws the pose at the new scrub head.
-_, shot6, out6 = run(['--timeline', 'intro', '--click', f'{fx(75)},{RULER_Y}', '--shot-at', '6'], save=False)
-n3 = differing(shot6, shot75, SCENE_VIEW)
+# The nav overlay appears when the background export lands, which is not
+# this frame, so both shots of this comparison hide the overlays.
+_, shot6, out6 = run(['--no-overlays', '--timeline', 'intro', '--click', f'{fx(75)},{RULER_Y}', '--shot-at', '6'], save=False)
+_, shot75n, _ = run(['--no-overlays'] + scrub(75), save=False)
+n3 = differing(shot6, shot75n, SCENE_VIEW)
 check('the Scene view draws the scrub on the frame it happens', n3 < 200, f'{n3} pixels differ | ' + out6[-200:])
 
 # Scrub, play a little, save: byte for byte the reference.

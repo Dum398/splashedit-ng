@@ -382,6 +382,18 @@ struct FlatObject {
     bool activeInHierarchy;
 };
 
+// An object's Trigger box in world space: the axis-aligned bounds of the
+// box after the object's transform, which is what the splashpack stores.
+inline void triggerWorldBox(const FlatObject& fo, Vec3* mn, Vec3* mx) {
+    const Vec3 half = fo.object->trigger ? fo.object->trigger->size * 0.5f : Vec3{};
+    for (int i = 0; i < 8; i++) {
+        const Vec3 c{(i & 1) ? half.x : -half.x, (i & 2) ? half.y : -half.y, (i & 4) ? half.z : -half.z};
+        const Vec3 p = fo.localToWorld.point(c);
+        *mn = i ? vmin(*mn, p) : p;
+        *mx = i ? vmax(*mx, p) : p;
+    }
+}
+
 std::vector<FlatObject> flatten(const Scene& scene);
 
 Scene loadScene(const std::filesystem::path& file);

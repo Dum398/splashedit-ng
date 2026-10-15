@@ -237,8 +237,27 @@ check('picking an off Room saves its plain name', portal(s) == ('East', 'East', 
 # the first frame, and once the export lands (East on, so it succeeds) the room line names Wing.
 s, out = run('Annex', ['--wait-export', '--wait', '5'], linked=True, wing=True, env={'SPLASHEDIT_EXPORT_DELAY_MS': '1000'})
 r = run.rects
+
+
+def label_peak(png, rect, depth):
+    """The brightest channel sum in a tree row's label (past its chevron and
+    icon): full text is near 0xe4e7ee, dimmed text near 0x6b7283."""
+    w, h, rows = png
+    x0 = rect[0] + 4 + depth * 16 + 16 + 22
+    peak = 0
+    for y in range(max(0, rect[1]), min(h, rect[3])):
+        for x in range(max(0, x0), min(w, x0 + 40)):
+            peak = max(peak, sum(rows[y][3 * x:3 * x + 3]))
+    return peak
+
+
 check('the Annex row is drawn under Wing', 'tree.Annex' in r and 'tree.Wing' in r and r['tree.Annex'][1] > r['tree.Wing'][1],
       (r.get('tree.Wing'), r.get('tree.Annex')))
+if 'tree.Annex' in r and 'tree.Gap' in r and 'tree.Wing' in r:
+    png = png_rgb(last_shot)
+    peaks = {n: label_peak(png, r['tree.' + n], d) for n, d in (('Gap', 1), ('Wing', 1), ('Annex', 2))}
+    check('Annex, on under the off Wing, is dimmed like Wing and unlike Gap',
+          peaks['Gap'] > 3 * 0xc8 and peaks['Wing'] < 3 * 0xa0 and peaks['Annex'] < 3 * 0xa0, peaks)
 cap, body = r.get('obj.inheritedoff'), r.get('obj.panel')
 check('the inspector caption says Annex is off through its parent, inside the panel',
       cap is not None and body is not None and body[0] <= cap[0] and cap[2] <= body[2] and body[1] <= cap[1] and cap[3] <= body[3],

@@ -3128,8 +3128,7 @@ void testActiveInHierarchyExport() {
     offParent.active = false;
     offParent.children.push_back(meshObject("HiddenKid", "meshes/quad.mesh", {0, 1, 0}, false));
     base.objects.push_back(offParent);
-    // Off, with a mesh file that does not exist: never loaded, so no error.
-    splash::Object selfOff = meshObject("SelfOff", "meshes/missing.mesh", {0, 0, 6}, false);
+    splash::Object selfOff = meshObject("SelfOff", "meshes/quad.mesh", {0, 0, 6}, false);
     selfOff.active = false;
     base.objects.push_back(selfOff);
     splash::Object sleeper = meshObject("Sleeper", "meshes/quad.mesh", {0, 0, -6}, false);
@@ -3161,6 +3160,14 @@ void testActiveInHierarchyExport() {
     CHECK(b.find("HiddenKid") == std::string::npos);  // child of an off parent
     CHECK(b.find("OffParent") == std::string::npos);
     CHECK(b.find("SelfOff") == std::string::npos);
+    // An off object's components are not checked: a mesh file that does not
+    // exist is never loaded, so it is no error.
+    {
+        splash::Scene broken = base;
+        broken.objects[3].mesh->mesh = "meshes/missing.mesh";  // SelfOff
+        broken.objects[2].children[0].mesh->mesh = "meshes/missing.mesh";  // HiddenKid
+        CHECK(splash::exportSplashpack(broken, project, project / "broken.splashpack").ok());
+    }
 
     // (iv) Lights on an off object or under an off parent change nothing.
     auto lamp = [](const char* name, splash::LightKind kind, bool runtime) {

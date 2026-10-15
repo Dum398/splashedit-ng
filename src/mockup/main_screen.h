@@ -78,6 +78,13 @@ struct State {
     // level). Its own toggle, independent of gizmos.
     bool bvhShow = false;
     int bvhDepth = -1;
+    // Nav regions from the last export: outlines (navShow), "R<k>" labels at
+    // the centroids that select a region when clicked (navLabels), portal edges
+    // (navPortals), and the region the Scene inspector details (-1: none).
+    bool navShow = true;
+    bool navLabels = false;
+    bool navPortals = false;
+    int navRegion = -1;
 
     // Background dry-run export feeding the status bar's budget meters and problem count.
     editor::LiveExport live;

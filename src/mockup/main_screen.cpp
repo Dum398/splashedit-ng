@@ -3216,6 +3216,7 @@ static void previewCamera(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
     ImGui::PopID();
 }
 
+constexpr ImU32 kNavPortal = rgb(0xff6650);  // nav portal edges, apart from Room portals' yellow
 static ImU32 overlayCol(ImU32 c, unsigned a) { return (c & 0x00ffffffu) | (a << IM_COL32_A_SHIFT); }
 
 // What the game reads off the scene but never draws: every Room box and
@@ -3223,19 +3224,69 @@ static ImU32 overlayCol(ImU32 c, unsigned a) { return (c & 0x00ffffffu) | (a << 
 // world box the splashpack stores), every Interactable's reach as a ring on
 // the ground plane through its origin, and the last export's nav regions.
 // The selected object's shapes are drawn brighter.
+static std::string fmtFixed(float v);
+
+// Where a nav region sits: its Room's name, or with no Room objects in the
+// scene its connectivity island. Scripted: "<name>", "island-k" or "none";
+// else "Room <name>", "Island k" or "No room".
+static std::string navRoomName(const splash::ExportStats& s, const splash::ExportStats::NavRegionInfo& info, bool scripted) {
+    if (info.room < 0) return scripted ? "none" : "No room";
+    if (s.navIslands) return (scripted ? "island-" : "Island ") + std::to_string(info.room);
+    const std::string name = size_t(info.room) < s.rooms.size() ? s.rooms[size_t(info.room)].name : "#" + std::to_string(info.room);
+    return scripted ? name : "Room " + name;
+}
+
+// The last export's nav regions (Scene inspector, Navigation section): the
+// outlines, the selected one brighter, the portal edges at floor height, and
+// "R<k>" labels at the centroids. A label is an item like sceneIcon's
+// markers, so clicking it selects the region and does not reach picking.
+static void navOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, State& st,
+                       const std::optional<splash::ExportResult>& res) {
+    if (!st.navShow || !res || !res->ok()) return;
+    const splash::ExportStats& s = res->stats;
+    for (size_t i = 0; i < s.navOutlines.size(); i++) {
+        const std::vector<splash::Vec3>& poly = s.navOutlines[i];
+        if (poly.size() < 3) continue;
+        std::vector<ImVec2> p(poly.size());
+        bool ok = true;
+        for (size_t k = 0; k < poly.size() && ok; k++) ok = view.project(toGl(poly[k]), mn, sz, &p[k]);
+        if (!ok) continue;
+        const bool hot = int(i) == st.navRegion;
+        dl->AddConvexPolyFilled(p.data(), (int)p.size(), overlayCol(kind::nav, hot ? 110 : 40));
+        dl->AddPolyline(p.data(), (int)p.size(), overlayCol(hot ? rgb(0xffffff) : kind::nav, hot ? 255 : 170), ImDrawFlags_Closed,
+                        hot ? 2.2f : 1.2f);
+    }
+    if (st.navPortals)
+        for (const splash::ExportStats::NavRegionInfo& info : s.navInfo)
+            for (const splash::ExportStats::NavPortalInfo& pt : info.portals) {
+                ImVec2 a, b;
+                if (!view.project(toGl(pt.a), mn, sz, &a) || !view.project(toGl(pt.b), mn, sz, &b)) continue;
+                dl->AddLine(a, b, overlayCol(kNavPortal, 230), 2.0f);
+            }
+    if (!st.navLabels) return;
+    const ImRect clip(mn, mn + sz);
+    for (size_t i = 0; i < s.navInfo.size(); i++) {
+        ImVec2 c;
+        if (!view.project(toGl(s.navInfo[i].centroid), mn, sz, &c) || !clip.Contains(c)) continue;
+        const std::string label = "R" + std::to_string(i);
+        const ImVec2 ts = measure(fonts().medium, type::caption, label.c_str());
+        const ImRect lr(c - ImVec2(ts.x * 0.5f + 5, 9), c + ImVec2(ts.x * 0.5f + 5, 9));
+        ImGui::PushID((int)i);
+        Hit h = interact("navlabel", lr);
+        ImGui::PopID();
+        nameRect("nav.label/" + std::to_string(i), lr);
+        const bool hot = int(i) == st.navRegion;
+        dl->AddRectFilled(lr.Min, lr.Max, hot ? overlayCol(kind::nav, 235) : rgb(0x0e1014, 200), 4.f);
+        dl->AddRect(lr.Min, lr.Max, overlayCol(kind::nav, (unsigned)(150 + 105 * h.hover)), 4.f, 0, 1.f + 0.6f * h.hover);
+        textCentered(dl, lr, fonts().medium, type::caption, hot ? rgb(0x0e1014) : kind::nav, label.c_str());
+        if (h.clicked) st.navRegion = int(i);
+    }
+}
+
 static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const std::vector<splash::FlatObject>& flats,
                           const std::vector<splash::FlatObject>& shown, const splash::Object* sel,
-                          const std::optional<splash::ExportResult>& res) {
-    if (res && res->ok())
-        for (const std::vector<splash::Vec3>& poly : res->stats.navOutlines) {
-            if (poly.size() < 3) continue;
-            std::vector<ImVec2> p(poly.size());
-            bool ok = true;
-            for (size_t k = 0; k < poly.size() && ok; k++) ok = view.project(toGl(poly[k]), mn, sz, &p[k]);
-            if (!ok) continue;
-            dl->AddConvexPolyFilled(p.data(), (int)p.size(), overlayCol(kind::nav, 40));
-            dl->AddPolyline(p.data(), (int)p.size(), overlayCol(kind::nav, 170), ImDrawFlags_Closed, 1.2f);
-        }
+                          const std::optional<splash::ExportResult>& res, State& st) {
+    navOverlay(dl, view, mn, sz, st, res);
     // The Rooms a portal can join: the exported ones, as the exporter picks them.
     std::vector<const splash::FlatObject*> rooms;
     for (const splash::FlatObject& fo : shown)
@@ -3460,7 +3511,32 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
 
     if (st.gizmos) {
         dl->ChannelsSetCurrent(kScene);
-        sceneOverlays(dl, view, mn, sz, flats, shown, sel, st.live.result());
+        sceneOverlays(dl, view, mn, sz, flats, shown, sel, st.live.result(), st);
+    }
+    // Scripted tests: the nav bake's counts and the selected region.
+    {
+        const std::optional<splash::ExportResult>& lr = st.live.result();
+        const splash::ExportStats* ns = lr && lr->ok() ? &lr->stats : nullptr;
+        if (ns && st.navRegion >= ns->navRegions) st.navRegion = -1;
+        if (namedRectsOn() && ImGui::GetFrameCount() > 1 && ns) {
+            static std::string reportedCounts, reportedRegion;
+            auto report = [](std::string& last, const std::string& now2) {
+                if (last == now2) return;
+                last = now2;
+                std::printf("%s\n", now2.c_str());
+                std::fflush(stdout);
+            };
+            report(reportedCounts, "nav: regions " + std::to_string(ns->navRegions) + " portals " + std::to_string(ns->navPortals));
+            std::string line = "nav: region none";
+            if (st.navRegion >= 0 && size_t(st.navRegion) < ns->navInfo.size()) {
+                const splash::ExportStats::NavRegionInfo& info = ns->navInfo[size_t(st.navRegion)];
+                std::string js;
+                for (const auto& pt : info.portals) js += (js.empty() ? "" : ",") + std::to_string(pt.neighbor);
+                line = "nav: region " + std::to_string(st.navRegion) + " floor " + fmtFixed(info.floorY) + " room " +
+                       navRoomName(*ns, info, true) + " portals " + (js.empty() ? "-" : js);
+            }
+            report(reportedRegion, line);
+        }
     }
 
     // The BVH, on its own toggle (Scene inspector, BVH section).
@@ -4558,6 +4634,88 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         float dv = float(shownDepth);
         FieldEdit fe = numberField("bvhdepth", dr, std::to_string(shownDepth).c_str(), nullptr, 0, nullptr, &dv);
         if (fe.changed) st.bvhDepth = std::clamp(int(std::lround(dv)), 0, maxDepth);
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
+        }
+    }
+
+    // The nav bake: its regions and portals, drawn in the viewport, with the
+    // selected region's floor, room, surface and neighbours. Every line has
+    // its space from the first frame, so nothing moves when the export lands.
+    {
+        const float stop = y;
+        const bool open = section("s_nav", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::user, kind::nav, "Navigation",
+                                  false, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const float lineH = type::caption + 4 + space::xs;
+        auto line = [&](const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm + lw;
+            const ImVec4 clip(tx, y - 4, x1 - space::sm, y + lineH);
+            if (!t.empty()) dl->AddText(f.regular, type::caption, ImVec2(tx, y - 2), col, t.c_str(), nullptr, 0, &clip);
+            y += lineH;
+        };
+        const bool baked = stats && stats->navWanted;
+        constexpr int kNavPortalLines = 3;
+        line(!stats ? std::string("measuring...")
+             : !stats->navWanted
+                 ? std::string("no nav bake")
+                 : std::to_string(stats->navRegions) + " regions, " + std::to_string(stats->navPortals) + " portals",
+             color::textFaint);
+        auto sw = [&](const char* id, const char* name, const char* label, const char* tip, bool& v) {
+            const ImRect rr = row(id, label, tip);
+            const ImRect t(ImVec2(rr.Min.x, rr.GetCenter().y - 8), ImVec2(rr.Min.x + 30, rr.GetCenter().y + 8));
+            nameRect(name, t);
+            if (toggle(name, t, v)) v = !v;
+        };
+        sw("lnavshow", "nav.show", "Show in viewport", "Draws each nav region's outline over the scene.", st.navShow);
+        sw("lnavlabels", "nav.labels", "Labels", "Names each region R<k> at its centre; click a label to select the region.",
+           st.navLabels);
+        sw("lnavportals", "nav.portals", "Portals", "Draws the edges the player can cross from one region into the next.",
+           st.navPortals);
+        const int count = baked ? stats->navRegions : 0;
+        const ImRect rr = row("lnavregion", "Region", "The region detailed below; -1 for none.");
+        nameRect("nav.region", rr);
+        float rv = float(st.navRegion);
+        FieldEdit fe = numberField("navregion", rr, st.navRegion < 0 ? "none" : std::to_string(st.navRegion).c_str(), nullptr, 0,
+                                   nullptr, &rv);
+        if (fe.changed) st.navRegion = std::clamp(int(std::lround(rv)), -1, count - 1);
+        const float detailTop = y;
+        const splash::ExportStats::NavRegionInfo* info =
+            baked && st.navRegion >= 0 && size_t(st.navRegion) < stats->navInfo.size() ? &stats->navInfo[size_t(st.navRegion)]
+                                                                                       : nullptr;
+        if (info) {
+            static const char* const surfaces[] = {"flat", "ramp", "stairs"};
+            line("Floor Y " + fmtFixed(info->floorY) + " m", color::textDim);
+            line(navRoomName(*stats, *info, false), color::textDim);
+            line(std::string("Surface ") + (info->surface >= 0 && info->surface < 3 ? surfaces[info->surface] : "?"), color::textDim);
+            line(info->platform ? "Platform" : "", color::textDim);
+            // The neighbours, wrapped over kNavPortalLines lines; what does not fit is counted.
+            const float wrapW = x1 - space::sm - (x0 + space::sm + lw);
+            std::vector<std::string> rows(1, info->portals.empty() ? "No portals" : "Portals ->");
+            for (size_t k = 0; k < info->portals.size(); k++) {
+                char b[48];
+                std::snprintf(b, sizeof b, " R%d (step %+.2f)%s", info->portals[k].neighbor, double(info->portals[k].heightDelta),
+                              k + 1 < info->portals.size() ? "," : "");
+                if (measure(f.regular, type::caption, (rows.back() + b).c_str()).x > wrapW) {
+                    if (rows.size() == size_t(kNavPortalLines)) {
+                        rows.back() += " +" + std::to_string(info->portals.size() - k) + " more";
+                        break;
+                    }
+                    rows.emplace_back();
+                }
+                rows.back() += rows.back().empty() ? b + 1 : b;
+            }
+            for (int k = 0; k < kNavPortalLines; k++) line(size_t(k) < rows.size() ? rows[size_t(k)] : "", color::textDim);
+        } else {
+            line(baked ? "Click a label in the viewport." : "", color::textFaint);
+            for (int k = 0; k < 3 + kNavPortalLines; k++) line("", 0);
+        }
+        nameRect("nav.details", ImRect(ImVec2(x0 + space::sm + lw, detailTop), ImVec2(x1 - space::sm, y)));
         if (!open) {
             ImGui::PopClipRect();
             y = stop + 34 + space::md;

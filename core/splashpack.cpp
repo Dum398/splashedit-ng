@@ -1495,6 +1495,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
 
     std::vector<ExpObject> exporters;
     for (const FlatObject& fo : flat) {
+        // An object that is off, or under an off parent, is not in the pack at
+        // all (Unity's FindObjectsByType skips it), so its components are not
+        // checked either.
+        if (!fo.activeInHierarchy) continue;
         if (fo.object->skin && !fo.object->mesh)
             res.errors.push_back(fo.object->name + ": a skin component needs a mesh component");
         if (!fo.object->mesh) {

@@ -157,15 +157,29 @@ Content is produced by a full DotRecast (Recast port) voxelisation pipeline on g
 
 Port in `core/navregion.cpp` (C++ recastnavigation, built from the upstream commit the 2.4.0
 DotRecast build was synced to): geometry collection, the full Recast pipeline with the same
-parameter conversions, region extraction and winding, plane fit, portals, room assignment by
-portal connectivity, platform flags (`collider.platform`), start region, and the binary layout
-above. Not ported: room assignment from `PSXRoom` volumes (rooms are not in the scene format, so
-every scene uses the connectivity fallback) and `PSXNavWalkoffZone` (no component; the walkoff mask
-only gets platform bits). The multi-step float expressions in the builder's own code are evaluated
+parameter conversions, region extraction and winding, plane fit, portals, room assignment,
+platform flags (`collider.platform`), start region, and the binary layout above. Room assignment
+(`AssignRoomsFromPSXRooms`): with Room objects in the scene, each region's `roomIndex` is the
+smallest-volume room whose world box, 0.5 m larger per side, contains the region centroid (XZ mean
+of its vertices, Y from its plane), else 0xFF; the room indices are the room block's (2.9). Only a
+scene without Room objects falls back to numbering connectivity islands. Not ported:
+`PSXNavWalkoffZone` (no component; the walkoff mask only gets platform bits). The multi-step float expressions in the builder's own code are evaluated
 in double, as Unity's Mono does; DotRecast's internals are not, so float-order differences inside
 Recast stay possible on sloped or rotated geometry. Checked against Unity on one flat region only.
 
-### 2.9 Rooms/portals (only if roomCount>0, i.e. interior with >=1 PSXRoom) - `AlignToFourBytes` first
+### 2.9 Rooms/portals (only if roomCount>0) - `AlignToFourBytes` first
+ng (`core/rooms.cpp`, written after nav and before the atlas metadata): the block exists iff the
+scene has at least one exported, active Room object (`sceneType` is ignored; psxsplash renders
+through rooms whenever roomCount>0 and then skips the BVH for static geometry). Rooms are the
+Room objects in scene (flatten) order; a Room's box is the world AABB of the 8 corners of
+`offset +- size/2` through the object's transform. A Portal names its two Rooms by object name;
+center = object position, normal/right/up = its local Z/X/Y axes, halfW/halfH = width/height * 0.5
+times the object's scale along right/up (Unity ignores the scale). The input triangles are the
+BVH's: every exported Tri of every pack object, `triangleIndex` = Tri index. Export errors (never
+clamped): a portal naming a missing, duplicate-named or identical room; more than 31 rooms
+(psxsplash's visited mask only covers rooms < 32); more than 65535 rooms+1, portals, tri refs,
+cells or portal refs; more than 255 portal refs in one room; rooms together with world streaming.
+Sorts by objectIndex are stable.
 Order: `(rooms+1)` x RoomData(36) | `portalCount` x PortalData(40) | `roomTriRefCount` x TriRef(4) | `roomCellCount` x RoomCell(28) | `roomPortalRefCount` x RoomPortalRef(4). Reader reads exactly in this order (cells and portal refs only if their counts >0).
 - RoomData: `i32 aabb x6 (PS1 space, Y negated+swapped; room AABB from PSXRoom.GetWorldBounds); u16 firstTriRef; u16 triRefCount; u16 firstCell; u8 cellCount; u8 portalRefCount; u16 firstPortalRef; u16 pad=0`. Last entry is the catch-all room: AABB = fp12(-1000/gte) x3 .. fp12(1000/gte) x3 (note: min Y written as `-1000/gte`, max Y `+1000/gte`).
 - PortalData: `u16 roomA; u16 roomB; i32 center x, -y, z (fp12(/gte)); i16 halfW = Clamp(RoundToInt(size.x*0.5/gte*4096),1,32767); i16 halfH likewise; i16 normal x, -y, z (RoundToInt(v*4096) clamp int16); i16 pad; i16 right x,-y,z; i16 up x,-y,z`.

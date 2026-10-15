@@ -75,6 +75,7 @@ add_library(splashcore STATIC
     vrampacker.cpp
     bvh.cpp
     navregion.cpp
+    rooms.cpp
     splashpack.cpp
     worldstream.cpp
     luacompile.cpp

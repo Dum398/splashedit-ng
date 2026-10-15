@@ -3,7 +3,9 @@
 #include "editor/project.hh"
 
 #include <chrono>
+#include <cstdlib>
 #include <exception>
+#include <thread>
 
 namespace editor {
 
@@ -38,13 +40,18 @@ void LiveExport::update(const Document& doc, double now) {
         splash::ExportOptions opt;
         opt.dryRun = true;
         opt.vram = loadVramSettings(root);
+        splash::ExportResult r;
         try {
-            return splash::exportSplashpack(scene, root, root / "scene.splashpack", opt);
+            r = splash::exportSplashpack(scene, root, root / "scene.splashpack", opt);
         } catch (const std::exception& e) {
-            splash::ExportResult r;
+            r = {};
             r.errors.push_back(e.what());
-            return r;
         }
+        // Tests stretch the export so a fast Release build cannot land it
+        // before a check has seen the placeholder state.
+        if (const char* ms = std::getenv("SPLASHEDIT_EXPORT_DELAY_MS"))
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::atoi(ms)));
+        return r;
     });
 }
 

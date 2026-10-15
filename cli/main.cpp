@@ -398,6 +398,12 @@ int main(int argc, char** argv) {
             if (st.navWanted)
                 std::printf("nav regions=%d cell=%g (asked %g) extent=%gx%g\n", st.navRegions, double(st.navCellSize),
                             double(st.navCellSizeAsked), double(st.navExtentX), double(st.navExtentZ));
+            if (!st.rooms.empty()) {
+                std::printf("rooms=%zu portals=%d catch_all_tris=%d\n", st.rooms.size(), st.roomPortals,
+                            st.roomCatchAllTris);
+                for (const auto& r : st.rooms)
+                    std::printf("room tri_refs=%d cells=%d portals=%d %s\n", r.triRefs, r.cells, r.portals, r.name.c_str());
+            }
             if (st.streamRegions)
                 std::printf("stream regions=%d objects=%d split=%d slots=%d (wanted %d) slot_bytes=%u pool=%zu "
                             "streamed_tri_bytes=%zu table=%zu geo=%zu ram_saved=%lld load_radius=%d region_size=%lld\n",

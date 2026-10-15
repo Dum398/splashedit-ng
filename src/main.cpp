@@ -63,7 +63,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, CopyFile, DeleteFile } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, WaitExport, CopyFile, DeleteFile } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -163,6 +163,7 @@ int actionFrames(const Action& a) {
         case Action::Move: return 14;
         case Action::Shot: return 1;
         case Action::WaitImport: return 2;
+        case Action::WaitExport: return 2;
         default: return 4;
     }
 }
@@ -259,6 +260,7 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
         case Action::Drop:  // the loop below hands these to the editor
         case Action::Shot:
         case Action::WaitImport:
+        case Action::WaitExport:
             break;
     }
 }
@@ -367,6 +369,9 @@ Args parse(int argc, char** argv) {
             Action act(Action::Shot);
             act.text = next();
             a.actions.push_back(act);
+        } else if (!std::strcmp(argv[i], "--wait-export")) {
+            // Holds the script here until the live export has caught up with the scene, up to 90 s.
+            a.actions.push_back(Action(Action::WaitExport));
         } else if (!std::strcmp(argv[i], "--wait-import")) {
             // Holds the script here while a model import is running (in the background), up to 90 s.
             a.actions.push_back(Action(Action::WaitImport));
@@ -605,7 +610,10 @@ int main(int argc, char** argv) {
     bool running = true;
     // --wait-import holding the script, since when; and a --shot due after this frame renders.
     bool held = false;
+    Action::Kind heldKind = Action::WaitImport;
     std::chrono::steady_clock::time_point heldSince;
+    // The live export is running, or its last result is for an older revision of the scene.
+    const auto exportBehind = [&] { return state.live.busy() || state.live.resultRevision() != doc.revision() || !state.live.result(); };
     std::string shotDue;
     // The end screenshot waits (up to 90 s, since when) for a model import still
     // running, so a --drop has landed in it; --shot-at keeps its exact frame.
@@ -673,10 +681,13 @@ int main(int argc, char** argv) {
                 if (frame != actionStart[i] || held) continue;
                 if (a.kind == Action::Drop) state.drop.files.push_back({a.text, ImVec2(a.x0, a.y0)});
                 if (a.kind == Action::Shot) shotDue = a.text;
-                if (a.kind == Action::WaitImport && state.importBusy()) held = true, heldSince = std::chrono::steady_clock::now();
+                if (a.kind == Action::WaitImport && state.importBusy()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
+                if (a.kind == Action::WaitExport && exportBehind()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
             }
-            if (held && (!state.importBusy() || std::chrono::steady_clock::now() - heldSince > std::chrono::seconds(90))) {
-                if (state.importBusy()) std::fprintf(stderr, "--wait-import: still importing after 90 s\n");
+            const bool holding = heldKind == Action::WaitExport ? exportBehind() : state.importBusy();
+            if (held && (!holding || std::chrono::steady_clock::now() - heldSince > std::chrono::seconds(90))) {
+                if (holding) std::fprintf(stderr, heldKind == Action::WaitExport ? "--wait-export: export still behind after 90 s\n"
+                                                                                 : "--wait-import: still importing after 90 s\n");
                 held = false;
                 ++frame;  // past the --wait-import frame
             }

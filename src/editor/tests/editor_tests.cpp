@@ -47,6 +47,7 @@
 #include "editor/ui_canvas.hh"
 #include "budget.hh"
 #include "navregion.hh"
+#include "rooms.hh"
 #include "splashpack.hh"
 #include "texture.hh"
 #include "worldstream.hh"
@@ -2764,6 +2765,412 @@ void testNavBigWorld() {
     CHECK(none.stats.navOutlines.empty());
     CHECK(std::any_of(none.warnings.begin(), none.warnings.end(),
                       [](const std::string& w) { return w == splash::navEmptyWarning(); }));
+}
+
+// ---- Rooms and portals
+namespace roomtest {
+namespace fs = std::filesystem;
+
+uint16_t rd16(const std::string& b, size_t at) { return uint16_t(uint8_t(b[at]) | (uint8_t(b[at + 1]) << 8)); }
+int16_t rdi16(const std::string& b, size_t at) { return int16_t(rd16(b, at)); }
+int32_t rd32(const std::string& b, size_t at) {
+    return int32_t(uint32_t(rd16(b, at)) | (uint32_t(rd16(b, at + 2)) << 16));
+}
+
+splash::Object meshObject(const char* name, const char* mesh, splash::Vec3 pos, bool walkable) {
+    splash::Object o;
+    o.name = name;
+    o.transform.position = pos;
+    splash::MeshComponent mc;
+    mc.mesh = mesh;
+    mc.materials.push_back({"", {1, 1, 1, 1}, {}});
+    o.mesh = mc;
+    if (walkable) o.collider = splash::ColliderComponent{splash::ColliderKind::Static, false, {}};
+    return o;
+}
+
+splash::Object roomObject(const std::string& name, splash::Vec3 pos, splash::Vec3 size) {
+    splash::Object o;
+    o.name = name;
+    o.transform.position = pos;
+    o.room = splash::RoomComponent{size, {}, {}};
+    return o;
+}
+
+// Two 6 x 2 x 6 rooms side by side along X (A at x -3, B at x +3) with a
+// portal between them facing -X (so the exporter has to flip it), a floor
+// in each room, one triangle straddling the boundary and a quad far away
+// from both. A Navigation object bakes nav on the floors.
+splash::Scene twoRooms(const fs::path& project) {
+    fs::create_directories(project / "meshes");
+    splash::Mesh quad;
+    const float h = 2.25f;
+    quad.positions = {{-h, 0, -h}, {-h, 0, h}, {h, 0, h}, {h, 0, -h}};
+    quad.normals.assign(4, {0, 1, 0});
+    quad.submeshes = {{0, 1, 2, 0, 2, 3}};
+    splash::saveMesh(quad, project / "meshes/quad.mesh");
+    splash::Mesh tri;
+    tri.positions = {{-1.5f, 0.5f, 1}, {1.5f, 0.5f, 1}, {0, 0.5f, 2}};
+    tri.normals.assign(3, {0, 1, 0});
+    tri.submeshes = {{0, 1, 2}};
+    splash::saveMesh(tri, project / "meshes/tri.mesh");
+
+    splash::Scene s;
+    s.objects.push_back(roomObject("Room A", {-3, 1, 0}, {6, 2, 6}));
+    s.objects.push_back(roomObject("Room B", {3, 1, 0}, {6, 2, 6}));
+    splash::Object door;
+    door.name = "Door";
+    door.transform.position = {0, 1, 0};
+    door.transform.rotation = {0, -0.70710678f, 0, 0.70710678f};  // forward = -X
+    door.portal = splash::PortalComponent{"Room A", "Room B", 2, 2, {}};
+    s.objects.push_back(door);
+    s.objects.push_back(meshObject("Floor A", "meshes/quad.mesh", {-3, 0, 0}, true));
+    s.objects.push_back(meshObject("Floor B", "meshes/quad.mesh", {3, 0, 0}, true));
+    s.objects.push_back(meshObject("Straddle", "meshes/tri.mesh", {0, 0, 0}, false));
+    s.objects.push_back(meshObject("Outside", "meshes/quad.mesh", {50, 0, 50}, false));
+    splash::Object nav;
+    nav.name = "Nav";
+    nav.transform.position = {-3, 0, 0};
+    nav.navigation = splash::NavigationComponent{};
+    nav.navigation->agentRadius = 0.3f;
+    s.objects.push_back(nav);
+    return s;
+}
+
+std::string readAll(const fs::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
+bool hasError(const splash::ExportResult& r, const std::string& part) {
+    return std::any_of(r.errors.begin(), r.errors.end(),
+                       [&](const std::string& e) { return e.find(part) != std::string::npos; });
+}
+
+}  // namespace roomtest
+
+// Exports the two-room scene and reads the room block back the way psxsplash
+// does. The block is found through ExportStats::roomBlockOffset; the nav
+// block right before it is found by its size from the header counts, which
+// also cross-checks that offset.
+void testRoomsExport() {
+    using namespace roomtest;
+    const fs::path project = g_outDir / "rooms";
+    fs::remove_all(project);
+    splash::Scene scene = twoRooms(project);
+    splash::ExportResult r = splash::exportSplashpack(scene, project, project / "scene.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "rooms export: %s\n", e.c_str());
+    CHECK(r.ok());
+    if (!r.ok()) return;
+    const std::string b = readAll(project / "scene.splashpack");
+    const float gte = scene.settings.gteScaling;
+
+    const size_t roomCount = rd16(b, 78), portalCount = rd16(b, 80), triRefCount = rd16(b, 82),
+                 cellCount = rd16(b, 86), portalRefCount = rd16(b, 106);
+    CHECK(roomCount == 3 && portalCount == 1);
+    CHECK(r.stats.rooms.size() == 2 && r.stats.roomPortals == 1);
+    const size_t off = r.stats.roomBlockOffset;
+    CHECK(off > 0 && off % 4 == 0);
+    const size_t portalsAt = off + 36 * roomCount, refsAt = portalsAt + 40 * portalCount,
+                 cellsAt = refsAt + 4 * triRefCount, prefsAt = cellsAt + 28 * cellCount,
+                 end = prefsAt + 4 * portalRefCount;
+    CHECK(end <= b.size());
+    if (end > b.size()) return;
+
+    struct Room {
+        int32_t mn[3], mx[3];
+        size_t firstRef, refCount, firstCell, cellCount, portalRefCount, firstPortalRef;
+    };
+    std::vector<Room> rooms(roomCount);
+    size_t sumRefs = 0, sumCells = 0, sumPrefs = 0;
+    for (size_t i = 0; i < roomCount; i++) {
+        const size_t at = off + 36 * i;
+        Room& rm = rooms[i];
+        for (int k = 0; k < 3; k++) {
+            rm.mn[k] = rd32(b, at + 4 * size_t(k));
+            rm.mx[k] = rd32(b, at + 12 + 4 * size_t(k));
+        }
+        rm.firstRef = rd16(b, at + 24);
+        rm.refCount = rd16(b, at + 26);
+        rm.firstCell = rd16(b, at + 28);
+        rm.cellCount = uint8_t(b[at + 30]);
+        rm.portalRefCount = uint8_t(b[at + 31]);
+        rm.firstPortalRef = rd16(b, at + 32);
+        CHECK(rd16(b, at + 34) == 0);
+        CHECK(rm.firstRef == sumRefs && rm.firstCell == sumCells && rm.firstPortalRef == sumPrefs);
+        sumRefs += rm.refCount;
+        sumCells += rm.cellCount;
+        sumPrefs += rm.portalRefCount;
+        CHECK(rm.mn[0] <= rm.mx[0] && rm.mn[1] <= rm.mx[1] && rm.mn[2] <= rm.mx[2]);
+    }
+    // Header counts are the record counts.
+    CHECK(sumRefs == triRefCount && sumCells == cellCount && sumPrefs == portalRefCount);
+
+    // Pack objects (92 bytes: offset, position, 3x3 i32 rotation, polyCount):
+    // identify them by their stored position.
+    const size_t objCount = rd16(b, 6);
+    const size_t luaCount = rd16(b, 4);
+    auto objX = [&](size_t i) { return rd32(b, 156 + 8 * luaCount + 92 * i + 4); };
+    auto objZ = [&](size_t i) { return rd32(b, 156 + 8 * luaCount + 92 * i + 12); };
+    auto polyCount = [&](size_t i) { return size_t(rd16(b, 156 + 8 * luaCount + 92 * i + 52)); };
+    int straddle = -1, outside = -1;
+    for (size_t i = 0; i < objCount; i++) {
+        if (objX(i) == 0 && objZ(i) == 0) straddle = int(i);
+        if (objX(i) == splash::toWorldFixed12(50 / gte) && objZ(i) == splash::toWorldFixed12(50 / gte)) outside = int(i);
+    }
+    CHECK(objCount == 4 && straddle >= 0 && outside >= 0);
+
+    std::vector<std::set<std::pair<int, int>>> inRoom(roomCount);
+    for (size_t i = 0; i < roomCount; i++)
+        for (size_t k = 0; k < rooms[i].refCount; k++) {
+            const size_t at = refsAt + 4 * (rooms[i].firstRef + k);
+            inRoom[i].insert({rd16(b, at), rd16(b, at + 2)});
+            CHECK(rd16(b, at) < objCount && rd16(b, at + 2) < polyCount(rd16(b, at)));
+        }
+
+    // The catch-all is last: huge box, no portals, exactly the outside quad.
+    const Room& ca = rooms.back();
+    CHECK(ca.mn[0] == splash::toWorldFixed12(-1000 / gte) && ca.mx[2] == splash::toWorldFixed12(1000 / gte));
+    CHECK(ca.portalRefCount == 0);
+    CHECK(inRoom.back().size() == polyCount(size_t(outside)) && ca.refCount == polyCount(size_t(outside)));
+    for (const auto& ref : inRoom.back()) CHECK(ref.first == outside);
+    CHECK(r.stats.roomCatchAllTris == int(polyCount(size_t(outside))));
+
+    // Every exported triangle is drawn by some room (the BVH is not used).
+    size_t missing = 0;
+    for (size_t o = 0; o < objCount; o++)
+        for (size_t t = 0; t < polyCount(o); t++) {
+            bool found = false;
+            for (const auto& set : inRoom) found = found || set.count({int(o), int(t)});
+            if (!found) missing++;
+        }
+    CHECK(missing == 0);
+
+    // The straddling triangle is in both rooms (portal boundary duplication).
+    CHECK(inRoom[0].count({straddle, 0}) && inRoom[1].count({straddle, 0}));
+
+    // Each room's cells partition exactly its tri-ref range, in order.
+    for (size_t i = 0; i < roomCount; i++) {
+        const Room& rm = rooms[i];
+        CHECK(rm.cellCount >= 1 && rm.cellCount <= 8);
+        size_t next = rm.firstRef;
+        for (size_t c = 0; c < rm.cellCount; c++) {
+            const size_t at = cellsAt + 28 * (rm.firstCell + c);
+            CHECK(rd16(b, at + 24) == next);
+            CHECK(rd16(b, at + 26) > 0);
+            for (int k = 0; k < 3; k++) CHECK(rd32(b, at + 4 * size_t(k)) <= rd32(b, at + 12 + 4 * size_t(k)));
+            next += rd16(b, at + 26);
+        }
+        CHECK(next == rm.firstRef + rm.refCount);
+    }
+
+    // The portal joins A and B and its normal points from A to B. The room
+    // boxes and the normal are both stored with Y negated, so the dot product
+    // in pack space equals the world one.
+    CHECK(rd16(b, portalsAt) == 0 && rd16(b, portalsAt + 2) == 1);
+    const int16_t nx = rdi16(b, portalsAt + 20), ny = rdi16(b, portalsAt + 22), nz = rdi16(b, portalsAt + 24);
+    double ab[3];
+    for (int k = 0; k < 3; k++)
+        ab[k] = (double(rooms[1].mn[k]) + rooms[1].mx[k]) / 2 - (double(rooms[0].mn[k]) + rooms[0].mx[k]) / 2;
+    CHECK(nx * ab[0] + ny * ab[1] + nz * ab[2] > 0);
+    CHECK(nx == 4096);
+    const int16_t rx = rdi16(b, portalsAt + 28), rz = rdi16(b, portalsAt + 32);
+    CHECK(rx == 0 && rz == -4096);  // right was flipped along with the normal (from +Z)
+    CHECK(rdi16(b, portalsAt + 16) == splash::roundToInt(1 / gte * 4096) &&
+          rdi16(b, portalsAt + 18) == splash::roundToInt(1 / gte * 4096));
+
+    // Portal refs are symmetric: room r lists (p, other) iff other lists (p, r).
+    std::set<std::tuple<int, int, int>> prefs;  // room, portal, other
+    for (size_t i = 0; i < roomCount; i++)
+        for (size_t k = 0; k < rooms[i].portalRefCount; k++) {
+            const size_t at = prefsAt + 4 * (rooms[i].firstPortalRef + k);
+            prefs.insert({int(i), rd16(b, at), rd16(b, at + 2)});
+        }
+    CHECK(prefs.size() == 2);
+    for (const auto& [room, p, other] : prefs) {
+        CHECK(prefs.count({other, p, room}));
+        const int a = rd16(b, portalsAt + 40 * size_t(p)), bb = rd16(b, portalsAt + 40 * size_t(p) + 2);
+        CHECK((a == room && bb == other) || (a == other && bb == room));
+    }
+
+    // Nav regions (just before the room block) carry the room their centroid
+    // is in, from the room boxes 0.5 m larger per side.
+    const size_t navRegions = rd16(b, 44), navPortals = rd16(b, 46);
+    CHECK(navRegions > 0);
+    const size_t navAt = off - (8 + 84 * navRegions + 20 * navPortals);
+    CHECK(rd16(b, navAt) == navRegions && rd16(b, navAt + 2) == navPortals);
+    const int32_t margin = splash::toWorldFixed12(0.5f / gte);
+    std::set<int> seenRooms;
+    for (size_t i = 0; i < navRegions; i++) {
+        const size_t at = navAt + 8 + 84 * i;
+        const size_t nv = uint8_t(b[at + 79]);
+        CHECK(nv >= 3 && nv <= 8);
+        double cx = 0, cz = 0;
+        for (size_t v = 0; v < nv; v++) {
+            cx += rd32(b, at + 4 * v);
+            cz += rd32(b, at + 32 + 4 * v);
+        }
+        cx /= double(nv);
+        cz /= double(nv);
+        int want = 0xFF;
+        for (int rm = 0; rm < 2 && want == 0xFF; rm++)
+            if (cx >= rooms[size_t(rm)].mn[0] - margin && cx <= rooms[size_t(rm)].mx[0] + margin &&
+                cz >= rooms[size_t(rm)].mn[2] - margin && cz <= rooms[size_t(rm)].mx[2] + margin)
+                want = rm;
+        CHECK(uint8_t(b[at + 81]) == want);
+        seenRooms.insert(uint8_t(b[at + 81]));
+    }
+    CHECK(seenRooms.count(0) && seenRooms.count(1));
+
+    // Without Room objects there is no room block and nav falls back to islands.
+    std::erase_if(scene.objects, [](const splash::Object& o) { return o.room || o.portal; });
+    splash::ExportResult plain = splash::exportSplashpack(scene, project, project / "plain.splashpack");
+    CHECK(plain.ok() && plain.stats.rooms.empty() && plain.stats.roomBlockOffset == 0);
+    const std::string pb = readAll(project / "plain.splashpack");
+    CHECK(rd16(pb, 78) == 0 && rd16(pb, 80) == 0 && rd16(pb, 82) == 0 && rd16(pb, 86) == 0 && rd16(pb, 106) == 0);
+}
+
+// What the room block cannot carry is an export error, never a clamp.
+void testRoomsErrors() {
+    using namespace roomtest;
+    const fs::path project = g_outDir / "rooms-errors";
+    fs::remove_all(project);
+    const splash::Scene base = twoRooms(project);
+    const fs::path out = project / "scene.splashpack";
+
+    // 31 rooms export; 32 do not (psxsplash's visited mask covers rooms < 32).
+    splash::Scene many = base;
+    for (int i = 0; i < 29; i++)
+        many.objects.push_back(roomObject("Extra " + std::to_string(i), {float(10 + 2 * i), 1, -20}, {1, 1, 1}));
+    splash::ExportResult ok31 = splash::exportSplashpack(many, project, out);
+    CHECK(ok31.ok() && ok31.stats.rooms.size() == 31);
+    many.objects.push_back(roomObject("Extra 29", {80, 1, -20}, {1, 1, 1}));
+    splash::ExportResult bad32 = splash::exportSplashpack(many, project, out);
+    CHECK(!bad32.ok() && hasError(bad32, "32 Rooms, at most 31"));
+
+    // A portal naming a room that does not exist, or the same room twice.
+    splash::Scene missing = base;
+    for (splash::Object& o : missing.objects)
+        if (o.portal) o.portal->roomB = "Room C";
+    splash::ExportResult noRoom = splash::exportSplashpack(missing, project, out);
+    CHECK(!noRoom.ok() && hasError(noRoom, "portal Door") && hasError(noRoom, "'Room C'"));
+    for (splash::Object& o : missing.objects)
+        if (o.portal) o.portal->roomB = "Room A";
+    splash::ExportResult same = splash::exportSplashpack(missing, project, out);
+    CHECK(!same.ok() && hasError(same, "portal Door: room A and room B are the same"));
+
+    // Rooms and world streaming together.
+    splash::Scene streaming = base;
+    streaming.settings.streamWorld = true;
+    splash::ExportResult st = splash::exportSplashpack(streaming, project, out);
+    CHECK(!st.ok() && hasError(st, "Rooms and world streaming"));
+}
+
+// Room and Portal components survive save and load, unknown keys included.
+// The editor's side of rooms: the pickers add and remove both kinds, a
+// portal's room edit is one undo step, the inspector's warnings are the
+// exporter's, and the viewport arrow's frame points from room A into room B.
+void testRoomsEditor() {
+    using namespace roomtest;
+    using editor::ComponentKind;
+    splash::Object o;
+    o.name = "Hall";
+    CHECK(editor::cannotAdd(o, ComponentKind::Room).empty() && editor::cannotAdd(o, ComponentKind::Portal).empty());
+    CHECK(editor::addComponent(o, ComponentKind::Room) && o.room && o.room->size.x == 1 && o.room->offset.y == 0);
+    CHECK(editor::addComponent(o, ComponentKind::Portal) && o.portal && o.portal->width == 2 && o.portal->height == 3 &&
+          o.portal->roomA.empty());
+    CHECK(editor::cannotAdd(o, ComponentKind::Room) == "Already added" && !editor::addComponent(o, ComponentKind::Portal));
+    CHECK(editor::removeComponent(o, ComponentKind::Room) && !o.room && o.portal);
+    CHECK(editor::removeComponent(o, ComponentKind::Portal) && !o.portal && !editor::removeComponent(o, ComponentKind::Portal));
+    std::vector<std::pair<const char*, const char*>> items;
+    for (const editor::ObjectPreset& p : editor::presets()) items.push_back({p.label, p.keywords});
+    CHECK(std::string(editor::presets()[size_t(editor::rank("portal", items)[0])].label) == "Portal");
+    CHECK(std::string(editor::presets()[size_t(editor::rank("room", items)[0])].label) == "Room");
+    CHECK(std::string(editor::info(ComponentKind::Portal).label) == "Portal");
+
+    const splash::Scene scene = twoRooms(g_outDir / "rooms-editor");
+    editor::Document d;
+    d.reset(scene);
+    CHECK(d.edit({2}, [](splash::Object& ob) { ob.portal->roomB = ""; }));
+    CHECK(d.edit({2}, [](splash::Object& ob) { ob.portal->roomA = "Room B"; }));
+    CHECK(d.object({2})->portal->roomA == "Room B" && d.object({2})->portal->roomB.empty());
+    CHECK(d.undo() && d.object({2})->portal->roomA == "Room A" && d.object({2})->portal->roomB.empty());
+    CHECK(d.undo() && d.object({2})->portal->roomB == "Room B");
+
+    auto problems = [](const splash::Scene& sc) {
+        const std::vector<splash::FlatObject> flat = splash::flatten(sc);
+        std::vector<const splash::FlatObject*> rooms;
+        for (const splash::FlatObject& fo : flat)
+            if (fo.object->room) rooms.push_back(&fo);
+        return splash::portalProblems(rooms, flat[2]);
+    };
+    CHECK(problems(scene).empty());
+    splash::Scene unset = scene;
+    unset.objects[2].portal->roomB.clear();
+    CHECK(problems(unset) == std::vector<std::string>{"portal Door room B: not set, pick a Room object"});
+    unset.objects[2].portal->roomB = "Room A";
+    CHECK(problems(unset) == std::vector<std::string>{"portal Door: room A and room B are the same Room 'Room A'"});
+
+    // The door faces -X; A is at -3 and B at +3, so the frame turns to +X.
+    const std::vector<splash::FlatObject> flat = splash::flatten(scene);
+    splash::PortalFrame ab = splash::portalFrameAtoB(flat[2], flat[0], flat[1]);
+    splash::PortalFrame ba = splash::portalFrameAtoB(flat[2], flat[1], flat[0]);
+    CHECK(splash::portalWorldFrame(flat[2]).normal.x < -0.99f);
+    CHECK(ab.normal.x > 0.99f && ba.normal.x < -0.99f && ab.right.z == -ba.right.z);
+    CHECK(std::fabs(ab.halfW - 1) < 1e-5f && std::fabs(ab.halfH - 1) < 1e-5f);
+}
+
+void testRoomsSceneRoundTrip() {
+    using namespace roomtest;
+    const fs::path dir = g_outDir / "rooms-roundtrip";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Scene s;
+    splash::Object room = roomObject("Hall", {1, 2, 3}, {4, 5, 6});
+    room.room->offset = {0.5f, -1, 2};
+    room.room->extra.push_back({"label", "\"Great hall\""});
+    s.objects.push_back(room);
+    splash::Object door;
+    door.name = "Door";
+    door.portal = splash::PortalComponent{"Hall", "Kitchen", 1.5f, 2.5f, {}};
+    door.portal->extra.push_back({"future", "{\"a\":1}"});
+    s.objects.push_back(door);
+    splash::saveScene(s, dir / "a.scene");
+    const splash::Scene l = splash::loadScene(dir / "a.scene");
+    CHECK(l.objects.size() == 2);
+    if (l.objects.size() != 2) return;
+    const splash::Object& lr = l.objects[0];
+    CHECK(lr.room && !lr.portal);
+    CHECK(lr.room->size == (splash::Vec3{4, 5, 6}) && lr.room->offset == (splash::Vec3{0.5f, -1, 2}));
+    CHECK(lr.room->extra.size() == 1 && lr.room->extra[0].first == "label" && lr.room->extra[0].second == "\"Great hall\"");
+    const splash::Object& lp = l.objects[1];
+    CHECK(lp.portal && !lp.room);
+    CHECK(lp.portal->roomA == "Hall" && lp.portal->roomB == "Kitchen");
+    CHECK(lp.portal->width == 1.5f && lp.portal->height == 2.5f);
+    CHECK(lp.portal->extra.size() == 1 && lp.portal->extra[0].first == "future");
+    CHECK(lp.unknownComponents.empty() && lr.unknownComponents.empty());
+    splash::saveScene(l, dir / "b.scene");
+    CHECK(readAll(dir / "a.scene") == readAll(dir / "b.scene"));
+
+    // The world box honours offset and rotation; the portal frame honours scale.
+    splash::Scene t;
+    splash::Object rot = roomObject("Rot", {10, 0, 0}, {2, 2, 4});
+    rot.room->offset = {0, 0, 1};
+    rot.transform.rotation = {0, 0.70710678f, 0, 0.70710678f};  // +90 about Y: local +Z -> world +X
+    t.objects.push_back(rot);
+    splash::Object sp;
+    sp.name = "Scaled";
+    sp.transform.scale = {2, 3, 1};
+    sp.portal = splash::PortalComponent{"Rot", "Rot", 2, 2, {}};
+    t.objects.push_back(sp);
+    const std::vector<splash::FlatObject> flat = splash::flatten(t);
+    splash::Vec3 mn, mx;
+    splash::roomWorldBox(flat[0], &mn, &mx);
+    CHECK(std::fabs(mn.x - 9) < 1e-4f && std::fabs(mx.x - 13) < 1e-4f);
+    CHECK(std::fabs(mn.z + 1) < 1e-4f && std::fabs(mx.z - 1) < 1e-4f);
+    const splash::PortalFrame f = splash::portalWorldFrame(flat[1]);
+    CHECK(std::fabs(f.halfW - 2) < 1e-5f && std::fabs(f.halfH - 3) < 1e-5f);
+    CHECK(f.normal == (splash::Vec3{0, 0, 1}) && f.right == (splash::Vec3{1, 0, 0}) && f.up == (splash::Vec3{0, 1, 0}));
 }
 
 // editMany: one undo step over several objects.
@@ -6418,6 +6825,10 @@ int main(int argc, char** argv) {
     testWorldStreamPlan();
     testWorldStreamExport();
     testNavBigWorld();
+    testRoomsExport();
+    testRoomsErrors();
+    testRoomsSceneRoundTrip();
+    testRoomsEditor();
     testEditMany();
     testTimelineSample();
     testTimelineEdit();

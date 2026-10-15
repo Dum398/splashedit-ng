@@ -1474,10 +1474,13 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     std::vector<SceneLight> lights, bakedOnlyLights;
     std::vector<RuntimeLight> runtimeLights;
     for (const FlatObject& fo : flat) {
-        if (!fo.object->light) continue;
+        // Lights on an off object, or under an off parent, neither bake nor ship
+        // (Unity's FindObjectsByType<Light> skips them).
+        if (!fo.object->light || !fo.activeInHierarchy) continue;
         const LightComponent& l = *fo.object->light;
-        // Disabled runtime lights are still exported so Lua can switch them on.
-        if (l.runtime && fo.activeInHierarchy) runtimeLights.push_back({&fo, &l});
+        // Disabled runtime lights on an active object are still exported so Lua
+        // can switch them on.
+        if (l.runtime) runtimeLights.push_back({&fo, &l});
         if (!l.enabled) continue;
         SceneLight sl = sceneLight(fo);
         lights.push_back(sl);
@@ -2692,7 +2695,7 @@ std::vector<Vec3> exportVertexColors(const std::vector<FlatObject>& flat, const 
     if (!object.object->mesh || mesh.normals.size() != mesh.positions.size()) return out;
     std::vector<SceneLight> lights;
     for (const FlatObject& fo : flat)
-        if (fo.object->light && fo.object->light->enabled) lights.push_back(sceneLight(fo));
+        if (fo.activeInHierarchy && fo.object->light && fo.object->light->enabled) lights.push_back(sceneLight(fo));
     for (const Color& c : meshColors(object, *object.object->mesh, mesh, lights)) out.push_back({c.r, c.g, c.b});
     return out;
 }

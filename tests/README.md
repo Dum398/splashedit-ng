@@ -100,8 +100,10 @@ comparison against the exported `.vram` file and **is** in CI.
 ## Boot check
 
 `boot/boot.sh` boots psxsplash (a PCdrv build) on one exported scene in pcsx-redux, headless, and
-saves the screen at a given frame (default 600). The three files are copied to a temporary
-directory as `scene_0.*`, the names the PCdrv loader opens.
+saves the screen at a given frame (default 600). The three files (and `.geo` and `.loading` when
+present) are copied to a temporary directory as `scene_0.*`, the names the PCdrv loader opens.
+With a loading canvas the loading screen shows for a few frames after the boot logo (frames
+260-266 with psxsplash f671202 on tests/ui/ui.scene plus a canvas).
 
     boot/boot.sh <pcsx-redux> <openbios.bin> <psxsplash.ps-exe> <dir>/scene shot.png [frame]
 

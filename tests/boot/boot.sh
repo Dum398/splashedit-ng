@@ -1,7 +1,8 @@
 #!/bin/bash
 # Boot psxsplash on one exported scene in pcsx-redux and save what it shows.
 # usage: boot.sh <pcsx-redux> <bios> <psxsplash.ps-exe> <scene prefix> <out.png> [frame]
-# <scene prefix> names <prefix>.splashpack, <prefix>.vram and <prefix>.spu (and <prefix>.geo if streamed).
+# <scene prefix> names <prefix>.splashpack, <prefix>.vram and <prefix>.spu (and <prefix>.geo if streamed,
+# <prefix>.loading if the scene has a loading screen).
 set -eu
 redux=$1; bios=$2; exe=$3; scene=$4; png=$5; frame=${6:-600}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -10,6 +11,8 @@ trap 'rm -rf "$work"' EXIT
 for ext in splashpack vram spu; do cp "$scene.$ext" "$work/scene_0.$ext"; done
 # A streamed scene also reads its regions from the .geo file.
 if [ -f "$scene.geo" ]; then cp "$scene.geo" "$work/scene_0.geo"; fi
+# A scene with a loading canvas has its loading screen in the .loading file.
+if [ -f "$scene.loading" ]; then cp "$scene.loading" "$work/scene_0.loading"; fi
 BOOT_OUT="$work" BOOT_FRAME="$frame" BOOT_HOLD="${BOOT_HOLD:-}" LIBGL_ALWAYS_SOFTWARE=1 timeout 300 \
   xvfb-run -a -s "-screen 0 1280x720x24" "$redux" -testmode -stdout -lua_stdout -safe \
   -bios "$bios" -loadexe "$exe" -run -pcdrv -pcdrvbase "$work" -dofile "$here/boot.lua" \

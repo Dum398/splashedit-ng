@@ -17,6 +17,7 @@
 #include "binwriter.hh"
 #include "budget.hh"
 #include "bvh.hh"
+#include "rooms.hh"
 #include "font.hh"
 #include "luacompile.hh"
 #include "navregion.hh"
@@ -1795,6 +1796,22 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     Bvh bvh = buildBvh(bvhIn);
 
+    // Rooms and portals, over the same triangles as the BVH.
+    RoomObjects roomObjs = collectRoomObjects(flat, res.errors);
+    if (!roomObjs.rooms.empty() && scene.settings.streamWorld)
+        res.errors.push_back("Rooms and world streaming cannot be used together: remove the Room objects or turn "
+                             "streaming off");
+    if (!res.ok()) return res;
+    std::vector<RoomInputObject> roomIn;
+    for (ExpObject& e : exporters) roomIn.push_back({e.obj->active, e.flat->localToWorld, &e.triPositions});
+    RoomSet rooms = buildRooms(roomObjs, roomIn, res.errors);
+    if (!res.ok()) return res;
+    for (size_t r = 0; r < rooms.realRooms(); r++)
+        st.rooms.push_back({rooms.rooms[r].name, int(rooms.rooms[r].triRefCount), int(rooms.rooms[r].cellCount),
+                            int(rooms.rooms[r].portalRefCount)});
+    if (!rooms.empty()) st.roomCatchAllTris = int(rooms.rooms.back().triRefCount);
+    st.roomPortals = int(rooms.portals.size());
+
     auto luaIndex = [&](const std::string& p) -> int16_t {
         auto it = std::find(luaFiles.begin(), luaFiles.end(), p);
         return it == luaFiles.end() ? int16_t(-1) : int16_t(it - luaFiles.begin());
@@ -1891,7 +1908,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (const auto& sm : e.mesh->submeshes) n.triangles.insert(n.triangles.end(), sm.begin(), sm.end());
         navIn.push_back(std::move(n));
     }
-    NavMesh nav = buildNavRegions(navIn, np, playerObj ? playerPos : navObj ? navSpawn : playerPos, res.errors);
+    NavMesh nav = buildNavRegions(navIn, np, playerObj ? playerPos : navObj ? navSpawn : playerPos, res.errors,
+                                  roomBoxes(roomObjs));
     if (!res.ok()) return res;
     if (nav.regions.size() > 65535 || nav.portals.size() > 65535) {
         res.errors.push_back("too many nav regions or portals");
@@ -1971,11 +1989,11 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (float c : fog.color) w.u8(uint8_t(clampv(roundToInt(c * 255.f), 0, 255)));
     w.u8(uint8_t(clampv(fog.density, 1, 10)));
     w.u8(0);
-    w.u16(0);  // rooms
-    w.u16(0);  // portals
-    w.u16(0);  // room tri refs
+    w.u16(uint16_t(rooms.rooms.size()));  // real rooms + the catch-all, or 0
+    w.u16(uint16_t(rooms.portals.size()));
+    w.u16(uint16_t(rooms.refs.size()));
     w.u16(uint16_t(scene.cutscenes.size()));
-    w.u16(0);  // room cells
+    w.u16(uint16_t(rooms.cells.size()));
     size_t cutsceneTableOffsetPos = w.pos();
     w.u32(0);
     w.u16(uint16_t(canvases.size()));
@@ -1985,7 +2003,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u32(0);
     w.u32(0);  // pixel data offset
     w.u16(uint16_t(scene.animations.size()));
-    w.u16(0);  // room portal refs
+    w.u16(uint16_t(rooms.portalRefs.size()));
     size_t animationTableOffsetPos = w.pos();
     w.u32(0);
     w.u16(uint16_t(skins.size()));
@@ -2114,6 +2132,13 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     if (!nav.regions.empty()) {
         w.align4();
         writeNavRegions(w, nav, gte);
+    }
+
+    // ---- rooms and portals
+    if (!rooms.empty()) {
+        w.align4();
+        st.roomBlockOffset = w.pos();
+        writeRooms(w, rooms, gte);
     }
 
     // ---- atlas + CLUT metadata (the reader skips the contents)

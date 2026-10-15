@@ -82,8 +82,11 @@ constexpr int kNavMaxSpans = (1 << 24) - 1;
 // 0.06 m on that terrain).
 constexpr int kNavSpanBudget = 1000000;
 
+// roomBoxes: the Room objects' world boxes (unexpanded) in room order. With
+// any, each region's roomIndex is the smallest room whose box (0.5 larger
+// per side) holds its centroid, else 0xFF; with none, connectivity islands.
 NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBuildParams& params, Vec3 spawn,
-                        std::vector<std::string>& errors);
+                        std::vector<std::string>& errors, const std::vector<Bounds>& roomBoxes = {});
 
 // PSXNavRegionBuilder.WriteToBinary
 void writeNavRegions(BinWriter& w, const NavMesh& nav, float gte);

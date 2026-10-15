@@ -112,6 +112,16 @@ struct ExportStats {
     // Each baked nav region's outline, in world metres (Y up), for the viewport.
     std::vector<std::vector<Vec3>> navOutlines;
     std::vector<StreamWarning> streamWarnings;  // also in ExportResult::warnings, as one line each
+
+    // Rooms and portals (Room objects). Empty when the scene has none, and
+    // then psxsplash renders static geometry through the BVH.
+    struct RoomSummary {
+        std::string name;
+        int triRefs = 0, cells = 0, portals = 0;
+    };
+    std::vector<RoomSummary> rooms;  // real rooms in room order; the catch-all is not listed
+    int roomCatchAllTris = 0, roomPortals = 0;
+    size_t roomBlockOffset = 0;  // byte offset of the room block in the splashpack, 0 = none
     size_t streamPoolBytes() const { return size_t(streamSlots) * streamSlotBytes; }
     // Negative when streaming costs more RAM than it frees.
     long long streamRamSaved() const {

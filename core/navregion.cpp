@@ -150,6 +150,28 @@ void fitPlane(NavRegion& r, const std::vector<Vec3>& pts) {
     r.surfaceType = slope < 3.f ? 0 : slope < 25.f ? 1 : 2;
 }
 
+// PSXNavRegionBuilder.AssignRoomsFromPSXRooms: the smallest room whose box,
+// 0.5 larger per side, holds the region's centroid; 0xFF outside them all.
+void assignRoomsFromBoxes(NavMesh& nav, const std::vector<Bounds>& rooms) {
+    for (NavRegion& reg : nav.regions) {
+        const Vec3 c = centroid(reg);
+        uint8_t best = 0xFF;
+        float bestVolume = 0;
+        for (size_t r = 0; r < rooms.size() && r < 0xFF; r++) {
+            const Vec3 mn = rooms[r].min() - Vec3{0.5f, 0.5f, 0.5f};
+            const Vec3 mx = rooms[r].max() + Vec3{0.5f, 0.5f, 0.5f};
+            if (c.x < mn.x || c.x > mx.x || c.y < mn.y || c.y > mx.y || c.z < mn.z || c.z > mx.z) continue;
+            const Vec3 s = mx - mn;
+            const float vol = s.x * s.y * s.z;
+            if (best == 0xFF || vol < bestVolume) {
+                best = uint8_t(r);
+                bestVolume = vol;
+            }
+        }
+        reg.roomIndex = best;
+    }
+}
+
 // PSXNavRegionBuilder.AssignRoomsByBFS (no PSXRoom volumes)
 void assignRoomsByBfs(NavMesh& nav) {
     uint8_t room = 0;
@@ -231,7 +253,7 @@ int findClosestRegion(const NavMesh& nav, Vec3 spawn) {
 }  // namespace
 
 NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBuildParams& p, Vec3 spawn,
-                        std::vector<std::string>& errors) {
+                        std::vector<std::string>& errors, const std::vector<Bounds>& roomBoxes) {
     NavMesh nav;
 
     // 1. World-space geometry
@@ -436,9 +458,12 @@ NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBui
         nav.portals.insert(nav.portals.end(), perRegion[r].begin(), perRegion[r].end());
     }
 
-    // 7-9. Rooms (PSXRoom volumes are not in the scene format, so always the
-    // connectivity fallback), platform flags, start region.
-    assignRoomsByBfs(nav);
+    // 7-9. Rooms (from the Room volumes, else the connectivity fallback),
+    // platform flags, start region.
+    if (roomBoxes.empty())
+        assignRoomsByBfs(nav);
+    else
+        assignRoomsFromBoxes(nav, roomBoxes);
     applyPlatformFlags(nav, objects);
     nav.startRegion = findClosestRegion(nav, spawn);
     return nav;

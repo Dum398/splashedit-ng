@@ -3432,6 +3432,46 @@ void testNavInfo() {
         inRoom = inRoom || info.room >= 0;
     }
     CHECK(inRoom);
+
+    // A ramp rising 0.3 per unit of X, its middle at x = 10: both scenes above
+    // have flat floors, where the plane's slope terms are zero and a centroid
+    // read off planeD alone would pass. The heights are checked against the
+    // mesh, not the writer's plane. Recast puts the walkable surface on voxel
+    // tops, a little above the triangles (cellHeight 0.025), so the region
+    // sits a constant height over the ramp rather than on it.
+    const fs::path rampDir = dir / "ramp";
+    fs::create_directories(rampDir / "meshes");
+    splash::Mesh ramp;
+    const float k = 0.3f, ox = 10;
+    ramp.positions = {{-3, -3 * k, -3}, {-3, -3 * k, 3}, {3, 3 * k, 3}, {3, 3 * k, -3}};
+    ramp.normals.assign(4, {-k, 1, 0});
+    ramp.submeshes = {{0, 1, 2, 0, 2, 3}};
+    splash::saveMesh(ramp, rampDir / "meshes/ramp.mesh");
+    splash::Scene ps;
+    ps.objects.push_back(meshObject("Ramp", "meshes/ramp.mesh", {ox, 0, 0}, true));
+    splash::Object rampNav;
+    rampNav.name = "Nav";
+    rampNav.transform.position = {ox, 0, 0};
+    rampNav.navigation = splash::NavigationComponent{};
+    rampNav.navigation->agentRadius = 0.3f;
+    ps.objects.push_back(rampNav);
+    const splash::ExportResult p = splash::exportSplashpack(ps, rampDir, rampDir / "scene.splashpack", dry);
+    CHECK(p.ok());
+    if (!p.ok()) return;
+    CHECK(p.stats.navRegions > 0);
+    checkShape(p.stats);
+    // Height above the ramp at a point: the same small lift everywhere.
+    auto lift = [&](const splash::Vec3& v) { return v.y - k * (v.x - ox); };
+    bool sloped = false;
+    for (size_t i = 0; i < p.stats.navInfo.size() && i < p.stats.navOutlines.size(); i++) {
+        const auto& info = p.stats.navInfo[i];
+        sloped = sloped || info.surface == 1;
+        CHECK(info.centroid.x > ox - 3 && info.centroid.x < ox + 3);
+        const float c = lift(info.centroid);
+        CHECK(c > -1e-3f && c < 0.1f);
+        for (const splash::Vec3& v : p.stats.navOutlines[i]) CHECK(std::fabs(lift(v) - c) < 1e-3f);
+    }
+    CHECK(sloped);
 }
 
 // What the skin section of the inspector shows (ExportStats::skins): one

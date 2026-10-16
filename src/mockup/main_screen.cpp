@@ -6369,6 +6369,7 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     Hit h = interact("playstatus", r);
     nameRect("playstatus", r);
     if (label != whole) tooltip(whole.c_str());
+    scriptLine("playstatus", "playstatus: " + whole);
     if (hasOutput) {
         dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
         if (h.clicked) ImGui::OpenPopup("##playoutput");

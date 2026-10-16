@@ -157,6 +157,27 @@ bool moveElement(Document& doc, int c, int from, int to);
 int addCanvas(Document& doc);
 bool deleteCanvas(Document& doc, int c);
 
+// ---- Scene fonts (Scene::fonts), each edit one undo step that carries the
+// fonts and the canvases together.
+// A new font named "font" (numbered when taken) from `source`: a .png is a
+// bitmap font, anything else a TTF/OTF; empty leaves it to pick. Returns its
+// index, or -1 (no change) when the scene has kMaxFonts already.
+int addFont(Document& doc, const std::string& source);
+// Runs `fn` on font `i`; its name stays (renameFont renames).
+bool editFont(Document& doc, int i, const std::function<void(splash::UIFont&)>& fn, const std::string& mergeKey = {});
+// Renames font `i` and every text element of every canvas that uses it.
+// Refuses, with the reason in `why`, an empty name or one another font has.
+bool renameFont(Document& doc, int i, const std::string& newName, std::string* why = nullptr);
+// Removes font `i`; text elements that used it go back to the system font.
+bool deleteFont(Document& doc, int i);
+// Sets `path` as the font's file: a .png as its bitmap (no source), else as its source (no bitmap).
+void setFontFile(splash::UIFont& f, const std::string& path);
+bool isBitmapFontFile(const std::string& path);
+// `base`, or `base (2)`... whichever no font of `fonts` has.
+std::string uniqueFontName(const std::vector<splash::UIFont>& fonts, const std::string& base);
+// How many text elements of the scene use font `name`.
+int fontUses(const splash::Scene& scene, const std::string& name);
+
 // `base`, or `base (2)`, `base (3)`... whichever no element of `cv` has.
 std::string uniqueElementName(const splash::UICanvas& cv, const std::string& base);
 const char* typeName(splash::UIElementType t);
@@ -178,6 +199,8 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int e, Screen s
 std::vector<Problem> canvasProblems(const Document& doc, int c);
 
 constexpr int kMaxCanvases = 24, kMaxElements = 256, kMaxCanvasElements = 255, kTextMax = 63;
+// The export's limit on Scene::fonts (splashpack.cpp kUiMaxFonts).
+constexpr int kMaxFonts = 3;
 
 // ---- Rendering.
 
@@ -211,6 +234,11 @@ private:
 // Width in pixels of `text` as the runtime draws it in font `font` (empty =
 // the system font).
 int textWidth(const splash::Scene& scene, Assets& assets, const std::string& font, const std::string& text);
+
+// `text` in font `font` of `scene`, white, drawn by render() on an image just
+// big enough for it (its size in *size): a font's sample line.
+std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, const std::string& font, const std::string& text,
+                                   uint32_t background, Screen* size);
 
 // The canvases with `show[c]` set drawn on a w x h RGBA image (0xAABBGGRR,
 // row 0 on top) as psxsplash draws them: canvases by sortOrder, elements in

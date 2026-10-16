@@ -158,9 +158,12 @@ def f32(v):
 
 
 def voxels(who, height, radius, step, cs, ch):
+    """The scripted line: the cell fields as drawn (three decimals at most),
+    then the counts."""
     import math
+    shown = ' x '.join(f'{v:.3f}'.rstrip('0').rstrip('.') for v in (cs, ch))
     h, r, st, cs, ch = map(f32, (height, radius, step, cs, ch))
-    return f'{who} voxels: height {math.ceil(h / ch)} radius {math.ceil(r / cs)} climb {math.floor(st / ch)}'
+    return f'{who} cells: {shown} voxels: height {math.ceil(h / ch)} radius {math.ceil(r / cs)} climb {math.floor(st / ch)}'
 
 
 def cells(c):

@@ -5762,11 +5762,13 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     auto number = [&](const char* id, const char* label, const char* tip, float v, const char* unit, const char* key, float lo, float hi,
                       const std::function<void(splash::Object&, float)>& set, int decimals = 2) {
         float nv = v;
+        const std::string shown = fmtShort(v, decimals);
         std::string lid = std::string("l") + id;
         const ImRect fr = row(lid.c_str(), label, tip);
         nameRect(std::string("obj.") + id, fr);
-        commit(numberField(id, fr, fmtShort(v, decimals).c_str(), unit, 0, nullptr, &nv), key,
+        commit(numberField(id, fr, shown.c_str(), unit, 0, nullptr, &nv), key,
                [&](splash::Object& ob) { set(ob, splash::clampv(nv, lo, hi)); });
+        return shown;
     };
     // What the last export's nav bake made of the scene: psxsplash only gives
     // the player the camera and the controller when there are nav regions.
@@ -5829,9 +5831,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         const std::string ctip = "Width of the nav bake's voxels. Smaller follows walls and ledges more closely and bakes slower; a "
                                  "large walkable area gets bigger cells to keep export fast." + over;
         const std::string htip = "Height of the nav bake's voxels. Step height and headroom are rounded down and up to it." + over;
-        number(cid.c_str(), "Cell size", ctip.c_str(), nb.cellSize, "m", cid.c_str(), 0.01f, 1,
+        const std::string shownCs = number(cid.c_str(), "Cell size", ctip.c_str(), nb.cellSize, "m", cid.c_str(), 0.01f, 1,
                [bakeOf](splash::Object& ob, float v) { bakeOf(ob)->cellSize = v; }, 3);
-        number(hid.c_str(), "Cell height", htip.c_str(), nb.cellHeight, "m", hid.c_str(), 0.01f, 1, [bakeOf](splash::Object& ob, float v) { bakeOf(ob)->cellHeight = v; }, 3);
+        const std::string shownCh = number(hid.c_str(), "Cell height", htip.c_str(), nb.cellHeight, "m", hid.c_str(), 0.01f, 1, [bakeOf](splash::Object& ob, float v) { bakeOf(ob)->cellHeight = v; }, 3);
         const int vh = int(std::ceil(double(agentHeight) / nb.cellHeight));
         const int vr = int(std::ceil(double(agentRadius) / nb.cellSize));
         const int vc = int(std::floor(double(nb.maxStepHeight) / nb.cellHeight));
@@ -5842,7 +5844,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         nameRect(std::string("obj.") + prefix + "voxels", ImRect(ImVec2(tx, y), ImVec2(x1 - space::sm, y + th)));
         dl->AddText(f.regular, type::caption, ImVec2(tx, y), vc == 0 ? color::warn : color::textFaint, buf, nullptr, w);
         y += th + space::sm;
-        report((std::string(prefix) + "vox").c_str(), std::string(who) + " voxels: height " + std::to_string(vh) + " radius " + std::to_string(vr) + " climb " +
+        report((std::string(prefix) + "vox").c_str(), std::string(who) + " cells: " + shownCs + " x " + shownCh + " voxels: height " + std::to_string(vh) + " radius " + std::to_string(vr) + " climb " +
                            std::to_string(vc));
     };
     if (o->player) {

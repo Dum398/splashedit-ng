@@ -109,6 +109,7 @@ bool button(const char* id, ImVec2 pos, const char* ic, const char* label, Butto
     float w = space::md * 2 + iconW + gap + labelW;
     ImRect r(pos, pos + ImVec2(w, size::field + 6));
     Hit h = interact(id, r);
+    nameRect(id, r);  // --click @id
     if (tip) tooltip(tip);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 

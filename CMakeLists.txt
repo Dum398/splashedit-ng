@@ -72,6 +72,7 @@ endif()
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
     src/editor/asset_browser.cpp
+    src/editor/blocks_edit.cpp
     src/editor/catalog.cpp
     src/editor/memcard.cpp
     src/editor/document.cpp

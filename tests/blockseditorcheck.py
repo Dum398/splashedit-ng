@@ -17,7 +17,9 @@
 # with no typing but a variable's name (its fields picked from the scene's
 # lists), its Lua and the Lua panel's error count; a refused variable rename;
 # and a cutscene renamed in the inspector while the tab has unsaved changes
-# (ScriptTabs::rewriteUnsavedBlocks), the tab then saved.
+# (ScriptTabs::rewriteUnsavedBlocks), the tab then saved. Last, a wait
+# block built from the palette (its Lua a task resumed from onUpdate) and
+# the same block refused under "when the scene starts".
 # usage: python3 blockseditorcheck.py <splashedit> [<splashpack-cli>]   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -322,6 +324,36 @@ saved = json.loads(read(project))
 st = saved['stacks'][0]
 check('the saved tab plays the renamed cutscene', st['blocks'][1] == {'op': 'play_cutscene', 'field': 'opening'}, st['blocks'])
 check('... and keeps its unsaved edit (the stack moved)', (st['x'], st['y']) == (70, 60), (st['x'], st['y']))
+
+# --- wait: dragged from Control under the hat, 0.5 typed into its number.
+# The stack becomes a task resumed from onUpdate; the Lua panel has no
+# errors. Then the same block under "when the scene starts" is refused.
+steps = DRAG_HAT + chip('Control')
+_, c = run(steps)
+hat, waitPal = need(c, 'blocks.block.s0.b0', 'blocks.palette.wait')
+steps += drop('blocks.palette.wait', waitPal, hat[0], hat[3]) + chip('Operators')
+_, c = run(steps)
+slot, numPal = need(c, 'blocks.slot.s0.b1.0', 'blocks.palette.number')
+steps += drop('blocks.palette.number', numPal, slot[0], slot[1]) + [
+    '--click', '@blocks.field.s0.b1.a0', '--wait', '3', '--key', 'ctrl+a', '--text', '0.5', '--key', 'enter', '--wait', '5']
+project, c = run(steps + SAVE)
+saved = json.loads(read(project))
+check('wait 0.5 seconds is saved under the hat', saved['stacks'][0]['blocks'][1:] ==
+      [{'op': 'wait', 'args': [{'op': 'number', 'field': '0.5'}]}], json.dumps(saved))
+rc, lout, err = lua(project)
+check('... and runs as a task resumed every frame', rc == 0 and
+      '    startTask("onInteract", function()\n        wait(FixedPoint.new(1) / 2)\n    end)\n' in lout and
+      '    if tasks.onInteract then\n        resumeTask("onInteract", dt)\n    end\n' in lout, (rc, lout, err))
+luaLines = [l for l in out.splitlines() if l.startswith('blocks: lua ')]
+want = 'blocks: lua %d lines, 0 errors' % lout.count('\n')
+check('the Lua panel shows it with no errors', luaLines and luaLines[-1] == want, (want, luaLines[-3:]))
+check('hovering wait shows its help', 'blocks: help wait' in out, [l for l in out.splitlines() if 'help' in l][-3:])
+WAIT_SCENE = json.dumps({'format': 'splashedit-blocks', 'version': 1, 'variables': [], 'stacks': [
+    {'x': 40, 'y': 40, 'blocks': [{'op': 'on_scene_start'}, {'op': 'wait', 'args': [{'op': 'number', 'field': '1'}]}]}]})
+run([], blocks=WAIT_SCENE)
+check('wait under "when the scene starts" is an error in the Lua panel',
+      'blocks: lua error stack 1, block 2 (wait): wait only works in object scripts: the scene and trigger events get no frames' in out,
+      [l for l in out.splitlines() if l.startswith('blocks: lua')])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

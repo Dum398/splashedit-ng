@@ -6290,6 +6290,25 @@ static std::string mb(size_t bytes) {
     return b;
 }
 
+// What a block script's field lists offer from the open scene: object names
+// (tree order), audio clip names, cutscene names; each once, none empty.
+static BlocksView::Context blockContext(const editor::Document& doc) {
+    BlocksView::Context c;
+    auto add = [](std::vector<std::string>& v, const std::string& s) {
+        if (!s.empty() && std::find(v.begin(), v.end(), s) == v.end()) v.push_back(s);
+    };
+    std::function<void(const std::vector<splash::Object>&)> walk = [&](const std::vector<splash::Object>& objects) {
+        for (const splash::Object& o : objects) {
+            add(c.objects, o.name);
+            if (o.audio) add(c.sounds, o.audio->clipName);
+            walk(o.children);
+        }
+    };
+    walk(doc.scene().objects);
+    for (const splash::Cutscene& cs : doc.scene().cutscenes) add(c.cutscenes, cs.name);
+    return c;
+}
+
 // Scripted runs print `line`; with a `tag`, only when it differs from the
 // last line printed under that tag.
 static void scriptLine(const char* tag, const std::string& line) {
@@ -6898,6 +6917,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         }
         st.viewportRect = ImRect();
     } else {
+        st.scripts.setBlockContext(blockContext(doc));
         st.scripts.draw(dl, body);
         st.viewportRect = ImRect();
         if (st.scripts.hasKeyboard()) st.play.gameFocus = false;

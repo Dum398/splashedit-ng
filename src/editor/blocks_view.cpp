@@ -5,6 +5,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <functional>
 
 #include "ui/icons.h"
 #include "ui/theme.h"
@@ -19,11 +20,12 @@ using blk::Path;
 namespace {
 
 constexpr float kPaletteW = 272;
+constexpr float kColumnW = 320;  // the variables and the Lua
 constexpr float kStatusH = 28;
 constexpr float kDragStart = 4;  // pixels the pointer moves before a press is a drag
 constexpr float kBlockRadius = 5;
 const char* const kFieldId = "##blockfield";
-const char* const kPickId = "##blockbutton";
+const char* const kPickId = "blocks.pick";
 
 ImU32 categoryColor(std::string_view c) {
     if (c == "Events") return blocks::events;
@@ -76,6 +78,8 @@ struct DrawOpts {
     Path hovered;       // the block under the pointer
     Path hoveredField;  // whose field is under it
     bool names = false;
+    // A field value the script or the scene does not have: drawn in the warning colour.
+    std::function<bool(std::string_view op, const std::string& value)> unknown;
 };
 
 void drawLayout(ImDrawList* dl, const blk::Layout& l, ImVec2 o, const DrawOpts& d) {
@@ -144,8 +148,9 @@ void drawLayout(ImDrawList* dl, const blk::Layout& l, ImVec2 o, const DrawOpts& 
                 } else if (pc.kind == blk::Piece::Field) {
                     const bool fieldHover = !d.hoveredField.empty() && d.hoveredField == b.path;
                     well(dl, r, false, false, fieldHover ? color::accentHover : lerpColor(color::border, cat, 0.35f));
-                    text(dl, ImVec2(r.Min.x + 7, textY(r, fs)), f.medium, fs, pc.placeholder ? color::textFaint : color::text,
-                         pc.text.c_str());
+                    const bool unknown = !pc.placeholder && d.unknown && d.unknown(b.op, pc.text);
+                    text(dl, ImVec2(r.Min.x + 7, textY(r, fs)), f.medium, fs,
+                         pc.placeholder ? color::textFaint : unknown ? color::warn : color::text, pc.text.c_str());
                 } else if (!pc.filled) {
                     well(dl, r, blk::booleanSlot(b.op, pc.arg), false, lerpColor(color::border, cat, 0.35f));
                 }
@@ -178,9 +183,29 @@ int numberFilter(ImGuiInputTextCallbackData* d) {
 }
 
 struct PaletteItem {
-    std::string_view op;
+    std::string name;  // blocks.palette.<name>: the op, or var.<variable>
     std::string_view category;
 };
+
+// Starting values by kind: Number, True-false, Text.
+const char* const kKinds[] = {"Number", "True-false", "Text"};
+int valueKind(const std::string& v) {
+    if (v == "true" || v == "false") return 1;
+    size_t i = (!v.empty() && v[0] == '-') ? 1 : 0;
+    bool digit = false, dot = false;
+    for (; i < v.size(); i++) {
+        if (v[i] >= '0' && v[i] <= '9') digit = true;
+        else if (v[i] == '.' && !dot) dot = true;
+        else return 2;
+    }
+    return digit ? 0 : 2;
+}
+
+std::string lower(std::string_view s) {
+    std::string out(s);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return out;
+}
 
 }  // namespace
 
@@ -205,7 +230,21 @@ bool BlocksView::edit(splash::BlockScript s, Result* out) {
     return true;
 }
 
-BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
+bool BlocksView::known(splash::BlockField f, const std::string& value, const Context& c) const {
+    auto in = [&](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), value) != v.end(); };
+    switch (f) {
+        case splash::BlockField::Variable:
+            for (const splash::BlockVariable& v : m_history.current().variables)
+                if (v.name == value) return true;
+            return false;
+        case splash::BlockField::Object: return value == "self" || in(c.objects);
+        case splash::BlockField::Sound: return in(c.sounds);
+        case splash::BlockField::Cutscene: return in(c.cutscenes);
+        default: return true;
+    }
+}
+
+BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, const Context& context) {
     Result res;
     Fonts& f = fonts();
     ImGuiIO& io = ImGui::GetIO();
@@ -236,7 +275,10 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
 
     const ImRect status(ImVec2(r.Min.x, r.Max.y - kStatusH), r.Max);
     const ImRect palette(r.Min, ImVec2(r.Min.x + kPaletteW, status.Min.y));
-    const ImRect canvas(ImVec2(palette.Max.x + 1, r.Min.y), ImVec2(r.Max.x, status.Min.y));
+    // The column narrows before the canvas goes under 240 px.
+    const float colW = std::round(std::clamp(r.GetWidth() - kPaletteW - 240, 200.0f, kColumnW));
+    const ImRect column(ImVec2(r.Max.x - colW, r.Min.y), ImVec2(r.Max.x, status.Min.y));
+    const ImRect canvas(ImVec2(palette.Max.x + 1, r.Min.y), ImVec2(column.Min.x - 1, status.Min.y));
     const splash::BlockScript& cur = m_history.current();
     auto originNow = [&] { return ImVec2(std::round(canvas.Min.x + space::xl - m_scroll.x), std::round(canvas.Min.y + space::xl - m_scroll.y)); };
 
@@ -264,15 +306,26 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
     std::vector<float> catY;  // each category header's top
     {
         float y = space::xs;
+        auto add = [&](splash::Block b, std::string name, std::string_view c) {
+            splash::BlockStack st{space::md + 2, y, {std::move(b)}};
+            y += blk::stackSize(st, tw, m).second + space::sm + 2;
+            pal.stacks.push_back(std::move(st));
+            palItems.push_back({std::move(name), c});
+        };
+        const std::vector<splash::BlockVariable>& vars = cur.variables;
         for (std::string_view c : cats) {
             catY.push_back(y);
             y += 26;
+            // Variables: a reporter per variable first, ready to drop in.
+            if (c == "Variables")
+                for (const splash::BlockVariable& v : vars) add(splash::Block{"var", v.name, {}, {}}, "var." + v.name, c);
             for (const splash::BlockSpec& s : splash::blockCatalogue()) {
                 if (s.category != c) continue;
-                splash::BlockStack st{space::md + 2, y, {blk::newBlock(s.op)}};
-                y += blk::stackSize(st, tw, m).second + space::sm + 2;
-                pal.stacks.push_back(std::move(st));
-                palItems.push_back({s.op, c});
+                splash::Block b = blk::newBlock(s.op);
+                // set and change come with the first variable chosen.
+                if (s.field == splash::BlockField::Variable && s.kind != splash::BlockKind::Reporter && !vars.empty())
+                    b.field = vars[0].name;
+                add(std::move(b), std::string(s.op), c);
             }
             y += space::md;
         }
@@ -286,7 +339,11 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
     // --- Input ---
     Hit canvasHit = interact("##canvas", canvas);
     Hit paletteHit = interact("##palette", list);
-    const bool typing = !m_editing.empty() && textEditing(kFieldId);
+    bool typing = !m_editing.empty() && textEditing(kFieldId);
+    for (size_t i = 0; i < cur.variables.size() && !typing; i++) {
+        const std::string id = "blocks.var." + std::to_string(i) + ".";
+        typing = textEditing((id + "name").c_str()) || textEditing((id + "value").c_str());
+    }
     const blk::Layout curL = blk::layout(cur, tw, m);
 
     // The keyboard first, so a frame's undo comes before its edits.
@@ -345,7 +402,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
                 m_press = {};
                 m_press.on = true;
                 m_press.palette = true;
-                m_press.op = std::string(palItems[i].op);
+                m_press.block = pal.stacks[i].blocks[0];
                 m_press.blockMin = sr.Min;
                 m_press.at = mouse;
                 break;
@@ -360,7 +417,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
             if (m_press.palette) {
                 m_drag = {};
                 m_drag.on = true;
-                m_drag.fragment.blocks.push_back(blk::newBlock(m_press.op));
+                m_drag.fragment.blocks.push_back(m_press.block);
                 m_drag.rest = cur;
                 m_drag.grab = m_press.at - m_press.blockMin;
             } else {
@@ -417,7 +474,9 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
             if (h.kind == blk::Hit::Field && spec) {
                 if (spec->field == splash::BlockField::Bool) {
                     if (auto out = blk::setField(cur, h.path, b->field == "true" ? "false" : "true")) edit(std::move(*out), &res);
-                } else if (spec->field == splash::BlockField::Button) {
+                } else if (spec->field == splash::BlockField::Button || spec->field == splash::BlockField::Variable ||
+                           spec->field == splash::BlockField::Object || spec->field == splash::BlockField::Sound ||
+                           spec->field == splash::BlockField::Cutscene) {
                     m_picking = h.path;
                     m_pickQuery.clear();
                     ImGui::OpenPopup(kPickId);
@@ -463,6 +522,10 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
     DrawOpts opts;
     opts.selected = m_selected;
     opts.names = namedRectsOn();
+    opts.unknown = [&](std::string_view op, const std::string& value) {
+        const splash::BlockSpec* sp = splash::findBlockSpec(op);
+        return sp && !known(sp->field, value, context);
+    };
     if (!m_drag.on && !m_press.on && canvasHit.hovered && !popup) {
         const blk::Hit h = blk::hitTest(*shownL, mouse.x - o.x, mouse.y - o.y);
         if (h.kind != blk::Hit::None) opts.hovered = dragOwner(shown, h.path);
@@ -567,7 +630,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
         drawLayout(dl, palL, po, po2);
         for (size_t i = 0; i < palL.stacks.size(); i++) {
             const ImRect sr = screen(palL.stacks[i].rect, po);
-            if (sr.Min.y >= list.Min.y && sr.Max.y <= list.Max.y) nameRect("blocks.palette." + std::string(palItems[i].op), sr);
+            if (sr.Min.y >= list.Min.y && sr.Max.y <= list.Max.y) nameRect("blocks.palette." + palItems[i].name, sr);
         }
     }
     ImGui::PopClipRect();
@@ -582,6 +645,8 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
         text(dl, ImVec2(x + iw + space::sm, y - type::body * 0.5f - 1), f.medium, type::body, color::text, what);
     }
 
+    drawColumn(dl, column, &res);
+
     // The dragged blocks, over everything in the tab.
     if (m_drag.on) {
         splash::BlockScript one;
@@ -595,32 +660,75 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
         ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     }
 
-    // --- Button picker ---
+    // --- A field's list: buttons, variables, objects, sounds, cutscenes ---
     if (!m_picking.empty()) {
-        std::vector<std::string_view> names;
+        const splash::Block* pb = blk::blockAt(m_history.current(), m_picking);
+        const splash::BlockSpec* ps = pb ? splash::findBlockSpec(pb->op) : nullptr;
+        const splash::BlockField kind = ps ? ps->field : splash::BlockField::None;
+        const std::string value = pb ? pb->field : std::string();
+        std::vector<std::string> all;
+        const char* title = "Button";
+        const char* ic = icon::gamepad;
+        ImU32 col = blocks::input;
+        switch (kind) {
+            case splash::BlockField::Button:
+                for (std::string_view b : splash::blockButtons()) all.emplace_back(b);
+                break;
+            case splash::BlockField::Variable:
+                title = "Variable";
+                ic = icon::type;
+                col = blocks::variables;
+                for (const splash::BlockVariable& v : m_history.current().variables) all.push_back(v.name);
+                break;
+            case splash::BlockField::Object:
+                title = "Object";
+                ic = icon::box;
+                col = blocks::objects;
+                all.push_back("self");
+                all.insert(all.end(), context.objects.begin(), context.objects.end());
+                break;
+            case splash::BlockField::Sound:
+                title = "Sound";
+                ic = icon::music;
+                col = blocks::sound;
+                all = context.sounds;
+                break;
+            case splash::BlockField::Cutscene:
+                title = "Cutscene";
+                ic = icon::camera;
+                col = blocks::sound;
+                all = context.cutscenes;
+                break;
+            default: break;
+        }
+        // The value the field has, kept in the list when it is not one of them.
+        const bool stray = !value.empty() && std::find(all.begin(), all.end(), value) == all.end();
+        if (stray) all.insert(all.begin(), value);
+        // What the search matches, the names it starts first.
+        const std::string q = lower(m_pickQuery);
+        std::vector<std::string> labels;
+        for (const std::string& a : all)
+            if (q.empty() || lower(a).find(q) != std::string::npos) labels.push_back(a);
+        std::stable_partition(labels.begin(), labels.end(), [&](const std::string& a) { return q.empty() || lower(a).rfind(q, 0) == 0; });
         std::vector<PickerItem> items;
-        std::string q = m_pickQuery;
-        std::transform(q.begin(), q.end(), q.begin(), [](unsigned char c) { return char(std::toupper(c)); });
-        for (std::string_view b : splash::blockButtons())
-            if (q.empty() || b.find(q) != std::string_view::npos) names.push_back(b);
-        std::vector<std::string> labels(names.begin(), names.end());
-        for (const std::string& l : labels) items.push_back({icon::gamepad, blocks::input, l.c_str(), "", nullptr});
+        for (const std::string& l : labels) {
+            const bool odd = stray && l == value;
+            const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script" : "Not in this scene")
+                                : l == "self" && kind == splash::BlockField::Object ? "The object this script is on"
+                                                                                     : "";
+            items.push_back({odd ? icon::warning : ic, odd ? color::warn : col, l.c_str(), blurb, nullptr});
+        }
         ImVec2 at = mouse;
         if (const blk::BlockBox* b = curL.find(m_picking)) at = ImVec2(o.x + b->field.x0, o.y + b->field.y1 + space::xs);
-        const int pick = picker(kPickId, at, 220, "Button", &m_pickQuery, items);
+        const int pick = picker(kPickId, at, 240, title, &m_pickQuery, items);
         if (pick >= 0 && size_t(pick) < labels.size()) {
-            if (auto s = blk::setField(m_history.current(), m_picking, labels[size_t(pick)])) edit(std::move(*s), &res);
+            if (auto ns = blk::setField(m_history.current(), m_picking, labels[size_t(pick)])) edit(std::move(*ns), &res);
             m_picking = {};
         }
         if (!ImGui::IsPopupOpen(kPickId)) m_picking = {};
     }
 
     // --- Status line: the Lua check ---
-    if (!m_checkedAny || !(m_checked == m_history.current())) {
-        m_checked = m_history.current();
-        m_checkedAny = true;
-        m_gen = splash::blocksToLua(m_checked);
-    }
     dl->AddLine(ImVec2(status.Min.x, status.Min.y), ImVec2(status.Max.x, status.Min.y), color::border);
     {
         const float cy = status.GetCenter().y;
@@ -653,6 +761,204 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused) {
     }
     ImGui::PopID();
     return res;
+}
+
+void BlocksView::drawColumn(ImDrawList* dl, ImRect col, Result* out) {
+    Fonts& f = fonts();
+    ImGuiIO& io = ImGui::GetIO();
+    const ImVec2 mouse = io.MousePos;
+    const bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);
+    auto say = [](const std::string& line) {
+        if (!namedRectsOn()) return;
+        std::printf("%s\n", line.c_str());
+        std::fflush(stdout);
+    };
+    dl->AddRectFilled(col.Min, col.Max, color::panel);
+    dl->AddLine(ImVec2(col.Min.x - 0.5f, col.Min.y), ImVec2(col.Min.x - 0.5f, col.Max.y), color::border);
+    const float x0 = col.Min.x + space::md, x1 = col.Max.x - space::md;
+    float y = col.Min.y + space::md;
+    auto header = [&](const char* title, const char* right) {
+        text(dl, ImVec2(x0, y), f.semibold, type::label, color::textDim, title);
+        if (right) {
+            const float w = measure(f.regular, type::caption, right).x;
+            text(dl, ImVec2(x1 - w, y + 1), f.regular, type::caption, color::textFaint, right);
+        }
+        y += 18 + space::sm;
+    };
+
+    // --- Variables: two rows each (name and delete; kind and value), whole
+    // ones only, scrolled by the wheel when they take more than 40% ---
+    // A copy: an edit replaces the script this frame.
+    const std::vector<splash::BlockVariable> vars = m_history.current().variables;
+    header("Variables", nullptr);
+    const float fh = size::field, rowH = fh * 2 + space::xs, perRow = rowH + space::md;
+    const int n = int(vars.size());
+    const int fit = std::max(1, int((col.GetHeight() * 0.4f + space::md) / perRow));
+    const int shown = std::min(n, fit);
+    const ImRect list(ImVec2(col.Min.x, y), ImVec2(col.Max.x, y + (shown ? shown * perRow - space::md : 0)));
+    if (!popup && io.MouseWheel != 0 && list.Contains(mouse)) m_varScroll -= io.MouseWheel > 0 ? 1 : -1;
+    m_varScroll = std::clamp(std::round(m_varScroll), 0.0f, float(std::max(0, n - shown)));
+    const int first = int(m_varScroll);
+    const float kindW = 118;
+    for (int i = first; i < first + shown; i++) {
+        const splash::BlockVariable& v = vars[size_t(i)];
+        const std::string id = "blocks.var." + std::to_string(i) + ".";
+        const float ry = list.Min.y + float(i - first) * perRow;
+        // Name, and delete while no block uses it.
+        const ImRect nameR(ImVec2(x0, ry), ImVec2(x1 - fh - space::xs, ry + fh));
+        std::string typed;
+        if (textField((id + "name").c_str(), nameR, v.name, &typed)) {
+            std::string why;
+            if (auto ns = blk::renameVariable(m_history.current(), v.name, typed, &why)) {
+                edit(std::move(*ns), out);
+                m_varNote.clear();
+            } else {
+                m_varNote = "Can't rename to \"" + typed + "\": " + why;
+                say("blocks: rename refused: " + why);
+            }
+        }
+        nameRect(id + "name", nameR);
+        const int uses = blk::variableUses(m_history.current(), v.name);
+        const std::string tip = uses ? "U" + blk::usedBy(uses).substr(1) : std::string("Delete this variable");
+        const ImRect delR(ImVec2(x1 - fh, ry), ImVec2(x1, ry + fh));
+        if (iconButton((id + "delete").c_str(), delR, icon::trash, false, tip.c_str(), color::textDim, uses == 0)) {
+            std::string why;
+            if (auto ns = blk::deleteVariable(m_history.current(), i, &why)) edit(std::move(*ns), out);
+            else m_varNote = why;
+        }
+        nameRect(id + "delete", delR);
+        // Kind and starting value.
+        const float y2 = ry + fh + space::xs;
+        const int kind = valueKind(v.value);
+        const ImRect kindR(ImVec2(x0, y2), ImVec2(x0 + kindW, y2 + fh));
+        const int k = dropdownMenu((id + "kind").c_str(), kindR, nullptr, kKinds[kind], {kKinds[0], kKinds[1], kKinds[2]}, kind);
+        nameRect(id + "kind", kindR);
+        std::optional<std::string> value;
+        if (k >= 0 && k != kind) value = k == 0 ? "0" : k == 1 ? "false" : "";
+        const float vx = x0 + kindW + space::sm;
+        if (kind == 1) {
+            const ImRect tr(ImVec2(vx, y2 + 3), ImVec2(vx + 34, y2 + fh - 3));
+            if (toggle((id + "value").c_str(), tr, v.value == "true")) value = v.value == "true" ? "false" : "true";
+            nameRect(id + "value", tr);
+            text(dl, ImVec2(tr.Max.x + space::sm, std::round(tr.GetCenter().y - type::body * 0.5f - 1)), f.regular, type::body,
+                 color::textDim, v.value.c_str());
+        } else {
+            const ImRect vr(ImVec2(vx, y2), ImVec2(x1, y2 + fh));
+            if (textField((id + "value").c_str(), vr, v.value, &typed, kind == 2 ? "empty text" : nullptr, 0,
+                          kind == 0 ? numberFilter : nullptr)) {
+                if (kind == 0 && typed.empty()) typed = "0";
+                if (kind == 0 && valueKind(typed) != 0) m_varNote = "\"" + typed + "\" is not a number";
+                else value = typed;
+            }
+            nameRect(id + "value", vr);
+        }
+        if (value) {
+            if (auto ns = blk::setVariableValue(m_history.current(), i, *value)) {
+                edit(std::move(*ns), out);
+                m_varNote.clear();
+            }
+        }
+    }
+    if (n > shown) {
+        // Which of them show, under the list's right edge.
+        char more[48];
+        std::snprintf(more, sizeof more, "%d-%d of %d", first + 1, first + shown, n);
+        const float w = measure(f.regular, type::caption, more).x;
+        text(dl, ImVec2(x1 - w, list.Max.y + 2), f.regular, type::caption, color::textFaint, more);
+    }
+    y = list.Max.y + (n ? space::md + (n > shown ? 8 : 0) : 0);
+    float bw = 0;
+    const ImVec2 bp(x0, y);
+    if (button("blocks.vars.add", bp, icon::plus, "Make a variable", ButtonKind::Secondary, &bw)) {
+        std::string name;
+        edit(blk::addVariable(m_history.current(), &name), out);
+        const int idx = int(m_history.current().variables.size()) - 1;
+        // Its name selected in its field, so typing replaces it.
+        beginTextEdit(("blocks.var." + std::to_string(idx) + ".name").c_str(), name);
+        m_varScroll = float(idx);
+        m_varNote.clear();
+    }
+    nameRect("blocks.vars.add", ImRect(bp, bp + ImVec2(bw, fh + 6)));
+    y += fh + 6 + space::sm;
+    // Two lines kept for why a change was refused (a hint while there is none).
+    {
+        const char* note = m_varNote.empty() ? "Names take letters, digits and _, and don't start with a digit." : m_varNote.c_str();
+        const ImVec4 clip(x0, y, x1, y + 34);
+        dl->AddText(f.regular, type::caption, ImVec2(x0, y), m_varNote.empty() ? color::textFaint : color::warn, note, nullptr, x1 - x0,
+                    &clip);
+        y += 34 + space::sm;
+    }
+    dl->AddLine(ImVec2(col.Min.x, std::round(y) + 0.5f), ImVec2(col.Max.x, std::round(y) + 0.5f), color::border);
+    y += space::md;
+
+    // --- The Lua, as blocksToLua makes it ---
+    if (!m_checkedAny || !(m_checked == m_history.current())) {
+        m_checked = m_history.current();
+        m_checkedAny = true;
+        m_gen = splash::blocksToLua(m_checked);
+    }
+    std::vector<std::string_view> lines;
+    for (size_t at = 0; at < m_gen.lua.size();) {
+        size_t nl = m_gen.lua.find('\n', at);
+        if (nl == std::string::npos) nl = m_gen.lua.size();
+        lines.push_back(std::string_view(m_gen.lua).substr(at, nl - at));
+        at = nl + 1;
+    }
+    {
+        std::string rep = "blocks: lua " + std::to_string(lines.size()) + " lines, " + std::to_string(m_gen.errors.size()) + " errors";
+        for (const std::string& e : m_gen.errors) rep += "\nblocks: lua error " + e;
+        if (namedRectsOn() && rep != m_luaReported) say(rep);
+        m_luaReported = rep;
+    }
+    char count[48];
+    std::snprintf(count, sizeof count, "%zu line%s", lines.size(), lines.size() == 1 ? "" : "s");
+    header("Lua", count);
+    // What keeps it from running, each with where it is.
+    const size_t errShown = m_gen.errors.size() > 4 ? 3 : m_gen.errors.size();
+    for (size_t k = 0; k < errShown; k++) {
+        dl->PushClipRect(ImVec2(x0, y), ImVec2(x1, y + 16), true);
+        text(dl, ImVec2(x0, y), f.regular, type::caption, color::bad, m_gen.errors[k].c_str());
+        dl->PopClipRect();
+        ImGui::PushID(int(k));
+        interact("err", ImRect(ImVec2(x0, y), ImVec2(x1, y + 16)));
+        ImGui::PopID();
+        tooltip(m_gen.errors[k].c_str());
+        y += 16;
+    }
+    if (errShown < m_gen.errors.size()) {
+        const std::string more = std::to_string(m_gen.errors.size() - errShown) + " more (the first is in the status line)";
+        text(dl, ImVec2(x0, y), f.regular, type::caption, color::bad, more.c_str());
+        y += 16;
+    }
+    if (errShown) y += space::xs;
+    const ImRect box(ImVec2(x0, y), ImVec2(x1, std::max(y + 40, col.Max.y - space::md)));
+    nameRect("blocks.lua", box);
+    dl->AddRectFilled(box.Min, box.Max, color::field, radius::field);
+    dl->AddRect(box.Min, box.Max, color::border, radius::field);
+    ImFont* mono = f.mono ? f.mono : f.regular;
+    const float cs = type::label, lineH = 17, pad = space::sm;
+    float wide = 0;
+    for (std::string_view l : lines) wide = std::max(wide, mono->CalcTextSizeA(cs, FLT_MAX, 0, l.data(), l.data() + l.size()).x);
+    const ImVec2 room(box.GetWidth() - pad * 2, box.GetHeight() - pad * 2);
+    if (!popup && box.Contains(mouse)) {
+        if (io.KeyShift && io.MouseWheel != 0) m_luaScroll.x -= io.MouseWheel * 48;
+        else if (io.MouseWheel != 0) m_luaScroll.y -= io.MouseWheel * 48;
+        if (io.MouseWheelH != 0) m_luaScroll.x -= io.MouseWheelH * 48;
+    }
+    m_luaScroll.x = std::clamp(m_luaScroll.x, 0.0f, std::max(0.0f, wide - room.x));
+    m_luaScroll.y = std::clamp(m_luaScroll.y, 0.0f, std::max(0.0f, float(lines.size()) * lineH - room.y));
+    dl->PushClipRect(box.Min + ImVec2(1, 1), box.Max - ImVec2(1, 1), true);
+    if (lines.empty()) {
+        dl->AddText(f.regular, type::caption, box.Min + ImVec2(pad, pad), color::textFaint,
+                    "No Lua yet: nothing runs until a stack starts with an Events block.", nullptr, room.x);
+    }
+    for (size_t k = 0; k < lines.size(); k++) {
+        const float ly = std::round(box.Min.y + pad + float(k) * lineH - m_luaScroll.y);
+        if (ly + lineH < box.Min.y || ly > box.Max.y) continue;
+        dl->AddText(mono, cs, ImVec2(std::round(box.Min.x + pad - m_luaScroll.x), ly), color::text, lines[k].data(),
+                    lines[k].data() + lines[k].size());
+    }
+    dl->PopClipRect();
 }
 
 }  // namespace ui

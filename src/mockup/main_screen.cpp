@@ -1147,15 +1147,16 @@ static bool slotField(State& st, int slot, const editor::ObjectPath& path, const
     return clicked;
 }
 
-// The inspector's New script: writes scripts/<name>.lua from a template, sets
-// it on the object's Script component (its Trigger component with `trigger`,
-// the scene's script when `object` is null) as one undo step and opens it in
-// the script editor.
-static void newScript(State& st, editor::Document& doc, const editor::ObjectPath* object, bool trigger = false) {
+// The inspector's New blocks and New Lua: writes scripts/<name>.blocks or
+// .lua from a starter, sets it on the object's Script component (its Trigger
+// component with `trigger`, the scene's script when `object` is null) as one
+// undo step and opens it in the block or script editor.
+static void newScript(State& st, editor::Document& doc, const editor::ObjectPath* object, editor::ScriptLanguage lang,
+                      bool trigger = false) {
     const splash::Object* o = object ? doc.object(*object) : nullptr;
     if (object && (!o || !(trigger ? o->trigger.has_value() : o->script.has_value()))) return;
     const editor::ScriptKind kind = !o ? editor::ScriptKind::Scene : trigger ? editor::ScriptKind::Trigger : editor::ScriptKind::Object;
-    editor::NewScript ns = editor::createScript(doc.projectRoot(), o ? o->name : doc.sceneStem(), kind);
+    editor::NewScript ns = editor::createScript(doc.projectRoot(), o ? o->name : doc.sceneStem(), kind, lang);
     if (!ns.error.empty()) {
         notify(st, "Cannot create a script: " + ns.error, true);
         return;
@@ -3796,9 +3797,13 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             pickAsset(AssetSlot::SceneLua, {});
         const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
         if (lua.empty()) {
-            if (button("newscenelua", at, icon::plus, "New script", ButtonKind::Secondary, nullptr,
+            float bw = 0;
+            if (button("newsceneblocks", at, icon::plus, "New blocks", ButtonKind::Secondary, &bw,
+                       "Writes scripts/<scene name>.blocks with a when-the-scene-starts stack, and opens it."))
+                newScript(st, doc, nullptr, editor::ScriptLanguage::Blocks);
+            if (button("newscenelua", ImVec2(at.x + bw + space::xs, at.y), icon::plus, "New Lua", ButtonKind::Secondary, nullptr,
                        "Writes scripts/<scene name>.lua with onSceneCreationStart and onSceneCreationEnd, and opens it."))
-                newScript(st, doc, nullptr);
+                newScript(st, doc, nullptr, editor::ScriptLanguage::Lua);
         } else if (button("editscenelua", at, icon::fileCode, found ? "Edit script" : "Create script", ButtonKind::Secondary, nullptr,
                           "Opens the file in the script editor, beside the Scene.")) {
             openScript(st, doc, lua);
@@ -5744,9 +5749,15 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             if (button("editlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::fileCode, found ? "Edit script" : "Create script",
                        ButtonKind::Secondary, nullptr, "Opens the file in the script editor, beside the Scene."))
                 openScript(st, doc, lua);
-        } else if (button("newlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::plus, "New script", ButtonKind::Secondary,
-                          nullptr, "Writes scripts/<object name>.lua with onCreate ready to fill in, and opens it.")) {
-            newScript(st, doc, &path);
+        } else {
+            const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
+            float bw = 0;
+            if (button("newblocks", at, icon::plus, "New blocks", ButtonKind::Secondary, &bw,
+                       "Writes scripts/<object name>.blocks with a when-created stack, and opens it."))
+                newScript(st, doc, &path, editor::ScriptLanguage::Blocks);
+            if (button("newlua", ImVec2(at.x + bw + space::xs, at.y), icon::plus, "New Lua", ButtonKind::Secondary, nullptr,
+                       "Writes scripts/<object name>.lua with onCreate ready to fill in, and opens it."))
+                newScript(st, doc, &path, editor::ScriptLanguage::Lua);
         }
         y += size::field + space::sm;
         sectionEnd(top);
@@ -5903,9 +5914,15 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             if (button("edittlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::fileCode, found ? "Edit script" : "Create script",
                        ButtonKind::Secondary, nullptr, "Opens the file in the script editor, beside the Scene."))
                 openScript(st, doc, tr.lua);
-        } else if (button("newtlua", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::plus, "New script", ButtonKind::Secondary,
-                          nullptr, "Writes scripts/<object name>_trigger.lua with onTriggerEnter and onTriggerExit, and opens it.")) {
-            newScript(st, doc, &path, true);
+        } else {
+            const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
+            float bw = 0;
+            if (button("newtblocks", at, icon::plus, "New blocks", ButtonKind::Secondary, &bw,
+                       "Writes scripts/<object name>_trigger.blocks with when-the-player-enters and -leaves stacks, and opens it."))
+                newScript(st, doc, &path, editor::ScriptLanguage::Blocks, true);
+            if (button("newtlua", ImVec2(at.x + bw + space::xs, at.y), icon::plus, "New Lua", ButtonKind::Secondary, nullptr,
+                       "Writes scripts/<object name>_trigger.lua with onTriggerEnter and onTriggerExit, and opens it."))
+                newScript(st, doc, &path, editor::ScriptLanguage::Lua, true);
         }
         y += size::field + space::sm;
         sectionEnd(top);

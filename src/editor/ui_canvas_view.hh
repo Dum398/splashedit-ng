@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "editor/asset_browser.hh"
 #include "editor/texture_preview_view.hh"
 #include "editor/ui_canvas.hh"
 
@@ -145,6 +146,26 @@ private:
     float m_listScroll = 0;
 
     std::string m_reported, m_listLayout, m_menuReported, m_inspReported, m_headReported;
+
+    // The canvas inspector scrolls (the Scene fonts section makes it tall);
+    // another canvas starts back at the top.
+    float m_cvScroll = 0;
+    int m_cvScrolled = -1;
+    // The Scene fonts section: the project's font files (.ttf, .otf, .png),
+    // listed again every couple of seconds; each font's sample line, drawn
+    // by uic::renderSample into a texture; what the section last reported.
+    void fontsSection(ImDrawList* dl, float x0, float x1, float* y, editor::Document& doc);
+    std::vector<std::string> fontFiles(const editor::Document& doc);
+    editor::AssetIndex m_fontFiles;
+    double m_fontFilesAt = -1e9;
+    struct FontSample {
+        unsigned tex = 0;
+        std::string key;
+        int w = 0, h = 0;
+    };
+    std::array<FontSample, editor::uic::kMaxFonts> m_samples;
+    std::vector<std::string> m_fontsReported;
+    std::string m_fontsCountReported;
 };
 
 }  // namespace ui

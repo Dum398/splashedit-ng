@@ -475,8 +475,9 @@ card warnings), `level3.scene` (memory card errors) or `zbroken.scene` (not a sc
 the engine set to `/bin/true`. It checks the editor's `build report: Play scenes N errors E warnings W`,
 `problems: <pill>` and `playstatus: <status line>` lines: other scenes' problems are counted, the open
 scene's own are counted once, the status line leads with the error count and stops short of the pill,
-the Problems popup gets its `problems.build` heading, and a second build replaces the report. Needs a
-display.
+the Problems popup gets its `problems.build` heading, and a second build replaces the report. `--wait-play` holds the script while the build runs and
+`--wait-export` until the live export lands, so the pill has its count before the click opens the popup.
+Needs a display.
 
     python3 buildproblemscheck.py <splashedit> [screenshot.png]
 

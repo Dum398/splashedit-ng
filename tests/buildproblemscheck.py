@@ -42,9 +42,9 @@ def run(listed, open_mc=None, args=None, shot=None):
     open(os.path.join(project, 'zbroken.scene'), 'w').write('{ not json')
     open(os.path.join(project, 'scenes.list'), 'w').write(''.join(l + '\n' for l in listed))
     open(os.path.join(project, 'one.list'), 'w').write('courtyard.scene\n')
-    cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '30', '--key', 'f5', '--wait', '60'] + \
+    cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '30', '--key', 'f5', '--wait', '60', '--wait-play'] + \
           [a.replace('@PROJECT', project) for a in (args or [])] + \
-          ['--click', '@problems', '--wait', '5', '--screenshot', shot or os.path.join(project, 'shot.png')]
+          ['--wait-export', '--click', '@problems', '--wait', '5', '--screenshot', shot or os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=240)
     lines = (r.stdout + r.stderr).strip().splitlines()
     missing = [l for l in lines if 'no such control drawn' in l]
@@ -94,7 +94,7 @@ check('its status line names it', any(l.startswith('playstatus: Play: Cannot loa
 
 # The next build replaces the report: a clean one-scene list leaves no problems.
 lines, rects = run(['courtyard.scene', 'level2.scene', 'level3.scene'],
-                   args=['--copy-file', '@PROJECT/one.list@@PROJECT/scenes.list', '--wait', '5', '--key', 'f5', '--wait', '60'])
+                   args=['--copy-file', '@PROJECT/one.list@@PROJECT/scenes.list', '--wait', '5', '--key', 'f5', '--wait', '60', '--wait-play'])
 check('the second build replaces the first', tagged(lines, 'build report:') ==
       ['build report: Play scenes 3 errors 2 warnings 3', 'build report: Play scenes 1 errors 0 warnings 0'],
       tagged(lines, 'build report:'))

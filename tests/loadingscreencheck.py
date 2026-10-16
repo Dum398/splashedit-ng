@@ -4,11 +4,14 @@
 # save with Ctrl+S and read settings.loadingCanvas back; the inspector's
 # `scene: loading ...` lines say what it picked and which warnings it drew.
 # Ctrl+Z takes a pick back. Controls are clicked by name (--click @scene.loading).
-# usage: python3 loadingscreencheck.py <splashedit> [title.png [bare.png]]   (needs a display: xvfb-run -a)
+# A scene saved naming a canvas that is gone shows the missing warning from
+# its first frame (control scene.loadingmissing), and Ctrl+Z back to it
+# reports it.
+# usage: python3 loadingscreencheck.py <splashedit> [title.png [bare.png [missing.png]]]   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
 
 editor = os.path.abspath(sys.argv[1])
-shots = sys.argv[2:4]
+shots = sys.argv[2:5]
 here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
@@ -36,7 +39,7 @@ CANVASES = [
 ]
 
 
-def run(args, shot=None):
+def run(args, shot=None, loading=None):
     """Runs the editor on a fresh courtyard copy with the two canvases
     (nothing selected, so the inspector shows the scene), then `args` and
     Ctrl+S; returns the saved scene's settings and the editor's output
@@ -46,6 +49,8 @@ def run(args, shot=None):
     scene = os.path.join(project, 'courtyard.scene')
     j = json.load(open(scene, encoding='utf-8'))
     j['canvases'] = CANVASES
+    if loading:
+        j.setdefault('settings', {})['loadingCanvas'] = loading
     json.dump(j, open(scene, 'w', encoding='utf-8'), indent=2)
     cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5'] + args + [
         '--key', 'ctrl+s', '--wait', '10', '--screenshot', shot or os.path.join(project, 'shot.png')]
@@ -74,7 +79,7 @@ check('the Canvas dropdown is drawn', any(c.startswith('control scene.loading at
 check('nothing is reported before a pick', 'scene: loading' not in out, out[-300:])
 check('save alone sets no loading canvas', 'loadingCanvas' not in s, s)
 
-s, out, _ = run(pick('Title'), shots[0] if shots else None)
+s, out, titleControls = run(pick('Title'), shots[0] if shots else None)
 check('picking Title reports it', 'scene: loading Title' in out, out[-300:])
 check('the saved scene names Title', s.get('loadingCanvas') == 'Title', s)
 check('Title has its bar: no warning', 'scene: loading warnings' not in out, out[-300:])
@@ -93,6 +98,27 @@ check('one Ctrl+Z puts Title back', s.get('loadingCanvas') == 'Title' and out.co
       f'{s.get("loadingCanvas")} | ' + out[-300:])
 warns = [l for l in out.splitlines() if l.startswith('scene: loading warnings')]
 check('and the warnings go with Bare', warns == ['scene: loading warnings bar,line', 'scene: loading warnings none'], warns)
+
+def has(controls, name):
+    return any(c.startswith('control ' + name + ' at') for c in controls)
+
+
+check('no missing warning with a real pick', not has(titleControls, 'scene.loadingmissing'), titleControls[:5])
+
+s, out, controls = run([], shots[2] if len(shots) > 2 else None, loading='Gone')
+check('a scene naming a gone canvas shows the missing warning from frame one', has(controls, 'scene.loadingmissing'),
+      [c for c in controls if 'scene.loading' in c])
+check('and keeps the pick on save', s.get('loadingCanvas') == 'Gone', s)
+
+s, out, controls = run(pick('Title'), loading='Gone')
+check('picking Title clears the missing warning', 'scene: loading warnings none' in out
+      and not has(controls, 'scene.loadingmissing'), out[-300:])
+check('the saved scene names Title', s.get('loadingCanvas') == 'Title', s)
+
+s, out, controls = run(pick('Title') + UNDO, loading='Gone')
+check('Ctrl+Z back to the gone canvas reports it', 'scene: loading Gone' in out
+      and out.splitlines().count('scene: loading warnings missing') == 1 and has(controls, 'scene.loadingmissing'), out[-300:])
+check('and saves it', s.get('loadingCanvas') == 'Gone', s)
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

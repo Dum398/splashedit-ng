@@ -3922,7 +3922,12 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             lines = std::any_of(picked->elements.begin(), picked->elements.end(),
                                 [](const splash::UIElement& e) { return e.type == splash::UIElementType::Line; });
         }
-        if (missing) caption("Canvas \"" + pickName + "\" no longer exists.", color::warn);
+        if (missing) {
+            const float top = y;
+            caption("Canvas \"" + pickName + "\" no longer exists: export stops until another canvas or None is picked.",
+                    color::warn);
+            nameRect("scene.loadingmissing", ImRect(ImVec2(x0 + space::sm + lw, top), ImVec2(x1 - space::sm, y)));
+        }
         if (noBar) caption("No progress bar named \"loading\": the screen shows without one.", color::warn);
         if (lines) caption("Lines are not drawn on the loading screen.", color::warn);
         if (namedRectsOn()) {

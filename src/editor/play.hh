@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -81,6 +82,25 @@ struct BuildScenes {
 };
 BuildScenes loadBuildScenes(const std::filesystem::path& project, const std::vector<std::filesystem::path>& files,
                             const std::filesystem::path& openFile, const splash::Scene& open);
+
+// What a finished Play, Run on hardware or Export build over the build list
+// reported, for the Problems popup: its errors and warnings minus those the
+// open scene's live export already lists. `openTag` is the open scene's
+// splash::sceneTag in that build ("" when it is the only scene), or nullopt
+// when the open scene is not in the build list, so nothing is left out.
+struct BuildReport {
+    std::string what;  // "Play", "Run on hardware", "Export"
+    size_t scenes = 0;
+    std::vector<std::string> errors, warnings;
+    bool empty() const { return errors.empty() && warnings.empty(); }
+};
+BuildReport buildReport(const std::string& what, size_t scenes, const splash::ExportResult& build,
+                        const std::optional<std::string>& openTag, const splash::ExportResult* live);
+
+// A failed build's status line: "<what>: <first error>", or "<what>, N
+// errors: <first error>" when there are more (the count first, so a status
+// bar that cuts the line still shows it).
+std::string buildFailure(const std::string& what, const splash::ExportResult& build);
 
 // Live edits while the game runs. psxsplash re-reads dir/reload.flag every
 // few frames when it existed at boot, and reloads the scene in place when its

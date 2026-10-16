@@ -111,6 +111,7 @@ static std::filesystem::path playDir() {
 
 static void notify(State& st, std::string msg, bool bad);
 static void scriptLine(const char* tag, const std::string& line);
+static std::string utf8(const std::filesystem::path& p);
 
 // Renames from the hierarchy (F2) or the inspector title: portals naming a
 // renamed Room follow it. Scripted runs print `rename: <old> -> <new> portals N`.
@@ -159,6 +160,24 @@ static int indexIn(const std::vector<std::filesystem::path>& files, const std::f
     return -1;
 }
 
+// What a build of `files` needs to know to report its problems later.
+static State::Play::Launch launchOf(const std::vector<std::filesystem::path>& files, const std::filesystem::path& open) {
+    State::Play::Launch l;
+    l.scenes = files.size();
+    const int i = indexIn(files, open);
+    if (i >= 0) l.openTag = splash::sceneTag(size_t(i), files.size(), utf8(files[size_t(i)].stem()));
+    return l;
+}
+
+// A build over the build list finished: keep what the Problems popup does not already show.
+static void reportBuild(State& st, const char* what, const State::Play::Launch& l, const splash::ExportResult& r) {
+    const std::optional<splash::ExportResult>& live = st.live.result();
+    st.play.built = editor::buildReport(what, l.scenes, r, l.openTag, live ? &*live : nullptr);
+    scriptLine(nullptr, std::string("build report: ") + what + " scenes " + std::to_string(l.scenes) + " errors " +
+                            std::to_string(st.play.built.errors.size()) + " warnings " +
+                            std::to_string(st.play.built.warnings.size()));
+}
+
 // F5 and the Play button: start, or stop what is running.
 static void togglePlay(State& st, const editor::Document& doc) {
     State::Play& p = st.play;
@@ -181,6 +200,8 @@ static void togglePlay(State& st, const editor::Document& doc) {
     p.reloadGeneration = 0;
     std::vector<std::filesystem::path> files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc));
     p.reloadIndex = indexIn(files, openSceneFile(doc));
+    p.built = {};
+    p.playLaunch = launchOf(files, openSceneFile(doc));
     p.build = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(),
                                               root = doc.projectRoot()] {
         splash::ExportResult r = exportBuild(files, open, scene, root, playDir());
@@ -213,8 +234,10 @@ static void toggleRun(State& st, const editor::Document& doc) {
         p.setupFor = 2;
         return;
     }
-    p.hwBuild = std::async(std::launch::async, [files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc)),
-                                                open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot()] {
+    std::vector<std::filesystem::path> files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc));
+    p.built = {};
+    p.hwLaunch = launchOf(files, openSceneFile(doc));
+    p.hwBuild = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot()] {
         return exportBuild(files, open, scene, root, hardwareDir());
     });
 }
@@ -251,7 +274,8 @@ static void updatePlay(State& st, const editor::Document& doc) {
     if (p.hwBuild.valid() && p.hwBuild.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         splash::ExportResult r = p.hwBuild.get();
         const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
-        if (!r.ok()) p.message = "Run on hardware: " + r.errors.front();
+        reportBuild(st, "Run on hardware", p.hwLaunch, r);
+        if (!r.ok()) p.message = editor::buildFailure("Run on hardware", r);
         else {
             p.hwPort = eff.port;
             p.hw.start(editor::HardwareRun::port(eff.port), editor::engineFor(eff), hardwareDir());
@@ -279,8 +303,9 @@ static void updatePlay(State& st, const editor::Document& doc) {
     }
     if (!p.build.valid() || p.build.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     splash::ExportResult r = p.build.get();
+    reportBuild(st, "Play", p.playLaunch, r);
     if (!r.ok()) {
-        p.message = "Play: " + r.errors.front();
+        p.message = editor::buildFailure("Play", r);
         return;
     }
     std::string err;
@@ -1196,8 +1221,10 @@ static void buildDisc(State& st, const editor::Document& doc, std::filesystem::p
     State::Play& p = st.play;
     if (bin.extension() != ".bin") bin += ".bin";
     p.discOut = bin;
-    p.disc = std::async(std::launch::async, [files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc)),
-                                             open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot(),
+    std::vector<std::filesystem::path> files = editor::buildScenes(doc.projectRoot(), openSceneFile(doc));
+    p.built = {};
+    p.discLaunch = launchOf(files, openSceneFile(doc));
+    p.disc = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(), root = doc.projectRoot(),
                                              engine = editor::withDefaults(p.tools, p.bundleDir).disc, bin,
                                              title = doc.sceneStem()] {
         editor::BuildScenes b = editor::loadBuildScenes(root, files, open, scene);
@@ -1233,8 +1260,9 @@ static void updateExport(State& st) {
     State::Play& p = st.play;
     if (!p.disc.valid() || p.disc.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     splash::DiscResult r = p.disc.get();
+    reportBuild(st, "Export", p.discLaunch, r.exported);
     if (!r.exported.ok()) {
-        notify(st, "Export failed: " + r.exported.errors.front(), true);
+        notify(st, editor::buildFailure("Export failed", r.exported), true);
         return;
     }
     char size[32];
@@ -6299,9 +6327,20 @@ static void outputLog(State& st, const char* who, const std::deque<std::string>&
 }
 
 
+// `s` cut to `room` pixels in `font` at `size`, ending in "..." when cut.
+static std::string cutTo(ImFont* font, float size, const std::string& s, float room) {
+    if (measure(font, size, s.c_str()).x <= room) return s;
+    std::string shown = s;
+    while (!shown.empty() && measure(font, size, (shown + "...").c_str()).x > room) {
+        while (!shown.empty() && (static_cast<unsigned char>(shown.back()) & 0xC0) == 0x80) shown.pop_back();
+        if (!shown.empty()) shown.pop_back();  // a whole UTF-8 character
+    }
+    return shown + "...";
+}
+
 // Status bar entry for Play: building, running (click for its output), how
 // it ended, or why it did not start.
-static float playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
+static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& st) {
     State::Play& p = st.play;
     Fonts& f = fonts();
     std::string label;
@@ -6321,12 +6360,16 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     } else {
         return x;
     }
-    ImVec2 ls = measure(f.medium, type::caption, label.c_str());
     float pad = dot ? 22 : 10;
+    const std::string whole = label;
+    label = cutTo(f.medium, type::caption, label, std::max(60.0f, maxX - x - pad - 10));
+    ImVec2 ls = measure(f.medium, type::caption, label.c_str());
     ImRect r(ImVec2(x, bar.Min.y + 5), ImVec2(x + pad + ls.x + 10, bar.Max.y - 5));
     const bool hasOutput = !p.emu.output().empty();
     Hit h = interact("playstatus", r);
     nameRect("playstatus", r);
+    if (label != whole) tooltip(whole.c_str());
+    scriptLine("playstatus", "playstatus: " + whole);
     if (hasOutput) {
         dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
         if (h.clicked) ImGui::OpenPopup("##playoutput");
@@ -6353,7 +6396,7 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
 
 // Status bar entry for Run on hardware: building, uploading, running (click
 // for what the console printed and the files it asked for), or why it stopped.
-static float hardwareStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
+static float hardwareStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& st) {
     State::Play& p = st.play;
     Fonts& f = fonts();
     using Phase = editor::HardwareRun::Phase;
@@ -6379,11 +6422,14 @@ static float hardwareStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     } else {
         return x;
     }
-    ImVec2 ls = measure(f.medium, type::caption, label.c_str());
     float pad = dot ? 22 : 10;
+    const std::string whole = label;
+    label = cutTo(f.medium, type::caption, label, std::max(60.0f, maxX - x - pad - 10));
+    ImVec2 ls = measure(f.medium, type::caption, label.c_str());
     ImRect r(ImVec2(x, bar.Min.y + 5), ImVec2(x + pad + ls.x + 10, bar.Max.y - 5));
     Hit h = interact("hwstatus", r);
     nameRect("hwstatus", r);
+    if (label != whole) tooltip(whole.c_str());
     const bool hasOutput = p.hw.lineCount() > 0;
     if (hasOutput) {
         dl->AddRectFilled(r.Min, r.Max, lerpColor(color::raised, color::hover, h.hover), radius::pill);
@@ -6504,16 +6550,19 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
              res ? color::bad : color::textFaint, msg);
         x += ms.x + space::xl;
     }
-    x = importStatus(dl, bar, x, st);
-    x = playStatus(dl, bar, x, st);
-    x = hardwareStatus(dl, bar, x, st);
-
-    // Right side: problems and save state.
+    // Right side: problems and save state. Play's and Run on hardware's
+    // entries are cut to stop short of it (a failed build's first error can be
+    // long), and shown whole on hover.
     const bool showNotice = st.saveError.empty() && !st.notice.empty() && ImGui::GetTime() < st.noticeUntil;
     const char* saved = !st.saveError.empty() ? st.saveError.c_str()
                         : showNotice          ? st.notice.c_str()
                         : doc.dirty()         ? "Unsaved changes"
                                               : "All changes saved";
+    const float leftMax = size.x - space::md - (res ? 200.0f : 0.0f) - space::xl -
+                          std::min(measure(f.regular, type::caption, saved).x, 240.0f);
+    x = importStatus(dl, bar, x, st);
+    x = playStatus(dl, bar, x, leftMax, st);
+    x = hardwareStatus(dl, bar, x, leftMax, st);
     // A long message (an import error with its fix) is cut to the room left
     // of it, beside the problems pill, and shown whole on hover.
     std::string shown = saved;
@@ -6537,16 +6586,19 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
         tooltip(saved);
     }
     if (!res) return;
-    const size_t nErr = res->errors.size(), nWarn = res->warnings.size();
+    const editor::BuildReport& built = st.play.built;
+    const size_t nErr = res->errors.size() + built.errors.size(), nWarn = res->warnings.size() + built.warnings.size();
     std::string prob = nErr ? std::to_string(nErr) + (nErr == 1 ? " error" : " errors")
                        : nWarn ? std::to_string(nWarn) + (nWarn == 1 ? " warning" : " warnings")
                                : "No problems";
     if (nErr && nWarn) prob += ", " + std::to_string(nWarn) + (nWarn == 1 ? " warning" : " warnings");
+    scriptLine("problems", "problems: " + prob);
     ImVec2 ps = measure(f.medium, type::caption, prob.c_str());
     ImRect pr(ImVec2(rx - space::xl - ps.x - 22, bar.Min.y + 5), ImVec2(rx - space::xl + 8, bar.Max.y - 5));
     const bool any = nErr || nWarn;
     const ImU32 tone = nErr ? color::bad : nWarn ? color::warn : color::textFaint;
     Hit h = interact("problems", pr);
+    nameRect("problems", pr);
     if (any) {
         dl->AddRectFilled(pr.Min, pr.Max, nErr ? rgb(0xef5a6f, (int)(30 + 30 * h.hover)) : rgb(0xf0a43a, (int)(30 + 30 * h.hover)),
                           radius::pill);
@@ -6578,6 +6630,28 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
             ImGui::PushStyleColor(ImGuiCol_Text, color::warn);
             ImGui::TextUnformatted(w.c_str());
             ImGui::PopStyleColor();
+        }
+        if (!built.empty()) {
+            // The other scenes of the last build over the build list (and its own errors, like a file that does not load).
+            if (!res->errors.empty() || !res->warnings.empty()) ImGui::Separator();
+            const std::string head = "Last " + built.what + " build, " + std::to_string(built.scenes) +
+                                     (built.scenes == 1 ? " scene" : " scenes");
+            ImGui::PushFont(f.medium, type::caption);
+            ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
+            ImGui::TextUnformatted(head.c_str());
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
+            nameRect("problems.build", ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+            for (const std::string& e : built.errors) {
+                ImGui::PushStyleColor(ImGuiCol_Text, color::bad);
+                ImGui::TextUnformatted(e.c_str());
+                ImGui::PopStyleColor();
+            }
+            for (const std::string& w : built.warnings) {
+                ImGui::PushStyleColor(ImGuiCol_Text, color::warn);
+                ImGui::TextUnformatted(w.c_str());
+                ImGui::PopStyleColor();
+            }
         }
         ImGui::PopTextWrapPos();
         ImGui::PopFont();

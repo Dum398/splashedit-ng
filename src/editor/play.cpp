@@ -9,6 +9,7 @@
 #include <string>
 #include <system_error>
 
+#include "disc.hh"
 #include "editor/project.hh"
 #include "scene.hh"
 
@@ -245,12 +246,7 @@ splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scen
     for (const fs::path& f : stale) fs::remove(f, ec);
     fs::remove(dir / "reload.flag", ec);
     for (size_t i = 0; i < scenes.size(); ++i) {
-        std::string tag;
-        if (scenes.size() > 1) {
-            tag = "scene " + std::to_string(i);
-            if (i < names.size() && !names[i].empty()) tag += " (" + names[i] + ")";
-            tag += ": ";
-        }
+        const std::string tag = splash::sceneTag(i, scenes.size(), i < names.size() ? names[i] : std::string());
         splash::ExportResult one = exportScene(*scenes[i], projectRoot, dir, i);
         for (const std::string& m : one.errors) r.errors.push_back(tag + m);
         for (const std::string& m : one.warnings) r.warnings.push_back(tag + m);
@@ -287,6 +283,32 @@ BuildScenes loadBuildScenes(const fs::path& project, const std::vector<fs::path>
         }
     }
     return b;
+}
+
+BuildReport buildReport(const std::string& what, size_t scenes, const splash::ExportResult& build,
+                        const std::optional<std::string>& openTag, const splash::ExportResult* live) {
+    BuildReport r;
+    r.what = what;
+    r.scenes = scenes;
+    // A message about the open scene that its live export also lists is shown once, there.
+    auto listed = [&](const std::string& m, const std::vector<std::string>& in) {
+        if (!openTag || !live || m.compare(0, openTag->size(), *openTag) != 0) return false;
+        const std::string bare = m.substr(openTag->size());
+        for (const std::string& l : in)
+            if (l == bare) return true;
+        return false;
+    };
+    for (const std::string& m : build.errors)
+        if (!listed(m, live ? live->errors : std::vector<std::string>())) r.errors.push_back(m);
+    for (const std::string& m : build.warnings)
+        if (!listed(m, live ? live->warnings : std::vector<std::string>())) r.warnings.push_back(m);
+    return r;
+}
+
+std::string buildFailure(const std::string& what, const splash::ExportResult& build) {
+    if (build.errors.empty()) return std::string();
+    if (build.errors.size() == 1) return what + ": " + build.errors.front();
+    return what + ", " + std::to_string(build.errors.size()) + " errors: " + build.errors.front();
 }
 
 bool parseRenderPeak(const std::string& line, RenderPeak* out) {

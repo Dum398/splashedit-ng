@@ -151,6 +151,9 @@ jobs:
       - name: Build scenes list
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/buildscenescheck.py build/splashedit
+      - name: Build problems
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/buildproblemscheck.py build/splashedit
       - name: VRAM layout
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/vramlayoutcheck.py build/splashedit

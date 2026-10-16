@@ -551,6 +551,13 @@ EngineKind engineKind(const std::vector<uint8_t>& exe) {
     return EngineKind::Cdrom;
 }
 
+std::string sceneTag(size_t index, size_t count, const std::string& name) {
+    if (count <= 1) return std::string();
+    std::string tag = "scene " + std::to_string(index);
+    if (!name.empty()) tag += " (" + name + ")";
+    return tag + ": ";
+}
+
 DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& projectRoot, const fs::path& engine,
                       const fs::path& bin, const std::string& title, const std::vector<std::string>& names,
                       const VramSettings& vram, const DiscSettings& disc) {
@@ -601,12 +608,7 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
         files.push_back({"PSX.EXE", std::move(exe)});
         for (size_t i = 0; i < scenes.size(); ++i) {
-            std::string tag;
-            if (scenes.size() > 1) {
-                tag = "scene " + std::to_string(i);
-                if (i < names.size() && !names[i].empty()) tag += " (" + names[i] + ")";
-                tag += ": ";
-            }
+            const std::string tag = sceneTag(i, scenes.size(), i < names.size() ? names[i] : std::string());
             const fs::path spk = tmp / ("scene_" + std::to_string(i) + ".splashpack");
             ExportResult one;
             try {

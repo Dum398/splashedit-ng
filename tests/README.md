@@ -470,6 +470,16 @@ the scene unchanged. Controls are clicked by name. Needs a display.
 
     python3 buildscenescheck.py <splashedit>
 
+`buildproblemscheck.py` presses F5 on courtyard copies whose `scenes.list` adds `level2.scene` (memory
+card warnings), `level3.scene` (memory card errors) or `zbroken.scene` (not a scene), with pcsx-redux and
+the engine set to `/bin/true`. It checks the editor's `build report: Play scenes N errors E warnings W`,
+`problems: <pill>` and `playstatus: <status line>` lines: other scenes' problems are counted, the open
+scene's own are counted once, the status line leads with the error count and stops short of the pill,
+the Problems popup gets its `problems.build` heading, and a second build replaces the report. Needs a
+display.
+
+    python3 buildproblemscheck.py <splashedit> [screenshot.png]
+
 `vramlayoutcheck.py` drives the scene inspector's VRAM layout section on copies of the courtyard example:
 Add area (`@vram.add`, a 64 x 64 area at 320,0), types a width into `@vram.w.0`, drags on the map
 (`--drag @vram.map,dx0,dy0,dx1,dy1`, offsets from the control's centre) to draw a second area snapped to

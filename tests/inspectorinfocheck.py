@@ -5,8 +5,9 @@
 # readable clip shows a Source row (obj.ainfo) with the WAV's format and the
 # sound RAM the exported clip takes. Under scripted runs the editor prints
 # "mesh: colours missing <mesh>" while the card shows and
-# "audio: source <rate> <seconds> <channels> adpcm <bytes>" as either changes.
-# usage: python3 inspectorinfocheck.py <splashedit> [mesh.png] [audio.png]   (needs a display: xvfb-run -a)
+# "audio: source <rate> <seconds> <channels> adpcm [at most ]<bytes>" as either
+# changes ("at most" with Trim silence on).
+# usage: python3 inspectorinfocheck.py <splashedit> [mesh.png] [audio.png] [audiotrim.png]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, struct, subprocess, sys, tempfile
 
 editor = os.path.abspath(sys.argv[1])
@@ -136,7 +137,8 @@ check('the courtyard Crate (Baked vertex) shows no card and no line', 'obj.fixme
 
 
 def source(rate, loop, trim=False):
-    return 'audio: source %d %.2f %d adpcm %d' % (RATE, FRAMES / RATE, CHANNELS, adpcm_bytes(resampled(FRAMES, RATE, rate), loop))
+    return 'audio: source %d %.2f %d adpcm %s%d' % (RATE, FRAMES / RATE, CHANNELS, 'at most ' if trim else '',
+                                                   adpcm_bytes(resampled(FRAMES, RATE, rate), loop))
 
 
 # The Source row: the WAV's header and the clip's size at 22050 Hz, no loop.
@@ -156,6 +158,17 @@ check('Loop changes the size to the looping one', comp(s, 'Bell', 'audio')['loop
 s, lines, _ = run('Bell', ['--dblclick', '@obj.arate', '--wait', '3', '--key', 'ctrl+a', '--text', '11025', '--key', 'enter', '--wait', '3'])
 check('11025 Hz changes the size to what it resamples to', comp(s, 'Bell', 'audio')['sampleRate'] == 11025 and
       lines == [source(22050, False), source(11025, False)], (lines, source(11025, False)))
+
+# Trim silence can only shrink the clip, so the size becomes a bound: the row
+# reads "at most", and Ctrl+Z takes it back to the exact size.
+s, lines, rects = run('Bell', click('obj.atrim'), shot=os.path.join(tmp, 'audiotrim.png'))
+check('Trim silence makes the size a bound', comp(s, 'Bell', 'audio')['trimLeadingSilence'] is True and
+      lines == [source(22050, False), source(22050, False, True)], (lines, source(22050, False, True)))
+check('and the Source row stays in the panel', inside(rects, 'obj.ainfo'), (rects.get('obj.ainfo'), rects.get('obj.panel')))
+if len(sys.argv) > 4: shutil.copyfile(os.path.join(tmp, 'audiotrim.png'), sys.argv[4])
+s, lines, _ = run('Bell', click('obj.atrim') + UNDO)
+check('Ctrl+Z gives the exact size back', comp(s, 'Bell', 'audio')['trimLeadingSilence'] is False and
+      lines == [source(22050, False), source(22050, False, True), source(22050, False)], lines)
 
 # A missing clip: the Clip card warns and there is no Source row.
 project = project_copy()

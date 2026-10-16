@@ -70,6 +70,7 @@ struct BlockSpec {
     int bodies;
     BlockField field;
     std::string_view category;  // one of blockCategories()
+    std::string_view help;      // one sentence: what the block does in the game
 };
 
 const std::vector<BlockSpec>& blockCatalogue();

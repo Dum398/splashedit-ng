@@ -268,6 +268,7 @@ struct State {
         ImRect rect;
         int slot;  // main_screen's AssetSlot, or -1 for the Model field
         std::vector<int> path;
+        int index = -1;  // the material a Texture field sets, -1 when the slot has one
     };
     std::vector<AssetSlotTarget> assetSlots;
 };

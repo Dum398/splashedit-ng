@@ -28,6 +28,7 @@ enum class AssetStatus { Ok, Missing, Unreadable };
 struct MeshInfo {
     AssetStatus status = AssetStatus::Missing;
     int triangles = 0;  // sum of submesh index counts / 3, valid when Ok
+    int submeshes = 0;  // submesh count (one material each), valid when Ok
     bool hasColors = false;  // vertex colours cover every vertex, as the exporter requires
     std::string error;
 };
@@ -236,8 +237,9 @@ public:
     // mesh, texture or script, a texture that would lose nothing at 4 bpp,
     // or Mesh colours on a mesh without vertex colours.
     bool hasWarning(const splash::Object& o) const;
-    // The texture is stored deeper than its colours need: it has at most 16
-    // distinct 15-bit colours but is set to 8 or 16 bpp.
+    // The textures are stored deeper than their colours need: the mesh is set
+    // to 8 or 16 bpp, every textured material's texture reads and has at most
+    // 16 distinct 15-bit colours, and together they take less VRAM at 4 bpp.
     bool couldBe4bpp(const splash::MeshComponent& m) const;
     // Set to Mesh colours, but the mesh has none, so it exports flat grey.
     bool missingMeshColors(const splash::MeshComponent& m) const;

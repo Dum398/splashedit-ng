@@ -7961,6 +7961,60 @@ void testMeshColours() {
     CHECK(d.hasWarning(*d.object({0})));
 }
 
+// couldBe4bpp over every material: true only when each textured material's
+// texture reads and fits 16 colours, and together they shrink at 4 bpp.
+void testMaterials4bpp() {
+    const fs::path dir = g_outDir / "materials4bpp";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto png = [&](const char* name, int colours) {
+        splash::Image img;
+        img.width = img.height = 32;
+        img.pixels.resize(32 * 32);
+        for (size_t i = 0; i < img.pixels.size(); i++)
+            img.pixels[i] = splash::Image::Px{float(i % size_t(colours)) / float(colours), 0.25f, 0.5f, 1};
+        splash::savePng(img, dir / name);
+    };
+    png("two.png", 2);
+    png("four.png", 4);
+    png("many.png", 64);
+    splash::Mesh quad;
+    quad.positions = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}};
+    quad.normals.assign(4, {0, 0, 1});
+    quad.submeshes = {{0, 1, 2}, {1, 3, 2}};
+    splash::saveMesh(quad, dir / "quad.mesh");
+
+    auto mesh = [](std::vector<std::string> textures) {
+        splash::Object o = named("M");
+        o.mesh.emplace();
+        o.mesh->mesh = "quad.mesh";
+        o.mesh->bitDepth = splash::BitDepth::Bpp16;
+        for (const std::string& t : textures) o.mesh->materials.push_back({t, {1, 1, 1, 1}, {}});
+        return o;
+    };
+    splash::Scene s;
+    s.objects.push_back(mesh({"two.png", "four.png"}));   // 0: both fit
+    s.objects.push_back(mesh({"two.png", "many.png"}));   // 1: the second has 64 colours
+    s.objects.push_back(mesh({"two.png", "gone.png"}));   // 2: the second is missing
+    s.objects.push_back(mesh({"two.png", ""}));           // 3: one textured, one plain
+    s.objects.push_back(mesh({"", ""}));                  // 4: none textured
+    s.objects.push_back(mesh({"many.png", "two.png"}));   // 5: the first fails
+    editor::Document d;
+    d.reset(s, dir);
+    const editor::MeshInfo* mi = d.mesh("quad.mesh");
+    CHECK(mi && mi->status == editor::AssetStatus::Ok && mi->submeshes == 2 && mi->triangles == 2);
+    CHECK(d.texture("many.png") && d.texture("many.png")->colors15 > 16);
+    CHECK(d.couldBe4bpp(*d.object({0})->mesh));
+    CHECK(!d.couldBe4bpp(*d.object({1})->mesh));
+    CHECK(!d.couldBe4bpp(*d.object({2})->mesh));
+    CHECK(d.couldBe4bpp(*d.object({3})->mesh));
+    CHECK(!d.couldBe4bpp(*d.object({4})->mesh));
+    CHECK(!d.couldBe4bpp(*d.object({5})->mesh));
+    CHECK(d.hasWarning(*d.object({0})));
+    d.edit({0}, [](splash::Object& ob) { ob.mesh->bitDepth = splash::BitDepth::Bpp4; });
+    CHECK(!d.couldBe4bpp(*d.object({0})->mesh));
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -8075,6 +8129,7 @@ int main(int argc, char** argv) {
     testAudioSizes();
     testWavInfo();
     testMeshColours();
+    testMaterials4bpp();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

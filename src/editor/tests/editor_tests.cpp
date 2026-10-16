@@ -1692,8 +1692,15 @@ void testBlocks() {
           "function onCreate(self)\nend\n\nfunction onUpdate(self, dt)\nend\n\nfunction onCollideWithPlayer(self)\nend\n\n"
           "function onInteract(self)\nend\n\nfunction onButtonPress(self, button)\n    if button == Input.L1 then\n    end\nend\n\n"
           "function onButtonRelease(self, button)\n    if button == Input.L1 then\n    end\nend\n\n"
-          "function onEnable(self)\nend\n\nfunction onDisable(self)\nend\n\nfunction onDestroy(self)\nend\n\n"
+          "function onEnable(self)\nend\n\nfunction onDisable(self)\nend\n\n"
           "function onSceneCreationEnd()\nend\n\nfunction onTriggerEnter(index)\nend\n\nfunction onTriggerExit(index)\nend\n");
+    // psxsplash never calls onDestroy: no hat offers it, and a saved stack
+    // under the old hat is an error rather than a silently loose stack.
+    CHECK(!splash::findBlockSpec("on_destroy"));
+    CHECK(error(blockScript({}, {{blk("on_create")}, {blk("on_destroy"), blk("log", "", {bnum("1")})}})) ==
+          "stack 2, block 1 (on_destroy): \"when destroyed\" never runs, psxsplash does not destroy objects; move "
+          "these blocks under another event");
+    CHECK(splash::blockNameError("onDestroy").empty());
     // Loose stacks make nothing and are not checked.
     CHECK(lua(blockScript({}, {{blk("log", "", {bnum("1")})}, {}, {blk("nonsense")}, {blk("on_create")}})) ==
           "function onCreate(self)\nend\n");
@@ -2321,7 +2328,9 @@ void testNewScript() {
         CHECK(api && trig.find(api->signature) != std::string::npos);
     }
     CHECK(editor::lua::check(trig).ok());
-    editor::NewScript t = editor::createScript(proj, "Game Logic", editor::ScriptKind::Trigger);
+    // psxsplash never calls onDestroy, so autocomplete does not offer it.
+    CHECK(!editor::lua::findApi("", "onDestroy") && editor::lua::findApi("", "onDisable"));
+    editor::NewScript t =editor::createScript(proj, "Game Logic", editor::ScriptKind::Trigger);
     CHECK(t.error.empty() && t.path == "scripts/game_logic_trigger.lua");
     std::ifstream tin(proj / "scripts" / "game_logic_trigger.lua", std::ios::binary);
     CHECK(std::string((std::istreambuf_iterator<char>(tin)), {}) == editor::scriptTemplate("Game Logic", editor::ScriptKind::Trigger));

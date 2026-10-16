@@ -37,8 +37,6 @@ const std::vector<BlockSpec> kCatalogue = {
      "Runs the blocks under it when this object is switched on."},
     {"on_disable", K::Hat, "when disabled", 0, 0, F::None, "Events",
      "Runs the blocks under it when this object is switched off."},
-    {"on_destroy", K::Hat, "when destroyed", 0, 0, F::None, "Events",
-     "Runs the blocks under it when this object is destroyed."},
     {"on_scene_start", K::Hat, "when the scene starts", 0, 0, F::None, "Events",
      "Runs the blocks under it once, after every object in the scene has been created."},
     {"on_trigger_enter", K::Hat, "when the player enters the trigger", 0, 0, F::None, "Events",
@@ -149,7 +147,6 @@ const Hat kHats[] = {
     {"on_button_release", "onButtonRelease", "self, button", true},
     {"on_enable", "onEnable", "self", true},
     {"on_disable", "onDisable", "self", true},
-    {"on_destroy", "onDestroy", "self", true},
     {"on_scene_start", "onSceneCreationEnd", "", false},
     {"on_trigger_enter", "onTriggerEnter", "index", false},
     {"on_trigger_exit", "onTriggerExit", "index", false},
@@ -167,7 +164,7 @@ const std::set<std::string, std::less<>> kReserved = {
     "SkinnedAnim", "Sprite", "Tile", "Timer", "UI", "Vec3",
     // event functions: a local of that name would capture the function
     "onCreate", "onUpdate", "onCollideWithPlayer", "onInteract", "onButtonPress", "onButtonRelease", "onEnable",
-    "onDisable", "onDestroy", "onSceneCreationStart", "onSceneCreationEnd", "onTriggerEnter", "onTriggerExit",
+    "onDisable", "onSceneCreationStart", "onSceneCreationEnd", "onTriggerEnter", "onTriggerExit",
     // helpers the generated Lua defines for wait blocks
     "tasks", "wait", "startTask", "resumeTask"};
 
@@ -717,6 +714,16 @@ LuaGen blocksToLua(const BlockScript& script) {
         bool onlyForTasks = false;  // onUpdate with no stack of its own
     };
     std::vector<Function> functions;
+    // psxsplash never calls onDestroy (no object is destroyed at runtime), so
+    // the hat left the catalogue; a saved stack under it would otherwise be a
+    // loose stack and vanish without a word.
+    for (size_t si = 0; si < script.stacks.size(); si++) {
+        const std::vector<Block>& blocks = script.stacks[si].blocks;
+        if (!blocks.empty() && blocks[0].op == "on_destroy")
+            g.error(Gen::where("stack " + std::to_string(si + 1) + ", ", "block ", 1, blocks[0]),
+                    "\"when destroyed\" never runs, psxsplash does not destroy objects; move these blocks under "
+                    "another event");
+    }
     for (const Hat& hat : kHats) {
         g.hat = &hat;
         bool buttons = hat.op == "on_button_press" || hat.op == "on_button_release";

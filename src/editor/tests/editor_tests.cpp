@@ -1747,6 +1747,35 @@ void testBlocks() {
     CHECK(error(blockScript({{"", "1"}}, {})) == "variable 1 (): no name");
     CHECK(error(blockScript({{"n", "1"}, {"n", "2"}}, {})) == "variable 2 (n): declared twice");
     CHECK(lua(blockScript({{"_n2", "1"}}, {})) == "local _n2 = 1\n");
+    // wait: a stack that waits runs as a task resumed from onUpdate; others stay plain.
+    {
+        const std::string noWait = lua(blockScript({}, {{blk("on_create"), blk("log", "", {blk("text", "hi")})}}));
+        CHECK(noWait == "function onCreate(self)\n    Debug.Log(\"hi\")\nend\n");
+        const std::string w = lua(blockScript({}, {{blk("on_create"), blk("wait", "", {bnum("2")}), blk("stop")},
+                                                   {blk("on_create"), blk("wait_until", "", {blk("bool", "true")})},
+                                                   {blk("on_create"), blk("log", "", {blk("text", "now")})}}));
+        CHECK(w.find("local function startTask(name, fn)") != std::string::npos);
+        CHECK(w.find("local function wait(seconds)") != std::string::npos);
+        CHECK(w.find("function onCreate(self)\n    startTask(\"onCreate_1\", function()\n        wait(2)\n        return\n    end)\n\n"
+                     "    startTask(\"onCreate_2\", function()\n        while not true do\n            coroutine.yield()\n        end\n"
+                     "    end)\n\n    Debug.Log(\"now\")\nend\n") != std::string::npos);
+        CHECK(w.find("function onUpdate(self, dt)\n    if tasks.onCreate_1 then\n        resumeTask(\"onCreate_1\", dt)\n    end\n"
+                     "    if tasks.onCreate_2 then") != std::string::npos);
+        // wait until alone needs no wait helper.
+        const std::string u = lua(blockScript({}, {{blk("on_interact"), blk("wait_until", "", {blk("bool", "true")})}}));
+        CHECK(u.find("startTask(\"onInteract\"") != std::string::npos && u.find("local function wait(") == std::string::npos);
+        // A waiting every-frame stack is itself a task, started after the resumes.
+        const std::string f = lua(blockScript({}, {{blk("on_update"), blk("wait", "", {bnum("1")})}}));
+        CHECK(f.find("function onUpdate(self, dt)\n    if tasks.onUpdate then\n        resumeTask(\"onUpdate\", dt)\n    end\n\n"
+                     "    startTask(\"onUpdate\", function()\n        wait(1)\n    end)\nend\n") != std::string::npos);
+        CHECK(error(blockScript({}, {{blk("on_scene_start"), blk("wait", "", {bnum("1")})}})) ==
+              "stack 1, block 2 (wait): wait only works in object scripts: the scene and trigger events get no frames");
+        CHECK(error(blockScript({}, {{blk("on_trigger_enter"), blk("wait_until", "", {blk("bool", "true")})}})) ==
+              "stack 1, block 2 (wait_until): wait only works in object scripts: the scene and trigger events get no frames");
+        CHECK(error(blockScript({}, {{blk("on_create"), blk("wait")}})) == "stack 1, block 2 (wait): missing input 1");
+        CHECK(error(blockScript({{"wait", "1"}}, {})) == "variable 1 (wait): \"wait\" is reserved");
+        CHECK(error(blockScript({{"tasks", "1"}}, {})) == "variable 1 (tasks): \"tasks\" is reserved");
+    }
     // Several errors are all reported; the file form throws the first.
     CHECK(splash::blocksToLua(blockScript({}, {{blk("on_create"), blk("hide"), blk("teleport")}})).errors.size() == 2);
     std::string thrown;
@@ -2166,6 +2195,8 @@ void testBlocksNewBlock() {
     CHECK(args(eb::newBlock("set_var")) == "number=0" && eb::newBlock("set_var").field.empty());
     CHECK(args(eb::newBlock("change_var")) == "number=1");
     CHECK(args(eb::newBlock("repeat")) == "number=10" && eb::newBlock("repeat").bodies.size() == 1);
+    CHECK(args(eb::newBlock("wait")) == "number=1");
+    CHECK(eb::newBlock("wait_until").args.size() == 1 && eb::newBlock("wait_until").args[0].op.empty());
     CHECK(args(eb::newBlock("random")) == "number=1,number=10" && args(eb::newBlock("add")) == "number=0,number=0");
     CHECK(args(eb::newBlock("log")) == "text=" && args(eb::newBlock("join")) == "text=,text=" && args(eb::newBlock("load_scene")) == "text=");
     CHECK(args(eb::newBlock("if")) == "_" && eb::newBlock("if").bodies.size() == 1 && eb::newBlock("if_else").bodies.size() == 2);

@@ -119,7 +119,7 @@ static std::vector<Block>* listOf(BlockScript& s, const Path& p) {
 bool isLiteral(const Block& b) { return b.op == "number" || b.op == "text" || b.op == "bool"; }
 
 bool booleanSlot(std::string_view op, int arg) {
-    if (op == "if" || op == "if_else" || op == "while" || op == "repeat_until" || op == "not") return arg == 0;
+    if (op == "if" || op == "if_else" || op == "while" || op == "repeat_until" || op == "wait_until" || op == "not") return arg == 0;
     if (op == "and" || op == "or") return arg == 0 || arg == 1;
     return false;
 }
@@ -141,7 +141,7 @@ Block newBlock(std::string_view op) {
     for (int i = 0; i < spec->args; i++) {
         if (booleanSlot(op, i)) b.args.push_back(Block{});
         else if (op == "log" || op == "join" || op == "load_scene") b.args.push_back(txt(""));
-        else if (op == "change_var") b.args.push_back(num("1"));
+        else if (op == "change_var" || op == "wait") b.args.push_back(num("1"));
         else if (op == "repeat") b.args.push_back(num("10"));
         else if (op == "random") b.args.push_back(num(i == 0 ? "1" : "10"));
         else b.args.push_back(num("0"));

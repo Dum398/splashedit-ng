@@ -19,7 +19,9 @@
 # and a cutscene renamed in the inspector while the tab has unsaved changes
 # (ScriptTabs::rewriteUnsavedBlocks), the tab then saved. Last, a wait
 # block built from the palette (its Lua a task resumed from onUpdate) and
-# the same block refused under "when the scene starts".
+# the same block refused under "when the scene starts". Then Convert to Lua
+# from the blocks tab's right-click menu: Convert, Cancel, an errored script
+# refused, and no Convert row on a Lua tab.
 # usage: python3 blockseditorcheck.py <splashedit> [<splashpack-cli>]   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -354,6 +356,51 @@ run([], blocks=WAIT_SCENE)
 check('wait under "when the scene starts" is an error in the Lua panel',
       'blocks: lua error stack 1, block 2 (wait): wait only works in object scripts: the scene and trigger events get no frames' in out,
       [l for l in out.splitlines() if l.startswith('blocks: lua')])
+
+# --- Convert to Lua, from the blocks tab's right-click menu only: Convert
+# turns door.blocks into door.lua holding the exporter's Lua (the tab follows
+# as a Lua tab, whose menu has no Convert row); Cancel leaves the file be; an
+# errored script is refused, saying why.
+_, c = run([], blocks=PLAYS)
+tab = c.get('tab.0')
+check('the blocks tab is drawn', tab is not None, sorted(k for k in c if k.startswith('tab.')))
+if not tab:
+    print(f'{fails} failures')
+    sys.exit(1)
+RCLICK = ['--click', '%d,%d,1' % (tab[0] + 20, (tab[1] + tab[3]) // 2), '--wait', '5']  # button 1: the right one
+CONVERT = RCLICK + ['--click', '@tabs.menu/Convert to Lua...', '--wait', '5']
+_, c = run(RCLICK, blocks=PLAYS)
+check("a blocks tab's menu offers Save, Close and Convert to Lua...",
+      all(k in c for k in ('tabs.menu/Save', 'tabs.menu/Close', 'tabs.menu/Convert to Lua...')),
+      sorted(k for k in c if k.startswith('tabs.menu')))
+with tempfile.TemporaryDirectory() as d:
+    want = os.path.join(d, 'door.blocks')
+    open(want, 'w', encoding='utf-8', newline='\n').write(PLAYS)
+    r = subprocess.run([cli, 'blocks', want], capture_output=True, text=True)
+    wantLua = r.stdout
+check('splashpack-cli makes the Lua the conversion should write', r.returncode == 0 and 'onInteract' in wantLua, (r.returncode, r.stderr))
+project, c = run(CONVERT + ['--click', '@convert.ok', '--wait', '10'] + RCLICK, blocks=PLAYS)
+scripts = os.path.join(project, 'scripts')
+check('Convert says what it did', 'blocks: converted scripts/door.blocks -> scripts/door.lua' in out,
+      [l for l in out.splitlines() if l.startswith('blocks: conv')])
+got = open(os.path.join(scripts, 'door.lua'), encoding='utf-8', newline='').read() if os.path.exists(os.path.join(scripts, 'door.lua')) else None
+check('... door.lua holds the generated Lua', got == wantLua, got)
+check('... and door.blocks is gone', not os.path.exists(os.path.join(scripts, 'door.blocks')))
+check('... the tab is a Lua tab now', 'blocks.canvas' not in c and 'tab.0' in c, sorted(k for k in c if k.startswith('blocks.'))[:4])
+check("a Lua tab's menu has Save and Close but no Convert row",
+      'tabs.menu/Save' in c and 'tabs.menu/Close' in c and not [k for k in c if k.startswith('tabs.menu/Convert')],
+      sorted(k for k in c if k.startswith('tabs.menu')))
+project, c = run(CONVERT + ['--click', '@convert.cancel', '--wait', '10'], blocks=PLAYS)
+check('Cancel leaves door.blocks as it was', read(project) == PLAYS and not os.path.exists(os.path.join(project, 'scripts', 'door.lua')) and
+      'blocks: conv' not in out, [l for l in out.splitlines() if l.startswith('blocks: conv')])
+check('... and the tab a blocks tab', 'blocks.canvas' in c)
+BROKEN = json.dumps({'format': 'splashedit-blocks', 'version': 1, 'variables': [], 'stacks': [
+    {'x': 40, 'y': 40, 'blocks': [{'op': 'on_interact'}, {'op': 'hide'}]}]})
+project, c = run(CONVERT + ['--click', '@convert.ok', '--wait', '10'], blocks=BROKEN)
+check('an errored script is refused, saying why',
+      'blocks: convert refused: Can\'t convert: stack 1, block 2 (hide): no object chosen' in out,
+      [l for l in out.splitlines() if l.startswith('blocks: conv')])
+check('... and left as it was', read(project) == BROKEN and not os.path.exists(os.path.join(project, 'scripts', 'door.lua')))
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

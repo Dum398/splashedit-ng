@@ -7,8 +7,10 @@
 // type its value; a button, variable, object, sound or cutscene field opens a
 // searchable list of what the script and the scene have. A column on the
 // right holds the script's variables (name, kind and starting value) and the
-// Lua the script makes, with what keeps it from making Lua. Ctrl+Z / Ctrl+Y
-// (Ctrl+Shift+Z) undo and redo, one step per edit.
+// Lua the script makes, with what keeps it from making Lua. The status line
+// under them says what is wrong with the script, else what the block under
+// the pointer (or the selected one) does; a palette block also says it in a
+// tooltip. Ctrl+Z / Ctrl+Y (Ctrl+Shift+Z) undo and redo, one step per edit.
 //
 // Controls by name (ui::nameRect, for scripted checks), with paths as
 // editor::blk::Path::str() spells them ("s0.b1", "s0.b1.a0", "s0.b2.d0.b1"):
@@ -29,7 +31,9 @@
 //   blocks.lua                 the Lua the script makes
 // Scripted runs print "blocks: lua <n> lines, <m> errors" and a
 // "blocks: lua error <error>" per error whenever the Lua changes, and
-// "blocks: rename refused: <why>" when a variable keeps its name.
+// "blocks: rename refused: <why>" when a variable keeps its name, and
+// "blocks: help <op>" when the status line starts showing another block's
+// help ("blocks: help none" when it stops).
 #pragma once
 
 #include <imgui.h>
@@ -114,6 +118,7 @@ private:
     bool m_checkedAny = false;
     splash::LuaGen m_gen;
     std::string m_luaReported;  // the scripted line last printed for it
+    std::string m_helpReported = "none";  // the op whose help the status line last showed, for scripted runs
     // Why the last rename was refused; empty when it was not.
     std::string m_varNote;
     float m_varScroll = 0;

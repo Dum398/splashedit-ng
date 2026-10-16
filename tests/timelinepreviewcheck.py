@@ -144,13 +144,15 @@ check('the reference save wrote the scene', b'"Crate"' in base, out[-200:])
 
 # Scrubbing poses the Scene view: frame 75 differs from frame 0 where the crate rose.
 untouched = open(os.path.join(project_copy(), 'courtyard.scene'), 'rb').read()
-d0, shot0, out0 = run(scrub(0), save=False)
-d75, shot75, out75 = run(scrub(75), save=False)
+d0, shot0, out0 = run(['--no-overlays'] + scrub(0), save=False)
+d75, shot75, out75 = run(['--no-overlays'] + scrub(75), save=False)
 check('scrubbing leaves the scene file alone', d0 == untouched and d75 == untouched)
 n = differing(shot0, shot75, SCENE_VIEW)
 check('the Scene view draws the pose at the scrub head', n > 1500, f'{n} pixels differ | ' + out75[-200:])
 # Same scrub twice: the view is stable (the difference above is the pose).
-_, shot75b, _ = run(scrub(75), save=False)
+# These shots hide the overlays: the nav overlay appears whenever the
+# background export lands, which under load can fall on either side of a shot.
+_, shot75b, _ = run(['--no-overlays'] + scrub(75), save=False)
 n2 = differing(shot75, shot75b, SCENE_VIEW)
 check('the same scrub draws the same view', n2 < 200, f'{n2} pixels differ')
 

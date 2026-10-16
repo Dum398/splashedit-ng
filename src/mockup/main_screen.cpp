@@ -5946,8 +5946,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const std::string chans = ai->channels == 1 ? "mono" : ai->channels == 2 ? "stereo" : std::to_string(ai->channels) + " ch";
             // Two lines, the source then the export, so it fits the field's width.
             const std::string src = std::to_string(ai->rate) + " Hz, " + sec + " s, " + chans;
-            const std::string out = "-> " + std::to_string(a.sampleRate) + " Hz ADPCM, " + (a.trimLeadingSilence ? "at most " : "") +
-                                    fmtKB(int(bytes));
+            // Trimming can only shrink the clip, so the size is a bound then.
+            const std::string bound = a.trimLeadingSilence ? "at most " : "";
+            const std::string out = "-> " + std::to_string(a.sampleRate) + " Hz ADPCM, " + bound + fmtKB(int(bytes));
             const float lineH = 18;
             const ImRect ir = row("lainfo", "Source", "The WAV file as it is, and the sound RAM the exported clip takes. With Trim silence "
                                                     "it can take less: how much depends on the file's quiet start.");
@@ -5956,7 +5957,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const float ty = centerY(f.regular, type::body, ir.Min.y, ir.Max.y);
             text(dl, ImVec2(ir.Min.x, ty), f.regular, type::body, color::textDim, src.c_str());
             text(dl, ImVec2(ir.Min.x, ty + lineH), f.regular, type::body, color::textDim, out.c_str());
-            audioLine = "audio: source " + std::to_string(ai->rate) + " " + sec + " " + std::to_string(ai->channels) + " adpcm " +
+            audioLine = "audio: source " + std::to_string(ai->rate) + " " + sec + " " + std::to_string(ai->channels) + " adpcm " + bound +
                         std::to_string(bytes);
         }
         std::string typed;

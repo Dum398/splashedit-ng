@@ -13,6 +13,7 @@
 
 #include "luacompile.hh"
 #include "audio.hh"
+#include "blocks.hh"
 #include "budget.hh"
 #include "disc.hh"
 #include "font.hh"
@@ -62,6 +63,8 @@ static int usage() {
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
                  "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n"
+                 "usage: splashpack-cli blocks <in.blocks>\n"
+                 "  prints the Lua a block script exports as\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
                  "    [--licence <file|psxsplash|none>] [--volume <name>]\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
@@ -269,6 +272,24 @@ static int luac(int argc, char** argv) {
     }
 }
 
+static int blocks(int argc, char** argv) {
+    if (argc != 3) return usage();
+    std::string name = fs::path(argv[2]).filename().string();
+    try {
+        std::ifstream in(argv[2], std::ios::binary);
+        if (!in) throw std::runtime_error(std::string("cannot open ") + argv[2]);
+        std::string src((std::istreambuf_iterator<char>(in)), {});
+        splash::LuaGen g = splash::blocksToLua(splash::parseBlocks(src, name));
+        for (const std::string& e : g.errors) std::fprintf(stderr, "error: %s: %s\n", name.c_str(), e.c_str());
+        if (!g.errors.empty()) return 1;
+        std::fwrite(g.lua.data(), 1, g.lua.size(), stdout);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 static int font(int argc, char** argv) {
     splash::UIFont f;
     f.name = "font";
@@ -379,6 +400,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return audio(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "luac") == 0) return luac(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "blocks") == 0) return blocks(argc, argv);
     if (argc < 2 || std::strcmp(argv[1], "export") != 0) return usage();
     std::string scenePath, outPath, project, orderFrom;
     bool luaBytecode = false, stats = false;

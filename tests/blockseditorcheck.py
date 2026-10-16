@@ -115,6 +115,10 @@ check('a .blocks script opens in a blocks tab', 'blocks.canvas' in c and 'blocks
       sorted(k for k in c if k.startswith('blocks.'))[:8])
 check('the empty script has no blocks', not [k for k in c if k.startswith('blocks.block.')], [k for k in c if k.startswith('blocks.block.')])
 check('hide is not in view before Objects is picked', 'blocks.palette.hide' not in c)
+# psxsplash never calls onDestroy: the hats on either side are drawn, it is not.
+check('the palette offers no "when destroyed" hat',
+      'blocks.palette.on_disable' in c and 'blocks.palette.on_scene_start' in c and 'blocks.palette.on_destroy' not in c,
+      sorted(k for k in c if k.startswith('blocks.palette.on_')))
 _, c2 = run(['--click', '@blocks.category.Objects', '--wait', '5'])
 check('the Objects chip brings hide into view', 'blocks.palette.hide' in c2)
 if fails:

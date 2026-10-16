@@ -1854,7 +1854,7 @@ void testBlocks() {
         labelsOk = labelsOk && (std::string(s.label).find("%f") != std::string::npos) == (s.field != splash::BlockField::None);
         labelsOk = labelsOk && (s.kind == splash::BlockKind::CBlock) == (s.bodies > 0);
     }
-    CHECK(ops.size() == splash::blockCatalogue().size() && hats == 12 && hatsFirst && labelsOk);
+    CHECK(ops.size() == splash::blockCatalogue().size() && hats == 11 && hatsFirst && labelsOk);
     CHECK(splash::findBlockSpec("move_by") && splash::findBlockSpec("move_by")->args == 3 && !splash::findBlockSpec("fly"));
     CHECK(splash::blockButtons().size() == 16 && splash::blockButtons().front() == "CROSS");
 

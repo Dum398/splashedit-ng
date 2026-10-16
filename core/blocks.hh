@@ -80,6 +80,10 @@ const std::vector<std::string_view>& blockButtons();
 // Sound and scenes, Variables, Operators, Input, Debug.
 const std::vector<std::string_view>& blockCategories();
 
+// Why name can't be a variable: not an identifier, a Lua keyword, an event
+// parameter, an API table or an event function. Empty when it can.
+std::string blockNameError(std::string_view name);
+
 struct LuaGen {
     std::string lua;
     std::vector<std::string> errors;  // "stack 2, block 3 (move_by): missing input 2"

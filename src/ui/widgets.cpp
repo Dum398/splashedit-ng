@@ -803,22 +803,29 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
         s.first = 0;
     }
 
-    // Keyboard: move over the available rows.
+    // Keyboard: move over the available rows, the list following.
     auto step = [&](int dir) {
         for (int i = s.hi + dir; i >= 0 && i < n; i += dir)
             if (available(i)) {
                 s.hi = i;
+                if (s.hi < s.first) s.first = s.hi;
+                if (s.hi >= s.first + rows) s.first = s.hi - rows + 1;
                 return;
             }
     };
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)) step(1);
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)) step(-1);
-    if (enter && available(s.hi)) picked = s.hi;
-    if (s.hi < s.first) s.first = s.hi;
-    if (s.hi >= s.first + rows) s.first = s.hi - rows + 1;
-    if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0)
-        s.first -= static_cast<int>(ImGui::GetIO().MouseWheel);
+    // The wheel scrolls the list; a highlight it scrolls away comes along.
+    if (ImGui::IsWindowHovered() && ImGui::GetIO().MouseWheel != 0) {
+        s.first = std::clamp(s.first - static_cast<int>(ImGui::GetIO().MouseWheel), 0, std::max(0, n - rows));
+        if (s.hi < s.first || s.hi >= s.first + rows) {
+            s.hi = s.hi < s.first ? s.first : s.first + rows - 1;
+            while (s.hi < n && !available(s.hi)) ++s.hi;
+            if (s.hi >= n) s.hi = firstAvailable();
+        }
+    }
     s.first = std::clamp(s.first, 0, std::max(0, n - rows));
+    if (enter && available(s.hi)) picked = s.hi;
 
     // Rows.
     float y = sr.Max.y + space::xs;
@@ -832,6 +839,7 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
         ImGui::PushID(i);
         Hit h = interact("row", ir);
         ImGui::PopID();
+        if (namedRectsOn()) nameRect(std::string(id) + "/" + it.label, ir);  // --click @id/label
         bool ok = !it.unavailable;
         if (h.hovered && ok && mouseMoved) s.hi = i;
         if (i == s.hi && ok) {

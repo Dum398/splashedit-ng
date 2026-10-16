@@ -1,9 +1,11 @@
 # The block editor (a .blocks script tab), driven through the GUI on copies
 # of the courtyard example whose Game Logic runs scripts/door.blocks, an
-# empty block script (blocks/editor/empty.blocks). Edit script opens it in a
+# empty block script (blocks/editor/empty.blocks), with an object Door (its
+# audio clip door_creak) and a cutscene "intro" added. Edit script opens it in a
 # blocks tab; "on_interact" is dragged from the palette onto the canvas,
 # "hide" from the palette's Objects section under it, where it must snap
-# (its control sits right under the hat), its field typed to "Door" and the
+# (its control sits right under the hat), "Door" searched for in its field's
+# object list and the
 # tab saved with Ctrl+S: the file must then read exactly as the expected
 # JSON and `splashpack-cli blocks` must turn it into the expected Lua. Then
 # Ctrl+Z / Ctrl+Y (one step per edit), Delete on a selected block, and a
@@ -11,9 +13,13 @@
 # the snap). Palette blocks, the canvas and the blocks on it are aimed at by
 # name (blocks.palette.<op>, blocks.canvas, blocks.block.<path>,
 # blocks.field.<path>; see src/editor/blocks_view.hh); a first run reads
-# where they are drawn.
+# where they are drawn. Then the variables column: the door example built
+# with no typing but a variable's name (its fields picked from the scene's
+# lists), its Lua and the Lua panel's error count; a refused variable rename;
+# and a cutscene renamed in the inspector while the tab has unsaved changes
+# (ScriptTabs::rewriteUnsavedBlocks), the tab then saved.
 # usage: python3 blockseditorcheck.py <splashedit> [<splashpack-cli>]   (needs a display: xvfb-run -a)
-import os, shutil, subprocess, sys, tempfile
+import json, os, shutil, subprocess, sys, tempfile
 
 editor = os.path.abspath(sys.argv[1])
 cli = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else os.path.join(os.path.dirname(editor), 'cli', 'splashpack-cli')
@@ -33,24 +39,45 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-def project_copy():
+def project_copy(blocks=None):
+    """The courtyard with Game Logic running scripts/door.blocks (`blocks`, else
+    the empty fixture), an object Door whose audio clip is door_creak, and a
+    cutscene "intro"."""
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     scene = os.path.join(project, 'courtyard.scene')
-    text = open(scene, encoding='utf-8').read()
-    assert text.count('"lua": "scripts/game_logic.lua"') == 1
-    open(scene, 'w', encoding='utf-8', newline='\n').write(text.replace('"lua": "scripts/game_logic.lua"', '"lua": "scripts/door.blocks"'))
-    shutil.copy(fixture, os.path.join(project, 'scripts', 'door.blocks'))
+    s = json.load(open(scene, encoding='utf-8'))
+    logic = [o for o in s['objects'] if o['name'] == 'Game Logic']
+    assert len(logic) == 1 and logic[0]['components'] == [{'type': 'script', 'lua': 'scripts/game_logic.lua'}], logic
+    logic[0]['components'][0]['lua'] = 'scripts/door.blocks'
+    assert not [o for o in s['objects'] if o['name'] == 'Door']
+    s['objects'].append({'name': 'Door', 'active': True,
+                         'transform': {'position': [2.0, 0.0, 3.0], 'rotation': [0.0, 0.0, 0.0, 1.0], 'scale': [1.0, 1.0, 1.0]},
+                         'components': [{'type': 'audio', 'clip': None, 'clipName': 'door_creak'}], 'children': []})
+    s['cutscenes'] = [{'name': 'intro', 'durationFrames': 90, 'audioEvents': [], 'tracks': []}]
+    json.dump(s, open(scene, 'w', encoding='utf-8', newline='\n'), indent=2)
+    dest = os.path.join(project, 'scripts', 'door.blocks')
+    if blocks is None:
+        shutil.copy(fixture, dest)
+    else:
+        open(dest, 'w', encoding='utf-8', newline='\n').write(blocks)
     return project
 
 
-def run(args):
-    """The editor on a fresh project copy, then `args`: the project and the named controls as last drawn."""
-    project = project_copy()
+out = ''  # the last run's output
+
+
+def run(args, blocks=None):
+    """The editor on a fresh project copy (door.blocks: `blocks`, else the
+    empty fixture), then `args`: the project and the named controls as last
+    drawn; `out` gets what it printed."""
+    global out
+    project = project_copy(blocks)
     cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5'] + OPEN + args + [
         '--wait', '10', '--screenshot', os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=180)
-    lines = (r.stdout + r.stderr).strip().splitlines()
+    out = (r.stdout + r.stderr).strip()
+    lines = out.splitlines()
     missing = [l for l in lines if 'no such control drawn' in l]
     check('every control the run names was drawn', not missing, missing)
     controls = {}
@@ -177,6 +204,124 @@ s1 = c6.get('blocks.block.s1.b0')
 check('a drop away from the hat makes a second stack', s1 is not None and 'blocks.block.s0.b1' not in c6, sorted(k for k in c6 if 'block.' in k))
 rc, out, err = lua(project)
 check('... which makes no code', rc == 0 and out == 'function onInteract(self)\nend\n', (rc, out, err))
+
+# --- Variables and the field lists: the door, built with no typing but the
+# variable's name. Make a variable "opened", True-false (false); then from the
+# palette: the hat, an if under it, a not in its slot, the palette's ready
+# "opened" reporter in the not, a set (its variable already opened) in the
+# if, a bool (true) in its slot, hide and play sound under it with their
+# fields picked from the scene's lists (Door, its clip door_creak). Each run
+# replays the steps so far and reads where the next ones go.
+MAKE_VAR = ['--click', '@blocks.vars.add', '--wait', '5', '--text', 'opened', '--key', 'enter', '--wait', '3',
+            '--click', '@blocks.var.0.kind', '--wait', '3', '--click', '@blocks.var.0.kind/True-false', '--wait', '3']
+
+
+def chip(c):
+    return ['--click', '@blocks.category.' + c, '--wait', '5']
+
+
+def drop(name, rect, x, y):
+    """Drag control `name` (drawn at `rect`) so its top left lands on x, y."""
+    return ['--drag', '@%s,0,0,%d,%d' % (name, x - rect[0], y - rect[1]), '--wait', '5']
+
+
+def need(c, *names):
+    missing = [n for n in names if n not in c]
+    if missing:
+        check('drawn: ' + ', '.join(missing), False, sorted(k for k in c if k.startswith('blocks.'))[:60])
+        print(f'{fails} failures')
+        sys.exit(1)
+    return [c[n] for n in names]
+
+
+steps = MAKE_VAR + DRAG_HAT + chip('Control')
+_, c = run(steps)
+hat, ifPal, catPal = need(c, 'blocks.block.s0.b0', 'blocks.palette.if', 'blocks.category.Events')
+# not is the last of the Operators: the wheel over the palette brings it up.
+steps += drop('blocks.palette.if', ifPal, hat[0], hat[3]) + chip('Operators') + [
+    '--wheel', '%d,%d,-4' % (catPal[0] + 40, catPal[3] + 200), '--wait', '3']
+_, c = run(steps)
+ifSlot, notPal = need(c, 'blocks.slot.s0.b1.0', 'blocks.palette.not')
+steps += drop('blocks.palette.not', notPal, ifSlot[0], ifSlot[1]) + chip('Variables')
+_, c = run(steps)
+notSlot, varPal, setPal = need(c, 'blocks.slot.s0.b1.a0.0', 'blocks.palette.var.opened', 'blocks.palette.set_var')
+check('Make a variable adds one, with its own reporter in the palette', 'blocks.var.0.name' in c and 'blocks.var.1.name' not in c,
+      sorted(k for k in c if k.startswith('blocks.var')))
+steps += drop('blocks.palette.var.opened', varPal, notSlot[0], notSlot[1])
+_, c = run(steps)
+iff, ifSlot = need(c, 'blocks.block.s0.b1', 'blocks.slot.s0.b1.0')
+# The if's mouth: under its row (6 px under the slot), 16 px in.
+steps += drop('blocks.palette.set_var', setPal, iff[0] + 16, ifSlot[3] + 6) + chip('Operators')
+_, c = run(steps)
+setSlot, boolPal = need(c, 'blocks.slot.s0.b1.d0.b0.0', 'blocks.palette.bool')
+steps += drop('blocks.palette.bool', boolPal, setSlot[0], setSlot[1]) + chip('Objects')
+_, c = run(steps)
+setBlk, hidePal2 = need(c, 'blocks.block.s0.b1.d0.b0', 'blocks.palette.hide')
+# The Object list shows ten at a time, self first then the scene in tree
+# order: Door, added last, is down the list.
+steps += drop('blocks.palette.hide', hidePal2, setBlk[0], setBlk[3]) + [
+    '--click', '@blocks.field.s0.b1.d0.b1', '--wait', '5', '--wheel', '%d,%d,-10' % (setBlk[0] + 60, setBlk[3] + 150), '--wait', '3',
+    '--click', '@blocks.pick/Door', '--wait', '3'] + chip('Sound and scenes')
+_, c = run(steps)
+hideBlk, soundPal = need(c, 'blocks.block.s0.b1.d0.b1', 'blocks.palette.play_sound')
+steps += drop('blocks.palette.play_sound', soundPal, hideBlk[0], hideBlk[3]) + [
+    '--click', '@blocks.field.s0.b1.d0.b2', '--wait', '5', '--click', '@blocks.pick/door_creak', '--wait', '3']
+# The delete button is off while blocks use the variable.
+project, c = run(steps + ['--click', '@blocks.var.0.delete', '--wait', '3'] + SAVE)
+saved = json.loads(read(project))
+WANT_DOOR = {'format': 'splashedit-blocks', 'version': 1, 'variables': [{'name': 'opened', 'value': 'false'}],
+             'stacks': [{'x': HAT_AT[0], 'y': HAT_AT[1], 'blocks': [
+                 {'op': 'on_interact'},
+                 {'op': 'if', 'args': [{'op': 'not', 'args': [{'op': 'var', 'field': 'opened'}]}], 'bodies': [[
+                     {'op': 'set_var', 'field': 'opened', 'args': [{'op': 'bool', 'field': 'true'}]},
+                     {'op': 'hide', 'field': 'Door'},
+                     {'op': 'play_sound', 'field': 'door_creak'}]]}]}]}
+check('the door script, built by dragging and picking, is saved', saved == WANT_DOOR, json.dumps(saved))
+rc, lout, err = lua(project)
+WANT_DOOR_LUA = '''local opened = false
+
+function onInteract(self)
+    if not opened then
+        opened = true
+        Entity.SetActive(Entity.Find("Door"), false)
+        Audio.Play("door_creak")
+    end
+end
+'''
+check("... and makes the door's Lua", rc == 0 and lout == WANT_DOOR_LUA, (rc, lout, err))
+luaLines = [l for l in out.splitlines() if l.startswith('blocks: lua ')]
+check('the Lua panel shows 9 lines and no errors', luaLines and luaLines[-1] == 'blocks: lua 9 lines, 0 errors', luaLines[-3:])
+# A field list offers the scene: self, then the scene's objects.
+_, c = run(steps + ['--click', '@blocks.field.s0.b1.d0.b1', '--wait', '5'])
+check("the Object list offers self and the scene's objects", 'blocks.pick/self' in c and 'blocks.pick/Crate' in c and
+      'blocks.pick/Back Wall' in c, sorted(k for k in c if k.startswith('blocks.pick')))
+
+# A name that is not one is refused: the variable keeps its name, the reason prints.
+RENAME_VAR = ['--click', '@blocks.var.0.name', '--wait', '3', '--text']
+project, _ = run(MAKE_VAR + RENAME_VAR + ['1bad', '--key', 'enter', '--wait', '3'] + SAVE)
+saved = json.loads(read(project))
+check('renaming a variable to 1bad is refused', saved['variables'] == [{'name': 'opened', 'value': 'false'}], saved['variables'])
+check('... saying why', 'blocks: rename refused: not a name' in out, [l for l in out.splitlines() if 'refused' in l])
+# The negative control: a good name is taken.
+project, _ = run(MAKE_VAR + RENAME_VAR + ['door_open', '--key', 'enter', '--wait', '3'] + SAVE)
+saved = json.loads(read(project))
+check('renaming it to door_open is taken', saved['variables'] == [{'name': 'door_open', 'value': 'false'}], saved['variables'])
+
+# --- A cutscene rename reaches a block tab with unsaved changes: the stack
+# moved (not saved), the cutscene renamed in the scene inspector, then the
+# tab saved: the file plays "opening" from where the stack was moved to.
+PLAYS = json.dumps({'format': 'splashedit-blocks', 'version': 1, 'variables': [], 'stacks': [
+    {'x': 40, 'y': 40, 'blocks': [{'op': 'on_interact'}, {'op': 'play_cutscene', 'field': 'intro'}]}]})
+SCENE_ROOT = '90,127'        # the scene's row at the top of the tree: the inspector shows the scene
+INSPECTOR_NAME = '1301,301'  # its first cutscene's name (as in timelineeditcheck.py)
+RENAME_CUT = ['--click', SCENE_ROOT, '--wait', '5', '--dblclick', INSPECTOR_NAME, '--wait', '3', '--key', 'ctrl+a', '--text', 'opening',
+              '--key', 'enter', '--wait', '5']
+FOCUS_TAB = ['--click', '@blocks.canvas,0,150', '--wait', '3']
+project, _ = run(['--drag', '@blocks.block.s0.b0,0,0,30,20', '--wait', '5'] + RENAME_CUT + FOCUS_TAB + SAVE, blocks=PLAYS)
+saved = json.loads(read(project))
+st = saved['stacks'][0]
+check('the saved tab plays the renamed cutscene', st['blocks'][1] == {'op': 'play_cutscene', 'field': 'opening'}, st['blocks'])
+check('... and keeps its unsaved edit (the stack moved)', (st['x'], st['y']) == (70, 60), (st['x'], st['y']))
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

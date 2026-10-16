@@ -713,7 +713,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     }
     if (t.blocks) {
         syncBlocks(t);
-        const BlocksView::Result res = t.blocks->draw(dl, ImRect(area.Min, r.Max), &t.focused);
+        const BlocksView::Result res = t.blocks->draw(dl, ImRect(area.Min, r.Max), &t.focused, m_blockContext);
         applyBlocks(t, res);
         if (res.save) saveTab(*this, t, &m_saved);
         ImGui::PopID();

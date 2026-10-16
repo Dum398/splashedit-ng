@@ -521,17 +521,17 @@ std::string mergeParts(const std::vector<Part>& parts, Gen& g) {
     return out;
 }
 
-std::string checkName(const std::string& name) {
+}  // namespace
+
+std::string blockNameError(std::string_view name) {
     if (name.empty()) return "no name";
     bool ident = !(name[0] >= '0' && name[0] <= '9') && std::all_of(name.begin(), name.end(), [](char c) {
         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
     });
     if (!ident) return "not a name (letters, digits and _, not starting with a digit)";
-    if (kReserved.count(name)) return "\"" + name + "\" is reserved";
+    if (kReserved.count(name)) return "\"" + std::string(name) + "\" is reserved";
     return {};
 }
-
-}  // namespace
 
 const std::vector<BlockSpec>& blockCatalogue() { return kCatalogue; }
 
@@ -621,7 +621,7 @@ LuaGen blocksToLua(const BlockScript& script) {
     for (size_t i = 0; i < script.variables.size(); i++) {
         const BlockVariable& v = script.variables[i];
         std::string at = "variable " + std::to_string(i + 1) + " (" + v.name + ")";
-        std::string bad = checkName(v.name);
+        std::string bad = blockNameError(v.name);
         if (!bad.empty()) g.error(at, bad);
         else if (g.vars.count(v.name)) g.error(at, "declared twice");
         std::string err;

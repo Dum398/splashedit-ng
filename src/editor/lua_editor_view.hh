@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "editor/blocks_view.hh"
+
 namespace ui {
 
 class ScriptTabs {
@@ -59,6 +61,10 @@ public:
     int rewriteUnsavedBlocks(const std::vector<std::filesystem::path>& files,
                              const std::function<std::string(const std::string&)>& fn);
 
+    // What the open scene has, for the block tabs' field lists (objects,
+    // sounds, cutscenes); set each frame before draw().
+    void setBlockContext(BlocksView::Context c) { m_blockContext = std::move(c); }
+
     // Files written since the last call, for the caller to refresh.
     std::vector<std::filesystem::path> takeSaved();
     // A save result for the status bar; empty when there is none.
@@ -78,6 +84,7 @@ private:
     int m_closing = -1;  // a changed tab waiting on the save prompt
     bool m_openClosePrompt = false;
     std::vector<std::filesystem::path> m_saved;
+    BlocksView::Context m_blockContext;
 };
 
 }  // namespace ui

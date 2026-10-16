@@ -51,7 +51,7 @@ const Block* blockAt(const BlockScript& s, const Path& p);
 Block* blockAt(BlockScript& s, const Path& p);
 // Reporters with a typed-in value: they sit in a slot as its value.
 bool isLiteral(const Block& b);
-// Input `arg` of `op` takes only a Boolean (if, while, and, or, not).
+// Input `arg` of `op` takes only a Boolean or a variable (if, while, and, or, not).
 bool booleanSlot(std::string_view op, int arg);
 // The block a palette drag makes: its inputs filled with literals where a
 // number or a text goes ("0", "1" for change, "10" for repeat, "" for log),
@@ -174,7 +174,7 @@ struct Target {
 // The kind rules: a hat only first in a stack (a new stack, or over a loose
 // one); statements and C blocks in lists, never under a stop nor with a stop
 // above other blocks; reporters only in inputs (a Boolean input takes a
-// Boolean only) or loose.
+// Boolean or a variable, which may hold true or false) or loose.
 bool canDrop(const BlockScript& s, const BlockStack& fragment, const Target& t);
 // The script with `fragment` at `t`, or nothing when canDrop() refuses.
 // `placed` gets the path of the fragment's first block.
@@ -190,6 +190,26 @@ std::optional<BlockScript> setField(const BlockScript& s, const Path& p, const s
 // layout(s).
 Target findTarget(const BlockScript& s, const Layout& l, const BlockStack& fragment, float fx, float fy, const TextWidth& tw,
                   const Metrics& m = {}, float radius = 28);
+
+// --- Variables ----------------------------------------------------------------
+
+// How many blocks (in stacks, inputs and bodies) have a Variable field naming `name`.
+int variableUses(const BlockScript& s, std::string_view name);
+// "used by 1 block", "used by 3 blocks".
+std::string usedBy(int uses);
+// The script with a new variable "my_variable" (then "my_variable2", ...: the
+// first name no variable has), value "0". `name` gets its name.
+BlockScript addVariable(const BlockScript& s, std::string* name = nullptr);
+// Variable `from` called `to`, and every Variable field naming `from` with it.
+// Nothing, with `why` set, when `to` is not a name blockNameError() takes, is
+// another variable's, or there is no `from`.
+std::optional<BlockScript> renameVariable(const BlockScript& s, std::string_view from, std::string_view to,
+                                          std::string* why = nullptr);
+// Variable i's initial value; nothing when there is no variable i.
+std::optional<BlockScript> setVariableValue(const BlockScript& s, int i, const std::string& value);
+// Variable i out of the script; nothing, with `why` set ("used by 2 blocks"),
+// while a block names it or when there is no variable i.
+std::optional<BlockScript> deleteVariable(const BlockScript& s, int i, std::string* why = nullptr);
 
 // --- Undo -----------------------------------------------------------------
 

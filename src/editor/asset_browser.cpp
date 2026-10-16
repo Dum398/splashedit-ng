@@ -75,7 +75,7 @@ AssetType classifyAsset(const fs::path& file, bool directory) {
     if (splash::canImportModel(file)) return AssetType::Model;
     if (e == ".mesh") return AssetType::Mesh;
     if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp" || e == ".tga" || e == ".gif") return AssetType::Texture;
-    if (e == ".lua") return AssetType::Script;
+    if (e == ".lua" || e == ".blocks") return AssetType::Script;
     if (e == ".wav") return AssetType::Audio;
     if (e == ".anim") return AssetType::Animation;
     if (e == ".scene") return AssetType::Scene;

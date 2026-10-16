@@ -3803,12 +3803,11 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
         y += 34 + space::xs;
         const float gteNow = set.gteScaling > 0 ? set.gteScaling : 100.f;
-        ImRect v = row("lfog", "Fog", "Fades triangles to the fog colour with distance, and culls anything wholly past the fog wall.");
-        const ImRect fogSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
-        nameRect("scene.fog", fogSw);
-        if (toggle("fogon", fogSw, set.fog.enabled))
-            doc.editSettings([](splash::SceneSettings& s) { s.fog.enabled = !s.fog.enabled; });
-        const ImRect colRow = row("lfogcol", "Colour", "What distant triangles fade to. Click to pick one.");
+        // psxsplash clears the screen to this colour every frame (renderer.cpp
+        // SetFog), fog or not; the pack keeps it in the fog block.
+        const ImRect colRow = row("lfogcol", "Background",
+                                  "The screen clears to this colour every frame, fog on or off. With fog on, distant "
+                                  "triangles also fade to it. Click to pick one.");
         nameRect("scene.fogcol", colRow);
         if (colorField("fogcol", colRow, toColor(set.fog.color), toHex(set.fog.color).c_str())) ImGui::OpenPopup("##fogcolpick");
         ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
@@ -3824,6 +3823,11 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
         ImGui::PopStyleVar(4);
         ImGui::PopStyleColor(2);
+        ImRect v = row("lfog", "Fog", "Fades distant triangles to the background colour, and culls anything wholly past the fog wall.");
+        const ImRect fogSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("scene.fog", fogSw);
+        if (toggle("fogon", fogSw, set.fog.enabled))
+            doc.editSettings([](splash::SceneSettings& s) { s.fog.enabled = !s.fog.enabled; });
         const int density = std::clamp(set.fog.density, 1, 10), wall = 20000 / density;
         char tip[256];
         std::snprintf(tip, sizeof tip,
@@ -3839,7 +3843,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             doc.editSettings([n](splash::SceneSettings& s) { s.fog.density = n; }, "fogdensity");
         }
         if (fe.done) doc.endMerge();
-        if (!set.fog.enabled) caption("Off: both are kept for when fog is on.", color::textFaint);
+        if (!set.fog.enabled) caption("Off: density is kept for when fog is on.", color::textFaint);
         const ImRect gteRow = row("lgte", "GTE scaling",
                                   "Editor units per PS1 unit. Positions export as value / scaling in 16-bit 4.12 fixed point, so "
                                   "everything must sit within 8 x scaling of the origin. Smaller is finer, larger reaches farther.");
@@ -3852,8 +3856,9 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
         if (fe.done) doc.endMerge();
         const ImRect typeRow = row("lscenetype", "Scene type",
-                                   "Written to the pack. psxsplash picks room and portal culling from the pack's room data, which "
-                                   "the editor does not export, so both types draw the same way today.");
+                                   "Written to the pack, but psxsplash does not read it: culling follows the Room objects. With "
+                                   "any Room the scene draws room by room through portals; with none it frustum-culls the "
+                                   "BVH. Both types draw the same way.");
         nameRect("scene.scenetype", typeRow);
         const bool interior = set.sceneType == splash::SceneType::Interior;
         int pick = dropdownMenu("scenetype", typeRow, nullptr, interior ? "Interior" : "Exterior", {"Exterior", "Interior"}, interior);
@@ -3861,11 +3866,25 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             const splash::SceneType t = pick ? splash::SceneType::Interior : splash::SceneType::Exterior;
             if (t != set.sceneType) doc.editSettings([t](splash::SceneSettings& s) { s.sceneType = t; });
         }
+        // The culling psxsplash will use, from the Room objects the exporter
+        // writes (rooms.cpp collectRoomObjects: on in the hierarchy).
+        size_t roomCount = 0;
+        {
+            const std::vector<splash::FlatObject> flat = splash::flatten(doc.scene());
+            std::vector<std::string> roomErrors;
+            roomCount = splash::collectRoomObjects(flat, roomErrors).rooms.size();
+        }
+        const float cullTop = y;
+        caption(roomCount ? "Culling: rooms and portals, " + std::to_string(roomCount) + (roomCount == 1 ? " room." : " rooms.")
+                          : std::string("Culling: frustum (BVH). Add a Room to cull by rooms and portals."),
+                color::textFaint);
+        nameRect("scene.culling", ImRect(ImVec2(x0, cullTop - 2), ImVec2(x1, y)));
         if (namedRectsOn()) {
             // Scripted tests: the section's values when they change.
             char now[128];
-            std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s", set.fog.enabled ? 1 : 0,
-                          set.fog.density, toHex(set.fog.color).c_str(), double(set.gteScaling), interior ? "interior" : "exterior");
+            std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s culling %s", set.fog.enabled ? 1 : 0,
+                          set.fog.density, toHex(set.fog.color).c_str(), double(set.gteScaling), interior ? "interior" : "exterior",
+                          roomCount ? ("rooms " + std::to_string(roomCount)).c_str() : "frustum");
             static std::string reported;
             if (reported != now) {
                 reported = now;

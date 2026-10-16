@@ -433,8 +433,10 @@ sections above and clicks the controls by name (`--click @s_render`, `@scene.mce
 the Fog switch, Density typed (and clamped to 10), GTE scaling typed, Scene type picked from its
 menu (`@scenetype/Interior`), then Ctrl+S, reading `settings.fog`, `gteScaling` and `sceneType` back
 from the saved scene and the inspector's `scene: fog ...` line from its output. One Ctrl+Z each must
-take back the scene type, the typed density and the switch. Controls are clicked by name. Needs a
-display.
+take back the scene type, the typed density and the switch. With the background set to #20C040 the
+viewport must clear to it with fog off as well as on (psxsplash clears to it every frame), and the
+`culling` caption must read `frustum` with no Room, `rooms 2` with two, and not count a switched-off
+Room. Controls are clicked by name. Needs a display.
 
     python3 scenefogcheck.py <splashedit>
 

@@ -117,68 +117,6 @@ std::string projectName(const fs::path& project) {
 
 fs::path absPath(const fs::path& project, const std::string& rel) { return project / fs::path(std::u8string(rel.begin(), rel.end())); }
 
-struct MenuItem {
-    std::string label;
-    std::string shortcut;
-    bool enabled = true;
-    std::function<void()> run;  // empty label: a separator
-};
-
-// A themed popup menu of `items` (open, sized and placed by the caller).
-// With a `name`, scripted checks find each row as <name>/<label>.
-std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h, const char* name = nullptr) {
-    Fonts& f = fonts();
-    const float pad = space::xs, rowH = size::field + 4, sepH = 9;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImVec2(w, h));
-    dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
-    dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
-    dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
-    float y = box.Min.y + pad;
-    std::function<void()> run;
-    int i = 0;
-    for (const MenuItem& e : items) {
-        ImGui::PushID(i++);
-        if (e.label.empty()) {
-            dl->AddLine(ImVec2(box.Min.x + space::sm, y + sepH * 0.5f), ImVec2(box.Max.x - space::sm, y + sepH * 0.5f), color::border);
-            y += sepH;
-        } else {
-            ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
-            Hit hit = interact("item", ir);
-            if (name) nameRect(std::string(name) + "/" + e.label, ir);
-            const bool on = e.enabled && hit.hover > 0;
-            if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
-            const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
-            text(dl, ImVec2(ir.Min.x + space::md, centerY(f.regular, type::body, ir.Min.y, ir.Max.y)), f.regular, type::body, tc,
-                 e.label.c_str());
-            if (!e.shortcut.empty()) {
-                ImVec2 ss = measure(f.regular, type::label, e.shortcut.c_str());
-                text(dl, ImVec2(ir.Max.x - space::sm - ss.x, centerY(f.regular, type::label, ir.Min.y, ir.Max.y)), f.regular,
-                     type::label, color::textFaint, e.shortcut.c_str());
-            }
-            if (hit.clicked && e.enabled && e.run) run = e.run;
-            y += rowH;
-        }
-        ImGui::PopID();
-    }
-    return run;
-}
-
-void menuSize(const std::vector<MenuItem>& items, float* w, float* h) {
-    Fonts& f = fonts();
-    *w = 200;
-    *h = space::xs * 2;
-    for (const MenuItem& e : items) {
-        if (e.label.empty()) {
-            *h += 9;
-            continue;
-        }
-        *h += size::field + 4;
-        *w = std::max(*w, space::md + measure(f.regular, type::body, e.label.c_str()).x + space::xl +
-                              measure(f.regular, type::label, e.shortcut.c_str()).x + space::md);
-    }
-}
-
 }  // namespace
 
 // --- layout ---
@@ -779,7 +717,15 @@ void AssetBrowser::after(editor::Document& doc, const editor::AssetOp& op, const
         m_thumbs.erase(p);
     }
     if (!recheck.empty()) doc.refreshAssets(recheck);
-    notice(done, false);
+    if (!done.empty()) notice(done, false);
+}
+
+editor::AssetOp AssetBrowser::convertBlocks(editor::Document& doc, const std::string& path) {
+    m_index.scan(m_index.project());  // a blocks script saved a moment ago is listed
+    m_scannedAt = ImGui::GetTime();
+    const editor::AssetOp op = editor::convertBlocksToLua(doc, m_index, m_openScene, path);
+    after(doc, op, {});
+    return op;
 }
 
 void AssetBrowser::moveInto(editor::Document& doc, const std::string& asset, const std::string& folder) {

@@ -4,9 +4,11 @@
 #include <cctype>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <set>
 #include <system_error>
 
+#include "blocks.hh"
 #include "editor/document.hh"
 #include "import.hh"
 
@@ -480,10 +482,18 @@ class AssetFilesCommand : public Command {
     bool sceneChanged = false;
     splash::Scene before, after;
     std::vector<std::string> recheck;  // asset paths the document should look up again
+    // A conversion's file contents, at the moved path: `after` once moved,
+    // `before` put back before moving back.
+    struct Swap {
+        std::string path;  // where the file is after the moves
+        std::string before, after;
+    };
+    std::optional<Swap> swap;
 
     void apply(Document& doc) override {
         if (!m_first) {
             if (std::string why = moveAll(root, moves); !why.empty()) g_historyError = "Redo: " + why;
+            if (swap && !writeFile(root / fromUtf8(swap->path), swap->after)) g_historyError = "Redo: could not write " + swap->path;
             for (const SceneFile& s : scenes)
                 if (!writeFile(root / fromUtf8(s.path), s.after)) g_historyError = "Redo: could not write " + s.path;
         }
@@ -495,6 +505,7 @@ class AssetFilesCommand : public Command {
     void revert(Document& doc) override {
         for (const SceneFile& s : scenes)
             if (!writeFile(root / fromUtf8(s.path), s.before)) g_historyError = "Undo: could not write " + s.path;
+        if (swap && !writeFile(root / fromUtf8(swap->path), swap->before)) g_historyError = "Undo: could not write " + swap->path;
         if (std::string why = moveAll(root, reversed(moves)); !why.empty()) g_historyError = "Undo: " + why;
         // A trashed file back home leaves its trash folder empty.
         for (const auto& [from, to] : moves) pruneEmpty(root / ".trash", (root / fromUtf8(to)).parent_path());
@@ -699,7 +710,12 @@ int emptyOldTrash(const fs::path& project, fs::file_time_type now, std::chrono::
     return removed;
 }
 
-AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string& openScene, const AssetPlan& plan) {
+namespace {
+
+// applyAssetPlan, with the moved file's contents swapped as part of the step
+// when `swap` is set.
+AssetOp applyPlan(Document& doc, const AssetIndex& index, const std::string& openScene, const AssetPlan& plan,
+                  std::optional<AssetFilesCommand::Swap> swap) {
     AssetOp r;
     r.path = plan.path;
     if (!plan.error.empty()) {
@@ -711,6 +727,7 @@ AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string
     auto cmd = std::make_unique<AssetFilesCommand>();
     cmd->root = root;
     cmd->moves = plan.moves;
+    cmd->swap = std::move(swap);
     // Every other scene file naming a moved file, rewritten. Worked out before
     // anything moves, so a scene that cannot be read stops it untouched.
     if (!plan.trash)
@@ -757,12 +774,18 @@ AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string
         r.error = why;
         return r;
     }
+    if (cmd->swap && !writeFile(root / fromUtf8(cmd->swap->path), cmd->swap->after)) {
+        moveAll(root, reversed(plan.moves));
+        r.error = "could not write " + cmd->swap->path;
+        return r;
+    }
     for (const AssetFilesCommand::SceneFile& s : cmd->scenes)
         if (!writeFile(root / fromUtf8(s.path), s.after)) {
             for (const AssetFilesCommand::SceneFile& w : cmd->scenes) {
                 if (&w == &s) break;
                 writeFile(root / fromUtf8(w.path), w.before);
             }
+            if (cmd->swap) writeFile(root / fromUtf8(cmd->swap->path), cmd->swap->before);
             moveAll(root, reversed(plan.moves));
             r.error = "could not write " + s.path;
             return r;
@@ -773,6 +796,52 @@ AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string
     }
     for (const AssetFilesCommand::SceneFile& s : cmd->scenes) r.scenes.push_back(s.path);
     doc.execute(std::move(cmd));
+    return r;
+}
+
+}  // namespace
+
+AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string& openScene, const AssetPlan& plan) {
+    return applyPlan(doc, index, openScene, plan, std::nullopt);
+}
+
+AssetOp convertBlocksToLua(Document& doc, const AssetIndex& index, const std::string& openScene, const std::string& blocksPath) {
+    AssetOp r;
+    const std::string from = normal(blocksPath);
+    const fs::path root = index.project();
+    auto refuse = [&](const std::string& why) {
+        r.error = "Can't convert: " + why;
+        return r;
+    };
+    if (lower(fs::path(fromUtf8(from)).extension().string()) != ".blocks") return refuse(from + " is not a blocks script");
+    const AssetEntry* e = index.find(from);
+    if (!e) return refuse(from + " is not in the project any more");
+    AssetFilesCommand::Swap swap;
+    if (!readFile(root / fromUtf8(from), &swap.before)) return refuse("could not read " + from);
+    try {
+        splash::LuaGen gen = splash::blocksToLua(splash::parseBlocks(swap.before, from));
+        if (!gen.errors.empty()) return refuse(gen.errors.front());
+        swap.after = std::move(gen.lua);
+    } catch (const std::exception& ex) {
+        return refuse(ex.what());
+    }
+    // <stem>.lua, or <stem>_2.lua, ... when a script of that stem (in either
+    // language, the source aside) is there.
+    const std::string stem = utf8(fs::path(fromUtf8(e->name)).stem());
+    std::error_code ec;
+    auto taken = [&](const std::string& st) {
+        return fs::exists(root / fromUtf8(join(e->folder, st + ".lua")), ec) ||
+               (join(e->folder, st + ".blocks") != from && fs::exists(root / fromUtf8(join(e->folder, st + ".blocks")), ec));
+    };
+    std::string name = stem;
+    for (int n = 2; taken(name); ++n) name = stem + "_" + std::to_string(n);
+    AssetReferences refs;
+    refs.update(index, doc.scene(), openScene, 0);
+    const AssetPlan plan = planTo(index, refs, *e, join(e->folder, name + ".lua"), openScene);
+    if (!plan.error.empty()) return refuse(plan.error);
+    swap.path = plan.path;
+    r = applyPlan(doc, index, openScene, plan, std::move(swap));
+    if (!r.error.empty()) r.error = "Can't convert: " + r.error;
     return r;
 }
 

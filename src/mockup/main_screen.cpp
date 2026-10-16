@@ -6957,6 +6957,15 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     if (!tl) st.assets.draw(dl, doc);
     // Project files renamed, moved or deleted (or that undone): open script
     // tabs follow their file; a move an undo or redo could not make is said.
+    // A blocks tab's menu asked for its script as Lua.
+    if (std::optional<std::filesystem::path> conv = st.scripts.takeConvertRequest()) {
+        std::error_code ec;
+        const std::filesystem::path rel = std::filesystem::relative(*conv, doc.projectRoot(), ec);
+        const std::string from = ec ? utf8(conv->generic_u8string()) : utf8(rel.generic_u8string());
+        const editor::AssetOp op = st.assets.convertBlocks(doc, from);
+        if (op.error.empty()) scriptLine(nullptr, "blocks: converted " + from + " -> " + op.path);
+        else scriptLine(nullptr, "blocks: convert refused: " + op.error);
+    }
     for (const auto& [from, to] : editor::takeAssetMoves()) st.scripts.moved(from, to);
     if (std::string why = editor::takeAssetHistoryError(); !why.empty()) notify(st, why, true);
     st.modelField = ImRect();

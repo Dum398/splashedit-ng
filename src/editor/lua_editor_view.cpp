@@ -198,8 +198,38 @@ void ScriptTabs::closeAll() {
 
 void ScriptTabs::moved(const std::filesystem::path& from, const std::filesystem::path& to) {
     const std::filesystem::path f = from.lexically_normal(), t = to.lexically_normal();
-    for (std::unique_ptr<Tab>& tab : m_tabs) {
+    for (size_t i = 0; i < m_tabs.size(); ++i) {
+        std::unique_ptr<Tab>& tab = m_tabs[i];
         const std::filesystem::path p = tab->script.path().lexically_normal();
+        if (p == f && isBlocksFile(f) != isBlocksFile(t)) {
+            // Blocks turned into Lua (or back, on undo): the tab is another
+            // kind of editor now. Close it and open the file where it is.
+            const bool wasActive = m_active == (int)i;
+            const int keep = m_active;
+            m_tabs.erase(m_tabs.begin() + i);
+            if (m_closing == (int)i) m_closing = -1;
+            if (m_converting == (int)i) m_converting = -1;
+            if (m_menuFor == (int)i) m_menuFor = -1;
+            std::string err;
+            auto nt = std::make_unique<Tab>();
+            if (nt->script.open(t, &err)) {
+                if (isBlocksFile(t)) {
+                    nt->blocks = std::make_unique<BlocksView>();
+                    syncBlocks(*nt);
+                } else {
+                    nt->script.diagnose();
+                }
+                nt->lastInput = ImGui::GetTime();
+                m_tabs.insert(m_tabs.begin() + i, std::move(nt));
+                m_active = keep;
+                if (wasActive)
+                    for (size_t k = 0; k < m_tabs.size(); ++k) m_tabs[k]->focused = k == i;
+            } else {
+                if (m_active > (int)i || m_active >= (int)m_tabs.size()) --m_active;
+                if (m_active < 0) m_active = kScene;
+            }
+            continue;
+        }
         if (p == f) {
             tab->script.setPath(t);
             continue;
@@ -268,6 +298,12 @@ int ScriptTabs::rewriteUnsavedBlocks(const std::vector<std::filesystem::path>& f
         ++n;
     }
     return n;
+}
+
+std::optional<std::filesystem::path> ScriptTabs::takeConvertRequest() {
+    std::optional<std::filesystem::path> r;
+    r.swap(m_convertRequest);
+    return r;
 }
 
 std::vector<std::filesystem::path> ScriptTabs::takeSaved() {
@@ -358,6 +394,140 @@ void ScriptTabs::closePrompt() {
     ImGui::EndPopup();
 }
 
+// Save, Close and (for blocks) Convert to Lua..., on a script tab's right-click.
+void ScriptTabs::tabMenu() {
+    const char* id = "##scripttabmenu";
+    if (m_openMenu) {
+        m_openMenu = false;
+        ImGui::OpenPopup(id);
+    }
+    if (!ImGui::IsPopupOpen(id)) return;
+    if (m_menuFor < 0 || m_menuFor >= (int)m_tabs.size()) {
+        if (ImGui::BeginPopup(id)) {
+            ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
+        return;
+    }
+    const int i = m_menuFor;
+    Tab& t = *m_tabs[i];
+    std::vector<MenuItem> items;
+    items.push_back({"Save", "", t.script.dirty() || t.diskDeleted, [this, i] { saveTab(*this, *m_tabs[i], &m_saved); }});
+    items.push_back({"Close", "", true, [this, i] { close(i); }});
+    if (t.blocks) {
+        items.push_back({});
+        items.push_back({"Convert to Lua...", "", true, [this, i] {
+                             m_converting = i;
+                             m_openConvert = true;
+                         }});
+    }
+    float w, h;
+    menuSize(items, &w, &h);
+    const ImVec2 d = ImGui::GetIO().DisplaySize;
+    ImVec2 pos = m_menuPos;
+    if (pos.x + w > d.x - space::xs) pos.x -= w;
+    if (pos.y + h > d.y - space::xs) pos.y -= h;
+    pos.x = std::max(pos.x, space::xs);
+    pos.y = std::max(pos.y, space::xs);
+    ImGui::SetNextWindowPos(pos);
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+    const bool shown = ImGui::BeginPopup(id, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                                 ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(2);
+    if (!shown) return;
+    std::function<void()> run = menuRows(items, w, h, "tabs.menu");
+    if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+    if (run) {
+        m_menuFor = -1;
+        run();
+    }
+}
+
+// Convert or Cancel for a blocks tab turning into Lua.
+void ScriptTabs::convertPrompt() {
+    const char* id = "##scriptconvert";
+    if (m_openConvert) {
+        m_openConvert = false;
+        ImGui::OpenPopup(id);
+    }
+    if (m_converting < 0 || m_converting >= (int)m_tabs.size() || !m_tabs[m_converting]->blocks) {
+        m_converting = -1;
+        return;
+    }
+    const float w = 460;
+    ImVec2 d = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos(ImVec2(d.x * 0.5f, d.y * 0.42f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, color::raised);
+    ImGui::PushStyleColor(ImGuiCol_Border, color::borderStrong);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(space::lg, space::lg));
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, radius::card);
+    ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(3);
+    ImGui::PopStyleColor(2);
+    if (!open) {
+        m_converting = -1;
+        return;
+    }
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float inner = w - space::lg * 2;
+    float y = o.y;
+    Tab& t = *m_tabs[m_converting];
+    const std::string title = "Convert " + t.script.title() + " to Lua?";
+    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, title.c_str());
+    y += 26;
+    // The body wraps at the prompt's width.
+    {
+        const std::string body = "The blocks become a Lua script and every reference to the script follows. "
+                                 "The editor can't turn Lua back into blocks; Ctrl+Z undoes this.";
+        std::string line, word;
+        auto flush = [&]() {
+            text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, line.c_str());
+            y += 18;
+            line.clear();
+        };
+        for (size_t k = 0; k <= body.size(); ++k) {
+            if (k == body.size() || body[k] == ' ') {
+                const std::string next = line.empty() ? word : line + " " + word;
+                if (!line.empty() && measure(f.regular, type::label, next.c_str()).x > inner) {
+                    flush();
+                    line = word;
+                } else {
+                    line = next;
+                }
+                word.clear();
+            } else {
+                word += body[k];
+            }
+        }
+        if (!line.empty()) flush();
+    }
+    y += 16;
+    auto width = [&](const char* l) { return space::md * 2 + measure(f.medium, type::body, l).x; };
+    const float bx = o.x + inner - width("Convert");
+    int done = 0;  // 1 convert, 2 cancel
+    if (button("convert.ok", ImVec2(bx, y), nullptr, "Convert", ButtonKind::Primary) || ImGui::IsKeyPressed(ImGuiKey_Enter, false)) done = 1;
+    if (button("convert.cancel", ImVec2(o.x, y), nullptr, "Cancel", ButtonKind::Ghost) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) done = 2;
+    y += size::field + 6;
+    ImGui::SetCursorScreenPos(o);
+    ImGui::Dummy(ImVec2(inner, y - o.y));
+    if (done) {
+        ImGui::CloseCurrentPopup();
+        if (done == 1) {
+            if (t.script.dirty()) saveTab(*this, t, &m_saved);
+            if (!t.script.dirty()) m_convertRequest = t.script.path();
+        }
+        m_converting = -1;
+    }
+    ImGui::EndPopup();
+}
+
 // About once a second: a tab whose file changed on disk reloads when it has
 // no unsaved edits, else asks (the bar over its editor). One whose file was
 // deleted says so on its tab and offers Save or Close.
@@ -378,6 +548,8 @@ void ScriptTabs::pollDisk() {
 
 ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     closePrompt();
+    tabMenu();
+    convertPrompt();
     pollDisk();
     for (int i = 0; i < (int)m_tabs.size(); ++i) {
         if (!m_tabs[i]->closeAsked) continue;
@@ -428,6 +600,11 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
                 dl->AddText(f.medium, type::caption, cr.GetCenter() - measure(f.medium, type::caption, icon::x) * 0.5f, color::textDim, icon::x);
             if (hit.clicked && overClose) closeIt = i;
             if (hit.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) closeIt = i;
+            if (hit.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                m_menuFor = i;
+                m_openMenu = true;
+                m_menuPos = ImGui::GetIO().MousePos;
+            }
         }
         if (hit.clicked && closeIt != i) pick = i;
         ImGui::PopID();

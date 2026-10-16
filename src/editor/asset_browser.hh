@@ -189,6 +189,12 @@ class Document;
 // the scene) at the new paths. Undo puts the files, the scene files and the
 // references back; redo does it again. Nothing is touched when it fails.
 AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string& openScene, const AssetPlan& plan);
+// Turns the blocks script `blocksPath` (project-relative) into a Lua script
+// beside it, <stem>.lua (<stem>_2.lua, ... when taken), holding the Lua the
+// exporter makes of it, as one undo step: the file is renamed and rewritten,
+// and every reference follows (see applyAssetPlan). Undo brings the blocks
+// back byte for byte. Refused, untouched, when the blocks have an error.
+AssetOp convertBlocksToLua(Document& doc, const AssetIndex& index, const std::string& openScene, const std::string& blocksPath);
 // A problem moving files back or forth on an undo or redo of an applied
 // plan, cleared on read; empty when there was none.
 std::string takeAssetHistoryError();

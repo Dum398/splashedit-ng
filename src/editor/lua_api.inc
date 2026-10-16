@@ -289,7 +289,6 @@
 {"", "onButtonRelease", ApiKind::Callback, "function onButtonRelease(self, button)", "Called on the frame a button is released."},
 {"", "onCollideWithPlayer", ApiKind::Callback, "function onCollideWithPlayer(self)", "Called when the player's collision capsule overlaps this object. Fires every frame while overlapping. Use a flag for one-time actions."},
 {"", "onCreate", ApiKind::Callback, "function onCreate(self)", "Called once after the scene finishes loading and all objects are registered. Use for initialization. Entity.Find() works here for any object."},
-{"", "onDestroy", ApiKind::Callback, "function onDestroy(self)", "Called when the object is destroyed."},
 {"", "onDisable", ApiKind::Callback, "function onDisable(self)", "Called when Entity.SetActive(self, false) deactivates the object."},
 {"", "onEnable", ApiKind::Callback, "function onEnable(self)", "Called when Entity.SetActive(self, true) activates the object."},
 {"", "onInteract", ApiKind::Callback, "function onInteract(self)", "Called when the player presses the interact button while near this object. Requires a PSXInteractable component on the same GameObject."},

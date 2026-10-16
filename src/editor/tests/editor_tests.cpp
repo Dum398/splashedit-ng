@@ -970,6 +970,50 @@ void testLiveExport() {
     CHECK(!live.busy());  // nothing changed since the last export
 }
 
+// What the Problems popup keeps of a build over the build list: every scene's
+// tagged message except those the open scene's live export already lists,
+// and the status line of a failed build.
+void testBuildReport() {
+    CHECK(splash::sceneTag(0, 1, "courtyard").empty());
+    CHECK(splash::sceneTag(1, 3, "cave") == "scene 1 (cave): ");
+    CHECK(splash::sceneTag(2, 3, "") == "scene 2: ");
+
+    splash::ExportResult live;
+    live.errors = {"bad mesh"};
+    live.warnings = {"no icon"};
+    splash::ExportResult build;
+    build.errors = {"scene 0 (a): bad mesh", "scene 1 (cave): bad mesh", "Cannot load c.scene: oops"};
+    build.warnings = {"scene 0 (a): no icon", "scene 1 (cave): no icon", "scene 0 (a): only in the build"};
+
+    // The open scene is scene 0: its copies of the live messages are left out, nothing else.
+    editor::BuildReport r = editor::buildReport("Play", 3, build, std::string("scene 0 (a): "), &live);
+    CHECK(r.what == "Play" && r.scenes == 3);
+    CHECK(r.errors == std::vector<std::string>({"scene 1 (cave): bad mesh", "Cannot load c.scene: oops"}));
+    CHECK(r.warnings == std::vector<std::string>({"scene 1 (cave): no icon", "scene 0 (a): only in the build"}));
+    // Open at scene 1 instead: scene 0's copies stay, scene 1's go.
+    r = editor::buildReport("Play", 3, build, std::string("scene 1 (cave): "), &live);
+    CHECK(r.errors == std::vector<std::string>({"scene 0 (a): bad mesh", "Cannot load c.scene: oops"}));
+    CHECK(r.warnings == std::vector<std::string>({"scene 0 (a): no icon", "scene 0 (a): only in the build"}));
+    // The open scene is not in the build list, or there is no live export yet: everything stays.
+    r = editor::buildReport("Export", 3, build, std::nullopt, &live);
+    CHECK(r.errors == build.errors && r.warnings == build.warnings);
+    r = editor::buildReport("Export", 3, build, std::string("scene 0 (a): "), nullptr);
+    CHECK(r.errors == build.errors && r.warnings == build.warnings);
+    // One scene, the open one: untagged, so an exact match is left out.
+    splash::ExportResult one;
+    one.errors = {"bad mesh", "Cannot write reload.flag"};
+    one.warnings = {"no icon"};
+    r = editor::buildReport("Run on hardware", 1, one, std::string(), &live);
+    CHECK(r.errors == std::vector<std::string>({"Cannot write reload.flag"}) && r.warnings.empty() && !r.empty());
+    CHECK(editor::buildReport("Play", 1, splash::ExportResult(), std::string(), &live).empty());
+
+    // A failed build's status line puts the count first.
+    CHECK(editor::buildFailure("Play", splash::ExportResult()).empty());
+    CHECK(editor::buildFailure("Play", one) == "Play, 2 errors: bad mesh");
+    one.errors.pop_back();
+    CHECK(editor::buildFailure("Export failed", one) == "Export failed: bad mesh");
+}
+
 // The build list and a Play of several scenes: scenes.list round trip, what
 // buildScenes makes of missing files and an empty list, exportForPlay writing
 // scene_<i> per scene and dropping stale ones, and a live reload of one index.
@@ -8089,6 +8133,7 @@ int main(int argc, char** argv) {
     testPlay();
     testPlayOverlays();
     testBuildScenes();
+    testBuildReport();
     testVramLayout();
     testProject();
     testAdoptAsset();

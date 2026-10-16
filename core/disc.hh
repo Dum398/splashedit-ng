@@ -118,6 +118,11 @@ DiscResult exportDisc(const Scene& scene, const std::filesystem::path& projectRo
                       const std::filesystem::path& bin, const std::string& title, const VramSettings& vram = {},
                       const DiscSettings& disc = {});
 
+// What a build over `count` scenes puts before scene `index`'s errors and
+// warnings: "scene 1 (cave): " (the name only when `name` is not empty), or
+// nothing when the build has one scene.
+std::string sceneTag(size_t index, size_t count, const std::string& name);
+
 // What the engine file is: a CD-ROM build, a PCdrv build, or not a PS-X EXE.
 enum class EngineKind { NotExe, Cdrom, Pcdrv };
 EngineKind engineKind(const std::vector<uint8_t>& exe);

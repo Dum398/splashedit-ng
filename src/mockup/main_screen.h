@@ -102,6 +102,16 @@ struct State {
         float split = 0.5f;       // share of the viewport the Scene view keeps while the game runs
         uint64_t startedAt = 0;   // SDL ticks when redux started, to notice it never publishing
         std::string message;  // why the last Play did not start, for the status bar
+        // The last finished Play, Run on hardware or Export build's problems the
+        // open scene's live export does not already list (the Problems popup's
+        // second part), and, per build in flight, the open scene's tag in it
+        // (splash::sceneTag; nullopt when it is not in the build list) and the
+        // number of scenes it builds.
+        editor::BuildReport built;
+        struct Launch {
+            std::optional<std::string> openTag;
+            size_t scenes = 0;
+        } playLaunch, hwLaunch, discLaunch;
         bool openSetup = false, openOutput = false;
         // Export (Ctrl+B): a disc image built in the background, where it goes,
         // and whether the setup popup was opened for it rather than for Play.

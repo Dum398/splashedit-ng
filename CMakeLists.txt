@@ -72,6 +72,7 @@ endif()
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
     src/editor/asset_browser.cpp
+    src/editor/blocks_edit.cpp
     src/editor/catalog.cpp
     src/editor/memcard.cpp
     src/editor/document.cpp
@@ -177,6 +178,7 @@ add_executable(splashedit
     src/viewport/ps1view.cpp
     src/mockup/main_screen.cpp
     src/editor/lua_editor_view.cpp
+    src/editor/blocks_view.cpp
     src/editor/timeline_view.cpp
     src/editor/asset_browser_view.cpp
     src/editor/ui_canvas_view.cpp

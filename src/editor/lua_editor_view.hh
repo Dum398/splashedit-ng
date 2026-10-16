@@ -1,5 +1,6 @@
 // The script editor's ImGui side: a tab per open Lua file beside the Scene
-// tab in the middle panel, and the code editor for the tab showing.
+// tab in the middle panel, and the code editor for the tab showing. A .blocks
+// file opens in the same strip with the block editor (blocks_view.hh).
 #pragma once
 
 #include <imgui.h>
@@ -50,8 +51,13 @@ public:
     void reloadFromDisk();
     // Runs `fn` over the text of each tab of `files` with unsaved changes, as
     // one edit of that tab (undoable there). Returns how many tabs changed.
+    // Block tabs (.blocks) are not Lua: rewriteUnsaved leaves them alone, and
+    // this does the same for them, `fn` getting and giving the file's JSON
+    // (a result that is not a block script is not applied).
     int rewriteUnsaved(const std::vector<std::filesystem::path>& files,
                        const std::function<std::string(const std::string&)>& fn);
+    int rewriteUnsavedBlocks(const std::vector<std::filesystem::path>& files,
+                             const std::function<std::string(const std::string&)>& fn);
 
     // Files written since the last call, for the caller to refresh.
     std::vector<std::filesystem::path> takeSaved();

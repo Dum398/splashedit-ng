@@ -167,7 +167,7 @@ void Document::refreshAssets(const std::vector<std::string>& projectPaths) {
     for (const std::string& p : projectPaths) {
         const fs::path ext = fs::path(p).extension();
         if (ext == ".mesh") m_meshes[p] = analyseMesh(resolve(p));
-        else if (ext == ".lua" || ext == ".wav" || ext == ".anim") {
+        else if (ext == ".lua" || ext == ".blocks" || ext == ".wav" || ext == ".anim") {
             m_files[p] = isFile(resolve(p));
             if (ext == ".wav") m_audio[p] = analyseAudio(resolve(p));
         }

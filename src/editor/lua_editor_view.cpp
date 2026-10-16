@@ -6,7 +6,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 
+#include "blocks.hh"
+#include "editor/blocks_view.hh"
 #include "editor/lua_editor.hh"
 #include "ui/icons.h"
 #include "ui/theme.h"
@@ -57,6 +60,13 @@ struct ScriptTabs::Tab {
     double hoverSince = 0;
     int flashLine = -1;  // after go-to-definition
     double flashAt = 0;
+    // A .blocks file: the block editor shows it. The buffer keeps the file's
+    // text (saving, the dirty mark and changes on disk work as for Lua); each
+    // block edit, undo and redo is one buffer edit, so the buffer's undo
+    // steps keep pace with the block editor's.
+    std::unique_ptr<BlocksView> blocks;
+    uint64_t blocksRev = 0;     // the buffer revision the block editor shows
+    bool blocksSynced = false;  // false: the next sync starts its undo over
 };
 
 ScriptTabs::ScriptTabs() = default;
@@ -65,6 +75,66 @@ ScriptTabs::~ScriptTabs() = default;
 static std::string utf8(const std::filesystem::path& p) {
     std::u8string u = p.u8string();
     return std::string(u.begin(), u.end());
+}
+
+static bool isBlocksFile(const std::filesystem::path& p) { return p.extension() == ".blocks"; }
+
+// A block script's text; blank (a file not written yet) is an empty script.
+static std::optional<splash::BlockScript> readBlocks(const std::string& text, const std::string& name, std::string* error) {
+    if (text.find_first_not_of(" \t\r\n") == std::string::npos) return splash::BlockScript{};
+    try {
+        return splash::parseBlocks(text, name);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return std::nullopt;
+    }
+}
+
+// The block editor catches up with the buffer when something else changed
+// it (opened, reloaded, rewritten): one undo step there, as in the buffer.
+static void syncBlocks(ScriptTabs::Tab& t) {
+    lua::Buffer& b = t.script.buffer;
+    if (t.blocksSynced && b.revision() == t.blocksRev) return;
+    std::string err;
+    std::optional<splash::BlockScript> s = readBlocks(b.text(), t.script.title(), &err);
+    if (!s) {
+        t.blocks->error = err;
+    } else if (!t.blocksSynced || !t.blocks->error.empty()) {
+        t.blocks->error.clear();
+        t.blocks->reset(std::move(*s));
+    } else {
+        t.blocks->commit(std::move(*s));
+    }
+    t.blocksSynced = true;
+    t.blocksRev = b.revision();
+}
+
+static void replaceAll(lua::Buffer& b, const std::string& text) {
+    b.breakUndoMerge();
+    b.replace({0, 0}, {b.lineCount() - 1, (int)b.line(b.lineCount() - 1).size()}, text);
+    b.breakUndoMerge();
+    b.moveTo({0, 0});
+}
+
+// What the block editor did this frame, into the buffer: an edit replaces
+// the text, an undo or redo steps the buffer the same way (and writes the
+// text when the buffer's step was not the same one).
+static void applyBlocks(ScriptTabs::Tab& t, const BlocksView::Result& res) {
+    lua::Buffer& b = t.script.buffer;
+    for (const BlocksView::Result::Op& op : res.ops) {
+        if (op.kind == BlocksView::Result::Op::Edit) {
+            replaceAll(b, op.text);
+            continue;
+        }
+        const bool stepped = op.kind == BlocksView::Result::Op::Undo ? b.undo() : b.redo();
+        bool same = stepped && b.text() == op.text;
+        if (stepped && !same) {
+            std::optional<splash::BlockScript> now = readBlocks(b.text(), std::string(), nullptr);
+            same = now && *now == t.blocks->script();
+        }
+        if (!same) replaceAll(b, op.text);
+    }
+    t.blocksRev = b.revision();
 }
 
 bool ScriptTabs::open(const std::filesystem::path& file, std::string* error) {
@@ -82,7 +152,12 @@ bool ScriptTabs::open(const std::filesystem::path& file, std::string* error) {
     }
     auto t = std::make_unique<Tab>();
     if (!t->script.open(file, error)) return false;
-    t->script.diagnose();
+    if (isBlocksFile(file)) {
+        t->blocks = std::make_unique<BlocksView>();
+        syncBlocks(*t);
+    } else {
+        t->script.diagnose();
+    }
     t->focused = true;
     t->lastInput = ImGui::GetTime();
     for (auto& o : m_tabs) o->focused = false;
@@ -143,7 +218,8 @@ void ScriptTabs::reloadFromDisk() {
         const lua::Pos at = t->script.buffer.cursor();
         if (!t->script.open(t->script.path(), nullptr)) continue;
         t->script.buffer.moveTo(t->script.buffer.clamp(at));
-        t->script.diagnose();
+        if (t->blocks) t->blocksSynced = false;  // a fresh start, as the buffer's undo is
+        else t->script.diagnose();
     }
 }
 
@@ -158,7 +234,7 @@ int ScriptTabs::rewriteUnsaved(const std::vector<std::filesystem::path>& files,
     for (const auto& f : files) want.push_back(canon(f));
     int n = 0;
     for (auto& t : m_tabs) {
-        if (!t->script.dirty() || std::find(want.begin(), want.end(), canon(t->script.path())) == want.end()) continue;
+        if (t->blocks || !t->script.dirty() || std::find(want.begin(), want.end(), canon(t->script.path())) == want.end()) continue;
         lua::Buffer& b = t->script.buffer;
         const std::string before = b.text(), after = fn(before);
         if (after == before) continue;
@@ -167,6 +243,28 @@ int ScriptTabs::rewriteUnsaved(const std::vector<std::filesystem::path>& files,
         b.replace({0, 0}, {b.lineCount() - 1, (int)b.line(b.lineCount() - 1).size()}, after);
         b.breakUndoMerge();
         b.moveTo(b.clamp(at));
+        ++n;
+    }
+    return n;
+}
+
+int ScriptTabs::rewriteUnsavedBlocks(const std::vector<std::filesystem::path>& files,
+                                     const std::function<std::string(const std::string&)>& fn) {
+    auto canon = [](const std::filesystem::path& p) {
+        std::error_code ec;
+        std::filesystem::path c = std::filesystem::weakly_canonical(p, ec);
+        return ec ? p : c;
+    };
+    std::vector<std::filesystem::path> want;
+    for (const auto& f : files) want.push_back(canon(f));
+    int n = 0;
+    for (auto& t : m_tabs) {
+        if (!t->blocks || !t->script.dirty() || std::find(want.begin(), want.end(), canon(t->script.path())) == want.end()) continue;
+        syncBlocks(*t);
+        const std::string before = t->script.buffer.text(), after = fn(before);
+        if (after == before || !readBlocks(after, std::string(), nullptr)) continue;
+        replaceAll(t->script.buffer, after);
+        syncBlocks(*t);  // one step in the block editor too
         ++n;
     }
     return n;
@@ -301,7 +399,8 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         const bool scene = i < 0;  // Scene or UI: no close button
         std::string label = i == kScene ? std::string("Scene") : i == kUi ? std::string("UI") : m_tabs[i]->script.title();
         if (i >= 0 && m_tabs[i]->diskDeleted) label += " (deleted)";
-        const char* ic = i == kScene ? icon::box : i == kUi ? icon::layoutTemplate : icon::fileCode;
+        const bool blocksTab = i >= 0 && m_tabs[i]->blocks;
+        const char* ic = i == kScene ? icon::box : i == kUi ? icon::layoutTemplate : blocksTab ? icon::layers : icon::fileCode;
         const float iw = measure(f.medium, type::icon, ic).x, tw = measure(f.medium, type::label, label.c_str()).x;
         const float w = space::md + iw + space::sm - 2 + tw + (scene ? space::md : 28);
         ImRect tr(ImVec2(x, strip.Min.y + space::xs), ImVec2(x + w, strip.Max.y));
@@ -313,7 +412,7 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         else if (hit.hovered) dl->AddRectFilled(tr.Min, tr.Max, color::hover, radius::button, ImDrawFlags_RoundCornersTop);
         if (active) dl->AddRectFilled(ImVec2(tr.Min.x + 6, tr.Max.y - 2), ImVec2(tr.Max.x - 6, tr.Max.y), color::accent, 1);
         const float cy = tr.GetCenter().y;
-        ImU32 icol = i == kScene ? color::textDim : i == kUi ? rgb(0xf2c25c) : rgb(0x5ccfe0);
+        ImU32 icol = i == kScene ? color::textDim : i == kUi ? rgb(0xf2c25c) : blocksTab ? blocks::events : rgb(0x5ccfe0);
         dl->AddText(f.medium, type::icon, ImVec2(tr.Min.x + space::md, cy - type::icon * 0.5f - 1), icol, ic);
         dl->AddText(f.medium, type::label, ImVec2(tr.Min.x + space::md + iw + space::sm - 2, cy - type::label * 0.5f - 1),
                     active ? color::text : color::textDim, label.c_str());
@@ -611,6 +710,14 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
                 noticeBad = true;
             }
         }
+    }
+    if (t.blocks) {
+        syncBlocks(t);
+        const BlocksView::Result res = t.blocks->draw(dl, ImRect(area.Min, r.Max), &t.focused);
+        applyBlocks(t, res);
+        if (res.save) saveTab(*this, t, &m_saved);
+        ImGui::PopID();
+        return;
     }
     int digits = 3;
     for (int n = b.lineCount(); n >= 1000; n /= 10) ++digits;

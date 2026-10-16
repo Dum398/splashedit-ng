@@ -495,6 +495,17 @@ The editor prints `scripttabs: active <tab>` each time a click brings a tab to t
 
     python3 scripttabscheck.py <splashedit>
 
+`blockseditorcheck.py` drives the block editor on copies of the courtyard example whose Game Logic runs
+an empty block script (`blocks/editor/empty.blocks`): Edit script opens it in a blocks tab, "on_interact"
+is dragged from the palette onto the canvas and "hide" (after the Objects chip) under it, where it must
+snap; its field is typed to "Door" and Ctrl+S saves. The file must read exactly as the expected JSON and
+`splashpack-cli blocks` must make the expected Lua. Then Ctrl+Z / Ctrl+Y, undoing back to the empty
+script, Delete on a selected block, and a drop away from the hat that must make a second stack. Blocks
+are aimed at by name (`@blocks.palette.<op>`, `@blocks.block.<path>`, `@blocks.field.<path>`); a first
+run reads where they are drawn. Needs a display.
+
+    python3 blockseditorcheck.py <splashedit> [<splashpack-cli>]
+
 `compfieldscheck.py` drives the object inspector's component rows on copies of the courtyard example
 (components are added to the copied scene before launch): Interactable Button (picked from its menu),
 Repeatable, Cooldown, Show prompt and Prompt canvas; Player Sprint speed, Gravity, Step height, Max

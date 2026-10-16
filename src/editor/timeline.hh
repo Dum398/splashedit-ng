@@ -141,6 +141,12 @@ std::string seqNameProblem(const Document& doc, SeqRef ref, const std::string& n
 // long-bracket, held in tables or assigned in table constructors are left alone.
 std::string renameSeqInLua(const std::string& lua, SeqKind kind, const std::string& from, const std::string& to,
                            int* count = nullptr);
+// The same for a block script (.blocks): every play_cutscene block whose
+// field is `from` gets `to` (a cutscene rename; animations have no block),
+// written back with saveBlocks. Text that is not a block script, or names
+// nothing, comes back as it was with `count` 0.
+std::string renameSeqInBlocks(const std::string& text, SeqKind kind, const std::string& from, const std::string& to,
+                              int* count = nullptr);
 // The scripts the scene exports, project relative: object scripts, trigger
 // scripts and the scene script, each once.
 std::vector<std::string> sceneScripts(const Document& doc);
@@ -154,7 +160,7 @@ struct ScriptRenames {
     std::vector<std::string> leftovers;
 };
 // Refused (no step) when seqNameProblem() says so or the name is unchanged.
-// Also rewrites the sequence's name in sceneScripts() (renameSeqInLua) on
+// Also rewrites the sequence's name in sceneScripts() (renameSeqInLua; renameSeqInBlocks for a .blocks) on
 // disk, in the same undo step: undo and redo write each file back only when
 // it still holds what the step left there, so a file edited since is left
 // alone. `scripts` gets what was rewritten.

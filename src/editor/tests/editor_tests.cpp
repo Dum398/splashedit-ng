@@ -27,6 +27,7 @@
 #endif
 
 #include "editor/asset_browser.hh"
+#include "editor/blocks_edit.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/hardware.hh"
@@ -1832,6 +1833,350 @@ void testBlocks() {
         }
     }
     CHECK(generated.size() >= 50 && compiled == int(generated.size()));
+}
+
+// The block editor's model: where blocks sit, what a point hits, the edits
+// and the kind rules they keep, undo, new blocks' defaults. Text is 7 px a
+// character here.
+float blkWidth(std::string_view s) { return 7.0f * float(s.size()); }
+bool blkInside(const editor::blk::Rect& a, const editor::blk::Rect& b) {
+    return a.x0 >= b.x0 && a.y0 >= b.y0 && a.x1 <= b.x1 && a.y1 <= b.y1;
+}
+// on interact: hide Door; if not opened then show self, stop; move self by 1 2 3. Then a loose log "hi".
+splash::BlockScript blkDoor() {
+    splash::BlockScript s = blockScript({{"opened", "false"}},
+                                        {{blk("on_interact"), blk("hide", "Door"),
+                                          blk("if", "", {blk("not", "", {bvar("opened")})}, {{blk("show", "self"), blk("stop")}}),
+                                          blk("move_by", "self", {bnum("1"), bnum("2"), bnum("3")})}});
+    s.stacks[0].x = 40;
+    s.stacks[0].y = 30;
+    s.stacks.push_back({300, 50, {blk("log", "", {blk("text", "hi")})}});
+    return s;
+}
+
+void testBlocksLayout() {
+    namespace eb = editor::blk;
+    const eb::Metrics m;
+    const splash::BlockScript s = blkDoor();
+    const eb::Layout l = eb::layout(s, blkWidth, m);
+    auto box = [&](const char* p) { return l.find(eb::parsePath(p)); };
+    const eb::BlockBox *hat = box("s0.b0"), *hide = box("s0.b1"), *iff = box("s0.b2"), *move = box("s0.b3");
+    CHECK(hat && hide && iff && move);
+    if (!hat || !hide || !iff || !move) return;
+    // A stack's blocks one under another from the stack's corner.
+    CHECK(hat->rect.x0 == 40 && hat->rect.y0 == 30 && hat->rect.h() == m.row + m.hatTop && hide->rect.h() == m.row);
+    CHECK(hide->rect.x0 == 40 && hide->rect.y0 == hat->rect.y1 && iff->rect.y0 == hide->rect.y1 && move->rect.y0 == iff->rect.y1);
+    CHECK(l.stacks.size() == 2 && l.stacks[0].hat && !l.stacks[1].hat && l.stacks[0].bottomX == 40 &&
+          l.stacks[0].bottomY == move->rect.y1 && l.stacks[1].rect.x0 == 300 && l.stacks[1].rect.y0 == 50);
+    CHECK(eb::stackSize(s.stacks[0], blkWidth, m).second == move->rect.y1 - 30);
+    // A C block's mouth under its header row, indented; its blocks fill it; the arm under it.
+    CHECK(iff->mouths.size() == 1);
+    const eb::Rect mouth = iff->mouths.empty() ? eb::Rect{} : iff->mouths[0];
+    const eb::BlockBox *show = box("s0.b2.d0.b0"), *stop = box("s0.b2.d0.b1");
+    CHECK(show && stop && !iff->parts.empty());
+    if (!show || !stop || iff->parts.empty()) return;
+    CHECK(mouth.x0 == 40 + m.mouthIndent && mouth.y0 == iff->parts[0].y1 && mouth.y0 > iff->rect.y0);
+    CHECK(show->rect.x0 == mouth.x0 && show->rect.y0 == mouth.y0 && stop->rect.y0 == show->rect.y1 && mouth.y1 == stop->rect.y1);
+    CHECK(iff->rect.y1 == mouth.y1 + m.arm && iff->parts.back().y0 == mouth.y1);
+    // An empty mouth still has room; if_else has two, the second under the else row.
+    splash::BlockScript e;
+    e.stacks.push_back({0, 0, {eb::newBlock("if_else")}});
+    const eb::Layout el = eb::layout(e, blkWidth, m);
+    const eb::BlockBox* ie = el.find(eb::parsePath("s0.b0"));
+    CHECK(ie && ie->mouths.size() == 2 && ie->mouths[0].h() == m.mouthMin && ie->mouths[1].y0 == ie->mouths[0].y1 + m.row &&
+          ie->pieces.back().text == "else" && ie->pieces.back().rect.y0 >= ie->mouths[0].y1);
+    // Inputs sit inside their block, left to right; a reporter in one is laid out in its rect.
+    CHECK(move->slots.size() == 3);
+    bool slotsOk = move->slots.size() == 3;
+    for (size_t i = 0; slotsOk && i < 3; i++) {
+        const eb::BlockBox* lit = l.find(eb::parsePath("s0.b3").then('a', int(i)));
+        slotsOk = blkInside(move->slots[i], move->rect) && lit && lit->rect == move->slots[i] && (i == 0 || move->slots[i - 1].x1 < move->slots[i].x0);
+    }
+    CHECK(slotsOk);
+    const eb::BlockBox *no = box("s0.b2.a0"), *opened = box("s0.b2.a0.a0");
+    CHECK(no && opened && !iff->slots.empty() && no->rect == iff->slots[0] && blkInside(no->rect, iff->parts[0]) &&
+          blkInside(opened->rect, no->rect) && no->depth == 1 && opened->depth == 2);
+    // A field's well fits its text and sits in its block.
+    CHECK(hide->hasField && hide->field.w() == 4 * 7 + 2 * m.wellPad && hide->field.h() == m.slotH && blkInside(hide->field, hide->rect));
+    // Parents come before what they hold.
+    auto order = [&](const eb::BlockBox* b) { return b - l.blocks.data(); };
+    CHECK(order(iff) < order(no) && order(no) < order(opened) && order(iff) < order(show));
+    // An empty field shows what goes there.
+    splash::BlockScript ph;
+    ph.stacks.push_back({0, 0, {blk("play_sound")}});
+    const eb::Layout pl = eb::layout(ph, blkWidth, m);
+    CHECK(pl.blocks.size() == 1 && pl.blocks[0].pieces.size() == 2 && pl.blocks[0].pieces[1].placeholder &&
+          pl.blocks[0].pieces[1].text == "sound");
+    // Paths, as control names spell them.
+    CHECK(eb::parsePath("s0.b2.d0.b1").str() == "s0.b2.d0.b1" && eb::parsePath("s12.b3.a1").stack == 12);
+    CHECK(eb::parsePath("s0.x1").empty() && eb::parsePath("b1").empty() && eb::parsePath("s0.b").empty());
+    CHECK(eb::parsePath("s0.b2.d0.b1").parent().str() == "s0.b2" && eb::parsePath("s0.b1.a0").parent().str() == "s0.b1" &&
+          eb::parsePath("s0.b1").parent().empty());
+}
+
+void testBlocksHitTest() {
+    namespace eb = editor::blk;
+    splash::BlockScript s = blkDoor();
+    s.stacks.push_back({600, 40, {eb::newBlock("if")}});
+    const eb::Layout l = eb::layout(s, blkWidth);
+    auto box = [&](const char* p) { return l.find(eb::parsePath(p)); };
+    auto at = [&](float x, float y) {
+        const eb::Hit h = eb::hitTest(l, x, y);
+        return std::to_string(int(h.kind)) + ":" + (h.path.empty() ? "-" : h.path.str()) + ":" + std::to_string(h.slot);
+    };
+    const eb::BlockBox *hide = box("s0.b1"), *iff = box("s0.b2"), *move = box("s0.b3"), *show = box("s0.b2.d0.b0"),
+                        *opened = box("s0.b2.a0.a0"), *no = box("s0.b2.a0"), *empty = box("s2.b0");
+    CHECK(hide && iff && move && show && opened && no && empty);
+    if (!hide || !iff || !move || !show || !opened || !no || !empty) return;
+    const float hy = (hide->rect.y0 + hide->rect.y1) * 0.5f;
+    CHECK(at(hide->rect.x0 + 3, hy) == "1:s0.b1:-1");                            // the block
+    CHECK(at(hide->field.x0 + 2, hide->field.y0 + 2) == "3:s0.b1:-1");          // its field
+    CHECK(at(move->slots[1].x0 + 2, move->slots[1].y0 + 2) == "3:s0.b3.a1:-1"); // a literal in an input: its field
+    CHECK(at(opened->field.x0 + 1, opened->field.y0 + 1) == "3:s0.b2.a0.a0:-1");  // innermost: the variable's field
+    CHECK(at(no->rect.x0 + 3, (no->rect.y0 + no->rect.y1) * 0.5f) == "1:s0.b2.a0:-1");
+    CHECK(at(show->rect.x0 + 2, show->rect.y0 + 2) == "1:s0.b2.d0.b0:-1");      // a body block, not its C block
+    CHECK(at(iff->rect.x0 + 2, show->rect.y0 + 2) == "1:s0.b2:-1");             // the C block's arm
+    CHECK(show->rect.x1 + 2 < iff->mouths[0].x1);
+    CHECK(at(show->rect.x1 + 1, show->rect.y0 + 2) == "0:-:-1");                // the mouth past the body: nothing
+    CHECK(at(empty->slots[0].x0 + 2, empty->slots[0].y0 + 2) == "2:s2.b0:0");   // an empty input
+    CHECK(at(5, 5) == "0:-:-1");
+}
+
+void testBlocksEdits() {
+    namespace eb = editor::blk;
+    using T = eb::Target;
+    const splash::BlockScript s = blkDoor();
+    auto P = [](const char* p) { return eb::parsePath(p); };
+    auto frag = [](std::vector<splash::Block> bs) { return splash::BlockStack{0, 0, std::move(bs)}; };
+    // Take: the block and every block under it.
+    std::optional<eb::Taken> t = eb::takeStack(s, P("s0.b2"));
+    CHECK(t && t->fragment.blocks.size() == 2 && t->fragment.blocks[0].op == "if" && t->fragment.blocks[1].op == "move_by" &&
+          t->rest.stacks.size() == 2 && t->rest.stacks[0].blocks.size() == 2 && t->rest.stacks[0].blocks[1].op == "hide");
+    t = eb::takeStack(s, P("s0.b2.d0.b1"));
+    CHECK(t && t->fragment.blocks.size() == 1 && t->fragment.blocks[0].op == "stop" && t->rest.stacks[0].blocks[2].bodies[0].size() == 1);
+    // The first block takes its stack; the stacks after move up.
+    t = eb::takeStack(s, P("s0.b0"));
+    CHECK(t && t->fragment.blocks.size() == 4 && t->rest.stacks.size() == 1 && t->rest.stacks[0].blocks[0].op == "log");
+    // A reporter out of an input leaves the input empty.
+    t = eb::takeStack(s, P("s0.b2.a0"));
+    CHECK(t && t->fragment.blocks.size() == 1 && t->fragment.blocks[0].op == "not" && t->rest.stacks[0].blocks[2].args.size() == 1 &&
+          t->rest.stacks[0].blocks[2].args[0] == splash::Block{});
+    CHECK(!eb::takeStack(s, P("s0.b9")) && !eb::takeStack(s, P("s5.b0")) && !eb::takeStack(s, P("s0.b2.d0")));
+    std::optional<splash::BlockScript> d = eb::deleteFragment(s, P("s0.b1"));
+    CHECK(d && d->stacks[0].blocks.size() == 1 && d->stacks[0].blocks[0].op == "on_interact");
+
+    // Drops.
+    const splash::BlockStack hide = frag({blk("hide", "Crate")});
+    eb::Path placed;
+    d = eb::dropStack(s, hide, {T::After, P("s0.b0")}, &placed);
+    CHECK(d && d->stacks[0].blocks.size() == 5 && d->stacks[0].blocks[1].field == "Crate" && d->stacks[0].blocks[2].field == "Door" &&
+          placed.str() == "s0.b1");
+    d = eb::dropStack(s, hide, {T::BodyTop, P("s0.b2"), 0}, &placed);
+    CHECK(d && d->stacks[0].blocks[2].bodies[0].size() == 3 && d->stacks[0].blocks[2].bodies[0][0].field == "Crate" &&
+          placed.str() == "s0.b2.d0.b0");
+    d = eb::dropStack(s, hide, {T::Canvas, {}, 0, 500, 420}, &placed);
+    CHECK(d && d->stacks.size() == 3 && d->stacks[2].x == 500 && d->stacks[2].y == 420 && placed.str() == "s2.b0");
+    d = eb::dropStack(s, hide, {T::StackTop, P("s1"), 0, 300, 18}, &placed);
+    CHECK(d && d->stacks[1].blocks.size() == 2 && d->stacks[1].blocks[0].op == "hide" && d->stacks[1].y == 18 && placed.str() == "s1.b0");
+    // A hat over a loose stack makes it run.
+    d = eb::dropStack(s, frag({blk("on_create")}), {T::StackTop, P("s1"), 0, 300, 6});
+    CHECK(d && d->stacks[1].blocks[0].op == "on_create" && splash::blocksToLua(*d).lua.find("Debug.Log(\"hi\")") != std::string::npos);
+    // A reporter into an input: a literal there gives way, any other reporter pops out.
+    d = eb::dropStack(s, frag({blk("add", "", {bnum("1"), bnum("2")})}), {T::Slot, P("s0.b3"), 0, 10, 10}, &placed);
+    CHECK(d && d->stacks.size() == 2 && d->stacks[0].blocks[3].args[0].op == "add" && placed.str() == "s0.b3.a0");
+    d = eb::dropReporter(s, blk("eq", "", {bnum("1"), bnum("1")}), P("s0.b2"), 0, 77, 88);
+    CHECK(d && d->stacks.size() == 3 && d->stacks[0].blocks[2].args[0].op == "eq" && d->stacks[2].blocks.size() == 1 &&
+          d->stacks[2].blocks[0].op == "not" && d->stacks[2].blocks[0].args[0].field == "opened" && d->stacks[2].x == 77 &&
+          d->stacks[2].y == 88);
+    // An empty input is filled.
+    t = eb::takeStack(s, P("s0.b2.a0"));
+    d = t ? eb::dropStack(t->rest, t->fragment, {T::Slot, P("s0.b2"), 0, 0, 0}) : std::nullopt;
+    CHECK(d && *d == s);
+
+    // The kind rules.
+    const splash::BlockStack hat = frag({blk("on_create")}), rep = frag({bvar("opened")}), boolean = frag({blk("bool", "true")});
+    const splash::BlockStack stop = frag({blk("stop")});
+    CHECK(eb::canDrop(s, hat, {T::Canvas, {}, 0, 0, 0}));
+    CHECK(!eb::canDrop(s, hat, {T::After, P("s0.b1")}) && !eb::canDrop(s, hat, {T::BodyTop, P("s0.b2"), 0}));
+    CHECK(!eb::canDrop(s, hat, {T::StackTop, P("s0")}));  // that stack has a hat
+    CHECK(eb::canDrop(s, hat, {T::StackTop, P("s1")}));
+    CHECK(!eb::dropStack(s, hat, {T::After, P("s0.b0")}));
+    CHECK(!eb::canDrop(s, hide, {T::Slot, P("s0.b3"), 0}));                                  // a statement is no input
+    CHECK(!eb::canDrop(s, rep, {T::After, P("s0.b1")}) && !eb::canDrop(s, rep, {T::BodyTop, P("s0.b2"), 0}));
+    CHECK(!eb::canDrop(s, rep, {T::StackTop, P("s1")}) && eb::canDrop(s, rep, {T::Canvas, {}, 0, 0, 0}));
+    CHECK(!eb::canDrop(s, rep, {T::Slot, P("s0.b2"), 0}) && eb::canDrop(s, boolean, {T::Slot, P("s0.b2"), 0}));  // a condition
+    CHECK(eb::canDrop(s, rep, {T::Slot, P("s0.b3"), 2}) && !eb::canDrop(s, rep, {T::Slot, P("s0.b3"), 3}));
+    CHECK(!eb::canDrop(s, hide, {T::After, P("s0.b2.d0.b1")}));                              // nothing under a stop
+    CHECK(!eb::canDrop(s, stop, {T::After, P("s0.b1")}) && eb::canDrop(s, stop, {T::After, P("s0.b3")}));
+    CHECK(!eb::canDrop(s, stop, {T::BodyTop, P("s0.b2"), 0}) && !eb::canDrop(s, stop, {T::StackTop, P("s1")}));
+    CHECK(!eb::canDrop(s, hide, {T::After, P("s0.b3.a0")}));                                 // in an input, not a list
+    CHECK(!eb::canDrop(s, hide, {T::BodyTop, P("s0.b1"), 0}) && !eb::canDrop(s, hide, {T::BodyTop, P("s0.b2"), 1}));
+    splash::BlockScript loose = s;
+    loose.stacks.push_back({0, 400, {bnum("5")}});
+    CHECK(!eb::canDrop(loose, hide, {T::After, P("s2.b0")}) && !eb::canDrop(loose, hide, {T::StackTop, P("s2")}));
+    CHECK(!eb::canDrop(s, frag({}), {T::Canvas, {}, 0, 0, 0}) && !eb::canDrop(s, hide, T{}));
+
+    // Fields.
+    d = eb::setField(s, P("s0.b1"), "Crate");
+    CHECK(d && d->stacks[0].blocks[1].field == "Crate");
+    d = eb::setField(s, P("s0.b3.a2"), "9");
+    CHECK(d && d->stacks[0].blocks[3].args[2].field == "9");
+    CHECK(!eb::setField(s, P("s0.b2"), "x") && !eb::setField(s, P("s0.b7"), "x"));
+}
+
+void testBlocksSnap() {
+    namespace eb = editor::blk;
+    using T = eb::Target;
+    const eb::Metrics m;
+    const splash::BlockScript s = blkDoor();
+    const eb::Layout l = eb::layout(s, blkWidth, m);
+    const eb::BlockBox *hat = l.find(eb::parsePath("s0.b0")), *iff = l.find(eb::parsePath("s0.b2")),
+                        *move = l.find(eb::parsePath("s0.b3"));
+    CHECK(hat && iff && move);
+    if (!hat || !iff || !move) return;
+    const splash::BlockStack hide{0, 0, {blk("hide", "Crate")}};
+    auto near = [&](const splash::BlockStack& f, float x, float y) { return eb::findTarget(s, l, f, x, y, blkWidth, m); };
+    // Under the hat: near its bottom edge.
+    T t = near(hide, hat->rect.x0 + 6, hat->rect.y1 + 5);
+    CHECK(t.kind == T::After && t.path.str() == "s0.b0");
+    // Into the mouth, past the end of the stack, and too far from anything.
+    t = near(hide, iff->mouths[0].x0 + 3, iff->mouths[0].y0 + 2);
+    CHECK(t.kind == T::BodyTop && t.path.str() == "s0.b2" && t.index == 0);
+    t = near(hide, move->rect.x0 + 2, move->rect.y1 + 3);
+    CHECK(t.kind == T::After && t.path.str() == "s0.b3");
+    CHECK(near(hide, 900, 900).kind == T::None);
+    // Over the loose stack: the fragment's bottom at its top; the stack moves up to make room.
+    const float fh = eb::stackSize(hide, blkWidth, m).second;
+    t = near(hide, 302, 50 - fh - 4);
+    CHECK(t.kind == T::StackTop && t.path.str() == "s1" && t.x == 300 && t.y == 50 - fh);
+    // A hat snaps only over a loose stack.
+    const splash::BlockStack hat2{0, 0, {blk("on_create")}};
+    CHECK(near(hat2, hat->rect.x0, hat->rect.y1).kind == T::None);
+    const float hh = eb::stackSize(hat2, blkWidth, m).second;
+    t = near(hat2, 300, 50 - hh);
+    CHECK(t.kind == T::StackTop && t.path.str() == "s1");
+    // A reporter snaps to the input its left edge is at; a condition only takes a Boolean.
+    const splash::BlockStack var{0, 0, {bvar("opened")}}, cond{0, 0, {blk("bool", "true")}};
+    const eb::Rect& y = move->slots[1];
+    const float vh = eb::stackSize(var, blkWidth, m).second;
+    t = near(var, y.x0 + 2, (y.y0 + y.y1) * 0.5f - vh * 0.5f);
+    CHECK(t.kind == T::Slot && t.path.str() == "s0.b3" && t.index == 1);
+    const eb::Rect& c = iff->slots[0];
+    t = near(cond, c.x0, c.y0);
+    CHECK(t.kind == T::Slot && t.path.str() == "s0.b2" && t.index == 0);
+    CHECK(near(var, c.x0, c.y0).kind != T::Slot || near(var, c.x0, c.y0).path.str() != "s0.b2");
+    // The snap is what dropStack takes.
+    std::optional<splash::BlockScript> d = eb::dropStack(s, hide, near(hide, hat->rect.x0 + 6, hat->rect.y1 + 5));
+    CHECK(d && d->stacks[0].blocks[1].field == "Crate");
+}
+
+void testBlocksHistory() {
+    namespace eb = editor::blk;
+    const splash::BlockScript a = blkDoor();
+    const splash::BlockScript b = *eb::setField(a, eb::parsePath("s0.b1"), "Crate");
+    const splash::BlockScript c = *eb::deleteFragment(b, eb::parsePath("s1.b0"));
+    eb::History h(a);
+    CHECK(!h.canUndo() && !h.canRedo() && h.current() == a);
+    CHECK(!h.commit(a));  // nothing changed: no step
+    CHECK(h.commit(b) && h.commit(c) && h.current() == c && h.canUndo());
+    CHECK(h.undo() && h.current() == b && h.canRedo());
+    CHECK(h.undo() && h.current() == a && !h.undo() && h.current() == a);
+    CHECK(h.redo() && h.current() == b && h.redo() && h.current() == c && !h.redo());
+    CHECK(h.undo() && h.commit(a) && !h.canRedo() && h.current() == a);  // a new edit drops the redo
+    CHECK(h.undo() && h.current() == b);
+    h.reset(c);
+    CHECK(h.current() == c && !h.canUndo() && !h.canRedo());
+}
+
+void testBlocksNewBlock() {
+    namespace eb = editor::blk;
+    auto args = [](const splash::Block& b) {
+        std::string s;
+        for (const splash::Block& a : b.args) s += (s.empty() ? "" : ",") + (a.op.empty() ? std::string("_") : a.op + "=" + a.field);
+        return s;
+    };
+    CHECK(args(eb::newBlock("move_by")) == "number=0,number=0,number=0" && eb::newBlock("move_by").field == "self");
+    CHECK(args(eb::newBlock("go_to")) == "number=0,number=0,number=0");
+    CHECK(args(eb::newBlock("set_var")) == "number=0" && eb::newBlock("set_var").field.empty());
+    CHECK(args(eb::newBlock("change_var")) == "number=1");
+    CHECK(args(eb::newBlock("repeat")) == "number=10" && eb::newBlock("repeat").bodies.size() == 1);
+    CHECK(args(eb::newBlock("random")) == "number=1,number=10" && args(eb::newBlock("add")) == "number=0,number=0");
+    CHECK(args(eb::newBlock("log")) == "text=" && args(eb::newBlock("join")) == "text=,text=" && args(eb::newBlock("load_scene")) == "text=");
+    CHECK(args(eb::newBlock("if")) == "_" && eb::newBlock("if").bodies.size() == 1 && eb::newBlock("if_else").bodies.size() == 2);
+    CHECK(args(eb::newBlock("and")) == "_,_" && args(eb::newBlock("not")) == "_" && args(eb::newBlock("while")) == "_");
+    CHECK(args(eb::newBlock("eq")) == "number=0,number=0");
+    CHECK(eb::newBlock("on_button_press").field == "CROSS" && eb::newBlock("bool").field == "true" && eb::newBlock("number").field == "0");
+    CHECK(eb::newBlock("hide").args.empty() && eb::newBlock("hide").bodies.empty() && eb::newBlock("fly").op == "fly");
+    // Every block fits the catalogue, and the statements that need no choice make Lua as they come.
+    bool shapes = true;
+    for (const splash::BlockSpec& sp : splash::blockCatalogue()) {
+        const splash::Block b = eb::newBlock(sp.op);
+        shapes = shapes && b.args.size() == size_t(sp.args) && b.bodies.size() == size_t(sp.bodies);
+    }
+    CHECK(shapes);
+    const splash::LuaGen g = splash::blocksToLua(blockScript({}, {{eb::newBlock("on_create"), eb::newBlock("move_by"),
+                                                                   eb::newBlock("repeat"), eb::newBlock("log")}}));
+    CHECK(g.errors.empty() && g.lua.find("Debug.Log(\"\")") != std::string::npos);
+    // The palette's categories, every block in one of them.
+    CHECK(splash::blockCategories().size() == 8 && splash::blockCategories().front() == "Events" &&
+          splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories().back() == "Debug");
+    bool cats = true;
+    for (const splash::BlockSpec& sp : splash::blockCatalogue())
+        cats = cats && std::find(splash::blockCategories().begin(), splash::blockCategories().end(), sp.category) != splash::blockCategories().end() &&
+               ((sp.kind == splash::BlockKind::Hat) == (sp.category == "Events"));
+    CHECK(cats && splash::findBlockSpec("hide")->category == "Objects" && splash::findBlockSpec("join")->category == "Operators");
+}
+
+void testSeqRenameBlocks() {
+    using editor::SeqKind;
+    const splash::BlockScript s = blockScript(
+        {}, {{blk("on_interact"), blk("play_cutscene", "intro"), blk("if", "", {blk("bool", "true")}, {{blk("play_cutscene", "intro")}}),
+              blk("play_cutscene", "outro"), blk("log", "", {blk("text", "intro")})}});
+    const std::string text = splash::saveBlocks(s);
+    int n = -1;
+    const std::string out = editor::renameSeqInBlocks(text, SeqKind::Cutscene, "intro", "opening", &n);
+    splash::BlockScript want = s;
+    want.stacks[0].blocks[1].field = "opening";
+    want.stacks[0].blocks[2].bodies[0][0].field = "opening";
+    CHECK(n == 2 && out == splash::saveBlocks(want));  // the text block that says "intro" is no cutscene
+    // Animations have no block; nothing named: the text as it was, byte for byte.
+    CHECK(editor::renameSeqInBlocks(text, SeqKind::Animation, "intro", "opening", &n) == text && n == 0);
+    const std::string compact = "{\"format\":\"splashedit-blocks\",\"version\":1,\"stacks\":[{\"blocks\":[{\"op\":\"on_create\"}]}]}";
+    CHECK(editor::renameSeqInBlocks(compact, SeqKind::Cutscene, "intro", "opening", &n) == compact && n == 0);
+    // Not a block script: left alone.
+    CHECK(editor::renameSeqInBlocks("{", SeqKind::Cutscene, "intro", "opening", &n) == "{" && n == 0);
+    CHECK(editor::renameSeqInBlocks("Cutscene.Play(\"intro\")", SeqKind::Cutscene, "intro", "opening", &n) == "Cutscene.Play(\"intro\")" && n == 0);
+
+    // renameSequence sends a .blocks scene script through it, on disk and in its undo.
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "seq_rename_blocks";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    auto get = [&](const char* p) {
+        std::ifstream in(dir / p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    std::ofstream(dir / "scripts/door.blocks", std::ios::binary) << text;
+    std::ofstream(dir / "scripts/bad.blocks", std::ios::binary) << "{ \"intro\"";
+    splash::Scene sc;
+    splash::Object door, bad;
+    door.name = "Door";
+    door.script = splash::ScriptComponent{"scripts/door.blocks", {}};
+    bad.name = "Bad";
+    bad.script = splash::ScriptComponent{"scripts/bad.blocks", {}};
+    sc.objects = {door, bad};
+    splash::Cutscene c;
+    c.name = "intro";
+    sc.cutscenes.push_back(c);
+    editor::Document d;
+    d.reset(sc, dir, "s");
+    editor::ScriptRenames sr;
+    CHECK(editor::renameSequence(d, {SeqKind::Cutscene, 0}, "opening", &sr));
+    CHECK(sr.refs == 2 && (sr.files == std::vector<std::string>{"scripts/door.blocks"}) && sr.leftovers.empty() && sr.failed.empty());
+    CHECK(get("scripts/door.blocks") == splash::saveBlocks(want) && get("scripts/bad.blocks") == "{ \"intro\"");
+    CHECK(d.undo() && get("scripts/door.blocks") == text);
+    fs::remove_all(dir, ec);
 }
 
 // New script: the file name from the object's or scene's name, numbered
@@ -8464,6 +8809,13 @@ int main(int argc, char** argv) {
     testAdoptAsset();
     testNewScript();
     testBlocks();
+    testBlocksLayout();
+    testBlocksHitTest();
+    testBlocksEdits();
+    testBlocksSnap();
+    testBlocksHistory();
+    testBlocksNewBlock();
+    testSeqRenameBlocks();
     testPlaceModel();
     testPlaceSkinnedModel();
     testImportSettings();

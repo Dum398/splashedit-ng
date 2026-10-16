@@ -60,6 +60,23 @@ constexpr ImU32 match = rgb(0xf0a43a, 50);
 constexpr ImU32 scope = rgb(0x5ccfe0, 16);  // the range find-in-selection searches
 }  // namespace code
 
+// The block editor: a colour per palette category (blockCategories()
+// order), the text on a block and the canvas grid.
+namespace blocks {
+constexpr ImU32 events = rgb(0xc98a2e);
+constexpr ImU32 control = rgb(0xc4673e);
+constexpr ImU32 objects = rgb(0x3f7dcc);
+constexpr ImU32 sound = rgb(0x9560cc);
+constexpr ImU32 variables = rgb(0xc25469);
+constexpr ImU32 operators = rgb(0x3d9a66);
+constexpr ImU32 input = rgb(0x2c95a8);
+constexpr ImU32 debug = rgb(0x687084);
+constexpr ImU32 text = rgb(0xffffff);
+constexpr ImU32 seam = rgb(0x000000, 70);     // a block's bottom edge
+constexpr ImU32 shadow = rgb(0x000000, 60);   // under a stack
+constexpr ImU32 grid = rgb(0xffffff, 12);     // the canvas dots
+}  // namespace blocks
+
 // 4 px grid.
 namespace space {
 constexpr float xxs = 2, xs = 4, sm = 8, md = 12, lg = 16, xl = 24;

@@ -11,6 +11,7 @@
 #include <set>
 #include <span>
 
+#include "blocks.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
 #include "editor/lua_editor.hh"
@@ -728,6 +729,44 @@ std::string renameSeqInLua(const std::string& s, SeqKind kind, const std::string
     return out;
 }
 
+namespace {
+
+void renameCutscenes(std::vector<splash::Block>& list, const std::string& from, const std::string& to, int* n);
+
+void renameCutscenes(splash::Block& b, const std::string& from, const std::string& to, int* n) {
+    if (b.op == "play_cutscene" && b.field == from) {
+        b.field = to;
+        ++*n;
+    }
+    for (splash::Block& a : b.args) renameCutscenes(a, from, to, n);
+    for (std::vector<splash::Block>& body : b.bodies) renameCutscenes(body, from, to, n);
+}
+
+void renameCutscenes(std::vector<splash::Block>& list, const std::string& from, const std::string& to, int* n) {
+    for (splash::Block& b : list) renameCutscenes(b, from, to, n);
+}
+
+}  // namespace
+
+std::string renameSeqInBlocks(const std::string& text, SeqKind kind, const std::string& from, const std::string& to, int* count) {
+    int n = 0;
+    if (count) *count = 0;
+    // Animations have no block; only play_cutscene names a sequence.
+    if (kind != SeqKind::Cutscene) return text;
+    splash::BlockScript script;
+    try {
+        script = splash::parseBlocks(text, "");
+    } catch (const std::exception&) {
+        return text;
+    }
+    for (splash::BlockStack& st : script.stacks) renameCutscenes(st.blocks, from, to, &n);
+    if (count) *count = n;
+    return n ? splash::saveBlocks(script) : text;
+}
+
+// A block script goes through renameSeqInBlocks, anything else is Lua.
+static bool isBlocks(const std::string& path) { return std::filesystem::path(path).extension() == ".blocks"; }
+
 std::vector<std::string> sceneScripts(const Document& doc) {
     std::vector<std::string> out;
     collectScripts(doc.scene().objects, out);
@@ -760,7 +799,8 @@ bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRe
             }
             scanned.emplace_back(p, *text);
             int n = 0;
-            std::string after = renameSeqInLua(*text, ref.kind, old, name, &n);
+            std::string after = isBlocks(p) ? renameSeqInBlocks(*text, ref.kind, old, name, &n)
+                                            : renameSeqInLua(*text, ref.kind, old, name, &n);
             if (!n) continue;
             refs[p] = n;
             written[p] = after;
@@ -778,6 +818,7 @@ bool renameSequence(Document& doc, SeqRef ref, const std::string& name, ScriptRe
     // literals that name the other kind of sequence.
     const SeqKind other = ref.kind == SeqKind::Cutscene ? SeqKind::Animation : SeqKind::Cutscene;
     for (const auto& [p, before] : scanned) {
+        if (isBlocks(p)) continue;  // a block names a cutscene in its field, never in a loose literal
         const bool now = std::find(raw->written.begin(), raw->written.end(), p) != raw->written.end();
         const std::string& text = now ? written[p] : before;
         for (int line : literalLines(text, old, seqLiterals(text, other, old)))

@@ -125,7 +125,8 @@ struct MenuItem {
 };
 
 // A themed popup menu of `items` (open, sized and placed by the caller).
-std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h) {
+// With a `name`, scripted checks find each row as <name>/<label>.
+std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h, const char* name = nullptr) {
     Fonts& f = fonts();
     const float pad = space::xs, rowH = size::field + 4, sepH = 9;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -144,6 +145,7 @@ std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, floa
         } else {
             ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
             Hit hit = interact("item", ir);
+            if (name) nameRect(std::string(name) + "/" + e.label, ir);
             const bool on = e.enabled && hit.hover > 0;
             if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
             const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
@@ -930,7 +932,7 @@ void AssetBrowser::menu(editor::Document& doc) {
                                                  ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(2);
     if (!shown) return;
-    std::function<void()> run = menuRows(items, w, h);
+    std::function<void()> run = menuRows(items, w, h, "assets.menu");
     if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
     if (run) run();

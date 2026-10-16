@@ -101,14 +101,21 @@ void tooltip(const char* t) {
     dl->AddText(f.regular, type::label, ImVec2(std::floor(tp.x), std::floor(tp.y)), color::text, t, nullptr, wrap);
 }
 
+float buttonWidth(const char* ic, const char* label) {
+    Fonts& f = fonts();
+    const float iconW = ic ? measure(f.medium, type::icon, ic).x : 0;
+    const float labelW = label ? measure(f.medium, type::body, label).x : 0;
+    return space::md * 2 + iconW + ((ic && label) ? space::sm - 2 : 0) + labelW;
+}
+
 bool button(const char* id, ImVec2 pos, const char* ic, const char* label, ButtonKind kind, float* outWidth, const char* tip) {
     Fonts& f = fonts();
     float iconW = ic ? measure(f.medium, type::icon, ic).x : 0;
-    float labelW = label ? measure(f.medium, type::body, label).x : 0;
     float gap = (ic && label) ? space::sm - 2 : 0;
-    float w = space::md * 2 + iconW + gap + labelW;
+    float w = buttonWidth(ic, label);
     ImRect r(pos, pos + ImVec2(w, size::field + 6));
     Hit h = interact(id, r);
+    nameRect(id, r);  // --click @id
     if (tip) tooltip(tip);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 

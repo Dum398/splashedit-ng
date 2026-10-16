@@ -9,6 +9,7 @@
 #include <set>
 
 #include "editor/document.hh"
+#include "editor/project.hh"
 #include "gl.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
@@ -124,7 +125,8 @@ struct MenuItem {
 };
 
 // A themed popup menu of `items` (open, sized and placed by the caller).
-std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h) {
+// With a `name`, scripted checks find each row as <name>/<label>.
+std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h, const char* name = nullptr) {
     Fonts& f = fonts();
     const float pad = space::xs, rowH = size::field + 4, sepH = 9;
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -143,6 +145,7 @@ std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, floa
         } else {
             ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
             Hit hit = interact("item", ir);
+            if (name) nameRect(std::string(name) + "/" + e.label, ir);
             const bool on = e.enabled && hit.hover > 0;
             if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
             const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
@@ -888,6 +891,26 @@ void AssetBrowser::menu(editor::Document& doc) {
                              m_renaming = rel;
                              m_renameStart = true;
                          }});
+        // A script here, with the starter an object's script gets, renamed straight away.
+        auto newScript = [this, &doc, project, folder](editor::ScriptLanguage lang) {
+            const std::string text = lang == editor::ScriptLanguage::Blocks
+                                         ? editor::blocksTemplate(editor::ScriptKind::Object)
+                                         : editor::scriptTemplate("New Script", editor::ScriptKind::Object);
+            const editor::NewScript ns = editor::writeNewScript(project, folder, "new_script", lang, text);
+            if (!ns.error.empty()) {
+                notice("Could not create a script: " + ns.error, true);
+                return;
+            }
+            m_index.scan(project);
+            m_refs.update(m_index, doc.scene(), m_openScene, doc.revision());
+            m_selected = ns.path;
+            m_renaming = ns.path;
+            m_renameStart = true;
+        };
+        items.push_back({"New blocks script", "", m_query.empty() && !m_types,
+                         [newScript] { newScript(editor::ScriptLanguage::Blocks); }});
+        items.push_back({"New Lua script", "", m_query.empty() && !m_types,
+                         [newScript] { newScript(editor::ScriptLanguage::Lua); }});
         items.push_back({"Reveal in file manager", "", true, [project, folder] {
                              SDL_OpenURL(editor::fileUrl(absPath(project, folder)).c_str());
                          }});
@@ -909,7 +932,7 @@ void AssetBrowser::menu(editor::Document& doc) {
                                                  ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(2);
     if (!shown) return;
-    std::function<void()> run = menuRows(items, w, h);
+    std::function<void()> run = menuRows(items, w, h, "assets.menu");
     if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
     if (run) run();

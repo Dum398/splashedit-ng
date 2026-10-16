@@ -177,6 +177,25 @@ Path dragOwner(const splash::BlockScript& s, Path p) {
     return p;
 }
 
+// A block's label as the status line shows it before its help: fields and
+// inputs as "...", the labels of a C block's later bodies after " ... ";
+// empty when the label is only the field (a literal, a variable).
+std::string helpLabel(const splash::BlockSpec& s) {
+    std::string out;
+    for (size_t i = 0; i < s.label.size(); i++) {
+        const char c = s.label[i];
+        if (c == '%' && i + 1 < s.label.size()) {
+            out += "...";
+            i++;
+        } else if (c == '|') {
+            out += " ... ";
+        } else {
+            out += c;
+        }
+    }
+    return out == "..." ? std::string() : out;
+}
+
 int numberFilter(ImGuiInputTextCallbackData* d) {
     const ImWchar c = d->EventChar;
     return (c >= '0' && c <= '9') || c == '.' || c == '-' ? 0 : 1;
@@ -339,6 +358,15 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
     // --- Input ---
     Hit canvasHit = interact("##canvas", canvas);
     Hit paletteHit = interact("##palette", list);
+    // The block whose help the status line shows: the one under the pointer
+    // (palette or canvas), else the selected one.
+    const splash::BlockSpec* help = nullptr;
+    if (paletteHit.hovered && !m_drag.on) {
+        const ImVec2 po = paletteOrigin();
+        for (size_t i = 0; i < palL.stacks.size() && !help; i++)
+            if (screen(palL.stacks[i].rect, po).Contains(io.MousePos)) help = splash::findBlockSpec(pal.stacks[i].blocks[0].op);
+        if (help) tooltip(std::string(help->help).c_str());
+    }
     bool typing = !m_editing.empty() && textEditing(kFieldId);
     for (size_t i = 0; i < cur.variables.size() && !typing; i++) {
         const std::string id = "blocks.var." + std::to_string(i) + ".";
@@ -529,6 +557,8 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
     if (!m_drag.on && !m_press.on && canvasHit.hovered && !popup) {
         const blk::Hit h = blk::hitTest(*shownL, mouse.x - o.x, mouse.y - o.y);
         if (h.kind != blk::Hit::None) opts.hovered = dragOwner(shown, h.path);
+        if (const splash::Block* b = h.kind != blk::Hit::None ? blk::blockAt(shown, h.path) : nullptr; b && !help)
+            help = splash::findBlockSpec(b->op);
         if (h.kind == blk::Hit::Field) opts.hoveredField = h.path;
     }
     drawLayout(dl, *shownL, o, opts);
@@ -728,7 +758,18 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
         if (!ImGui::IsPopupOpen(kPickId)) m_picking = {};
     }
 
-    // --- Status line: the Lua check ---
+    // --- Status line: the Lua check, else the help of the block pointed at or selected ---
+    if (!help && !m_selected.empty())
+        if (const splash::Block* b = blk::blockAt(m_history.current(), m_selected)) help = splash::findBlockSpec(b->op);
+    if (!m_gen.errors.empty()) help = nullptr;
+    if (namedRectsOn()) {
+        const std::string op = help ? std::string(help->op) : "none";
+        if (op != m_helpReported) {
+            std::printf("blocks: help %s\n", op.c_str());
+            std::fflush(stdout);
+            m_helpReported = op;
+        }
+    }
     dl->AddLine(ImVec2(status.Min.x, status.Min.y), ImVec2(status.Max.x, status.Min.y), color::border);
     {
         const float cy = status.GetCenter().y;
@@ -748,6 +789,10 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
             msg = m_gen.errors[0];
             if (m_gen.errors.size() > 1) msg += "  (" + std::to_string(m_gen.errors.size() - 1) + " more)";
             dot = col = color::bad;
+        } else if (help) {
+            const std::string label = helpLabel(*help);
+            msg = (label.empty() ? "" : label + ": ") + std::string(help->help);
+            dot = color::textFaint;
         } else if (!events) {
             msg = "No events yet: nothing runs until a stack starts with an Events block";
             dot = color::textFaint;

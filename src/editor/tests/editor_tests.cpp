@@ -2296,6 +2296,77 @@ void testNewScript() {
     CHECK(std::string((std::istreambuf_iterator<char>(tin)), {}) == editor::scriptTemplate("Game Logic", editor::ScriptKind::Trigger));
 }
 
+// New blocks: a .blocks starter per kind that makes Lua with the same
+// callbacks as the Lua starter, and a stem taken by either extension.
+void testNewBlocksScript() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    auto read = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+    fs::path proj = g_outDir / "newblocks";
+    fs::remove_all(proj, ec);
+    fs::create_directories(proj, ec);
+    struct Want {
+        editor::ScriptKind kind;
+        const char* path;
+        std::vector<std::string> functions;
+    };
+    for (const Want& w : {Want{editor::ScriptKind::Object, "scripts/game_logic.blocks", {"function onCreate(self)"}},
+                          Want{editor::ScriptKind::Scene, "scripts/game_logic.blocks", {"function onSceneCreationEnd()"}},
+                          Want{editor::ScriptKind::Trigger, "scripts/game_logic_trigger.blocks",
+                               {"function onTriggerEnter(index)", "function onTriggerExit(index)"}}}) {
+        fs::remove_all(proj / "scripts", ec);
+        editor::NewScript n = editor::createScript(proj, "Game Logic", w.kind, editor::ScriptLanguage::Blocks);
+        CHECK(n.error.empty() && n.path == w.path);
+        const std::string text = read(proj / fs::path(n.path));
+        CHECK(text == editor::blocksTemplate(w.kind));
+        std::string lua, err;
+        try {
+            lua = splash::blocksFileToLua(text, n.path);
+        } catch (const std::exception& e) {
+            err = e.what();
+        }
+        CHECK(err.empty());
+        for (const std::string& f : w.functions) CHECK(lua.find(f) != std::string::npos);
+        const splash::BlockScript bs = splash::parseBlocks(text, n.path);
+        CHECK(bs.stacks.size() == w.functions.size() && bs.variables.empty());
+        // One hat per stack, and the stacks apart.
+        for (size_t i = 0; i < bs.stacks.size(); i++) {
+            CHECK(bs.stacks[i].blocks.size() == 1);
+            for (size_t j = 0; j < i; j++) CHECK(std::abs(bs.stacks[i].y - bs.stacks[j].y) >= 80);
+        }
+    }
+    // A stem is taken by a file of either language.
+    fs::remove_all(proj / "scripts", ec);
+    fs::create_directories(proj / "scripts", ec);
+    std::ofstream(proj / "scripts" / "door.lua", std::ios::binary) << "mine";
+    CHECK(editor::createScript(proj, "Door", editor::ScriptKind::Object, editor::ScriptLanguage::Blocks).path == "scripts/door_2.blocks");
+    CHECK(!fs::exists(proj / "scripts" / "door.blocks"));
+    CHECK(editor::createScript(proj, "Door", editor::ScriptKind::Object, editor::ScriptLanguage::Lua).path == "scripts/door_3.lua");
+    std::ofstream(proj / "scripts" / "gate.blocks", std::ios::binary) << "mine";
+    CHECK(editor::createScript(proj, "Gate", editor::ScriptKind::Object).path == "scripts/gate_2.lua");
+    CHECK(read(proj / "scripts" / "door.lua") == "mine" && read(proj / "scripts" / "gate.blocks") == "mine");
+    // The asset browser's: any folder, the project's top included.
+    editor::NewScript top = editor::writeNewScript(proj, "", "new_script", editor::ScriptLanguage::Blocks, "x");
+    CHECK(top.error.empty() && top.path == "new_script.blocks" && read(proj / "new_script.blocks") == "x");
+    CHECK(editor::writeNewScript(proj, "", "new_script", editor::ScriptLanguage::Lua, "y").path == "new_script_2.lua");
+    editor::NewScript deep = editor::writeNewScript(proj, "scripts/ai", "new_script", editor::ScriptLanguage::Lua, "z");
+    CHECK(deep.error.empty() && deep.path == "scripts/ai/new_script.lua" && read(proj / "scripts" / "ai" / "new_script.lua") == "z");
+    CHECK(!editor::writeNewScript({}, "", "x", editor::ScriptLanguage::Blocks, "").error.empty());
+    fs::remove_all(proj, ec);
+}
+
+// Every block says what it does: one plain sentence.
+void testBlockHelp() {
+    for (const splash::BlockSpec& s : splash::blockCatalogue()) {
+        const std::string h(s.help);
+        CHECK(!h.empty() && h.back() == '.' && h.find("%f") == std::string::npos);
+        if (h.empty() || h.back() != '.') std::printf("  block %s: help \"%s\"\n", std::string(s.op).c_str(), h.c_str());
+    }
+}
+
 void testAdoptAsset() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -8874,6 +8945,8 @@ int main(int argc, char** argv) {
     testProject();
     testAdoptAsset();
     testNewScript();
+    testNewBlocksScript();
+    testBlockHelp();
     testBlocks();
     testBlocksLayout();
     testBlocksHitTest();

@@ -1,6 +1,6 @@
 # Script editor and Play: a build reads scripts from disk, so F5 (Play) and
 # Ctrl+F5 (Run on hardware) pressed while the script editor has the keyboard
-# must write its unsaved tabs first. Then New script: in the scene inspector
+# must write its unsaved tabs first. Then New Lua: in the scene inspector
 # and on an object's empty Script component it writes scripts/<name>.lua,
 # sets it (one undo step) and opens it; on a Trigger component it writes
 # scripts/<name>_trigger.lua. Then the editor itself: Replace all (Ctrl+H) and
@@ -18,8 +18,9 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 MARK = 'zz_typed_marker = 1 '
-EDIT_SCRIPT = '1410,419'  # Game Logic's "Edit script" / "New script" button at 1600x960
-NEW_SCENE_SCRIPT = '1428,221'  # the scene inspector's "New script"
+EDIT_SCRIPT = '1410,419'  # Game Logic's "Edit script" button at 1600x960
+NEW_SCRIPT = '@newlua'  # Game Logic's "New Lua", when its Script component has no file
+NEW_SCENE_SCRIPT = '@newscenelua'  # the scene inspector's "New Lua"
 OUTLINER = '140,750'  # empty Scene panel: takes the keyboard from the script editor
 CODE = '700,500'  # the script editor's text, below a short script
 REPLACE_ALL = '1075,132'  # the Replace row's "Replace all"
@@ -28,7 +29,7 @@ MATCH_CASE, REGEX, IN_SELECTION = '1046,103', '1100,103', '1181,103'  # the find
 RELOAD, KEEP_MINE = '1105,100', '1186,100'  # the changed-on-disk bar
 SAVE_DELETED, CLOSE_DELETED = '1138,100', '1200,100'  # the deleted-on-disk bar
 BAR = (52, 45, 39)  # either bar's background
-NEW_TRIGGER_SCRIPT = '1412,573'  # Game Logic's Trigger box "New script", with a trigger added
+NEW_TRIGGER_SCRIPT = '@newtlua'  # Game Logic's Trigger box "New Lua", with a trigger added
 CHANGED = '-- changed elsewhere\nfunction onCreate(self)\n  print("hi")\nend\n'
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 
@@ -140,7 +141,7 @@ scene = os.path.join(project, 'courtyard.scene')
 text = read(scene)
 assert '"lua": "scripts/game_logic.lua"' in text
 open(scene, 'w', encoding='utf-8').write(text.replace('"lua": "scripts/game_logic.lua"', '"lua": ""'))
-out = editor_run(project, ['--select', 'Game Logic', '--click', EDIT_SCRIPT, '--wait', '5', '--text', MARK, '--key', 'ctrl+s',
+out = editor_run(project, ['--select', 'Game Logic', '--click', NEW_SCRIPT, '--wait', '5', '--text', MARK, '--key', 'ctrl+s',
                            '--click', OUTLINER, '--key', 'ctrl+s', '--wait', '5'])
 lua = read(os.path.join(project, 'scripts', 'game_logic_2.lua'))
 check('object New script writes scripts/game_logic_2.lua and opens it',

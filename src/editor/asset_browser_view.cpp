@@ -9,6 +9,7 @@
 #include <set>
 
 #include "editor/document.hh"
+#include "editor/project.hh"
 #include "gl.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
@@ -888,6 +889,26 @@ void AssetBrowser::menu(editor::Document& doc) {
                              m_renaming = rel;
                              m_renameStart = true;
                          }});
+        // A script here, with the starter an object's script gets, renamed straight away.
+        auto newScript = [this, &doc, project, folder](editor::ScriptLanguage lang) {
+            const std::string text = lang == editor::ScriptLanguage::Blocks
+                                         ? editor::blocksTemplate(editor::ScriptKind::Object)
+                                         : editor::scriptTemplate("New Script", editor::ScriptKind::Object);
+            const editor::NewScript ns = editor::writeNewScript(project, folder, "new_script", lang, text);
+            if (!ns.error.empty()) {
+                notice("Could not create a script: " + ns.error, true);
+                return;
+            }
+            m_index.scan(project);
+            m_refs.update(m_index, doc.scene(), m_openScene, doc.revision());
+            m_selected = ns.path;
+            m_renaming = ns.path;
+            m_renameStart = true;
+        };
+        items.push_back({"New blocks script", "", m_query.empty() && !m_types,
+                         [newScript] { newScript(editor::ScriptLanguage::Blocks); }});
+        items.push_back({"New Lua script", "", m_query.empty() && !m_types,
+                         [newScript] { newScript(editor::ScriptLanguage::Lua); }});
         items.push_back({"Reveal in file manager", "", true, [project, folder] {
                              SDL_OpenURL(editor::fileUrl(absPath(project, folder)).c_str());
                          }});

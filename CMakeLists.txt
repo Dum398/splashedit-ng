@@ -186,10 +186,24 @@ add_executable(splashedit
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(splashedit PRIVATE imgui splasheditdoc splashcore)
+# The release tag (v*) the source is at, else the commit.
+execute_process(COMMAND git describe --tags --match "v*" --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE SPLASHEDIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT SPLASHEDIT_VERSION)
+    set(SPLASHEDIT_VERSION "dev")
+endif()
 target_compile_definitions(splashedit PRIVATE SPLASHEDIT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
-    SPLASHEDIT_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/courtyard")
+    SPLASHEDIT_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/courtyard"
+    SPLASHEDIT_VERSION="${SPLASHEDIT_VERSION}")
 if(WIN32)
     target_compile_definitions(splashedit PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    # No console window: a windowed program. The icon and version details
+    # come from the resource script.
+    set(SPLASHEDIT_ICON "${CMAKE_CURRENT_SOURCE_DIR}/assets/brand/icon.ico")
+    configure_file(src/splashedit.rc.in ${CMAKE_CURRENT_BINARY_DIR}/splashedit.rc @ONLY)
+    target_sources(splashedit PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/splashedit.rc)
+    set_target_properties(splashedit PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()
 if(MSVC)
     target_compile_options(splashedit PRIVATE /W4 /utf-8)

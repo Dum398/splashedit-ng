@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=SplashEdit
+GenericName=PS1 Game Editor
+Comment=Make PlayStation 1 games with psxsplash
+Exec=splashedit
+Icon=splashedit
+Terminal=false
+Categories=Development;IDE;
+StartupWMClass=splashedit

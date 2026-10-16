@@ -16,6 +16,10 @@
 #include <system_error>
 #include <vector>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 // The implementation comes from splashcore (core/stb_impl.cpp).
 #include <stb_image_write.h>
 
@@ -505,7 +509,31 @@ static int dumpTexturePreview(int argc, char** argv) {
     return 0;
 }
 
+#ifdef _WIN32
+// The editor is a windowed program, so it starts with no console. Output sent
+// to a file or a pipe already reaches it; anything else goes to the console
+// it was started from, if there is one.
+void attachParentConsole() {
+    auto open = [](DWORD id) {
+        HANDLE h = GetStdHandle(id);
+        return h && h != INVALID_HANDLE_VALUE;
+    };
+    const bool out = open(STD_OUTPUT_HANDLE), err = open(STD_ERROR_HANDLE);
+    if ((out && err) || !AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    FILE* f;
+    if (!out) freopen_s(&f, "CONOUT$", "w", stdout);
+    if (!err) freopen_s(&f, "CONOUT$", "w", stderr);
+}
+#endif
+
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    attachParentConsole();
+#endif
+    if (argc >= 2 && !std::strcmp(argv[1], "--version")) {
+        std::printf("SplashEdit %s\nassets %s\n", SPLASHEDIT_VERSION, resourceDir("assets", SPLASHEDIT_ASSET_DIR).c_str());
+        return 0;
+    }
     if (argc >= 2 && !std::strcmp(argv[1], "--dump-texture-preview")) return dumpTexturePreview(argc, argv);
     Args args = parse(argc, argv);
     if (!SDL_Init(SDL_INIT_VIDEO)) {

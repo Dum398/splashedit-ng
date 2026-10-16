@@ -66,7 +66,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
             libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols libegl1-mesa-dev libgl1-mesa-dev \
-            xvfb xauth libgl1-mesa-dri
+            xvfb xauth libgl1-mesa-dri desktop-file-utils
       # SDL3 and FreeType are always built in, so the package never links a
       # library the target machine lacks (Homebrew's FreeType on macOS).
       - name: Configure
@@ -96,6 +96,7 @@ jobs:
           "$py" tests/bvhstatscheck.py "$cli"
           "$py" tests/navstatscheck.py "$cli"
           "$py" tests/splashdiffcheck.py "$cli"
+          "$py" tests/iconcheck.py
       - name: Editor tests
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Game view keys
@@ -256,7 +257,15 @@ jobs:
               (cd pkg/redux && cmake -E tar xf ../../redux-download && chmod +x PCSX-Redux-*.AppImage &&
                 ./PCSX-Redux-*.AppImage --appimage-extract >/dev/null && rm PCSX-Redux-*.AppImage &&
                 mv squashfs-root pcsx-redux.AppDir && ln -s pcsx-redux.AppDir/AppRun pcsx-redux)
-              cp build/splashedit pkg/ ;;
+              cp build/splashedit pkg/
+              # A menu entry and icons, added to the user's menu by install-desktop-entry.sh.
+              mkdir -p pkg/share/applications
+              cp packaging/linux/splashedit.desktop pkg/share/applications/
+              cp packaging/linux/install-desktop-entry.sh pkg/
+              for n in 16 32 64 128 256 512; do
+                mkdir -p pkg/share/icons/hicolor/${n}x${n}/apps
+                cp assets/brand/icon-$n.png pkg/share/icons/hicolor/${n}x${n}/apps/splashedit.png
+              done ;;
           esac
           cp -R assets pkg/
           cp -R examples/courtyard pkg/examples/
@@ -273,6 +282,18 @@ jobs:
             macOS) otool -L pkg/splashedit; ! otool -L pkg/splashedit | grep -E '/opt/homebrew|/usr/local' ;;
             *) test -x pkg/redux/pcsx-redux && ! ldd pkg/redux/pcsx-redux.AppDir/usr/bin/pcsx-redux | grep 'not found' ;;
           esac
+          # On macOS the editor and everything it ships go into SplashEdit.app,
+          # whose Resources folder is where the editor looks for them.
+          if [ "${{ runner.os }}" = macOS ]; then
+            app=pkg/SplashEdit.app/Contents
+            mkdir -p "$app/MacOS" "$app/Resources"
+            mv pkg/splashedit "$app/MacOS/"
+            mv pkg/assets pkg/examples pkg/engine pkg/redux "$app/Resources/"
+            cp packaging/macos/Info.plist "$app/"
+            cp assets/brand/icon.icns "$app/Resources/SplashEdit.icns"
+          fi
+          py=python3; command -v python3 >/dev/null || py=python
+          "$py" tests/packagecheck.py pkg
           # upload-artifact drops the executable bit, so Linux and macOS ship a tarball.
           mv pkg splashedit
           if [ "${{ runner.os }}" = Windows ]; then

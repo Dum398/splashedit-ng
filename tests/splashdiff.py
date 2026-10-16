@@ -7,6 +7,10 @@ Every object-index field (BVH refs, collider gameObjectIndex) is translated
 through the name mapping before comparing. Covers the sections the C++ writer
 emits so far; anything else present in either file is reported, not compared.
 
+Decodes v23..v27 by version (header size and interactable size, as the
+psxsplash reader does); packs of different versions are compared on what both
+carry and the version shows up as a header difference.
+
 usage: splashdiff.py A.splashpack B.splashpack [-v]
 exit 0 = equal, 1 = differences, 2 = cannot compare
 """
@@ -14,7 +18,7 @@ import struct
 import sys
 from pathlib import Path
 
-HEADER = [  # (name, fmt) in order, 144 bytes (v23)
+HEADER = [  # (name, fmt) in order, 156 bytes (v25+); 148 in v24, 144 in v22-v23
     ("magic", "2s"), ("version", "H"), ("luaFileCount", "H"), ("gameObjectCount", "H"),
     ("textureAtlasCount", "H"), ("clutCount", "H"), ("colliderCount", "H"), ("interactableCount", "H"),
     ("playerStartPos", "3h"), ("playerStartRot", "3h"), ("playerHeight", "H"), ("sceneLuaFileIndex", "h"),
@@ -30,14 +34,22 @@ HEADER = [  # (name, fmt) in order, 144 bytes (v23)
     ("animationTableOffset", "I"), ("skinnedMeshCount", "H"), ("agentCount", "H"), ("skinTableOffset", "I"),
     ("memcardTableOffset", "I"), ("streamTableOffset", "I"), ("spriteTableOffset", "I"),
     ("spriteSheetCount", "H"), ("spriteAnimCount", "H"), ("sceneHash", "I"), ("tilemapTableOffset", "I"),
+    ("lightTableOffset", "I"), ("orderingTableSize", "I"), ("bumpAllocatorSize", "I"),
 ]
 OFFSET_FIELDS = {"nameTableOffset", "audioTableOffset", "cutsceneTableOffset", "uiTableOffset",
                  "animationTableOffset", "skinTableOffset", "memcardTableOffset", "streamTableOffset",
-                 "spriteTableOffset", "tilemapTableOffset"}
-UNSUPPORTED = ["triggerBoxCount", "roomCount", "interactableCount", "audioClipCount",
+                 "spriteTableOffset", "tilemapTableOffset", "lightTableOffset"}
+VERSIONS = range(23, 28)
+
+
+def header_size(version):  # psxsplash splashpack.cpp splashpackHeaderSize
+    return 156 if version >= 25 else 148 if version >= 24 else 144
+
+
+UNSUPPORTED = ["triggerBoxCount", "interactableCount", "audioClipCount",
                "cutsceneCount", "animationCount", "skinnedMeshCount", "agentCount", "uiCanvasCount",
                "uiFontCount", "spriteSheetCount", "memcardTableOffset", "streamTableOffset",
-               "tilemapTableOffset"]
+               "tilemapTableOffset", "lightTableOffset"]
 
 
 class Pack:
@@ -45,17 +57,27 @@ class Pack:
         self.path = Path(path)
         self.d = self.path.read_bytes()
         self.vram = self.path.with_suffix(".vram").read_bytes()
+        if self.d[:2] != b"SP":
+            raise ValueError(f"{path}: not a splashpack")
+        version, = struct.unpack_from("<H", self.d, 2)
+        if version not in VERSIONS:
+            raise ValueError(f"{path}: version {version}, only v{VERSIONS[0]}..v{VERSIONS[-1]} are decoded")
+        size = header_size(version)
+        # Fields past this version's header are absent: read as 0, not compared.
         p = 0
         self.h = {}
+        self.present = set()
         for name, fmt in HEADER:
-            v = struct.unpack_from("<" + fmt, self.d, p)
-            p += struct.calcsize("<" + fmt)
-            self.h[name] = v[0] if len(v) == 1 else v
-        if self.h["magic"] != b"SP":
-            raise ValueError(f"{path}: not a splashpack")
-        if self.h["version"] != 23:
-            raise ValueError(f"{path}: version {self.h['version']}, only v23 is decoded")
-        assert p == 144
+            n = struct.calcsize("<" + fmt)
+            if p + n <= size:
+                v = struct.unpack_from("<" + fmt, self.d, p)
+                self.h[name] = v[0] if len(v) == 1 else v
+                self.present.add(name)
+            else:
+                self.h[name] = 0
+            p += n
+        assert p == 156
+        p = size
         h = self.h
         self.lua = []
         for _ in range(h["luaFileCount"]):
@@ -87,11 +109,15 @@ class Pack:
             p += 4
         p = (p + 3) & ~3
         self.cursorAfterBvh = p
-        p += h["interactableCount"] * 28
+        p += h["interactableCount"] * (32 if version >= 27 else 28)  # v26 and older: 28
         waypoints = 0
         for i in range(h["agentCount"]):
             waypoints += self.d[p + i * 28 + 3]
         p += h["agentCount"] * 28 + waypoints * 12
+        if h["worldCollisionMeshCount"]:  # legacy world collision, skipped as the engine does
+            p = (p + 3) & ~3
+            mc, tc, cw, ch = struct.unpack_from("<4H", self.d, p)
+            p += 20 + mc * 32 + tc * 52 + (cw * ch * 4 if cw and ch else 0)
         self.nav = None
         if h["navRegionCount"]:
             p = (p + 3) & ~3
@@ -111,6 +137,35 @@ class Pack:
                 portals.append({"a": f[0:2], "b": f[2:4], "neighbor": f[4], "heightDelta": f[5]})
             self.nav = {"regionCount": nr, "portalCount": np_, "startRegion": start, "regions": regions,
                         "portals": portals}
+        # rooms (rooms.cpp writeRooms): RoomData 36, PortalData 40, TriangleRef 4,
+        # RoomCell 28, RoomPortalRef 4, counts from the header. Last room = catch-all.
+        self.roomBlockOffset = None
+        self.rooms, self.portals, self.roomRefs, self.cells, self.portalRefs = [], [], [], [], []
+        if h["roomCount"]:
+            p = (p + 3) & ~3
+            self.roomBlockOffset = p
+            for _ in range(h["roomCount"]):
+                f = struct.unpack_from("<6iHHHBBHH", self.d, p)
+                p += 36
+                self.rooms.append({"box": f[0:6], "firstTriRef": f[6], "triRefCount": f[7], "firstCell": f[8],
+                                   "cellCount": f[9], "portalRefCount": f[10], "firstPortalRef": f[11],
+                                   "pad": f[12]})
+            for _ in range(h["portalCount"]):
+                f = struct.unpack_from("<HH3ihh3hh3h3h", self.d, p)
+                p += 40
+                self.portals.append({"roomA": f[0], "roomB": f[1], "center": f[2:5], "halfW": f[5],
+                                     "halfH": f[6], "normal": f[7:10], "pad": f[10], "right": f[11:14],
+                                     "up": f[14:17]})
+            for _ in range(h["roomTriRefCount"]):
+                self.roomRefs.append(struct.unpack_from("<HH", self.d, p))
+                p += 4
+            for _ in range(h["roomCellCount"]):
+                f = struct.unpack_from("<6iHH", self.d, p)
+                p += 28
+                self.cells.append({"box": f[0:6], "firstTriRef": f[6], "triRefCount": f[7]})
+            for _ in range(h["roomPortalRefCount"]):
+                self.portalRefs.append(struct.unpack_from("<HH", self.d, p))
+                p += 4
         # name table
         p = h["nameTableOffset"]
         self.names = []
@@ -183,12 +238,52 @@ def compare_nav(a, b, out):
         out(f"nav: {ndiff} differing regions/portals, max matched XZ delta {maxd} (20.12 units)")
 
 
+def compare_rooms(a, b, amap, out):
+    """Rooms and portals by index. Triangle refs (a room's and each cell's) are
+    compared as sorted (object, triangle) lists with A's object indices mapped
+    to B's, so a different object order compares equal."""
+    if len(a.rooms) != len(b.rooms):
+        out(f"room count {len(a.rooms)} != {len(b.rooms)}")
+    if len(a.portals) != len(b.portals):
+        out(f"portal count {len(a.portals)} != {len(b.portals)}")
+
+    def refs(pk, first, count, mapped):
+        r = pk.roomRefs[first:first + count]
+        return sorted((amap[o], t) for o, t in r) if mapped else sorted(r)
+
+    for i, (ra, rb) in enumerate(zip(a.rooms, b.rooms)):
+        for k in ("box", "triRefCount", "cellCount", "portalRefCount", "pad"):
+            if ra[k] != rb[k]:
+                out(f"room {i}.{k}: {ra[k]} != {rb[k]}")
+        ta = refs(a, ra["firstTriRef"], ra["triRefCount"], True)
+        tb = refs(b, rb["firstTriRef"], rb["triRefCount"], False)
+        if ta != tb:
+            out(f"room {i} tri refs differ ({len(ta)} vs {len(tb)})")
+        ca = a.cells[ra["firstCell"]:ra["firstCell"] + ra["cellCount"]]
+        cb = b.cells[rb["firstCell"]:rb["firstCell"] + rb["cellCount"]]
+        for j, (xa, xb) in enumerate(zip(ca, cb)):
+            if xa["box"] != xb["box"]:
+                out(f"room {i} cell {j}.box: {xa['box']} != {xb['box']}")
+            ta = refs(a, xa["firstTriRef"], xa["triRefCount"], True)
+            tb = refs(b, xb["firstTriRef"], xb["triRefCount"], False)
+            if ta != tb:
+                out(f"room {i} cell {j} tri refs differ ({len(ta)} vs {len(tb)})")
+        pa = a.portalRefs[ra["firstPortalRef"]:ra["firstPortalRef"] + ra["portalRefCount"]]
+        pb = b.portalRefs[rb["firstPortalRef"]:rb["firstPortalRef"] + rb["portalRefCount"]]
+        if pa != pb:
+            out(f"room {i} portal refs (portal, other room): {pa} != {pb}")
+    for i, (pa, pb) in enumerate(zip(a.portals, b.portals)):
+        for k in pa:
+            if pa[k] != pb[k]:
+                out(f"portal {i}.{k}: {pa[k]} != {pb[k]}")
+
+
 def compare(a, b, verbose):
     diffs = []
     out = lambda s: diffs.append(s)
 
     for name, _ in HEADER:
-        if name in OFFSET_FIELDS:
+        if name in OFFSET_FIELDS or name not in a.present or name not in b.present:
             continue
         if a.h[name] != b.h[name]:
             out(f"header.{name}: {a.h[name]} != {b.h[name]}")
@@ -235,6 +330,7 @@ def compare(a, b, verbose):
                     out(f"bvh leaf {i}: refs differ")
 
     compare_nav(a, b, out)
+    compare_rooms(a, b, amap, out)
 
     if [x["data"] for x in a.cluts] != [x["data"] for x in b.cluts] or \
             [(x["x"], x["y"], x["len"]) for x in a.cluts] != [(x["x"], x["y"], x["len"]) for x in b.cluts]:
@@ -275,8 +371,9 @@ def main():
     if limit and len(diffs) > limit:
         print(f"... {len(diffs) - limit} more (of {len(diffs)}); -v for all")
     nav = f"{a.nav['regionCount']} nav regions, {a.nav['portalCount']} nav portals, " if a.nav else ""
+    rooms = f"{len(a.rooms)} rooms, {len(a.portals)} portals, " if a.rooms else ""
     print(f"{'EQUAL' if not diffs else 'DIFFERENT'}: {len(a.names)} objects, {len(a.nodes)} bvh nodes, "
-          f"{nav}{len(a.atlases)} atlases, {len(a.cluts)} cluts; {len(diffs)} differences")
+          f"{nav}{rooms}{len(a.atlases)} atlases, {len(a.cluts)} cluts; {len(diffs)} differences")
     return 0 if not diffs else 1
 
 

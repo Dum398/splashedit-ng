@@ -471,15 +471,18 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
         m_viewProj = Mat4::perspective(kFovY, aspect, 0.1f * viewScale(), 200.0f * viewScale()) * Mat4::lookAt(m_eye, m_target, bUp);
     }
 
-    // The scene's fog as psxsplash draws it: the screen clears to the fog
-    // colour and each vertex fades linearly from an eighth of the fog wall
-    // (20000 / density GTE depth units) to the wall. Off, or in an orthographic
-    // view, the view keeps its own haze.
+    // The scene's background as psxsplash draws it: the screen clears to the
+    // fog colour every frame, fog on or off. With fog on each vertex fades
+    // linearly from an eighth of the fog wall (20000 / density GTE depth units)
+    // to the wall; off, the view's own haze fades toward the background. An
+    // orthographic view keeps the editor sky.
     const splash::SceneSettings* set = m_doc ? &m_doc->scene().settings : nullptr;
-    const bool sceneFog = set && set->fog.enabled && !m_ortho;
+    const bool sceneBackground = set && !m_ortho;
+    const bool sceneFog = sceneBackground && set->fog.enabled;
     float fog[3] = {0.10f, 0.11f, 0.17f}, fogFar = 0;
-    if (sceneFog) {
+    if (sceneBackground)
         for (int i = 0; i < 3; i++) fog[i] = std::clamp(set->fog.color[i], 0.0f, 1.0f);
+    if (sceneFog) {
         const float gte = set->gteScaling > 0 ? set->gteScaling : 100.f;
         fogFar = 20000.0f / float(std::clamp(set->fog.density, 1, 10)) * gte / 4096.0f;
     }
@@ -507,7 +510,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform3f(glGetUniformLocation(m_skyProg, "uSkyHi"), kSkyHi[0], kSkyHi[1], kSkyHi[2]);
     glUniform1i(glGetUniformLocation(m_skyProg, "uClean"), clean ? 1 : 0);
     glBindVertexArray(m_vao);
-    if (!sceneFog) glDrawArrays(GL_TRIANGLES, 0, 3);
+    if (!sceneBackground) glDrawArrays(GL_TRIANGLES, 0, 3);
 
     glEnable(GL_DEPTH_TEST);
     glUseProgram(m_prog);

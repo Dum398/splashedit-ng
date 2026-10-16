@@ -2195,6 +2195,8 @@ void testBlocksNewBlock() {
     CHECK(args(eb::newBlock("set_var")) == "number=0" && eb::newBlock("set_var").field.empty());
     CHECK(args(eb::newBlock("change_var")) == "number=1");
     CHECK(args(eb::newBlock("repeat")) == "number=10" && eb::newBlock("repeat").bodies.size() == 1);
+    CHECK(args(eb::newBlock("wait")) == "number=1");
+    CHECK(eb::newBlock("wait_until").args.size() == 1 && eb::newBlock("wait_until").args[0].op.empty());
     CHECK(args(eb::newBlock("random")) == "number=1,number=10" && args(eb::newBlock("add")) == "number=0,number=0");
     CHECK(args(eb::newBlock("log")) == "text=" && args(eb::newBlock("join")) == "text=,text=" && args(eb::newBlock("load_scene")) == "text=");
     CHECK(args(eb::newBlock("if")) == "_" && eb::newBlock("if").bodies.size() == 1 && eb::newBlock("if_else").bodies.size() == 2);

@@ -280,6 +280,9 @@ exported vertices the way the renderer does and compares with the clip's pose co
 for every frame, a child joint under a moving parent and a non-uniformly scaled object. It also
 checks frame counts, the skinned flag, the bone per triangle vertex, and that a missing skeleton,
 an unknown joint, no clips, a repeated or too-long clip name and fps 31 fail the export.
+With `--stats` the `skins=N bytes=B`, `skin bones=... <object>` and `skin clip fps=F frames=K bytes=Y
+<object>/<clip>` lines must match that table: bone, triangle, clip and frame counts, each clip's bytes
+from its name length byte through its last matrix, and a scene without skins prints none.
 
     python3 skincheck.py <splashpack-cli>
 

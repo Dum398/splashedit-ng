@@ -444,6 +444,18 @@ int main(int argc, char** argv) {
                 for (const auto& r : st.rooms)
                     std::printf("room tri_refs=%d cells=%d portals=%d %s\n", r.triRefs, r.cells, r.portals, r.name.c_str());
             }
+            if (!st.skins.empty()) {
+                size_t total = 0;
+                for (const auto& s : st.skins) total += s.bytes;
+                std::printf("skins=%zu bytes=%zu\n", st.skins.size(), total);
+                for (const auto& s : st.skins) {
+                    std::printf("skin bones=%d triangles=%zu clips=%zu bytes=%zu %s\n", s.bones, s.triangles,
+                                s.clips.size(), s.bytes, s.object.c_str());
+                    for (const auto& c : s.clips)
+                        std::printf("skin clip fps=%d frames=%d bytes=%zu %s/%s\n", c.fps, c.frames, c.bytes,
+                                    s.object.c_str(), c.name.c_str());
+                }
+            }
             if (st.streamRegions)
                 std::printf("stream regions=%d objects=%d split=%d slots=%d (wanted %d) slot_bytes=%u pool=%zu "
                             "streamed_tri_bytes=%zu table=%zu geo=%zu ram_saved=%lld load_radius=%d region_size=%lld\n",

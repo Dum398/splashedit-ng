@@ -23,7 +23,7 @@ base = json.load(open(os.path.join(here, 'skin', 'skin.scene')))
 GTE = base['settings']['gteScaling']
 
 
-def export(edit=lambda s: None, files=None):
+def export(edit=lambda s: None, files=None, stats=False):
     d = tempfile.mkdtemp(dir=tmp)
     for n in ('arm.mesh', 'bend.anim', 'raise.anim', 'play.lua'):
         open(os.path.join(d, n), 'w').write(open(os.path.join(here, 'skin', n)).read())
@@ -33,7 +33,8 @@ def export(edit=lambda s: None, files=None):
     edit(s)
     json.dump(s, open(os.path.join(d, 's.scene'), 'w'))
     out = os.path.join(d, 's.splashpack')
-    r = subprocess.run([cli, 'export', os.path.join(d, 's.scene'), '-o', out], capture_output=True, text=True)
+    r = subprocess.run([cli, 'export', os.path.join(d, 's.scene'), '-o', out] + (['--stats'] if stats else []),
+                       capture_output=True, text=True)
     return r, (open(out, 'rb').read() if r.returncode == 0 else b'')
 
 
@@ -60,6 +61,7 @@ def read(d):
         p = (p + poly * 3 + 3) & ~3
         clips = []
         for c in range(nclip):
+            start = p
             cl = d[p]
             name = d[p + 1:p + 1 + cl].decode()
             p += 1 + cl + 1
@@ -70,7 +72,7 @@ def read(d):
             p += 2
             frames = [[struct.unpack_from('<12h', d, p + (f * bones + b) * 24) for b in range(bones)] for f in range(fc)]
             p += fc * bones * 24
-            clips.append(dict(name=name, loop=flags & 1, fps=fps, frames=frames))
+            clips.append(dict(name=name, loop=flags & 1, fps=fps, frames=frames, span=p - start))
         bind, joints = [], []
         if version >= 26:
             p = (p + 1) & ~1
@@ -83,7 +85,8 @@ def read(d):
             check('joint names end where the object name starts', p == noff, (p, noff))
         objname = d[noff:d.index(b'\0', noff)].decode()
         skins.append(dict(go=go, bones=bones, idx=idx, clips=clips, name=objname, nlen=nlen, bind=bind,
-                          joints=joints, version=version))
+                          joints=joints, version=version, doff=doff,
+                          end=noff + len(objname.encode()) + 1))
     return gos, skins
 
 
@@ -211,6 +214,37 @@ err('mesh without a skeleton is an error',
     lambda s: s['objects'][0]['components'][0].__setitem__('mesh', 'x.mesh'), 'no skeleton', {'x.mesh': plain})
 err('skin without a mesh is an error', lambda s: s['objects'][0]['components'].pop(0), 'needs a mesh')
 err('fps 31 is an error', lambda s: s['objects'][0]['components'][1].__setitem__('fps', 31), 'fps')
+
+
+# ---- --stats skin lines, against the table read back from the same pack
+r, d = export(stats=True)
+check('--stats export succeeds', r.returncode == 0, r.stderr)
+gos, skins = read(d)
+lines = r.stdout.splitlines()
+skin_lines = [l for l in lines if l.startswith('skin ')]
+clip_lines = [l for l in skin_lines if l.startswith('skin clip ')]
+mesh_lines = [l for l in skin_lines if not l.startswith('skin clip ')]
+want_mesh, want_clip, total = [], [], 0
+for sk in skins:
+    block = sk['end'] - sk['doff']
+    bl = [l for l in mesh_lines if l.endswith(' ' + sk['name'])]
+    check('one skin line for ' + sk['name'], len(bl) == 1, mesh_lines)
+    if bl:
+        f = dict(kv.split('=') for kv in bl[0].split()[1:5])
+        check('skin line counts match the table', (int(f['bones']), int(f['triangles']), int(f['clips'])) ==
+              (sk['bones'], len(gos[sk['go']]['tris']), len(sk['clips'])), bl[0])
+        # 12-byte table entry + the block; up to 3 bytes of align4 padding sit before doff.
+        b = int(f['bytes'])
+        check('skin bytes cover the entry and its data block', 12 + block <= b <= 12 + block + 3, (b, 12 + block))
+        total += b
+    for c in sk['clips']:
+        want_clip.append('skin clip fps=%d frames=%d bytes=%d %s/%s' % (c['fps'], len(c['frames']), c['span'],
+                                                                         sk['name'], c['name']))
+check('one clip line per baked clip, with fps, frames and bytes', clip_lines == want_clip, (clip_lines, want_clip))
+check('skins total line', ('skins=%d bytes=%d' % (len(skins), total)) in lines, [l for l in lines if l.startswith('skins=')])
+r, d = export(lambda s: s['objects'][0]['components'].pop(1), stats=True)
+check('a scene without skins prints no skin lines', r.returncode == 0 and
+      not [l for l in r.stdout.splitlines() if l.startswith('skin')], r.stdout[-300:])
 
 print(f'{checks - fails}/{checks} passed')
 sys.exit(1 if fails else 0)

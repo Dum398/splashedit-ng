@@ -389,7 +389,7 @@ open afterwards. Needs a display (CI runs it under `xvfb-run`).
 `scripteditorcheck.py` opens the courtyard example's `game_logic.lua` with Edit script, types a
 line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the
 tab before building, so the file on disk starts with the typed line; typing alone must not. Then
-New script, in the scene inspector and on an object whose Script component has no file: it writes
+New Lua, in the scene inspector and on an object whose Script component has no file: it writes
 `scripts/<name>.lua` (numbered when taken), sets it, undoes in one step and opens the file; on a
 Trigger box it writes `scripts/<name>_trigger.lua` with `onTriggerEnter`/`onTriggerExit`. Then
 the editor itself:
@@ -505,6 +505,16 @@ are aimed at by name (`@blocks.palette.<op>`, `@blocks.block.<path>`, `@blocks.f
 run reads where they are drawn. Needs a display.
 
     python3 blockseditorcheck.py <splashedit> [<splashpack-cli>]
+
+`newscriptcheck.py` drives New blocks and New Lua on copies of the courtyard example: New blocks in the
+scene inspector, on Game Logic's Script component with no file (game_logic.lua takes the stem, so it
+writes `game_logic_2.blocks`) and on a Trigger box writes `scripts/<name>.blocks` with the starter's
+hats, the saved scene names it and a blocks tab opens; New Lua still writes a `.lua`. The Project
+panel's background menu writes `new_script.blocks` / `new_script.lua`. Then block help: a palette
+block under the pointer, a canvas block under it and a selected one must show in the status line
+(the editor prints `blocks: help <op>`). Needs a display.
+
+    python3 newscriptcheck.py <splashedit>
 
 `compfieldscheck.py` drives the object inspector's component rows on copies of the courtyard example
 (components are added to the copied scene before launch): Interactable Button (picked from its menu),

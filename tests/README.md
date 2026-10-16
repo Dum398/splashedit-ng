@@ -502,7 +502,11 @@ snap; its field is typed to "Door" and Ctrl+S saves. The file must read exactly 
 `splashpack-cli blocks` must make the expected Lua. Then Ctrl+Z / Ctrl+Y, undoing back to the empty
 script, Delete on a selected block, and a drop away from the hat that must make a second stack. Blocks
 are aimed at by name (`@blocks.palette.<op>`, `@blocks.block.<path>`, `@blocks.field.<path>`); a first
-run reads where they are drawn. Needs a display.
+run reads where they are drawn. Last, Convert to Lua from the blocks tab's right-click menu: Convert
+must print `blocks: converted scripts/door.blocks -> scripts/door.lua`, write the Lua `splashpack-cli
+blocks` makes and remove the `.blocks`, the tab becoming a Lua tab whose menu has no Convert row;
+Cancel leaves the file alone; an errored script is refused (`blocks: convert refused: ...`). Needs a
+display.
 
     python3 blockseditorcheck.py <splashedit> [<splashpack-cli>]
 

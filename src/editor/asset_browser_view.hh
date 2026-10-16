@@ -66,6 +66,10 @@ class AssetBrowser {
     std::string shownList() const;
 
     const editor::AssetIndex& index() const { return m_index; }
+    // editor::convertBlocksToLua on `path` (project-relative) with the
+    // panel's listing (scanned again first) and open scene; an error goes to
+    // the status bar. The listing and references are updated after.
+    editor::AssetOp convertBlocks(editor::Document& doc, const std::string& path);
     const editor::AssetReferences& references() const { return m_refs; }
 
   private:

@@ -997,4 +997,62 @@ float meter(const char* id, ImVec2 pos, const char* ic, const char* label, float
     return w;
 }
 
+// --- Popup menus ---
+
+// A themed popup menu of `items` (open, sized and placed by the caller).
+// With a `name`, scripted checks find each row as <name>/<label>.
+std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h, const char* name) {
+    auto centerY = [](ImFont* font, float size, float y0, float y1) { return y0 + (y1 - y0 - measure(font, size, "Ag").y) * 0.5f; };
+    Fonts& f = fonts();
+    const float pad = space::xs, rowH = size::field + 4, sepH = 9;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImRect box(ImGui::GetWindowPos(), ImGui::GetWindowPos() + ImVec2(w, h));
+    dl->AddRectFilled(box.Min + ImVec2(0, 2), box.Max + ImVec2(0, 6), rgb(0x000000, 80), radius::card);
+    dl->AddRectFilled(box.Min, box.Max, color::raised, radius::card);
+    dl->AddRect(box.Min, box.Max, color::borderStrong, radius::card);
+    float y = box.Min.y + pad;
+    std::function<void()> run;
+    int i = 0;
+    for (const MenuItem& e : items) {
+        ImGui::PushID(i++);
+        if (e.label.empty()) {
+            dl->AddLine(ImVec2(box.Min.x + space::sm, y + sepH * 0.5f), ImVec2(box.Max.x - space::sm, y + sepH * 0.5f), color::border);
+            y += sepH;
+        } else {
+            ImRect ir(ImVec2(box.Min.x + pad, y), ImVec2(box.Max.x - pad, y + rowH));
+            Hit hit = interact("item", ir);
+            if (name) nameRect(std::string(name) + "/" + e.label, ir);
+            const bool on = e.enabled && hit.hover > 0;
+            if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
+            const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
+            text(dl, ImVec2(ir.Min.x + space::md, centerY(f.regular, type::body, ir.Min.y, ir.Max.y)), f.regular, type::body, tc,
+                 e.label.c_str());
+            if (!e.shortcut.empty()) {
+                ImVec2 ss = measure(f.regular, type::label, e.shortcut.c_str());
+                text(dl, ImVec2(ir.Max.x - space::sm - ss.x, centerY(f.regular, type::label, ir.Min.y, ir.Max.y)), f.regular,
+                     type::label, color::textFaint, e.shortcut.c_str());
+            }
+            if (hit.clicked && e.enabled && e.run) run = e.run;
+            y += rowH;
+        }
+        ImGui::PopID();
+    }
+    return run;
+}
+
+void menuSize(const std::vector<MenuItem>& items, float* w, float* h) {
+    Fonts& f = fonts();
+    *w = 200;
+    *h = space::xs * 2;
+    for (const MenuItem& e : items) {
+        if (e.label.empty()) {
+            *h += 9;
+            continue;
+        }
+        *h += size::field + 4;
+        *w = std::max(*w, space::md + measure(f.regular, type::body, e.label.c_str()).x + space::xl +
+                              measure(f.regular, type::label, e.shortcut.c_str()).x + space::md);
+    }
+}
+
 }  // namespace ui

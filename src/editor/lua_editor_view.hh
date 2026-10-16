@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,10 @@ public:
     // sounds, cutscenes); set each frame before draw().
     void setBlockContext(BlocksView::Context c) { m_blockContext = std::move(c); }
 
+    // A blocks script (absolute path) the user asked to turn into Lua, from
+    // its tab's menu, saved first; taken once.
+    std::optional<std::filesystem::path> takeConvertRequest();
+
     // Files written since the last call, for the caller to refresh.
     std::vector<std::filesystem::path> takeSaved();
     // A save result for the status bar; empty when there is none.
@@ -76,6 +81,8 @@ public:
 private:
     void close(int i);
     void closePrompt();
+    void tabMenu();
+    void convertPrompt();
     void pollDisk();
     double m_polledAt = -1;
     static constexpr int kScene = -1, kUi = -2;
@@ -83,6 +90,12 @@ private:
     int m_active = kScene;  // a script tab's index, or kScene / kUi
     int m_closing = -1;  // a changed tab waiting on the save prompt
     bool m_openClosePrompt = false;
+    int m_menuFor = -1;  // the tab whose right-click menu is open
+    bool m_openMenu = false;
+    ImVec2 m_menuPos{0, 0};
+    int m_converting = -1;  // a blocks tab waiting on the convert prompt
+    bool m_openConvert = false;
+    std::optional<std::filesystem::path> m_convertRequest;
     std::vector<std::filesystem::path> m_saved;
     BlocksView::Context m_blockContext;
 };

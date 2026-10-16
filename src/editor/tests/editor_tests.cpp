@@ -7324,6 +7324,112 @@ void testTexturePreview() {
 
 // The Project panel's model: listing, classification, filters, references
 // across scenes and the rename/delete rules.
+// Convert to Lua: a blocks script becomes <stem>.lua (numbered when taken)
+// holding the exporter's Lua, every reference following, as one undo step
+// that brings the blocks back byte for byte. An errored script is refused.
+void testBlocksConvert() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path proj = g_outDir / "blocksconvert" / "game";
+    fs::remove_all(proj.parent_path(), ec);
+    fs::create_directories(proj / "scripts", ec);
+    auto write = [&](const std::string& rel, const std::string& text) { std::ofstream(proj / rel, std::ios::binary) << text; };
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    const std::string door = splash::saveBlocks(blockScript({{"opened", "0"}}, {{blk("on_create"), blk("log", "", {bnum("1")})}}));
+    const std::string broken = splash::saveBlocks(blockScript({}, {{blk("on_create"), blk("hide")}}));
+    const splash::LuaGen gen = splash::blocksToLua(splash::parseBlocks(door, "scripts/door.blocks"));
+    CHECK(gen.errors.empty() && !gen.lua.empty());
+    write("scripts/door.blocks", door);
+    write("scripts/gate.blocks", door);
+    write("scripts/gate.lua", "-- the gate's own Lua\n");
+    write("scripts/bad.blocks", broken);
+
+    // The open scene uses door.blocks as a Script; another scene file as a
+    // trigger and as its scene script.
+    splash::Scene sc;
+    splash::Object a = named("Door");
+    a.script.emplace();
+    a.script->lua = "scripts/door.blocks";
+    splash::Object g = named("Gate");
+    g.script.emplace();
+    g.script->lua = "scripts/gate.blocks";
+    splash::Object b = named("Bad");
+    b.script.emplace();
+    b.script->lua = "scripts/bad.blocks";
+    sc.objects = {a, g, b};
+    splash::saveScene(sc, proj / "game.scene");
+    {
+        splash::Scene other;
+        other.settings.script = "scripts/door.blocks";
+        splash::Object t = named("Zone");
+        t.trigger.emplace();
+        t.trigger->lua = "scripts/door.blocks";
+        other.objects.push_back(t);
+        splash::saveScene(other, proj / "other.scene");
+    }
+    const std::string otherBefore = slurp(proj / "other.scene");
+
+    editor::AssetIndex index;
+    index.scan(proj);
+    editor::Document doc;
+    doc.reset(sc, proj, "game");
+    editor::takeAssetMoves();
+
+    // An errored script is refused, nothing touched.
+    {
+        editor::AssetOp op = editor::convertBlocksToLua(doc, index, "game.scene", "scripts/bad.blocks");
+        CHECK(op.error.rfind("Can't convert: ", 0) == 0 && op.error.find("no object chosen") != std::string::npos);
+        CHECK(slurp(proj / "scripts/bad.blocks") == broken && !fs::exists(proj / "scripts/bad.lua"));
+        CHECK(doc.object({2})->script->lua == "scripts/bad.blocks" && !doc.canUndo() && editor::takeAssetMoves().empty());
+    }
+
+    // Convert: the Lua the exporter makes, every reference follows.
+    editor::AssetOp op = editor::convertBlocksToLua(doc, index, "game.scene", "scripts/door.blocks");
+    CHECK(op.error.empty() && op.path == "scripts/door.lua");
+    CHECK(!fs::exists(proj / "scripts/door.blocks") && slurp(proj / "scripts/door.lua") == gen.lua);
+    CHECK(doc.object({0})->script->lua == "scripts/door.lua");
+    {
+        splash::Scene other = splash::loadScene(proj / "other.scene");
+        CHECK(other.settings.script == "scripts/door.lua" && other.objects[0].trigger->lua == "scripts/door.lua");
+        CHECK(op.scenes == std::vector<std::string>{"other.scene"} && op.references == 3);
+        auto moved = editor::takeAssetMoves();
+        CHECK(moved.size() == 1 && moved[0].first == proj / "scripts/door.blocks" && moved[0].second == proj / "scripts/door.lua");
+    }
+
+    // Undo: the blocks back byte for byte, every reference with them.
+    CHECK(doc.undo());
+    CHECK(slurp(proj / "scripts/door.blocks") == door && !fs::exists(proj / "scripts/door.lua"));
+    CHECK(doc.object({0})->script->lua == "scripts/door.blocks" && slurp(proj / "other.scene") == otherBefore);
+    {
+        auto moved = editor::takeAssetMoves();
+        CHECK(moved.size() == 1 && moved[0].first == proj / "scripts/door.lua" && moved[0].second == proj / "scripts/door.blocks");
+    }
+    CHECK(editor::takeAssetHistoryError().empty());
+    // Redo converts again.
+    CHECK(doc.redo());
+    CHECK(!fs::exists(proj / "scripts/door.blocks") && slurp(proj / "scripts/door.lua") == gen.lua);
+    CHECK(doc.object({0})->script->lua == "scripts/door.lua" &&
+          splash::loadScene(proj / "other.scene").objects[0].trigger->lua == "scripts/door.lua");
+    CHECK(editor::takeAssetHistoryError().empty());
+    editor::takeAssetMoves();
+
+    // A taken name: gate.lua is there, so gate.blocks becomes gate_2.lua.
+    index.scan(proj);
+    op = editor::convertBlocksToLua(doc, index, "game.scene", "scripts/gate.blocks");
+    CHECK(op.error.empty() && op.path == "scripts/gate_2.lua");
+    CHECK(slurp(proj / "scripts/gate.lua") == "-- the gate's own Lua\n" && slurp(proj / "scripts/gate_2.lua") == gen.lua);
+    CHECK(!fs::exists(proj / "scripts/gate.blocks") && doc.object({1})->script->lua == "scripts/gate_2.lua");
+    CHECK(doc.undo() && slurp(proj / "scripts/gate.blocks") == door && doc.object({1})->script->lua == "scripts/gate.blocks");
+    CHECK(slurp(proj / "scripts/gate.lua") == "-- the gate's own Lua\n" && !fs::exists(proj / "scripts/gate_2.lua"));
+    // Not a blocks script: refused.
+    index.scan(proj);
+    CHECK(editor::convertBlocksToLua(doc, index, "game.scene", "scripts/gate.lua").error.rfind("Can't convert: ", 0) == 0);
+    editor::takeAssetMoves();
+}
+
 void testAssetBrowser() {
     namespace fs = std::filesystem;
     std::error_code ec;
@@ -9003,6 +9109,7 @@ int main(int argc, char** argv) {
     testQuantizer();
     testTexturePreview();
     testAssetBrowser();
+    testBlocksConvert();
     testUiLayout();
     testUiHitTest();
     testUiResize();

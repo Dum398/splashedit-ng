@@ -3,6 +3,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <functional>
 #include <initializer_list>
 #include <map>
 #include <string>
@@ -167,5 +168,19 @@ float problemCard(const char* id, ImVec2 pos, float width, const char* title, co
 // Budget meter for the status bar. Returns its width.
 // fraction < 0 draws no bar (a plain count).
 float meter(const char* id, ImVec2 pos, const char* icon, const char* label, float fraction, const char* value, const char* tip);
+
+// A row of a popup menu (menuRows).
+struct MenuItem {
+    std::string label;
+    std::string shortcut;
+    bool enabled = true;
+    std::function<void()> run;  // empty label: a separator
+};
+// A themed popup menu of `items` (open, sized and placed by the caller).
+// With a `name`, scripted checks find each row as <name>/<label>. Returns
+// the clicked row's run.
+std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h, const char* name = nullptr);
+// The size menuRows wants for `items`.
+void menuSize(const std::vector<MenuItem>& items, float* w, float* h);
 
 }  // namespace ui

@@ -81,7 +81,7 @@ jobs:
           py=python3; command -v python3 >/dev/null || py=python
           "$py" tests/roundtrip.py "$cli"
           "$py" tests/luacheck.py "$cli"
-          "$py" -P tests/blockscheck.py "$cli"
+          "$py" tests/blockscheck.py "$cli"
           "$py" tests/audiocheck.py "$cli"
           "$py" tests/uicheck.py "$cli"
           "$py" tests/cutscenecheck.py "$cli"

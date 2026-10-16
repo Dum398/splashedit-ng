@@ -357,6 +357,18 @@ the model (`testUiMultiSelect`).
 
     python3 uicanvascheck.py <splashedit>
 
+`uifontscheck.py` drives the canvas inspector's Scene fonts section on the same copy of
+`ui/ui.scene`. With `--ui` the editor prints each font as `uicanvas: fonts: <i> <name> ttf <source>
+<size>px vram <bytes>` (or `bitmap <png> <w>x<h>`, or `error <why>`), `uicanvas: fonts: count <n>
+add enabled|disabled` and `uicanvas: fonts: rename refused: <why>`, each when it changes. It checks
+both fonts' lines and that each sample line draws ink, changes a size (the line and its VRAM
+follow), renames a font (the text element that uses it follows in the saved scene) and is refused
+a name another font has, adds a third font (Add font then reports disabled and a click on it adds
+nothing), deletes one (its text element goes back to the system font) and takes that back with
+Ctrl+Z. `editor_tests` covers the model (`testUiFonts`).
+
+    python3 uifontscheck.py <splashedit>
+
 `uicanvassmallcheck.py` opens the same UI tab at a small editor window (`--size 1024x768`) and reads
 the canvas header's layout, which the editor prints with `--ui` (each item as `x0-x1`, or `-` when it
 gives way). At 1024x768 the resolution and the hint text step aside so the toolbar (fit, zoom in and

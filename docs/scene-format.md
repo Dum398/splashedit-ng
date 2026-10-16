@@ -151,6 +151,11 @@ A font is either `source`, a TTF/OTF rasterised at `size` pixels per em (4..64),
 0.5). A bitmap font may give `advances`, 96 widths for 0x20..0x7F; without them each character
 advances by its ink width plus one. At most 3 fonts; names must be unique.
 
+In the editor, the UI tab's canvas inspector (select a canvas, no element) has a Scene fonts
+section that adds, edits and removes fonts: name, source file, size or glyph cells, with the sheet
+and VRAM each one costs and a sample line. Renaming a font renames it in every text element that
+uses it; deleting one puts those elements back on the system font. Each change is one undo step.
+
 Elements are drawn in array order. `type` is `box`, `text`, `progress`, `line` or `image`. Colours
 are 0..1. Layout is in screen pixels: on each axis with `anchorMin` equal to `anchorMax`, `rect`
 x (or y) is the offset of the top-left corner from that fraction of the screen and w (or h) the

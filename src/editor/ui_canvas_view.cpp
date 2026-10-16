@@ -16,6 +16,7 @@
 
 #include "editor/document.hh"
 #include "editor/project.hh"
+#include "font.hh"
 #include "gl.h"
 #include "ui/icons.h"
 #include "ui/theme.h"
@@ -214,6 +215,8 @@ float stepZoom(float scale, int dir) {
 CanvasView::CanvasView() = default;
 CanvasView::~CanvasView() {
     if (m_tex) glDeleteTextures(1, &m_tex);
+    for (FontSample& s : m_samples)
+        if (s.tex) glDeleteTextures(1, &s.tex);
 }
 
 // ---- The tab
@@ -1451,7 +1454,12 @@ void CanvasView::canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Docu
     Fonts& f = fonts();
     const int c = validSelection(doc).canvas;
     const UICanvas& cv = doc.scene().canvases[size_t(c)];
-    Rows rows{dl, r.Min.x + space::md, r.Max.x - space::md, y};
+    if (m_cvScrolled != c) {
+        m_cvScrolled = c;
+        m_cvScroll = 0;
+    }
+    const float top0 = y;
+    Rows rows{dl, r.Min.x + space::md, r.Max.x - space::md, y - m_cvScroll};
     const float x0 = rows.x0, x1 = rows.x1;
     ImRect ic(ImVec2(x0, rows.y), ImVec2(x0 + 40, rows.y + 40));
     dl->AddRectFilled(ic.Min, ic.Max, rgb(0x5ccfe0, 34), radius::card);
@@ -1478,19 +1486,266 @@ void CanvasView::canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Docu
         if (fe.done) doc.endMerge();
         rows.gap();
     }
-    if (rows.sectionHead("cvfonts", icon::type, rgb(0xf2c25c), "Scene fonts")) {
-        const auto& fonts = doc.scene().fonts;
-        if (fonts.empty())
-            text(dl, ImVec2(x0 + space::sm, rows.y), f.regular, type::label, color::textFaint, "Only the system font (8 x 16).");
-        for (const splash::UIFont& uf : fonts) {
-            std::string line = uf.name + "   " + (uf.bitmap.empty() ? uf.source + ", " + std::to_string(uf.size) + " px" : uf.bitmap);
-            text(dl, ImVec2(x0 + space::sm, rows.y), f.regular, type::label, color::textDim, line.c_str());
-            rows.y += 20;
-        }
-        rows.y += 20;
-    }
+    fontsSection(dl, x0, x1, &rows.y, doc);
     dl->AddText(f.regular, type::caption, ImVec2(x0, rows.y), color::textFaint,
                 "Select an element on the canvas or in the list to edit it.", nullptr, x1 - x0);
+    rows.y += 40;
+
+    // Taller than the panel, it scrolls with the wheel.
+    const float content = rows.y - (top0 - m_cvScroll), view = r.Max.y - top0;
+    const float maxScroll = std::max(0.0f, content - view);
+    if (maxScroll > 0 && ImGui::IsMouseHoveringRect(r.Min, r.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+        m_cvScroll -= ImGui::GetIO().MouseWheel * 48.0f;
+    m_cvScroll = std::clamp(m_cvScroll, 0.0f, maxScroll);
+    if (maxScroll > 0) {
+        const float h = view * view / content, t = top0 + (view - h) * (m_cvScroll / maxScroll);
+        dl->AddRectFilled(ImVec2(r.Max.x - 5, t + 2), ImVec2(r.Max.x - 2, t + h - 2), rgb(0xffffff, 40), 2);
+    }
+}
+
+std::vector<std::string> CanvasView::fontFiles(const editor::Document& doc) {
+    // The asset browser's listing of the project; walked again at most every two seconds.
+    const double now = ImGui::GetTime();
+    if (m_fontFiles.project() != doc.projectRoot() || now - m_fontFilesAt > 2.0) {
+        m_fontFilesAt = now;
+        if (!doc.projectRoot().empty()) m_fontFiles.scan(doc.projectRoot());
+    }
+    std::vector<std::string> out;
+    for (const editor::AssetEntry& e : m_fontFiles.entries())
+        if (e.type == editor::AssetType::Font) out.push_back(e.path);
+    for (const editor::AssetEntry& e : m_fontFiles.entries())
+        if (e.type != editor::AssetType::Folder && uic::isBitmapFontFile(e.path)) out.push_back(e.path);
+    return out;
+}
+
+// The Scene fonts section: each font's name, file, size (or bitmap cells), what
+// the export makes of it and a sample line; Add font under them.
+void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, editor::Document& doc) {
+    Fonts& f = fonts();
+    const std::vector<splash::UIFont>& fl = doc.scene().fonts;
+    const int n = int(fl.size());
+    auto say = [](const std::string& line) {
+        std::printf("uicanvas: %s\n", line.c_str());
+        std::fflush(stdout);
+    };
+
+    // What each font builds to: the info line, the scripted line.
+    struct Built {
+        const splash::FontSheet* sheet = nullptr;
+        std::string error, info, line;
+    };
+    std::vector<Built> built(static_cast<size_t>(n));
+    for (int i = 0; i < n; i++) {
+        const splash::UIFont& uf = fl[size_t(i)];
+        Built& b = built[size_t(i)];
+        const bool bitmap = !uf.bitmap.empty();
+        if (uf.source.empty() && uf.bitmap.empty()) b.error = "no source file: pick a .ttf, .otf or .png";
+        else b.sheet = m_assets.font(doc.scene(), uf.name, &b.error);
+        if (b.sheet) {
+            const splash::FontSheet& sh = *b.sheet;
+            const size_t vram = sh.packed4bpp().size();
+            char info[160];
+            std::snprintf(info, sizeof info, "%d x %d cells of %d x %d, sheet 256 x %d, VRAM %zu bytes", 256 / std::max(1, sh.glyphWidth),
+                          sh.height / std::max(1, sh.glyphHeight), sh.glyphWidth, sh.glyphHeight, sh.height, vram);
+            b.info = info;
+            b.line = "fonts: " + std::to_string(i) + " " + uf.name +
+                     (bitmap ? " bitmap " + uf.bitmap + " " + std::to_string(uf.glyphWidth) + "x" + std::to_string(uf.glyphHeight)
+                             : " ttf " + uf.source + " " + std::to_string(uf.size) + "px") +
+                     " vram " + std::to_string(vram);
+        } else {
+            if (b.error.empty()) b.error = "cannot be built";
+            b.info = b.error;
+            b.line = "fonts: " + std::to_string(i) + " " + uf.name + " error " + b.error;
+        }
+    }
+    if (reportLayout) {
+        // Scripted tests: each font's line and the count, when they change.
+        m_fontsReported.resize(size_t(n));
+        for (int i = 0; i < n; i++)
+            if (m_fontsReported[size_t(i)] != built[size_t(i)].line) say(m_fontsReported[size_t(i)] = built[size_t(i)].line);
+        const std::string count = "fonts: count " + std::to_string(n) + (n < uic::kMaxFonts ? " add enabled" : " add disabled");
+        if (m_fontsCountReported != count) say(m_fontsCountReported = count);
+    }
+
+    Rows rows{dl, x0, x1, *yp};
+    if (!rows.sectionHead("cvfonts", icon::type, rgb(0xf2c25c), "Scene fonts")) {
+        *yp = rows.y;
+        return;
+    }
+    if (fl.empty()) {
+        text(dl, ImVec2(x0 + space::sm, rows.y), f.regular, type::label, color::textFaint, "Only the system font (8 x 16).");
+        rows.y += 24;
+    }
+    std::vector<std::string> files;
+    bool listed = false;
+    auto list = [&]() -> const std::vector<std::string>& {
+        if (!listed) files = fontFiles(doc), listed = true;
+        return files;
+    };
+    int remove = -1;
+    for (int i = 0; i < n; i++) {
+        const splash::UIFont& uf = fl[size_t(i)];
+        const Built& b = built[size_t(i)];
+        const std::string id = "cvfont." + std::to_string(i);
+        ImGui::PushID(i);
+
+        // A line per font: which one, how many text elements use it, Delete.
+        const int uses = uic::fontUses(doc.scene(), uf.name);
+        char head[96];
+        std::snprintf(head, sizeof head, "Font %d of %d   %s", i + 1, n,
+                      uses == 0 ? "unused" : uses == 1 ? "used by 1 text element" : (std::to_string(uses) + " text elements").c_str());
+        text(dl, ImVec2(x0 + space::sm, rows.y + 8), f.medium, type::caption, color::textDim, head);
+        const char* delTip = "Removes the font. Text elements that use it go back to the system font. Ctrl+Z brings both back.";
+        const float dw = buttonWidth(icon::trash, "Delete");
+        if (button((id + ".delete").c_str(), ImVec2(x1 - space::sm - dw, rows.y), icon::trash, "Delete", ButtonKind::Ghost, nullptr, delTip))
+            remove = i;
+        rows.y += size::field + 6 + space::xs;
+
+        // Name: text elements refer to the font by it, so a rename renames theirs.
+        ImRect nf = rows.row("lfname", "Name", "What text elements pick the font by. Renaming it renames it in every text element that uses it.");
+        nameRect(id + ".name", nf);
+        std::string typed;
+        if (textField("fname", nf, uf.name, "(unnamed)", &typed)) {
+            std::string why;
+            if (!uic::renameFont(doc, i, typed, &why) && !why.empty()) {
+                notice("Font not renamed: " + why, true);
+                if (reportLayout) say("fonts: rename refused: " + why);
+            }
+        }
+
+        // The file: a TTF/OTF rasterised at Size, or a 256-wide bitmap PNG.
+        const bool bitmap = !uf.bitmap.empty();
+        ImRect sf = rows.row("lfsrc", "Source",
+                             "A project .ttf or .otf, rasterised at Size, or a 256-wide .png of glyph cells (characters 32 to 127 in rows).");
+        nameRect(id + ".source", sf);
+        const std::string shown = bitmap ? uf.bitmap : uf.source.empty() ? std::string("pick a source") : uf.source;
+        if (pickField("fsrc", sf, bitmap ? icon::image : icon::type, rgb(0xf2c25c), shown.c_str())) ImGui::OpenPopup("##fontsrcmenu");
+        ImGui::SetNextWindowPos(ImVec2(sf.Min.x, sf.Max.y + space::xs));
+        pushMenuStyle();
+        if (ImGui::BeginPopup("##fontsrcmenu")) {
+            const std::vector<std::string>& fs = list();
+            if (fs.empty()) menuItem(nullptr, color::textDim, "No .ttf, .otf or .png in the project", nullptr, false);
+            for (const std::string& p : fs) {
+                const bool png = uic::isBitmapFontFile(p);
+                const bool cur = png ? p == uf.bitmap : p == uf.source;
+                if (menuItem(cur ? icon::chevronRight : png ? icon::image : icon::type, color::accent, p.c_str(), png ? "bitmap" : "TTF/OTF"))
+                    uic::editFont(doc, i, [&](splash::UIFont& x) { uic::setFontFile(x, p); });
+            }
+            ImGui::EndPopup();
+        }
+        popMenuStyle();
+
+        if (!bitmap) {
+            ImRect zf = rows.row("lfsize", "Size", "Pixels per em the TTF/OTF is rasterised at, 4 to 64.");
+            nameRect(id + ".size", zf);
+            float v = float(uf.size);
+            FieldEdit fe = numberField("fsize", zf, std::to_string(uf.size).c_str(), "px", 0, nullptr, &v);
+            if (fe.changed)
+                uic::editFont(doc, i, [&](splash::UIFont& x) { x.size = std::clamp(int(std::lround(v)), 4, 64); }, "uifontsize" + id);
+            if (fe.done) doc.endMerge();
+        } else {
+            ImRect gf = rows.row("lfcell", "Glyph", "The size of one character's cell in the PNG, in pixels (4 to 64 each).");
+            const float half = (gf.GetWidth() - space::xs) * 0.5f;
+            ImRect wf(gf.Min, ImVec2(gf.Min.x + half, gf.Max.y)), hf(ImVec2(gf.Max.x - half, gf.Min.y), gf.Max);
+            nameRect(id + ".gw", wf);
+            nameRect(id + ".gh", hf);
+            float w = float(uf.glyphWidth), h = float(uf.glyphHeight);
+            FieldEdit fw = numberField("fgw", wf, std::to_string(uf.glyphWidth).c_str(), nullptr, color::axisX, "W", &w);
+            if (fw.changed)
+                uic::editFont(doc, i, [&](splash::UIFont& x) { x.glyphWidth = std::clamp(int(std::lround(w)), 4, 64); }, "uifontgw" + id);
+            if (fw.done) doc.endMerge();
+            FieldEdit fh = numberField("fgh", hf, std::to_string(uf.glyphHeight).c_str(), nullptr, color::axisY, "H", &h);
+            if (fh.changed)
+                uic::editFont(doc, i, [&](splash::UIFont& x) { x.glyphHeight = std::clamp(int(std::lround(h)), 4, 64); }, "uifontgh" + id);
+            if (fh.done) doc.endMerge();
+        }
+
+        // What the export makes of it, or why it cannot: one line, the whole reason in its tooltip.
+        {
+            // Two lines, wrapped, reserved whether or not the text needs them.
+            const ImVec2 at(x0 + space::sm + rows.lw, rows.y - 4);
+            ImRect line(at, ImVec2(x1 - space::sm, at.y + 32));
+            ImGui::PushClipRect(line.Min, line.Max, true);
+            dl->AddText(f.regular, type::caption, at, b.sheet ? color::textFaint : color::warn, b.info.c_str(), nullptr, line.GetWidth());
+            ImGui::PopClipRect();
+            nameRect(id + ".info", line);
+            interact("finfo", line);
+            tooltip(b.info.c_str());
+            rows.y += 34;
+        }
+
+        // A sample line drawn the way the canvas draws custom-font text.
+        rows.rowH = 52;
+        ImRect pf = rows.row("lfsample", "Sample", "The font as the PS1 draws it: white, one texel per pixel, shown at twice the size when it fits.");
+        rows.rowH = 32;
+        pf = ImRect(ImVec2(pf.Min.x, rows.y - 52 + 4), ImVec2(pf.Max.x, rows.y - 4));
+        nameRect(id + ".sample", pf);
+        dl->AddRectFilled(pf.Min, pf.Max, color::field, radius::field);
+        dl->AddRect(pf.Min, pf.Max, color::border, radius::field);
+        if (b.sheet && i < uic::kMaxFonts) {
+            FontSample& smp = m_samples[size_t(i)];
+            const std::string key = uf.name + "|" + uf.source + "|" + uf.bitmap + "|" + std::to_string(uf.size) + "|" +
+                                    std::to_string(uf.glyphWidth) + "x" + std::to_string(uf.glyphHeight) + "|" +
+                                    std::to_string(doc.assetsId()) + "|" + doc.projectRoot().string();
+            if (!smp.tex || smp.key != key) {
+                uic::Screen size;
+                std::vector<uint32_t> px = uic::renderSample(doc.scene(), m_assets, uf.name, "AaBbCc 0123 !?", 0, &size);
+                if (!smp.tex) glGenTextures(1, &smp.tex);
+                glBindTexture(GL_TEXTURE_2D, smp.tex);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, size.w, size.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                smp.key = key;
+                smp.w = size.w;
+                smp.h = size.h;
+            }
+            const float room = pf.GetHeight() - 8, wide = pf.GetWidth() - 2 * space::sm;
+            const float scale = (smp.h * 2 <= room && smp.w * 2 <= wide) ? 2.0f : 1.0f;
+            const ImVec2 o(std::floor(pf.Min.x + space::sm), std::floor(pf.GetCenter().y - smp.h * scale * 0.5f));
+            ImGui::PushClipRect(pf.Min + ImVec2(1, 1), pf.Max - ImVec2(1, 1), true);
+            dl->AddImage((ImTextureID)(intptr_t)smp.tex, o, o + ImVec2(smp.w * scale, smp.h * scale));
+            ImGui::PopClipRect();
+        } else {
+            textCentered(dl, pf, f.regular, type::caption, color::textFaint, "No sample: the font cannot be built.");
+        }
+        rows.y += space::md;
+        ImGui::PopID();
+    }
+
+    // Add font: from the project's first TTF/OTF; the export takes three at most.
+    const bool canAdd = n < uic::kMaxFonts;
+    const char* addTip = "A new font from the project's first .ttf or .otf; pick another file under Source.";
+    if (canAdd) {
+        if (button("cvfonts.add", ImVec2(x0 + space::sm, rows.y), icon::plus, "Add font", ButtonKind::Secondary, nullptr, addTip)) {
+            std::string first;
+            for (const std::string& p : list())
+                if (!uic::isBitmapFontFile(p)) {
+                    first = p;
+                    break;
+                }
+            uic::addFont(doc, first);
+        }
+    } else {
+        // Shown but dead: the reason under it.
+        ImRect br(ImVec2(x0 + space::sm, rows.y), ImVec2(x0 + space::sm + buttonWidth(icon::plus, "Add font"), rows.y + size::field + 6));
+        interact("cvfonts.add", br);
+        nameRect("cvfonts.add", br);
+        tooltip("The export takes at most 3 fonts per scene. Delete one to add another.");
+        dl->AddRect(br.Min, br.Max, color::border, radius::button);
+        text(dl, ImVec2(br.Min.x + space::md, br.GetCenter().y - type::icon * 0.5f - 1), f.medium, type::icon, color::textFaint, icon::plus);
+        text(dl, ImVec2(br.Min.x + space::md + measure(f.medium, type::icon, icon::plus).x + space::sm - 2,
+                        br.GetCenter().y - type::body * 0.5f - 1),
+             f.medium, type::body, color::textFaint, "Add font");
+    }
+    rows.y += size::field + 6 + space::xs;
+    // Reserved either way so the layout under it does not move.
+    if (!canAdd) text(dl, ImVec2(x0 + space::sm, rows.y), f.regular, type::caption, color::textFaint, "At most 3 fonts per scene.");
+    rows.y += 18 + space::md;
+    if (remove >= 0) uic::deleteFont(doc, remove);
+    *yp = rows.y;
 }
 
 }  // namespace ui

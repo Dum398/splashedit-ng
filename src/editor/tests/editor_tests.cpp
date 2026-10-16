@@ -8053,6 +8053,95 @@ void testUiLoadingRename() {
     CHECK(editCanvas(d, 0, [](splash::UICanvas& cv) { cv.name = "x"; }) && d.scene().settings.loadingCanvas.empty());
 }
 
+// The Scene fonts: add (numbered names, at most three), edit, rename (every
+// text element that uses the font follows, refusals), delete (its text
+// elements go back to the system font), each one undo step that carries the
+// fonts and the canvases together; and the rendered sheets follow the edits.
+void testUiFonts() {
+    using namespace editor::uic;
+    editor::Document d;
+    splash::Scene sc = uiScene();
+    splash::UIElement t0 = uiBox("t0", 0, 0, 50, 16), t1 = uiBox("t1", 0, 20, 50, 16);
+    t0.type = t1.type = splash::UIElementType::Text;
+    t0.text = t1.text = "Hi";
+    t0.font = t1.font = "font";
+    sc.canvases[0].elements.push_back(t0);
+    sc.canvases[1].elements.push_back(t1);
+    d.reset(sc);
+    CHECK(addFont(d, "fonts/a.ttf") == 0 && d.scene().fonts[0].name == "font" && d.scene().fonts[0].source == "fonts/a.ttf");
+    CHECK(addFont(d, "fonts/b.png") == 1 && d.scene().fonts[1].name == "font (2)" && d.scene().fonts[1].bitmap == "fonts/b.png" &&
+          d.scene().fonts[1].source.empty());
+    CHECK(addFont(d, "") == 2 && d.scene().fonts[2].name == "font (3)" && d.scene().fonts[2].source.empty());
+    CHECK(d.historySize() == 3);
+    CHECK(addFont(d, "fonts/a.ttf") == -1 && d.scene().fonts.size() == 3 && d.historySize() == 3);
+    CHECK(d.undo() && d.scene().fonts.size() == 2 && d.redo() && d.scene().fonts.size() == 3);
+    // Edits: the name stays; one merge key is one step.
+    CHECK(editFont(d, 0, [](splash::UIFont& f) { f.size = 20; f.name = "sneaky"; }, "k") && d.scene().fonts[0].name == "font");
+    CHECK(editFont(d, 0, [](splash::UIFont& f) { f.size = 24; }, "k") && d.scene().fonts[0].size == 24 && d.historySize() == 4);
+    d.endMerge();
+    CHECK(!editFont(d, 0, [](splash::UIFont& f) { f.size = 24; }) && !editFont(d, 7, [](splash::UIFont&) {}));
+    setFontFile(d.sceneMut().fonts[2], "x.ttf");
+    CHECK(d.scene().fonts[2].source == "x.ttf" && d.scene().fonts[2].bitmap.empty());
+    // Rename: both canvases' text elements follow, in the same step.
+    CHECK(renameFont(d, 0, "title") && d.scene().fonts[0].name == "title");
+    CHECK(d.scene().canvases[0].elements.back().font == "title" && d.scene().canvases[1].elements.back().font == "title");
+    CHECK(d.historySize() == 5);
+    CHECK(d.undo() && d.scene().fonts[0].name == "font" && d.scene().canvases[0].elements.back().font == "font" &&
+          d.scene().canvases[1].elements.back().font == "font");
+    CHECK(d.redo() && d.scene().canvases[1].elements.back().font == "title");
+    // Refused: a name another font has, an empty one; nothing changes.
+    std::string why;
+    CHECK(!renameFont(d, 1, "title", &why) && why.find("already") != std::string::npos && d.scene().fonts[1].name == "font (2)");
+    why.clear();
+    CHECK(!renameFont(d, 1, "", &why) && !why.empty() && d.historySize() == 5);
+    CHECK(!renameFont(d, 0, "title", &why));  // unchanged: no step
+    CHECK(uniqueFontName(d.scene().fonts, "font (2)") == "font (4)" && fontUses(d.scene(), "title") == 2);
+    // Delete: the text elements that used it go back to the system font.
+    CHECK(deleteFont(d, 0) && d.scene().fonts.size() == 2 && d.scene().fonts[0].name == "font (2)");
+    CHECK(d.scene().canvases[0].elements.back().font.empty() && d.scene().canvases[1].elements.back().font.empty());
+    CHECK(d.undo() && d.scene().fonts.size() == 3 && d.scene().fonts[0].name == "title" &&
+          d.scene().canvases[0].elements.back().font == "title" && d.scene().canvases[1].elements.back().font == "title");
+    CHECK(!deleteFont(d, 5));
+    // Undo puts the selection back too, and a UI element edit keeps the fonts.
+    CHECK(editElement(d, 0, 0, [](splash::UIElement& e) { e.name = "b2"; }) && d.scene().fonts.size() == 3);
+    CHECK(d.undo() && d.scene().fonts.size() == 3 && d.scene().fonts[0].name == "title");
+
+    // The sheets: a rename, an edit and a delete-then-add under the same name show the new font.
+    const std::filesystem::path src = SPLASHEDIT_SOURCE_DIR;
+    const std::filesystem::path project = g_outDir / "uifonts";
+    std::filesystem::remove_all(project);
+    std::filesystem::create_directories(project);
+    std::filesystem::copy_file(src / "assets" / "fonts" / "Inter-Regular.ttf", project / "inter.ttf");
+    editor::Document e;
+    splash::Scene es = uiScene();
+    es.canvases[0].elements.push_back(t0);
+    e.reset(es);
+    Assets assets;
+    assets.refresh(project, 0);
+    CHECK(addFont(e, "inter.ttf") == 0);
+    CHECK(editFont(e, 0, [](splash::UIFont& f) { f.size = 12; }));
+    const splash::FontSheet* a = assets.font(e.scene(), "font");
+    CHECK(a != nullptr);
+    const int h12 = a ? a->glyphHeight : 0;
+    CHECK(editFont(e, 0, [](splash::UIFont& f) { f.size = 32; }));
+    const splash::FontSheet* b = assets.font(e.scene(), "font");
+    CHECK(b && b->glyphHeight > h12);
+    CHECK(renameFont(e, 0, "big") && assets.font(e.scene(), "font") == nullptr && assets.font(e.scene(), "big") != nullptr);
+    CHECK(e.scene().canvases[0].elements.back().font == "big");
+    CHECK(deleteFont(e, 0) && addFont(e, "inter.ttf") == 0 && renameFont(e, 0, "big"));
+    const splash::FontSheet* c = assets.font(e.scene(), "big");
+    CHECK(c && e.scene().fonts[0].size == 16);
+    CHECK(c && b && c->glyphHeight < 32 && c->glyphHeight != b->glyphHeight);
+    std::string err;
+    CHECK(editFont(e, 0, [](splash::UIFont& f) { f.source = "missing.ttf"; }) && !assets.font(e.scene(), "big", &err) && !err.empty());
+    // The sample line: drawn by render(), as wide as the text, some of it lit.
+    CHECK(editFont(e, 0, [](splash::UIFont& f) { f.source = "inter.ttf"; }));
+    Screen size;
+    std::vector<uint32_t> px = renderSample(e.scene(), assets, "big", "AaBb", 0, &size);
+    CHECK(size.w == textWidth(e.scene(), assets, "big", "AaBb") && size.w > 8 && px.size() == size_t(size.w) * size_t(size.h));
+    CHECK(std::count(px.begin(), px.end(), 0xffffffffu) > 10);
+}
+
 // Copy, cut and paste of UI elements: the clipboard text, the offset, the
 // names, one undo step each, and text of the other kind refused both ways.
 void testUiClipboard() {
@@ -9126,6 +9215,7 @@ int main(int argc, char** argv) {
     testUiZOrder();
     testUiUndo();
     testUiLoadingRename();
+    testUiFonts();
     testUiClipboard();
     testUiMultiSelect();
     testUiProblems();

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -68,21 +69,26 @@ bool sameCanvas(const UICanvas& a, const UICanvas& b) {
 }
 
 // Every UI edit: the canvases before and after, and the UI selection with them.
-// Also the scene's loading canvas name, which follows a rename of that canvas.
+// Also the scene's loading canvas name, which follows a rename of that canvas,
+// and the scene's fonts, which text elements refer to by name.
 class UiCommand : public Command {
 public:
     UiCommand(std::vector<UICanvas> before, std::vector<UICanvas> after, Document::UiSelection selBefore,
-              Document::UiSelection selAfter, std::string key, std::string loadBefore, std::string loadAfter)
+              Document::UiSelection selAfter, std::string key, std::string loadBefore, std::string loadAfter,
+              std::vector<splash::UIFont> fontsBefore, std::vector<splash::UIFont> fontsAfter)
         : m_before(std::move(before)), m_after(std::move(after)), m_selBefore(selBefore), m_selAfter(selAfter),
-          m_key(std::move(key)), m_loadBefore(std::move(loadBefore)), m_loadAfter(std::move(loadAfter)) {}
+          m_key(std::move(key)), m_loadBefore(std::move(loadBefore)), m_loadAfter(std::move(loadAfter)),
+          m_fontsBefore(std::move(fontsBefore)), m_fontsAfter(std::move(fontsAfter)) {}
     void apply(Document& doc) override {
         doc.canvasesMut() = m_after;
         doc.settingsMut().loadingCanvas = m_loadAfter;
+        doc.sceneMut().fonts = m_fontsAfter;
         doc.selectUi(m_selAfter);
     }
     void revert(Document& doc) override {
         doc.canvasesMut() = m_before;
         doc.settingsMut().loadingCanvas = m_loadBefore;
+        doc.sceneMut().fonts = m_fontsBefore;
         doc.selectUi(m_selBefore);
     }
     bool merge(const Command& next) override {
@@ -91,6 +97,7 @@ public:
         m_after = n->m_after;
         m_selAfter = n->m_selAfter;
         m_loadAfter = n->m_loadAfter;
+        m_fontsAfter = n->m_fontsAfter;
         return true;
     }
 
@@ -98,14 +105,21 @@ private:
     std::vector<UICanvas> m_before, m_after;
     Document::UiSelection m_selBefore, m_selAfter;
     std::string m_key, m_loadBefore, m_loadAfter;
+    std::vector<splash::UIFont> m_fontsBefore, m_fontsAfter;
 };
 
+// `fonts`, when given, are the scene's fonts after the edit; otherwise they stay.
 void commit(Document& doc, std::vector<UICanvas> after, Document::UiSelection sel, const std::string& key = {},
-            const std::string* loading = nullptr) {
+            const std::string* loading = nullptr, const std::vector<splash::UIFont>* fonts = nullptr) {
     const std::string& now = doc.scene().settings.loadingCanvas;
     doc.execute(std::make_unique<UiCommand>(doc.scene().canvases, std::move(after), doc.uiSelection(), sel, key, now,
-                                            loading ? *loading : now),
+                                            loading ? *loading : now, doc.scene().fonts, fonts ? *fonts : doc.scene().fonts),
                 !key.empty());
+}
+
+bool sameFont(const splash::UIFont& a, const splash::UIFont& b) {
+    return a.name == b.name && a.source == b.source && a.size == b.size && a.bitmap == b.bitmap && a.glyphWidth == b.glyphWidth &&
+           a.glyphHeight == b.glyphHeight && a.advances == b.advances && a.extra == b.extra;
 }
 
 bool validCanvas(const Document& doc, int c) { return c >= 0 && c < int(doc.scene().canvases.size()); }
@@ -764,6 +778,109 @@ bool deleteCanvas(Document& doc, int c) {
     return true;
 }
 
+// ---- Fonts
+
+std::string uniqueFontName(const std::vector<splash::UIFont>& fonts, const std::string& name) {
+    std::string base;
+    splitNumbered(name, &base);
+    bool taken = false;
+    int next = 1;
+    for (const splash::UIFont& f : fonts) {
+        if (f.name == name) taken = true;
+        std::string b;
+        int n = splitNumbered(f.name, &b);
+        if (b == base) next = std::max(next, n + 1);
+    }
+    if (!taken) return name;
+    return base + " (" + std::to_string(std::max(next, 2)) + ")";
+}
+
+bool isBitmapFontFile(const std::string& path) {
+    std::string ext = std::filesystem::path(path).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return char(std::tolower(ch)); });
+    return ext == ".png";
+}
+
+void setFontFile(splash::UIFont& f, const std::string& path) {
+    if (isBitmapFontFile(path)) {
+        f.bitmap = path;
+        f.source.clear();
+    } else {
+        f.source = path;
+        f.bitmap.clear();
+    }
+}
+
+int addFont(Document& doc, const std::string& source) {
+    std::vector<splash::UIFont> fonts = doc.scene().fonts;
+    if (int(fonts.size()) >= kMaxFonts) return -1;
+    splash::UIFont f;
+    f.name = uniqueFontName(fonts, "font");
+    if (!source.empty()) setFontFile(f, source);
+    fonts.push_back(std::move(f));
+    commit(doc, doc.scene().canvases, doc.uiSelection(), {}, nullptr, &fonts);
+    return int(fonts.size()) - 1;
+}
+
+bool editFont(Document& doc, int i, const std::function<void(splash::UIFont&)>& fn, const std::string& mergeKey) {
+    const std::vector<splash::UIFont>& was = doc.scene().fonts;
+    if (i < 0 || i >= int(was.size())) return false;
+    std::vector<splash::UIFont> fonts = was;
+    const std::string name = fonts[size_t(i)].name;
+    fn(fonts[size_t(i)]);
+    fonts[size_t(i)].name = name;  // renameFont renames, with the elements that use it
+    if (sameFont(fonts[size_t(i)], was[size_t(i)])) return false;
+    commit(doc, doc.scene().canvases, doc.uiSelection(), mergeKey, nullptr, &fonts);
+    return true;
+}
+
+bool renameFont(Document& doc, int i, const std::string& newName, std::string* why) {
+    auto refuse = [&](const std::string& reason) {
+        if (why) *why = reason;
+        return false;
+    };
+    const std::vector<splash::UIFont>& was = doc.scene().fonts;
+    if (i < 0 || i >= int(was.size())) return refuse("no such font");
+    const std::string old = was[size_t(i)].name;
+    if (newName == old) return false;
+    if (newName.empty()) return refuse("a font needs a name");
+    for (size_t k = 0; k < was.size(); k++)
+        if (int(k) != i && was[k].name == newName) return refuse("another font is already called '" + newName + "'");
+    std::vector<splash::UIFont> fonts = was;
+    fonts[size_t(i)].name = newName;
+    std::vector<UICanvas> after = doc.scene().canvases;
+    for (UICanvas& cv : after)
+        for (UIElement& e : cv.elements)
+            if (!old.empty() && e.font == old) e.font = newName;
+    commit(doc, std::move(after), doc.uiSelection(), {}, nullptr, &fonts);
+    return true;
+}
+
+bool deleteFont(Document& doc, int i) {
+    const std::vector<splash::UIFont>& was = doc.scene().fonts;
+    if (i < 0 || i >= int(was.size())) return false;
+    const std::string old = was[size_t(i)].name;
+    std::vector<splash::UIFont> fonts = was;
+    fonts.erase(fonts.begin() + i);
+    // Another font of the same name (a scene written by hand) keeps the elements.
+    const bool still = std::any_of(fonts.begin(), fonts.end(), [&](const splash::UIFont& f) { return f.name == old; });
+    std::vector<UICanvas> after = doc.scene().canvases;
+    if (!still)
+        for (UICanvas& cv : after)
+            for (UIElement& e : cv.elements)
+                if (!old.empty() && e.font == old) e.font.clear();
+    commit(doc, std::move(after), doc.uiSelection(), {}, nullptr, &fonts);
+    return true;
+}
+
+int fontUses(const splash::Scene& scene, const std::string& name) {
+    int n = 0;
+    if (name.empty()) return 0;
+    for (const UICanvas& cv : scene.canvases)
+        for (const UIElement& e : cv.elements) n += e.font == name;
+    return n;
+}
+
 // ---- Problems
 
 std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen s) {
@@ -1145,6 +1262,30 @@ int textWidth(const splash::Scene& scene, Assets& assets, const std::string& fon
     int w = 0;
     for (unsigned char raw : t) w += sh->advances[size_t(glyphChar(raw) - 32)];
     return w;
+}
+
+std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, const std::string& font, const std::string& text,
+                                   uint32_t background, Screen* size) {
+    // One text element on a canvas of its own, drawn the way render() draws the scene.
+    splash::Scene one;
+    one.fonts = scene.fonts;
+    UICanvas cv;
+    cv.name = "sample";
+    UIElement e;
+    e.type = UIElementType::Text;
+    e.name = "sample";
+    e.text = text;
+    e.font = font;
+    e.color = {1, 1, 1};
+    const splash::FontSheet* sh = font.empty() ? nullptr : assets.font(scene, font);
+    Screen s;
+    s.w = std::max(1, textWidth(scene, assets, font, text));
+    s.h = sh ? std::max(1, sh->glyphHeight) : 16;
+    e.rect = {0, 0, s.w, s.h};
+    cv.elements.push_back(std::move(e));
+    one.canvases.push_back(std::move(cv));
+    if (size) *size = s;
+    return render(one, {true}, s, assets, background);
 }
 
 std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>& show, Screen s, Assets& assets,

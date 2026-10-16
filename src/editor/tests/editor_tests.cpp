@@ -2174,7 +2174,7 @@ void testSeqRenameBlocks() {
     editor::ScriptRenames sr;
     CHECK(editor::renameSequence(d, {SeqKind::Cutscene, 0}, "opening", &sr));
     CHECK(sr.refs == 2 && (sr.files == std::vector<std::string>{"scripts/door.blocks"}) && sr.leftovers.empty() && sr.failed.empty());
-    CHECK(get("scripts/door.blocks") == out && get("scripts/bad.blocks") == "{ \"intro\"");
+    CHECK(get("scripts/door.blocks") == splash::saveBlocks(want) && get("scripts/bad.blocks") == "{ \"intro\"");
     CHECK(d.undo() && get("scripts/door.blocks") == text);
     fs::remove_all(dir, ec);
 }

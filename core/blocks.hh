@@ -69,12 +69,16 @@ struct BlockSpec {
     int args;
     int bodies;
     BlockField field;
+    std::string_view category;  // one of blockCategories()
 };
 
 const std::vector<BlockSpec>& blockCatalogue();
 const BlockSpec* findBlockSpec(std::string_view op);
 // Button names a Button field takes, in the order Input numbers them.
 const std::vector<std::string_view>& blockButtons();
+// The palette's sections, in order: Events (every hat), Control, Objects,
+// Sound and scenes, Variables, Operators, Input, Debug.
+const std::vector<std::string_view>& blockCategories();
 
 struct LuaGen {
     std::string lua;

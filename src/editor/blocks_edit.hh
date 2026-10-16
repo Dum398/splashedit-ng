@@ -191,6 +191,26 @@ std::optional<BlockScript> setField(const BlockScript& s, const Path& p, const s
 Target findTarget(const BlockScript& s, const Layout& l, const BlockStack& fragment, float fx, float fy, const TextWidth& tw,
                   const Metrics& m = {}, float radius = 28);
 
+// --- Variables ----------------------------------------------------------------
+
+// How many blocks (in stacks, inputs and bodies) have a Variable field naming `name`.
+int variableUses(const BlockScript& s, std::string_view name);
+// "used by 1 block", "used by 3 blocks".
+std::string usedBy(int uses);
+// The script with a new variable "my_variable" (then "my_variable2", ...: the
+// first name no variable has), value "0". `name` gets its name.
+BlockScript addVariable(const BlockScript& s, std::string* name = nullptr);
+// Variable `from` called `to`, and every Variable field naming `from` with it.
+// Nothing, with `why` set, when `to` is not a name blockNameError() takes, is
+// another variable's, or there is no `from`.
+std::optional<BlockScript> renameVariable(const BlockScript& s, std::string_view from, std::string_view to,
+                                          std::string* why = nullptr);
+// Variable i's initial value; nothing when there is no variable i.
+std::optional<BlockScript> setVariableValue(const BlockScript& s, int i, const std::string& value);
+// Variable i out of the script; nothing, with `why` set ("used by 2 blocks"),
+// while a block names it or when there is no variable i.
+std::optional<BlockScript> deleteVariable(const BlockScript& s, int i, std::string* why = nullptr);
+
 // --- Undo -----------------------------------------------------------------
 
 // A tab's undo: the whole script before and after each committed edit.

@@ -665,6 +665,96 @@ Target findTarget(const BlockScript& s, const Layout& l, const BlockStack& f, fl
     return best;
 }
 
+// --- Variables ----------------------------------------------------------------
+
+namespace {
+
+bool namesVariable(const Block& b, std::string_view name) {
+    const BlockSpec* spec = findBlockSpec(b.op);
+    return spec && spec->field == BlockField::Variable && b.field == name;
+}
+
+// Calls f on every block of the script, inputs and bodies included.
+template <class List, class F>
+void eachBlock(List& list, const F& f) {
+    for (auto& b : list) {
+        f(b);
+        eachBlock(b.args, f);
+        for (auto& body : b.bodies) eachBlock(body, f);
+    }
+}
+
+int findVariable(const BlockScript& s, std::string_view name) {
+    for (size_t i = 0; i < s.variables.size(); i++)
+        if (s.variables[i].name == name) return int(i);
+    return -1;
+}
+
+}  // namespace
+
+int variableUses(const BlockScript& s, std::string_view name) {
+    int n = 0;
+    for (const BlockStack& st : s.stacks)
+        eachBlock(st.blocks, [&](const Block& b) {
+            if (namesVariable(b, name)) n++;
+        });
+    return n;
+}
+
+std::string usedBy(int uses) { return "used by " + std::to_string(uses) + (uses == 1 ? " block" : " blocks"); }
+
+BlockScript addVariable(const BlockScript& s, std::string* name) {
+    std::string n = "my_variable";
+    for (int k = 2; findVariable(s, n) >= 0; k++) n = "my_variable" + std::to_string(k);
+    BlockScript r = s;
+    r.variables.push_back(splash::BlockVariable{n, "0"});
+    if (name) *name = n;
+    return r;
+}
+
+std::optional<BlockScript> renameVariable(const BlockScript& s, std::string_view from, std::string_view to,
+                                          std::string* why) {
+    auto refuse = [&](std::string w) -> std::optional<BlockScript> {
+        if (why) *why = std::move(w);
+        return std::nullopt;
+    };
+    const int i = findVariable(s, from);
+    if (i < 0) return refuse("no variable \"" + std::string(from) + "\"");
+    if (from == to) return s;
+    std::string bad = splash::blockNameError(to);
+    if (!bad.empty()) return refuse(bad);
+    if (findVariable(s, to) >= 0) return refuse("there is a variable \"" + std::string(to) + "\" already");
+    BlockScript r = s;
+    r.variables[size_t(i)].name = std::string(to);
+    for (BlockStack& st : r.stacks)
+        eachBlock(st.blocks, [&](Block& b) {
+            if (namesVariable(b, from)) b.field = std::string(to);
+        });
+    return r;
+}
+
+std::optional<BlockScript> setVariableValue(const BlockScript& s, int i, const std::string& value) {
+    if (i < 0 || size_t(i) >= s.variables.size()) return std::nullopt;
+    BlockScript r = s;
+    r.variables[size_t(i)].value = value;
+    return r;
+}
+
+std::optional<BlockScript> deleteVariable(const BlockScript& s, int i, std::string* why) {
+    if (i < 0 || size_t(i) >= s.variables.size()) {
+        if (why) *why = "no such variable";
+        return std::nullopt;
+    }
+    const int uses = variableUses(s, s.variables[size_t(i)].name);
+    if (uses > 0) {
+        if (why) *why = usedBy(uses);
+        return std::nullopt;
+    }
+    BlockScript r = s;
+    r.variables.erase(r.variables.begin() + i);
+    return r;
+}
+
 // --- Undo -------------------------------------------------------------------------
 
 bool History::commit(BlockScript next) {

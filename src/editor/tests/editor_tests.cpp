@@ -2088,6 +2088,65 @@ void testBlocksHistory() {
     CHECK(h.current() == c && !h.canUndo() && !h.canRedo());
 }
 
+void testBlocksVariables() {
+    namespace eb = editor::blk;
+    // opened in a field of the if's not (an input), of a set_var in a body,
+    // of a change_var in a loose stack; "count" in nothing; a text "opened" is no use.
+    splash::BlockScript s = blockScript(
+        {{"opened", "false"}, {"count", "0"}},
+        {{blk("on_interact"), blk("if", "", {blk("not", "", {bvar("opened")})}, {{blk("set_var", "opened", {blk("bool", "true")})}}),
+          blk("log", "", {blk("text", "opened")})}});
+    s.stacks.push_back({200, 10, {blk("change_var", "opened", {bnum("1")})}});
+    CHECK(eb::variableUses(s, "opened") == 3 && eb::variableUses(s, "count") == 0 && eb::variableUses(s, "nope") == 0);
+    CHECK(eb::usedBy(1) == "used by 1 block" && eb::usedBy(3) == "used by 3 blocks");
+
+    // Add: the first free my_variable name, value 0.
+    std::string name;
+    splash::BlockScript a = eb::addVariable(s, &name);
+    CHECK(name == "my_variable" && a.variables.size() == 3 && a.variables[2] == (splash::BlockVariable{"my_variable", "0"}) &&
+          a.stacks == s.stacks);
+    a = eb::addVariable(a, &name);
+    CHECK(name == "my_variable2" && a.variables.size() == 4 && splash::blockNameError(name).empty());
+    a = eb::addVariable(*eb::renameVariable(a, "my_variable", "x"), &name);
+    CHECK(name == "my_variable" && a.variables.size() == 5);
+
+    // Rename: every field naming it follows; the text literal does not.
+    std::string why;
+    std::optional<splash::BlockScript> r = eb::renameVariable(s, "opened", "is_open", &why);
+    CHECK(r && r->variables[0].name == "is_open" && eb::variableUses(*r, "is_open") == 3 && eb::variableUses(*r, "opened") == 0);
+    CHECK(r && r->stacks[0].blocks[1].args[0].args[0].field == "is_open" && r->stacks[0].blocks[1].bodies[0][0].field == "is_open" &&
+          r->stacks[1].blocks[0].field == "is_open" && r->stacks[0].blocks[2].args[0].field == "opened");
+    CHECK(r && splash::blocksToLua(*r).errors.empty());
+    // Refused: not a name, reserved, an event function, taken, no such variable.
+    CHECK(!eb::renameVariable(s, "opened", "1bad", &why) && why.find("not a name") != std::string::npos);
+    CHECK(!eb::renameVariable(s, "opened", "end", &why) && why == "\"end\" is reserved");
+    CHECK(!eb::renameVariable(s, "opened", "onInteract", &why) && why == "\"onInteract\" is reserved");
+    CHECK(!eb::renameVariable(s, "opened", "", &why) && why == "no name");
+    CHECK(!eb::renameVariable(s, "opened", "count", &why) && why.find("already") != std::string::npos);
+    CHECK(!eb::renameVariable(s, "nope", "fine", &why) && why.find("no variable") != std::string::npos);
+    CHECK(eb::renameVariable(s, "opened", "opened") == s);
+
+    // Value.
+    r = eb::setVariableValue(s, 1, "5");
+    CHECK(r && r->variables[1].value == "5" && r->variables[0] == s.variables[0] && r->stacks == s.stacks);
+    CHECK(!eb::setVariableValue(s, 2, "5") && !eb::setVariableValue(s, -1, "5"));
+
+    // Delete: refused while a block names it.
+    CHECK(!eb::deleteVariable(s, 0, &why) && why == "used by 3 blocks");
+    r = eb::deleteVariable(s, 1, &why);
+    CHECK(r && r->variables.size() == 1 && r->variables[0].name == "opened" && r->stacks == s.stacks);
+    CHECK(!eb::deleteVariable(s, 2, &why) && !eb::deleteVariable(s, -1, &why));
+    // Once its blocks are gone, it goes.
+    splash::BlockScript bare = s;
+    bare.stacks.clear();
+    r = eb::deleteVariable(bare, 0, &why);
+    CHECK(r && r->variables.size() == 1 && r->variables[0].name == "count");
+
+    // The codegen's own check is the one exposed.
+    CHECK(splash::blockNameError("ok_name2").empty() && !splash::blockNameError("self").empty() &&
+          !splash::blockNameError("a-b").empty());
+}
+
 void testBlocksNewBlock() {
     namespace eb = editor::blk;
     auto args = [](const splash::Block& b) {
@@ -8815,6 +8874,7 @@ int main(int argc, char** argv) {
     testBlocksSnap();
     testBlocksHistory();
     testBlocksNewBlock();
+    testBlocksVariables();
     testSeqRenameBlocks();
     testPlaceModel();
     testPlaceSkinnedModel();

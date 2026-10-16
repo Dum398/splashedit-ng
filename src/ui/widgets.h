@@ -136,7 +136,8 @@ int dropdownMenu(const char* id, ImRect r, const char* icon, const char* value, 
 // ID stack. The caller keeps the search text in `query` and passes `items`
 // filtered and ordered by it; the list follows the next frame. Up/Down move,
 // Enter picks, Escape closes. Opens at `pos`, kept on screen. Returns the
-// picked index into `items`, or -1.
+// picked index into `items`, or -1. Rows in view are named <id>/<label>
+// for scripted checks.
 struct PickerItem {
     const char* icon;
     ImU32 iconColor;

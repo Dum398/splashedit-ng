@@ -832,6 +832,7 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
         ImGui::PushID(i);
         Hit h = interact("row", ir);
         ImGui::PopID();
+        if (namedRectsOn()) nameRect(std::string(id) + "/" + it.label, ir);  // --click @id/label
         bool ok = !it.unavailable;
         if (h.hovered && ok && mouseMoved) s.hi = i;
         if (i == s.hi && ok) {

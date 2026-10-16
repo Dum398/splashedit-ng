@@ -497,8 +497,10 @@ The editor prints `scripttabs: active <tab>` each time a click brings a tab to t
 
 `compfieldscheck.py` drives the object inspector's component rows on copies of the courtyard example
 (components are added to the copied scene before launch): Interactable Button (picked from its menu),
-Repeatable, Cooldown, Show prompt and Prompt canvas; Player Sprint speed, Gravity, Step height and Max
-slope; Audio Name, Sample rate, Loop and Trim silence; Mesh Smooth normals; Spot light Inner angle. Each
+Repeatable, Cooldown, Show prompt and Prompt canvas; Player Sprint speed, Gravity, Step height, Max
+slope, Cell size and Cell height, and the same nav rows on a Navigation component (the voxel-count
+caption is compared against float32 arithmetic, and `build/cli/splashpack-cli export --stats` on the
+saved scene must report the edited cell size as the one the nav bake was asked for); Audio Name, Sample rate, Loop and Trim silence; Mesh Smooth normals; Spot light Inner angle. Each
 run saves with Ctrl+S and reads the fields back from the saved scene; Ctrl+Z must take back the last
 edit and keep the rest. Controls are clicked by name. Needs a display.
 

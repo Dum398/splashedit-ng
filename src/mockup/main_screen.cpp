@@ -3653,8 +3653,13 @@ static std::string fmtFixed(float v) {
 }
 
 // Up to two decimals with trailing zeros dropped ("15", "12.5", "0.75").
-static std::string fmtShort(float v) {
+static std::string fmtShort(float v, int decimals = 2) {
     std::string s = fmtFixed(v);
+    if (decimals != 2) {
+        char b[32];
+        std::snprintf(b, sizeof b, "%.*f", decimals, static_cast<double>(v));
+        s = b;
+    }
     s.erase(s.find_last_not_of('0') + 1);
     if (s.back() == '.') s.pop_back();
     if (s == "-0") s = "0";
@@ -5755,12 +5760,12 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         y += 34 + space::xs;
     };
     auto number = [&](const char* id, const char* label, const char* tip, float v, const char* unit, const char* key, float lo, float hi,
-                      const std::function<void(splash::Object&, float)>& set) {
+                      const std::function<void(splash::Object&, float)>& set, int decimals = 2) {
         float nv = v;
         std::string lid = std::string("l") + id;
         const ImRect fr = row(lid.c_str(), label, tip);
         nameRect(std::string("obj.") + id, fr);
-        commit(numberField(id, fr, fmtShort(v).c_str(), unit, 0, nullptr, &nv), key,
+        commit(numberField(id, fr, fmtShort(v, decimals).c_str(), unit, 0, nullptr, &nv), key,
                [&](splash::Object& ob) { set(ob, splash::clampv(nv, lo, hi)); });
     };
     // What the last export's nav bake made of the scene: psxsplash only gives
@@ -5814,6 +5819,32 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             note(buf, color::textFaint);
         }
     };
+    // The voxel size of the nav bake, and what the bake makes of the agent in
+    // those voxels (core/navregion.cpp: height and climb in cell heights,
+    // radius in cell sizes). A step lower than one cell height climbs nothing.
+    auto navCells = [&](const char* prefix, const char* who, const splash::NavBakeSettings& nb, float agentHeight,
+                        float agentRadius, splash::NavBakeSettings* (*bakeOf)(splash::Object&)) {
+        const std::string cid = std::string(prefix) + "cell", hid = std::string(prefix) + "cellh";
+        const std::string over = std::string(who) == "player" ? " A Navigation component in the scene overrides it." : "";
+        const std::string ctip = "Width of the nav bake's voxels. Smaller follows walls and ledges more closely and bakes slower; a "
+                                 "large walkable area gets bigger cells to keep export fast." + over;
+        const std::string htip = "Height of the nav bake's voxels. Step height and headroom are rounded down and up to it." + over;
+        number(cid.c_str(), "Cell size", ctip.c_str(), nb.cellSize, "m", cid.c_str(), 0.01f, 1,
+               [bakeOf](splash::Object& ob, float v) { bakeOf(ob)->cellSize = v; }, 3);
+        number(hid.c_str(), "Cell height", htip.c_str(), nb.cellHeight, "m", hid.c_str(), 0.01f, 1, [bakeOf](splash::Object& ob, float v) { bakeOf(ob)->cellHeight = v; }, 3);
+        const int vh = int(std::ceil(double(agentHeight) / nb.cellHeight));
+        const int vr = int(std::ceil(double(agentRadius) / nb.cellSize));
+        const int vc = int(std::floor(double(nb.maxStepHeight) / nb.cellHeight));
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "Voxels: height %d, radius %d, climb %d (%.3f m)", vh, vr, vc, double(vc) * nb.cellHeight);
+        const float tx = x0 + space::sm + lw, w = x1 - space::sm - tx;
+        const float th = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, buf).y;
+        nameRect(std::string("obj.") + prefix + "voxels", ImRect(ImVec2(tx, y), ImVec2(x1 - space::sm, y + th)));
+        dl->AddText(f.regular, type::caption, ImVec2(tx, y), vc == 0 ? color::warn : color::textFaint, buf, nullptr, w);
+        y += th + space::sm;
+        report((std::string(prefix) + "vox").c_str(), std::string(who) + " voxels: height " + std::to_string(vh) + " radius " + std::to_string(vr) + " climb " +
+                           std::to_string(vc));
+    };
     if (o->player) {
         const splash::PlayerComponent& p = *o->player;
         top = y;
@@ -5834,6 +5865,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                p.nav.maxStepHeight, "m", "pstep", 0, 100, [](splash::Object& ob, float v) { ob.player->nav.maxStepHeight = v; });
         number("pslope", "Max slope", "Steepest ground the player can walk on. For the nav bake; a Navigation component in the scene overrides it.",
                p.nav.walkableSlopeAngle, "deg", "pslope", 0, 90, [](splash::Object& ob, float v) { ob.player->nav.walkableSlopeAngle = v; });
+        navCells("p", "player", p.nav, p.playerHeight, p.playerRadius, [](splash::Object& ob) { return &ob.player->nav; });
         navNotes();
         sectionEnd(top);
     }
@@ -5845,6 +5877,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                [](splash::Object& ob, float v) { ob.navigation->agentHeight = v; });
         number("nradius", "Agent radius", "How far walkable ground keeps from walls.", n.agentRadius, "m", "nradius", 0.01f, 100,
                [](splash::Object& ob, float v) { ob.navigation->agentRadius = v; });
+        number("nstep", "Step height", "Tallest step or ledge an agent walks up. Overrides the Player's.", n.nav.maxStepHeight, "m",
+               "nstep", 0, 100, [](splash::Object& ob, float v) { ob.navigation->nav.maxStepHeight = v; });
+        number("nslope", "Max slope", "Steepest walkable ground. Overrides the Player's.", n.nav.walkableSlopeAngle, "deg", "nslope",
+               0, 90, [](splash::Object& ob, float v) { ob.navigation->nav.walkableSlopeAngle = v; });
+        navCells("n", "navigation", n.nav, n.agentHeight, n.agentRadius, [](splash::Object& ob) { return &ob.navigation->nav; });
         if (!o->player) navNotes();
         sectionEnd(top);
     }

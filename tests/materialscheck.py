@@ -86,8 +86,8 @@ mats, out = run([])
 check('one material: the Texture row is drawn in the inspector', inside('obj.texture'), sorted(k for k in rects if k.startswith('obj.')))
 check('one material: no per-material rows, caption or colour row',
       not any(k.startswith(('obj.texture.', 'obj.matcol', 'obj.matcount')) for k in rects), sorted(k for k in rects if k.startswith('obj.')))
-check('one material: the scripted lines', 'mesh: materials 1 textured 1' in out and
-      'mesh: material 0 texture crate.png colour #FFFFFF' in out, out[-400:])
+check('one material: the scripted lines', 'materials: 1 textured 1' in out and
+      'material 0: texture crate.png colour #FFFFFF' in out, out[-400:])
 
 # --- one untextured material: a Colour row under the Texture row ---
 def plain(d):
@@ -95,7 +95,7 @@ def plain(d):
 mats, out = run([], plain)
 check('one untextured material: a Colour row below the Texture row',
       inside('obj.texture') and inside('obj.matcol.0') and rects['obj.matcol.0'][1] >= rects['obj.texture'][3], rects.get('obj.matcol.0'))
-check('one untextured material: its colour reported', 'mesh: material 0 texture none colour #804000' in out, out[-400:])
+check('one untextured material: its colour reported', 'material 0: texture none colour #804000' in out, out[-400:])
 
 # --- three materials: rows, fix card, caption; pick a colour, undo it ---
 script = ['--click', '@obj.matcol.2', '--wait', '5', '--click', '@obj.matcolpick.2,-40,0', '--wait', '5', '--key', 'escape', '--wait', '3'] + \
@@ -111,10 +111,10 @@ check('the missing texture gets its File not found card', 'obj.fixtex.1' in rect
 check('only the untextured material has a Colour row', 'obj.matcol.2' in rects and 'obj.matcol.0' not in rects and 'obj.matcol.1' not in rects,
       sorted(k for k in rects if k.startswith('obj.matcol')))
 check('the caption is drawn', inside('obj.matcount'), rects.get('obj.matcount'))
-check('the scripted lines list the materials', 'mesh: materials 3 textured 2' in out and
-      'mesh: material 0 texture crate.png colour #FFFFFF' in out and 'mesh: material 1 texture nope.png colour #FFFFFF' in out and
-      'mesh: material 2 texture none colour #FFFFFF' in out, out[-600:])
-picked = re.findall(r'mesh: material 2 texture none colour (#[0-9A-F]{6})', out)
+check('the scripted lines list the materials', 'materials: 3 textured 2' in out and
+      'material 0: texture crate.png colour #FFFFFF' in out and 'material 1: texture nope.png colour #FFFFFF' in out and
+      'material 2: texture none colour #FFFFFF' in out, out[-600:])
+picked = re.findall(r'material 2: texture none colour (#[0-9A-F]{6})', out)
 check('the pick is reported as a new colour', len(picked) >= 2 and picked[1] != '#FFFFFF', picked)
 check('the picked colour is saved on material 3 only', mid is not None and len(mid) == 3 and mid[2]['color'] != WHITE and
       mid[0]['color'] == WHITE and mid[1]['color'] == WHITE, mid)
@@ -128,7 +128,7 @@ if row:
     mats, out = run(['--click', SEARCH + ',0', '--text', 'brick', '--wait', '5', '--drag', TILE + ',' + to + ',0', '--wait', '10'], three)
     check('dropping brick.png on Material 3 sets that material only',
           [m.get('texture') for m in mats] == ['textures/crate.png', 'textures/nope.png', 'textures/brick.png'], str(mats) + ' | ' + out[-300:])
-    check('the drop is reported', 'mesh: materials 3 textured 3' in out and 'mesh: material 2 texture brick.png' in out, out[-400:])
+    check('the drop is reported', 'materials: 3 textured 3' in out and 'material 2: texture brick.png' in out, out[-400:])
 else:
     check('Material 3 row found for the drop', False, sorted(rects))
 

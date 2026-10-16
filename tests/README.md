@@ -444,8 +444,8 @@ Room. Controls are clicked by name. Needs a display.
 Crate keeps its Texture row (`obj.texture`), with a Colour row (`obj.matcol.0`) only when it has no
 texture. Given three materials (crate.png, a missing textures/nope.png, untextured) it must draw a
 row per material (`obj.texture.<i>`) inside `obj.panel`, the File not found card `obj.fixtex.1`, the
-caption and a Colour row for the third only, and print `mesh: materials 3 textured 2` and a
-`mesh: material <i> texture <name|none> colour #RRGGBB` line each. A colour picked in the third's
+caption and a Colour row for the third only, and print `materials: 3 textured 2` and a
+`material <i>: texture <name|none> colour #RRGGBB` line each. A colour picked in the third's
 picker (`@obj.matcolpick.2`) is saved on that material only and one Ctrl+Z puts it back; brick.png
 dragged from the Project panel onto Material 3 sets that material only. An optional PNG path keeps
 the three-material screenshot.

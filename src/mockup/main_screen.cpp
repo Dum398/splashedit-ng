@@ -5526,10 +5526,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         // For scripted tests: the materials, one line each.
         int textured = 0;
         for (const splash::Material& mat : m.materials) textured += !mat.texture.empty();
-        std::string matLines = "mesh: materials " + std::to_string(nMat) + " textured " + std::to_string(textured);
+        std::string matLines = "materials: " + std::to_string(nMat) + " textured " + std::to_string(textured);
         for (size_t i = 0; i < nMat; i++) {
             const std::array<float, 4>& c4 = m.materials[i].color;
-            matLines += "\nmesh: material " + std::to_string(i) + " texture " +
+            matLines += "\nmaterial " + std::to_string(i) + ": texture " +
                         (m.materials[i].texture.empty() ? std::string("none") : fileName(m.materials[i].texture)) + " colour " +
                         toHex({c4[0], c4[1], c4[2]});
         }

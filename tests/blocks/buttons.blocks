@@ -1,0 +1,176 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "START"
+        },
+        {
+          "op": "load_scene",
+          "args": [
+            {
+              "op": "number",
+              "field": "1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 200,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "CROSS"
+        },
+        {
+          "op": "move_by",
+          "field": "self",
+          "args": [
+            {
+              "op": "number",
+              "field": "0"
+            },
+            {
+              "op": "number",
+              "field": "1"
+            },
+            {
+              "op": "number",
+              "field": "0"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 360,
+      "blocks": [
+        {
+          "op": "on_button_release",
+          "field": "CIRCLE"
+        },
+        {
+          "op": "go_to",
+          "field": "Crate",
+          "args": [
+            {
+              "op": "number",
+              "field": "0"
+            },
+            {
+              "op": "number",
+              "field": "0"
+            },
+            {
+              "op": "number",
+              "field": "-3"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 300,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "CROSS"
+        },
+        {
+          "op": "play_cutscene",
+          "field": "intro"
+        }
+      ]
+    },
+    {
+      "x": 300,
+      "y": 200,
+      "blocks": [
+        {
+          "op": "on_update"
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "button_held",
+              "field": "SQUARE"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "move_by",
+                "field": "self",
+                "args": [
+                  {
+                    "op": "number",
+                    "field": "0.5"
+                  },
+                  {
+                    "op": "number",
+                    "field": "0"
+                  },
+                  {
+                    "op": "number",
+                    "field": "0"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "lt",
+              "args": [
+                {
+                  "op": "position_x",
+                  "field": "self"
+                },
+                {
+                  "op": "number",
+                  "field": "-10"
+                }
+              ]
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "go_to",
+                "field": "self",
+                "args": [
+                  {
+                    "op": "number",
+                    "field": "-10"
+                  },
+                  {
+                    "op": "position_y",
+                    "field": "self"
+                  },
+                  {
+                    "op": "position_z",
+                    "field": "Crate"
+                  }
+                ]
+              }
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

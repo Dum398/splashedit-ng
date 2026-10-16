@@ -1,0 +1,41 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [
+    {
+      "name": "count",
+      "value": "0"
+    }
+  ],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_create"
+        },
+        {
+          "op": "set_var",
+          "field": "count",
+          "args": [
+            {
+              "op": "number",
+              "field": "1"
+            }
+          ]
+        },
+        {
+          "op": "change_var",
+          "field": "missing",
+          "args": [
+            {
+              "op": "number",
+              "field": "1"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

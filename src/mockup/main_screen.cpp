@@ -6861,6 +6861,8 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         for (const std::string& p : editor::sceneScripts(doc)) files.push_back(doc.resolve(p));
         const int tabs = st.scripts.rewriteUnsaved(files, [&](const std::string& text) {
             return editor::renameSeqInLua(text, r->kind, r->from, r->to);
+        }) + st.scripts.rewriteUnsavedBlocks(files, [&](const std::string& text) {
+            return editor::renameSeqInBlocks(text, r->kind, r->from, r->to);
         });
         notify(st, r->summary + (tabs ? "; also in " + std::to_string(tabs) + " unsaved script tab" + (tabs == 1 ? "" : "s") : ""),
                false);

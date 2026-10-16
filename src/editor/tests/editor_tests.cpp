@@ -2127,6 +2127,58 @@ void testBlocksNewBlock() {
     CHECK(cats && splash::findBlockSpec("hide")->category == "Objects" && splash::findBlockSpec("join")->category == "Operators");
 }
 
+void testSeqRenameBlocks() {
+    using editor::SeqKind;
+    const splash::BlockScript s = blockScript(
+        {}, {{blk("on_interact"), blk("play_cutscene", "intro"), blk("if", "", {blk("bool", "true")}, {{blk("play_cutscene", "intro")}}),
+              blk("play_cutscene", "outro"), blk("log", "", {blk("text", "intro")})}});
+    const std::string text = splash::saveBlocks(s);
+    int n = -1;
+    const std::string out = editor::renameSeqInBlocks(text, SeqKind::Cutscene, "intro", "opening", &n);
+    splash::BlockScript want = s;
+    want.stacks[0].blocks[1].field = "opening";
+    want.stacks[0].blocks[2].bodies[0][0].field = "opening";
+    CHECK(n == 2 && out == splash::saveBlocks(want));  // the text block that says "intro" is no cutscene
+    // Animations have no block; nothing named: the text as it was, byte for byte.
+    CHECK(editor::renameSeqInBlocks(text, SeqKind::Animation, "intro", "opening", &n) == text && n == 0);
+    const std::string compact = "{\"format\":\"splashedit-blocks\",\"version\":1,\"stacks\":[{\"blocks\":[{\"op\":\"on_create\"}]}]}";
+    CHECK(editor::renameSeqInBlocks(compact, SeqKind::Cutscene, "intro", "opening", &n) == compact && n == 0);
+    // Not a block script: left alone.
+    CHECK(editor::renameSeqInBlocks("{", SeqKind::Cutscene, "intro", "opening", &n) == "{" && n == 0);
+    CHECK(editor::renameSeqInBlocks("Cutscene.Play(\"intro\")", SeqKind::Cutscene, "intro", "opening", &n) == "Cutscene.Play(\"intro\")" && n == 0);
+
+    // renameSequence sends a .blocks scene script through it, on disk and in its undo.
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "seq_rename_blocks";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    auto get = [&](const char* p) {
+        std::ifstream in(dir / p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+    std::ofstream(dir / "scripts/door.blocks", std::ios::binary) << text;
+    std::ofstream(dir / "scripts/bad.blocks", std::ios::binary) << "{ \"intro\"";
+    splash::Scene sc;
+    splash::Object door, bad;
+    door.name = "Door";
+    door.script = splash::ScriptComponent{"scripts/door.blocks", {}};
+    bad.name = "Bad";
+    bad.script = splash::ScriptComponent{"scripts/bad.blocks", {}};
+    sc.objects = {door, bad};
+    splash::Cutscene c;
+    c.name = "intro";
+    sc.cutscenes.push_back(c);
+    editor::Document d;
+    d.reset(sc, dir, "s");
+    editor::ScriptRenames sr;
+    CHECK(editor::renameSequence(d, {SeqKind::Cutscene, 0}, "opening", &sr));
+    CHECK(sr.refs == 2 && (sr.files == std::vector<std::string>{"scripts/door.blocks"}) && sr.leftovers.empty() && sr.failed.empty());
+    CHECK(get("scripts/door.blocks") == out && get("scripts/bad.blocks") == "{ \"intro\"");
+    CHECK(d.undo() && get("scripts/door.blocks") == text);
+    fs::remove_all(dir, ec);
+}
+
 // New script: the file name from the object's or scene's name, numbered
 // rather than overwriting, and a template that compiles for the PS1.
 void testNewScript() {
@@ -8763,6 +8815,7 @@ int main(int argc, char** argv) {
     testBlocksSnap();
     testBlocksHistory();
     testBlocksNewBlock();
+    testSeqRenameBlocks();
     testPlaceModel();
     testPlaceSkinnedModel();
     testImportSettings();

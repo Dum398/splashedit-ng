@@ -988,7 +988,8 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
 // Sets `files` on the field `slot` of the object at `target` (or the scene's
 // settings for the scene script and memory card icon) as one undo step; a
 // skin's clips are replaced, or with `append` added to (up to 16). `index` is
-// the memory card icon frame to replace, or -1 to append frames.
+// the memory card icon frame to replace, or -1 to append frames; for a
+// Texture, the material to set (-1 is the first), the list grown to reach it.
 static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, const editor::ObjectPath& target,
                             const std::vector<std::string>& files, bool append = false, int index = -1) {
     const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon;
@@ -1039,8 +1040,8 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
         switch (slot) {
             case AssetSlot::Texture:
                 if (!o.mesh) return;
-                if (o.mesh->materials.empty()) o.mesh->materials.emplace_back();
-                o.mesh->materials[0].texture = first;
+                if (o.mesh->materials.size() <= size_t(std::max(index, 0))) o.mesh->materials.resize(size_t(std::max(index, 0)) + 1);
+                o.mesh->materials[size_t(std::max(index, 0))].texture = first;
                 break;
             case AssetSlot::Lua:
                 if (o.script) o.script->lua = first;
@@ -1106,13 +1107,13 @@ static bool slotTakes(int slot, editor::AssetType t) {
 // panel: a drop target where it shows (not in a folded section), outlined
 // while a file it takes is dragged, strongly under the pointer.
 static bool slotField(State& st, int slot, const editor::ObjectPath& path, const char* id, ImRect r, const char* ic, ImU32 iconColor,
-                      const char* name, const char* meta) {
+                      const char* name, const char* meta, int index = -1) {
     const bool clicked = assetField(id, r, ic, iconColor, name, meta);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect shown = r;
     shown.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
     if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return clicked;
-    st.assetSlots.push_back({shown, slot, path});
+    st.assetSlots.push_back({shown, slot, path, index});
     if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
         const bool over = shown.Contains(ImGui::GetIO().MousePos);
         dl->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft, radius::field + 1, 0,
@@ -1919,7 +1920,7 @@ static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1V
                     if (t.rect.Contains(r.pos)) slot = &t;
                 if (slot && slot->slot >= 0) {
                     if (slotTakes(slot->slot, r.type))
-                        applyAssetFiles(st, doc, static_cast<AssetSlot>(slot->slot), slot->path, {utf8(abs)}, true);
+                        applyAssetFiles(st, doc, static_cast<AssetSlot>(slot->slot), slot->path, {utf8(abs)}, true, slot->index);
                     else {
                         std::string what = editor::assetTypeName(r.type, true);
                         for (char& c : what) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -5438,7 +5439,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, audioLine, skinLine;
+    std::string meshColLine, materialLines, audioLine, skinLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -5460,6 +5461,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         std::string tris = meshSt == editor::AssetStatus::Ok ? std::to_string(mi->triangles) + " tris" : std::string();
         std::string modelName = m.mesh.empty() ? std::string("None") : fileName(m.mesh);
 
+        const size_t nMat = m.materials.size();
         const std::string texPath = m.materials.empty() ? std::string() : m.materials[0].texture;
         const editor::TextureInfo* ti = texPath.empty() ? nullptr : doc.texture(texPath);
         editor::AssetStatus texSt = ti ? ti->status : editor::AssetStatus::Ok;
@@ -5490,21 +5492,111 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj;blend"}};
             SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
         }
-        if (slotField(st, static_cast<int>(AssetSlot::Texture), path, "texture", row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export."),
-                       icon::grid, texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str()) |
-            fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
-            pickAsset(AssetSlot::Texture, path);
+        // An untextured material's tint, from a colour well and its picker
+        // (named obj.matcol.<i> and obj.matcolpick.<i>); a drag is one undo step.
+        auto matColour = [&](size_t i) {
+            const std::array<float, 4>& c4 = m.materials[i].color;
+            const std::array<float, 3> c3{c4[0], c4[1], c4[2]};
+            const std::string is = std::to_string(i);
+            const ImRect colRow = row(("lmatcol." + is).c_str(), "Colour",
+                                      "Tints this untextured part of the model. Ignored while it has a texture.");
+            nameRect("obj.matcol." + is, colRow);
+            const std::string popup = "##matcolpick" + is;
+            if (colorField(("matcol." + is).c_str(), colRow, toColor(c3), toHex(c3).c_str())) ImGui::OpenPopup(popup.c_str());
+            // Right-aligned under the field, so it stays inside the inspector.
+            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            pushPopupStyle();
+            if (ImGui::BeginPopup(popup.c_str())) {
+                float c[3] = {c3[0], c3[1], c3[2]};
+                ImGui::SetNextItemWidth(220);
+                if (ImGui::ColorPicker3("##matcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                                ImGuiColorEditFlags_NoAlpha))
+                    doc.edit(path, [&](splash::Object& ob) {
+                        if (!ob.mesh || i >= ob.mesh->materials.size()) return;
+                        std::array<float, 4>& col = ob.mesh->materials[i].color;
+                        col = {c[0], c[1], c[2], col[3]};
+                    }, "matcol." + is);
+                nameRect("obj.matcolpick." + is, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (ImGui::IsItemDeactivated()) doc.endMerge();
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(4);
+            ImGui::PopStyleColor(2);
+        };
+        // For scripted tests: the materials, one line each.
+        int textured = 0;
+        for (const splash::Material& mat : m.materials) textured += !mat.texture.empty();
+        std::string matLines = "materials: " + std::to_string(nMat) + " textured " + std::to_string(textured);
+        for (size_t i = 0; i < nMat; i++) {
+            const std::array<float, 4>& c4 = m.materials[i].color;
+            matLines += "\nmaterial " + std::to_string(i) + ": texture " +
+                        (m.materials[i].texture.empty() ? std::string("none") : fileName(m.materials[i].texture)) + " colour " +
+                        toHex({c4[0], c4[1], c4[2]});
+        }
+        materialLines = matLines;
+        if (nMat <= 1) {
+            const ImRect texRow = row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export.");
+            nameRect("obj.texture", texRow);
+            if (slotField(st, static_cast<int>(AssetSlot::Texture), path, "texture", texRow, icon::grid,
+                          texSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim, texName.c_str(), texMeta.c_str(), 0) |
+                fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
+                pickAsset(AssetSlot::Texture, path, 0);
+            if (nMat == 1 && texPath.empty()) matColour(0);
+        } else {
+            std::string cap = std::to_string(nMat) + " materials, " + std::to_string(textured) + " textured";
+            if (meshSt == editor::AssetStatus::Ok && nMat > size_t(mi->submeshes)) {
+                const size_t unused = nMat - size_t(mi->submeshes);
+                cap += ", " + std::to_string(unused) + " unused (the model has " + std::to_string(mi->submeshes) +
+                       (mi->submeshes == 1 ? " part)" : " parts)");
+            }
+            const ImVec2 at(x0 + space::sm, y + space::xs);
+            text(dl, at, f.regular, type::caption, color::textDim, cap.c_str());
+            nameRect("obj.matcount", ImRect(at, at + measure(f.regular, type::caption, cap.c_str())));
+            y += 16 + space::sm;
+            for (size_t i = 0; i < nMat; i++) {
+                const std::string is = std::to_string(i);
+                const std::string& tp = m.materials[i].texture;
+                const editor::TextureInfo* mt = tp.empty() ? nullptr : doc.texture(tp);
+                const editor::AssetStatus mSt = mt ? mt->status : tp.empty() ? editor::AssetStatus::Ok : editor::AssetStatus::Missing;
+                std::string meta = mt && mt->status == editor::AssetStatus::Ok
+                                       ? std::to_string(mt->width) + " x " + std::to_string(mt->height)
+                                       : std::string();
+                const std::string label = "Material " + std::to_string(i + 1);
+                const ImRect texRow = row(("ltex." + is).c_str(), label.c_str(),
+                                          "Image painted on this part of the model. Click to pick an image, or drop one here. Converted to PS1 colours on export.");
+                nameRect("obj.texture." + is, texRow);
+                if (slotField(st, static_cast<int>(AssetSlot::Texture), path, ("texture." + is).c_str(), texRow, icon::grid,
+                              mSt != editor::AssetStatus::Ok || to4 ? color::warn : color::textDim,
+                              tp.empty() ? "None" : fileName(tp).c_str(), meta.empty() ? nullptr : meta.c_str(), int(i)) |
+                    fileCard(("fixtex." + is).c_str(), mSt, tp, mt ? mt->error : std::string()))
+                    pickAsset(AssetSlot::Texture, path, int(i));
+                if (tp.empty()) matColour(i);
+            }
+        }
         if (to4) {
-            int cur = m.bitDepth == splash::BitDepth::Bpp8 ? ti->vramBytes8 : ti->vramBytes16;
-            std::string body = texName + " has " + std::to_string(ti->colors15) + (ti->colors15 == 1 ? " colour" : " colours") +
-                               " and takes " + fmtKB(cur) + " of VRAM. At 4 bpp it keeps every colour and takes " +
-                               fmtKB(ti->vramBytes4) + ".";
-            if (card("fix4bpp", "Texture could be 4 bpp", body, "Convert to 4 bpp"))
+            // Every textured material: the sums the 4 bpp check compared.
+            int n = 0, cur = 0, at4 = 0, most = 0;
+            std::string one;
+            for (const splash::Material& mat : m.materials) {
+                const editor::TextureInfo* t = mat.texture.empty() ? nullptr : doc.texture(mat.texture);
+                if (!t) continue;
+                n++;
+                one = fileName(mat.texture);
+                cur += m.bitDepth == splash::BitDepth::Bpp8 ? t->vramBytes8 : t->vramBytes16;
+                at4 += t->vramBytes4;
+                most = std::max(most, t->colors15);
+            }
+            std::string body = n == 1 ? one + " has " + std::to_string(most) + (most == 1 ? " colour" : " colours") + " and takes " +
+                                            fmtKB(cur) + " of VRAM. At 4 bpp it keeps every colour and takes " + fmtKB(at4) + "."
+                                      : "The " + std::to_string(n) + " textures have at most " + std::to_string(most) +
+                                            (most == 1 ? " colour" : " colours") + " each and take " + fmtKB(cur) +
+                                            " of VRAM together. At 4 bpp they keep every colour and take " + fmtKB(at4) + ".";
+            if (card("fix4bpp", n == 1 ? "Texture could be 4 bpp" : "Textures could be 4 bpp", body, "Convert to 4 bpp"))
                 doc.edit(path, [](splash::Object& ob) { ob.mesh->bitDepth = splash::BitDepth::Bpp4; });
         }
         // What the console will show, next to the source. Mesh textures are
         // not cutout (that is a UI-image setting), so cutout = false.
-        if (!folded && texSt == editor::AssetStatus::Ok && !texPath.empty())
+        if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty())
             y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, false) + space::sm;
         // Menu order follows the labels' enum: Baked vertex, Flat, Mesh colours.
         const splash::VertexColorMode modes[3] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
@@ -6052,6 +6144,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (removedFlags[static_cast<int>(c.kind)]) toRemove = c.kind;
 
     report("meshcol", meshColLine);
+    report("materials", materialLines);
     report("audio", audioLine);
     report("skin", skinLine);
 

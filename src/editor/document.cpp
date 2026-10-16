@@ -76,6 +76,7 @@ MeshInfo analyseMesh(const fs::path& file) {
         size_t indices = 0;
         for (const auto& sm : m.submeshes) indices += sm.size();
         info.triangles = static_cast<int>(indices / 3);
+        info.submeshes = static_cast<int>(m.submeshes.size());
         info.hasColors = !m.positions.empty() && m.colors.size() == m.positions.size();
         info.status = AssetStatus::Ok;
     } catch (const std::exception& e) {
@@ -821,9 +822,19 @@ bool Document::fileExists(const std::string& projectPath) const {
 }
 
 bool Document::couldBe4bpp(const splash::MeshComponent& m) const {
-    if (m.bitDepth == splash::BitDepth::Bpp4 || m.materials.empty()) return false;
-    const TextureInfo* t = texture(m.materials[0].texture);
-    return t && t->status == AssetStatus::Ok && t->colors15 <= 16 && t->vramBytes4 < (m.bitDepth == splash::BitDepth::Bpp8 ? t->vramBytes8 : t->vramBytes16);
+    // Every textured material must fit 16 colours, and the mesh's textures
+    // together must take less VRAM at 4 bpp than at the current depth.
+    if (m.bitDepth == splash::BitDepth::Bpp4) return false;
+    int textured = 0, now = 0, at4 = 0;
+    for (const splash::Material& mat : m.materials) {
+        if (mat.texture.empty()) continue;
+        const TextureInfo* t = texture(mat.texture);
+        if (!t || t->status != AssetStatus::Ok || t->colors15 > 16) return false;
+        textured++;
+        now += m.bitDepth == splash::BitDepth::Bpp8 ? t->vramBytes8 : t->vramBytes16;
+        at4 += t->vramBytes4;
+    }
+    return textured > 0 && at4 < now;
 }
 
 bool Document::missingMeshColors(const splash::MeshComponent& m) const {

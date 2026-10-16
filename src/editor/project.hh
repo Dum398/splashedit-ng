@@ -82,29 +82,44 @@ struct AdoptedAsset {
 };
 AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesystem::path& file, const std::string& folder);
 
-// A new Lua file for an object's Script component or the scene's own script,
-// for the inspector's New script button. The name is the object's or scene's,
-// lowercased with every run of other characters one '_' ("Game Logic" ->
-// game_logic, "script" when nothing is left), written as scripts/<name>.lua,
-// numbered (<name>_2.lua) when that is taken: an existing file is never
-// overwritten. The text names the psxsplash callbacks a script of its kind
-// gets: onCreate for an object, onSceneCreationStart/End for a scene,
-// onTriggerEnter/Exit for a Trigger component's script, whose file is
-// <name>_trigger.lua.
+// A new script for an object's Script component or the scene's own script,
+// for the inspector's New blocks and New Lua buttons, in either language: a
+// Lua file (scripts/<name>.lua) or a block script (scripts/<name>.blocks).
+// The name is the object's or scene's, lowercased with every run of other
+// characters one '_' ("Game Logic" -> game_logic, "script" when nothing is
+// left), numbered (<name>_2) when that stem is taken, by a file of either
+// extension: an existing file is never overwritten and a .lua and a .blocks
+// never share a stem. The starter names the psxsplash callbacks a script of
+// its kind gets: onCreate for an object, onSceneCreationStart/End for a
+// scene, onTriggerEnter/Exit for a Trigger component's script, whose file is
+// <name>_trigger. The block starter is one hat stack per callback: "when
+// created", "when the scene starts", or "when the player enters the trigger"
+// and "when the player leaves the trigger".
 enum class ScriptKind { Object, Scene, Trigger };
+enum class ScriptLanguage { Lua, Blocks };
 std::string scriptFileStem(const std::string& name);
 std::string scriptTemplate(const std::string& name, ScriptKind kind);
 inline std::string scriptTemplate(const std::string& name, bool scene) {
     return scriptTemplate(name, scene ? ScriptKind::Scene : ScriptKind::Object);
 }
+std::string blocksTemplate(ScriptKind kind);
 struct NewScript {
     std::string path;   // project-relative, '/'-separated; empty on failure
     std::string error;  // empty on success
 };
-NewScript createScript(const std::filesystem::path& project, const std::string& name, ScriptKind kind);
+NewScript createScript(const std::filesystem::path& project, const std::string& name, ScriptKind kind,
+                       ScriptLanguage lang);
+inline NewScript createScript(const std::filesystem::path& project, const std::string& name, ScriptKind kind) {
+    return createScript(project, name, kind, ScriptLanguage::Lua);
+}
 inline NewScript createScript(const std::filesystem::path& project, const std::string& name, bool scene) {
     return createScript(project, name, scene ? ScriptKind::Scene : ScriptKind::Object);
 }
+// Writes `text` as <folder>/<stem>.lua or .blocks (project-relative folder,
+// '/'-separated, empty for the project's top), numbered like createScript:
+// <stem>_2 when a file of either extension has the stem. Creates the folder.
+NewScript writeNewScript(const std::filesystem::path& project, const std::string& folder, const std::string& stem,
+                         ScriptLanguage lang, const std::string& text);
 
 // The objects an imported model becomes, the top one named `name`. A model of
 // one node, or any model with `settings.mergeMeshes`, is one object drawing

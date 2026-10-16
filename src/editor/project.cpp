@@ -10,6 +10,7 @@
 #include <set>
 #include <system_error>
 
+#include "blocks.hh"
 #include "editor/catalog.hh"
 #include "scene.hh"
 
@@ -241,30 +242,53 @@ std::string scriptTemplate(const std::string& name, ScriptKind kind) {
            "-- end\n";
 }
 
-NewScript createScript(const fs::path& project, const std::string& name, ScriptKind kind) {
+std::string blocksTemplate(ScriptKind kind) {
+    splash::BlockScript s;
+    auto hat = [&](const char* op, float y) { s.stacks.push_back({40, y, {splash::Block{op, {}, {}, {}}}}); };
+    if (kind == ScriptKind::Trigger) {
+        hat("on_trigger_enter", 40);
+        hat("on_trigger_exit", 160);
+    } else {
+        hat(kind == ScriptKind::Scene ? "on_scene_start" : "on_create", 40);
+    }
+    return splash::saveBlocks(s);
+}
+
+NewScript writeNewScript(const fs::path& project, const std::string& folder, const std::string& stem,
+                         ScriptLanguage lang, const std::string& text) {
     NewScript r;
     std::error_code ec;
     if (project.empty()) {
         r.error = "no project is open";
         return r;
     }
-    const fs::path dir = project / "scripts";
+    const fs::path dir = folder.empty() ? project : project / fromUtf8(folder);
     fs::create_directories(dir, ec);
     if (ec) {
         r.error = "could not create " + utf8(dir) + ": " + ec.message();
         return r;
     }
-    const std::string stem = scriptFileStem(kind == ScriptKind::Trigger ? name + " trigger" : name);
-    fs::path dest = dir / fromUtf8(stem + ".lua");
-    for (int n = 2; fs::exists(dest, ec); ++n) dest = dir / fromUtf8(stem + "_" + std::to_string(n) + ".lua");
+    // A stem is taken when either language has a file of it.
+    auto taken = [&](const std::string& st) {
+        return fs::exists(dir / fromUtf8(st + ".lua"), ec) || fs::exists(dir / fromUtf8(st + ".blocks"), ec);
+    };
+    std::string name = stem;
+    for (int n = 2; taken(name); ++n) name = stem + "_" + std::to_string(n);
+    const fs::path dest = dir / fromUtf8(name + (lang == ScriptLanguage::Blocks ? ".blocks" : ".lua"));
     std::ofstream out(dest, std::ios::binary);
-    out << scriptTemplate(name, kind);
+    out << text;
     if (!out.flush()) {
         r.error = "could not write " + utf8(dest);
         return r;
     }
-    r.path = "scripts/" + utf8(dest.filename());
+    r.path = (folder.empty() ? "" : folder + "/") + utf8(dest.filename());
     return r;
+}
+
+NewScript createScript(const fs::path& project, const std::string& name, ScriptKind kind, ScriptLanguage lang) {
+    const std::string stem = scriptFileStem(kind == ScriptKind::Trigger ? name + " trigger" : name);
+    return writeNewScript(project, "scripts", stem, lang,
+                          lang == ScriptLanguage::Blocks ? blocksTemplate(kind) : scriptTemplate(name, kind));
 }
 
 // A mesh component for an object made from a model.

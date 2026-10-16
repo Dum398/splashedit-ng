@@ -15,6 +15,7 @@
 
 #include "audio.hh"
 #include "binwriter.hh"
+#include "blocks.hh"
 #include "budget.hh"
 #include "bvh.hh"
 #include "rooms.hh"
@@ -1785,6 +1786,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (const std::string& p : luaFiles) {
         try {
             std::string src = readFile(root / p);
+            if (fs::path(p).extension() == ".blocks") src = blocksFileToLua(src, p);
             luaSources.push_back(src);
             if (options.luaBytecode) {
                 std::vector<uint8_t> bc = compileLua(src, p);

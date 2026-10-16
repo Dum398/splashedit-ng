@@ -1,0 +1,57 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [
+    {
+      "name": "opened",
+      "value": "false"
+    }
+  ],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_interact"
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "not",
+              "args": [
+                {
+                  "op": "var",
+                  "field": "opened"
+                }
+              ]
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "set_var",
+                "field": "opened",
+                "args": [
+                  {
+                    "op": "bool",
+                    "field": "true"
+                  }
+                ]
+              },
+              {
+                "op": "hide",
+                "field": "Door"
+              },
+              {
+                "op": "play_sound",
+                "field": "creak"
+              }
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

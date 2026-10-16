@@ -1,0 +1,96 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [
+    {
+      "name": "started",
+      "value": "false"
+    }
+  ],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_scene_start"
+        },
+        {
+          "op": "set_var",
+          "field": "started",
+          "args": [
+            {
+              "op": "bool",
+              "field": "true"
+            }
+          ]
+        },
+        {
+          "op": "play_cutscene",
+          "field": "intro"
+        },
+        {
+          "op": "show",
+          "field": "Door"
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 240,
+      "blocks": [
+        {
+          "op": "on_trigger_enter"
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "frame_count"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 300,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "text",
+              "field": "loose stack, never runs"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 300,
+      "y": 240,
+      "blocks": [
+        {
+          "op": "on_trigger_exit"
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "var",
+              "field": "started"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "stop"
+              }
+            ]
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -46,6 +46,8 @@
 #include "editor/unirom.hh"
 #include "audio.hh"
 #include "blend.hh"
+#include "blocks.hh"
+#include "luacompile.hh"
 #include "editor/ui_canvas.hh"
 #include "budget.hh"
 #include "disc.hh"
@@ -1507,6 +1509,329 @@ void testProject() {
     back.load();
     CHECK(back.items().size() == editor::RecentScenes::kMax - 1 && back.items().front() == proj / "s5.scene");
     CHECK(std::find(back.items().begin(), back.items().end(), proj / "s9.scene") == back.items().end());
+}
+
+// Block scripts: the Lua each block makes, parenthesised only where Lua's
+// precedence needs it, decimals as fixed-point fractions, hats merged per
+// event, every error located, and the file format byte-stable.
+splash::Block blk(const char* op, const char* field = "", std::vector<splash::Block> args = {},
+                  std::vector<std::vector<splash::Block>> bodies = {}) {
+    return {op, field, std::move(args), std::move(bodies)};
+}
+splash::Block bnum(const char* v) { return blk("number", v); }
+splash::Block bvar(const char* v) { return blk("var", v); }
+splash::BlockScript blockScript(std::vector<splash::BlockVariable> vars, std::vector<std::vector<splash::Block>> stacks) {
+    splash::BlockScript s;
+    s.variables = std::move(vars);
+    for (auto& st : stacks) s.stacks.push_back({0, 0, std::move(st)});
+    return s;
+}
+
+void testBlocks() {
+    using splash::Block;
+    std::vector<std::string> generated;  // every output must compile
+    auto gen = [&](const splash::BlockScript& s) {
+        splash::LuaGen g = splash::blocksToLua(s);
+        if (g.errors.empty()) generated.push_back(g.lua);
+        return g;
+    };
+    auto lua = [&](const splash::BlockScript& s) {
+        splash::LuaGen g = gen(s);
+        for (const std::string& e : g.errors) std::fprintf(stderr, "  blocks: %s\n", e.c_str());
+        return g.errors.empty() ? g.lua : std::string("<errors>");
+    };
+    // One error, exactly.
+    auto error = [&](const splash::BlockScript& s) {
+        splash::LuaGen g = gen(s);
+        return g.errors.size() == 1 ? g.errors[0] : "<" + std::to_string(g.errors.size()) + " errors>";
+    };
+    // `x = <e>` in onCreate, with a, b, c, x declared.
+    auto expr = [&](Block e) {
+        std::string out = lua(blockScript({{"a", "1"}, {"b", "2"}, {"c", "3"}, {"x", "0"}},
+                                          {{blk("on_create"), blk("set_var", "x", {std::move(e)})}}));
+        const std::string head = "local a = 1\nlocal b = 2\nlocal c = 3\nlocal x = 0\n\nfunction onCreate(self)\n    x = ";
+        if (out.rfind(head, 0) != 0 || out.size() < head.size() + 5) return out;
+        return out.substr(head.size(), out.size() - head.size() - 5);  // "\nend\n"
+    };
+    Block a = bvar("a"), b = bvar("b"), c = bvar("c");
+
+    // The door example.
+    CHECK(lua(blockScript({{"opened", "false"}},
+                          {{blk("on_interact"),
+                            blk("if", "", {blk("not", "", {bvar("opened")})},
+                                {{blk("set_var", "opened", {blk("bool", "true")}), blk("hide", "Door"),
+                                  blk("play_sound", "creak")}})}})) ==
+          "local opened = false\n\nfunction onInteract(self)\n    if not opened then\n        opened = true\n"
+          "        Entity.SetActive(Entity.Find(\"Door\"), false)\n        Audio.Play(\"creak\")\n    end\nend\n");
+
+    // Statements.
+    CHECK(lua(blockScript({{"n", "0"}, {"t", "hi"}},
+                          {{blk("on_create"), blk("change_var", "n", {bnum("2")}), blk("change_var", "n", {bnum("-1")}),
+                            blk("set_var", "t", {blk("text", "a\"b\\c\nd\te")}), blk("show", "self"), blk("hide", "Lamp"),
+                            blk("move_by", "self", {bnum("1"), bnum("0"), bnum("-2")}),
+                            blk("go_to", "Crate", {bnum("0"), bnum("0.5"), bnum("3")}), blk("play_cutscene", "intro"),
+                            blk("load_scene", "", {bnum("2")}), blk("log", "", {bvar("t")}), blk("stop")}})) ==
+          "local n = 0\nlocal t = \"hi\"\n\nfunction onCreate(self)\n"
+          "    n = n + 2\n    n = n - 1\n    t = \"a\\\"b\\\\c\\nd\\te\"\n    Entity.SetActive(self, true)\n"
+          "    Entity.SetActive(Entity.Find(\"Lamp\"), false)\n"
+          "    Entity.SetPosition(self, Vec3.add(Entity.GetPosition(self), Vec3.new(1, 0, -2)))\n"
+          "    Entity.SetPosition(Entity.Find(\"Crate\"), Vec3.new(0, FixedPoint.new(1) / 2, 3))\n"
+          "    Cutscene.Play(\"intro\")\n    Scene.Load(2)\n    Debug.Log(t)\n    return\nend\n");
+    CHECK(lua(blockScript({{"n", "0"}, {"t", "hi"}}, {{blk("on_create"), blk("change_var", "n", {blk("sub", "", {bvar("n"), bnum("1")})})}})) ==
+          "local n = 0\nlocal t = \"hi\"\n\nfunction onCreate(self)\n    n = n + (n - 1)\nend\n");
+    // C blocks and loop variables by depth.
+    CHECK(lua(blockScript({{"n", "0"}},
+                          {{blk("on_update"),
+                            blk("repeat", "", {bnum("3")},
+                                {{blk("repeat", "", {bvar("n")}, {{blk("change_var", "n", {bnum("1")})}})}}),
+                            blk("repeat", "", {bnum("2")}, {{}}),
+                            blk("if_else", "", {blk("gt", "", {bvar("n"), bnum("5")})},
+                                {{blk("set_var", "n", {bnum("0")})}, {blk("log", "", {blk("text", "small")})}}),
+                            blk("while", "", {blk("lt", "", {bvar("n"), bnum("3")})}, {{blk("change_var", "n", {bnum("1")})}}),
+                            blk("repeat_until", "", {blk("eq", "", {bvar("n"), bnum("9")})}, {{}}),
+                            blk("repeat_until", "", {blk("button_held", "CROSS")}, {{}}),
+                            blk("if", "", {blk("bool", "true")})}})) ==
+          "local n = 0\n\nfunction onUpdate(self, dt)\n    for i = 1, 3 do\n        for j = 1, n do\n"
+          "            n = n + 1\n        end\n    end\n    for i = 1, 2 do\n    end\n    if n > 5 then\n        n = 0\n"
+          "    else\n        Debug.Log(\"small\")\n    end\n    while n < 3 do\n        n = n + 1\n    end\n"
+          "    while not (n == 9) do\n    end\n    while not Input.IsHeldPlayer1(Input.CROSS) do\n    end\n"
+          "    if true then\n    end\nend\n");
+    // A variable named like a loop variable is skipped.
+    CHECK(lua(blockScript({{"i", "0"}}, {{blk("on_create"), blk("repeat", "", {bnum("2")}, {{blk("change_var", "i", {bnum("1")})}})}})) ==
+          "local i = 0\n\nfunction onCreate(self)\n    for j = 1, 2 do\n        i = i + 1\n    end\nend\n");
+
+    // Reporters.
+    CHECK(expr(blk("random", "", {bnum("1"), bnum("6")})) == "Random.Range(1, 6)");
+    CHECK(expr(blk("frame_count")) == "Timer.GetFrameCount()");
+    CHECK(expr(blk("position_x", "self")) == "Entity.GetPosition(self).x");
+    CHECK(expr(blk("position_z", "Crate")) == "Entity.GetPosition(Entity.Find(\"Crate\")).z");
+    CHECK(expr(blk("button_held", "R3")) == "Input.IsHeldPlayer1(Input.R3)");
+    CHECK(expr(blk("text", "")) == "\"\"");
+    CHECK(expr(blk("bool", "false")) == "false");
+    CHECK(expr(blk("mod", "", {a, b})) == "a % b");
+    CHECK(expr(blk("div", "", {a, b})) == "a / b");
+
+    // Precedence: parentheses only where Lua needs them.
+    CHECK(expr(blk("sub", "", {a, blk("sub", "", {b, c})})) == "a - (b - c)");
+    CHECK(expr(blk("sub", "", {blk("sub", "", {a, b}), c})) == "a - b - c");
+    CHECK(expr(blk("mul", "", {blk("add", "", {a, b}), c})) == "(a + b) * c");
+    CHECK(expr(blk("add", "", {a, blk("mul", "", {b, c})})) == "a + b * c");
+    CHECK(expr(blk("div", "", {a, blk("mul", "", {b, c})})) == "a / (b * c)");
+    CHECK(expr(blk("not", "", {blk("eq", "", {a, b})})) == "not (a == b)");
+    CHECK(expr(blk("not", "", {blk("not", "", {a})})) == "not not a");
+    CHECK(expr(blk("join", "", {a, blk("join", "", {b, c})})) == "a .. b .. c");
+    CHECK(expr(blk("join", "", {blk("join", "", {a, b}), c})) == "(a .. b) .. c");
+    CHECK(expr(blk("join", "", {blk("add", "", {a, b}), c})) == "a + b .. c");
+    CHECK(expr(blk("or", "", {blk("and", "", {a, b}), c})) == "a and b or c");
+    CHECK(expr(blk("and", "", {blk("or", "", {a, b}), c})) == "(a or b) and c");
+    CHECK(expr(blk("lt", "", {blk("add", "", {a, b}), blk("join", "", {b, c})})) == "a + b < b .. c");
+    CHECK(expr(blk("eq", "", {blk("eq", "", {a, b}), c})) == "a == b == c");
+    CHECK(expr(blk("mul", "", {bnum("0.5"), a})) == "FixedPoint.new(1) / 2 * a");
+    CHECK(expr(blk("div", "", {a, bnum("0.5")})) == "a / (FixedPoint.new(1) / 2)");
+    CHECK(expr(blk("add", "", {a, bnum("-0.5")})) == "a + FixedPoint.new(-1) / 2");
+    CHECK(expr(blk("sub", "", {a, bnum("-3")})) == "a - -3");
+    CHECK(expr(blk("mul", "", {bnum("-3"), a})) == "-3 * a");
+
+    // Decimals: integer-only psxlua takes them as fixed-point fractions.
+    CHECK(expr(bnum("0.5")) == "FixedPoint.new(1) / 2");
+    CHECK(expr(bnum("1.25")) == "FixedPoint.new(5) / 4");
+    CHECK(expr(bnum("0.1")) == "FixedPoint.new(1) / 10");
+    CHECK(expr(bnum("-0.5")) == "FixedPoint.new(-1) / 2");
+    CHECK(expr(bnum("2.50")) == "FixedPoint.new(5) / 2");
+    CHECK(expr(bnum("3")) == "3");
+    CHECK(expr(bnum("-3")) == "-3");
+    CHECK(expr(bnum("3.0")) == "3");
+    CHECK(expr(bnum("007")) == "7");
+    CHECK(expr(bnum("52428.7")) == "FixedPoint.new(524287) / 10");
+    CHECK(expr(bnum("-104857.6")) == "FixedPoint.new(-524288) / 5");
+    CHECK(expr(bnum("104857.4")) == "FixedPoint.new(524287) / 5");
+    auto oneExpr = [&](Block e) {
+        return error(blockScript({{"x", "0"}}, {{blk("on_create"), blk("set_var", "x", {std::move(e)})}}));
+    };
+    CHECK(oneExpr(bnum("52428.9")) ==
+          "stack 1, block 2 (set_var), input 1 (number): number 52428.9 is out of range (decimals go from -524288 to 524287)");
+    CHECK(oneExpr(bnum("104857.8")) ==
+          "stack 1, block 2 (set_var), input 1 (number): number 104857.8 is out of range (decimals go from -524288 to 524287)");
+    CHECK(oneExpr(bnum("524287.5")) ==
+          "stack 1, block 2 (set_var), input 1 (number): number 524287.5 is out of range (decimals go from -524288 to 524287)");
+    CHECK(oneExpr(bnum("2147483648")) == "stack 1, block 2 (set_var), input 1 (number): number 2147483648 is out of range");
+    CHECK(oneExpr(bnum("0.1234567891")) ==
+          "stack 1, block 2 (set_var), input 1 (number): number 0.1234567891 has more than 9 decimal places");
+    CHECK(oneExpr(bnum("1e3")) == "stack 1, block 2 (set_var), input 1 (number): \"1e3\" is not a number");
+    CHECK(oneExpr(bnum(".5")) == "stack 1, block 2 (set_var), input 1 (number): \".5\" is not a number");
+    CHECK(oneExpr(bnum("")) == "stack 1, block 2 (set_var), input 1 (number): no number");
+    CHECK(oneExpr(blk("bool", "yes")) == "stack 1, block 2 (set_var), input 1 (bool): \"yes\" is not true or false");
+    // Variable values: integer, decimal, bool, else text.
+    CHECK(lua(blockScript({{"p", "-4"}, {"q", "0.75"}, {"r", "true"}, {"s", "1.2.3"}, {"u", ""}}, {})) ==
+          "local p = -4\nlocal q = FixedPoint.new(3) / 4\nlocal r = true\nlocal s = \"1.2.3\"\nlocal u = \"\"\n");
+    CHECK(error(blockScript({{"p", "999999.5"}}, {})) ==
+          "variable 1 (p): number 999999.5 is out of range (decimals go from -524288 to 524287)");
+
+    // Hats: one function per event in catalogue order, stacks merged in
+    // stack order; button hats become one if/elseif chain.
+    CHECK(lua(blockScript({}, {{blk("on_interact"), blk("log", "", {bnum("1")})},
+                               {blk("on_create")},
+                               {blk("on_interact"), blk("log", "", {bnum("2")})},
+                               {blk("on_interact")},
+                               {blk("on_interact"), blk("log", "", {bnum("3")})}})) ==
+          "function onCreate(self)\nend\n\nfunction onInteract(self)\n    Debug.Log(1)\n\n    Debug.Log(2)\n\n"
+          "    Debug.Log(3)\nend\n");
+    CHECK(lua(blockScript({}, {{blk("on_button_press", "START"), blk("log", "", {bnum("1")})},
+                               {blk("on_button_release", "CROSS")},
+                               {blk("on_button_press", "CROSS"), blk("log", "", {bnum("2")})},
+                               {blk("on_button_press", "START"), blk("log", "", {bnum("3")})}})) ==
+          "function onButtonPress(self, button)\n    if button == Input.CROSS then\n        Debug.Log(2)\n"
+          "    elseif button == Input.START then\n        Debug.Log(1)\n\n        Debug.Log(3)\n    end\nend\n\n"
+          "function onButtonRelease(self, button)\n    if button == Input.CROSS then\n    end\nend\n");
+    std::string allHats;
+    std::vector<std::vector<Block>> hatStacks;
+    for (auto it = splash::blockCatalogue().rbegin(); it != splash::blockCatalogue().rend(); ++it)
+        if (it->kind == splash::BlockKind::Hat) hatStacks.push_back({blk(std::string(it->op).c_str(), "L1")});
+    CHECK(lua(blockScript({}, hatStacks)) ==
+          "function onCreate(self)\nend\n\nfunction onUpdate(self, dt)\nend\n\nfunction onCollideWithPlayer(self)\nend\n\n"
+          "function onInteract(self)\nend\n\nfunction onButtonPress(self, button)\n    if button == Input.L1 then\n    end\nend\n\n"
+          "function onButtonRelease(self, button)\n    if button == Input.L1 then\n    end\nend\n\n"
+          "function onEnable(self)\nend\n\nfunction onDisable(self)\nend\n\nfunction onDestroy(self)\nend\n\n"
+          "function onSceneCreationEnd()\nend\n\nfunction onTriggerEnter(index)\nend\n\nfunction onTriggerExit(index)\nend\n");
+    // Loose stacks make nothing and are not checked.
+    CHECK(lua(blockScript({}, {{blk("log", "", {bnum("1")})}, {}, {blk("nonsense")}, {blk("on_create")}})) ==
+          "function onCreate(self)\nend\n");
+    CHECK(lua(blockScript({}, {})).empty());
+
+    // Errors, each located.
+    auto stmt = [&](Block s) { return error(blockScript({{"n", "0"}}, {{blk("on_create"), std::move(s)}})); };
+    CHECK(stmt(blk("move_by", "self", {bnum("1"), bnum("2")})) == "stack 1, block 2 (move_by): missing input 3");
+    CHECK(stmt(blk("move_by", "self", {bnum("1"), blk(""), bnum("1")})) == "stack 1, block 2 (move_by): missing input 2");
+    CHECK(stmt(blk("log", "", {bnum("1"), bnum("2")})) == "stack 1, block 2 (log): too many inputs");
+    CHECK(stmt(blk("log", "", {bnum("1")}, {{}})) == "stack 1, block 2 (log): too many bodies");
+    CHECK(stmt(blk("teleport")) == "stack 1, block 2 (teleport): unknown block");
+    CHECK(stmt(blk("")) == "stack 1, block 2 (empty): empty block");
+    CHECK(stmt(blk("add", "", {bnum("1"), bnum("2")})) == "stack 1, block 2 (add): a reporter block cannot be a statement");
+    CHECK(stmt(blk("on_create")) == "stack 1, block 2 (on_create): a hat block can only start a stack");
+    CHECK(stmt(blk("log", "", {blk("stop")})) == "stack 1, block 2 (log), input 1 (stop): a statement block cannot be an input");
+    CHECK(stmt(blk("set_var", "q", {bnum("1")})) == "stack 1, block 2 (set_var): undeclared variable \"q\"");
+    CHECK(stmt(blk("change_var", "", {bnum("1")})) == "stack 1, block 2 (change_var): no variable chosen");
+    CHECK(stmt(blk("log", "", {bvar("q")})) == "stack 1, block 2 (log), input 1 (var): undeclared variable \"q\"");
+    CHECK(stmt(blk("if", "", {bnum("1")}, {{blk("set_var", "q", {bnum("1")})}})) ==
+          "stack 1, block 2 (if), body 1, block 1 (set_var): undeclared variable \"q\"");
+    CHECK(stmt(blk("if_else", "", {bnum("1")}, {{}, {blk("log"), }})) ==
+          "stack 1, block 2 (if_else), body 2, block 1 (log): missing input 1");
+    CHECK(stmt(blk("log", "", {blk("add", "", {bnum("1")})})) == "stack 1, block 2 (log), input 1 (add): missing input 2");
+    CHECK(stmt(blk("hide")) == "stack 1, block 2 (hide): no object chosen");
+    CHECK(stmt(blk("play_sound")) == "stack 1, block 2 (play_sound): no sound chosen");
+    CHECK(stmt(blk("play_cutscene")) == "stack 1, block 2 (play_cutscene): no cutscene chosen");
+    CHECK(stmt(blk("log", "", {blk("button_held", "X")})) == "stack 1, block 2 (log), input 1 (button_held): unknown button \"X\"");
+    CHECK(error(blockScript({}, {{blk("on_button_press", "")}})) == "stack 1, block 1 (on_button_press): no button chosen");
+    CHECK(error(blockScript({}, {{blk("on_button_release", "cross")}})) ==
+          "stack 1, block 1 (on_button_release): unknown button \"cross\"");
+    CHECK(error(blockScript({}, {{blk("on_scene_start"), blk("show", "self")}})) ==
+          "stack 1, block 2 (show): self is not available in on_scene_start");
+    CHECK(error(blockScript({}, {{blk("on_trigger_enter"), blk("log", "", {blk("position_y", "self")})}})) ==
+          "stack 1, block 2 (log), input 1 (position_y): self is not available in on_trigger_enter");
+    CHECK(error(blockScript({}, {{blk("on_create"), blk("stop"), blk("log", "", {bnum("1")})}})) ==
+          "stack 1, block 2 (stop): nothing can follow stop");
+    // A stop returns from the merged function, so only the last stack may stop.
+    CHECK(error(blockScript({}, {{blk("on_create"), blk("if", "", {bnum("1")}, {{blk("stop")}})}, {blk("on_create")}})) ==
+          "stack 1, block 2 (if), body 1, block 1 (stop): stop would also skip stack 2, which has the same hat");
+    CHECK(lua(blockScript({}, {{blk("on_create")}, {blk("on_create"), blk("stop")}})) == "function onCreate(self)\n    return\nend\n");
+    CHECK(error(blockScript({{"end", "1"}}, {})) == "variable 1 (end): \"end\" is reserved");
+    CHECK(error(blockScript({{"self", "1"}}, {})) == "variable 1 (self): \"self\" is reserved");
+    CHECK(error(blockScript({{"dt", "1"}}, {})) == "variable 1 (dt): \"dt\" is reserved");
+    CHECK(error(blockScript({{"Entity", "1"}}, {})) == "variable 1 (Entity): \"Entity\" is reserved");
+    CHECK(error(blockScript({{"onCreate", "1"}}, {})) == "variable 1 (onCreate): \"onCreate\" is reserved");
+    CHECK(error(blockScript({{"2x", "1"}}, {})) ==
+          "variable 1 (2x): not a name (letters, digits and _, not starting with a digit)");
+    CHECK(error(blockScript({{"my var", "1"}}, {})) ==
+          "variable 1 (my var): not a name (letters, digits and _, not starting with a digit)");
+    CHECK(error(blockScript({{"", "1"}}, {})) == "variable 1 (): no name");
+    CHECK(error(blockScript({{"n", "1"}, {"n", "2"}}, {})) == "variable 2 (n): declared twice");
+    CHECK(lua(blockScript({{"_n2", "1"}}, {})) == "local _n2 = 1\n");
+    // Several errors are all reported; the file form throws the first.
+    CHECK(splash::blocksToLua(blockScript({}, {{blk("on_create"), blk("hide"), blk("teleport")}})).errors.size() == 2);
+    std::string thrown;
+    try {
+        splash::blocksFileToLua(splash::saveBlocks(blockScript({}, {{blk("on_create"), blk("hide"), blk("teleport")}})),
+                                "scripts/x.blocks");
+    } catch (const std::runtime_error& e) {
+        thrown = e.what();
+    }
+    CHECK(thrown == "scripts/x.blocks: stack 1, block 2 (hide): no object chosen");
+
+    // File format: stable key order, fields left out when empty.
+    splash::BlockScript round = blockScript({{"opened", "false"}, {"name", "Door \"A\""}},
+                                            {{blk("on_interact"),
+                                              blk("if_else", "", {blk("not", "", {bvar("opened")})},
+                                                  {{blk("move_by", "self", {bnum("0.5"), blk(""), bnum("-1")})}, {}})},
+                                             {blk("log", "", {blk("text", "loose \xc3\xa9")})}});
+    round.stacks[0].x = 12.5f;
+    round.stacks[0].y = -3;
+    round.stacks[1].x = 300;
+    const std::string saved = splash::saveBlocks(round);
+    CHECK(splash::parseBlocks(saved, "r.blocks") == round);
+    CHECK(splash::saveBlocks(splash::parseBlocks(saved, "r.blocks")) == saved);
+    CHECK(saved.rfind("{\n  \"format\": \"splashedit-blocks\",\n  \"version\": 1,\n  \"variables\": [\n    {\n"
+                      "      \"name\": \"opened\",\n      \"value\": \"false\"\n    },", 0) == 0);
+    CHECK(saved.find("\"x\": 12.5,\n      \"y\": -3,\n      \"blocks\"") != std::string::npos);
+    CHECK(saved.find("{\n          \"op\": \"on_interact\"\n        }") != std::string::npos);
+    CHECK(saved.find("\"op\": \"var\",\n                  \"field\": \"opened\"\n") != std::string::npos);
+    CHECK(saved.find("\"op\": \"\"\n") != std::string::npos);
+    CHECK(saved.size() > 2 && saved.substr(saved.size() - 2) == "}\n");
+    CHECK(splash::saveBlocks({}) == "{\n  \"format\": \"splashedit-blocks\",\n  \"version\": 1,\n  \"variables\": [],\n"
+                                    "  \"stacks\": []\n}\n");
+    CHECK(splash::parseBlocks("{\"format\":\"splashedit-blocks\",\"version\":1}", "e.blocks") == splash::BlockScript{});
+    // An unknown op loads (a newer editor's block) and fails at codegen.
+    CHECK(splash::parseBlocks("{\"format\":\"splashedit-blocks\",\"version\":1,\"stacks\":[{\"blocks\":[{\"op\":\"on_create\"},"
+                              "{\"op\":\"fly\"}]}]}", "f.blocks").stacks[0].blocks[1].op == "fly");
+    auto parseError = [](const std::string& text) {
+        try {
+            splash::parseBlocks(text, "p.blocks");
+        } catch (const std::runtime_error& e) {
+            return std::string(e.what());
+        }
+        return std::string("<no error>");
+    };
+    CHECK(parseError("{").rfind("p.blocks: ", 0) == 0);
+    CHECK(parseError("[]") == "p.blocks: not a block script");
+    CHECK(parseError("{\"format\":\"splashedit-ng/scene\",\"version\":1}") == "p.blocks: not a splashedit block script");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\"}") == "p.blocks: missing or invalid \"version\"");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":2}") == "p.blocks: format version 2, this build reads up to 1");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":1,\"stack\":[]}") == "p.blocks: file: unknown key \"stack\"");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":1,\"variables\":[{\"name\":\"a\",\"value\":1}]}") ==
+          "p.blocks: variables[0].value: not a string");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":1,\"stacks\":[{\"blocks\":[{\"op\":\"if\",\"bodies\":[[{\"op\":3}]]}]}]}") ==
+          "p.blocks: stacks[0].blocks[0].bodies[0][0].op: not a string");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":1,\"stacks\":[{\"x\":\"1\"}]}") ==
+          "p.blocks: stacks[0].x: not a number");
+    CHECK(parseError("{\"format\":\"splashedit-blocks\",\"version\":1,\"stacks\":[{\"blocks\":[{\"op\":\"log\",\"arg\":[]}]}]}") ==
+          "p.blocks: stacks[0].blocks[0]: unknown key \"arg\"");
+
+    // The catalogue: unique ops, labels naming each input, hats first.
+    std::set<std::string> ops;
+    int hats = 0;
+    bool labelsOk = true, hatsFirst = true;
+    for (const splash::BlockSpec& s : splash::blockCatalogue()) {
+        ops.insert(std::string(s.op));
+        if (s.kind == splash::BlockKind::Hat) hatsFirst = hatsFirst && hats == int(ops.size()) - 1, hats++;
+        for (int i = 1; i <= 9; i++)
+            labelsOk = labelsOk && (std::string(s.label).find("%" + std::to_string(i)) != std::string::npos) == (i <= s.args);
+        labelsOk = labelsOk && (std::string(s.label).find("%f") != std::string::npos) == (s.field != splash::BlockField::None);
+        labelsOk = labelsOk && (s.kind == splash::BlockKind::CBlock) == (s.bodies > 0);
+    }
+    CHECK(ops.size() == splash::blockCatalogue().size() && hats == 12 && hatsFirst && labelsOk);
+    CHECK(splash::findBlockSpec("move_by") && splash::findBlockSpec("move_by")->args == 3 && !splash::findBlockSpec("fly"));
+    CHECK(splash::blockButtons().size() == 16 && splash::blockButtons().front() == "CROSS");
+
+    // Every script generated above compiles for the PS1.
+    int compiled = 0;
+    for (const std::string& src : generated) {
+        try {
+            splash::compileLua(src, "blocks.lua");
+            compiled++;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "  blocks: does not compile: %s\n%s", e.what(), src.c_str());
+        }
+    }
+    CHECK(generated.size() >= 50 && compiled == int(generated.size()));
 }
 
 // New script: the file name from the object's or scene's name, numbered
@@ -8138,6 +8463,7 @@ int main(int argc, char** argv) {
     testProject();
     testAdoptAsset();
     testNewScript();
+    testBlocks();
     testPlaceModel();
     testPlaceSkinnedModel();
     testImportSettings();

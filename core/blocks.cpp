@@ -50,6 +50,8 @@ const std::vector<BlockSpec> kCatalogue = {
      "Sets the variable to the value."},
     {"change_var", K::Statement, "change %f by %1", 1, 0, F::Variable, "Variables",
      "Adds the value to the variable; a negative number takes it away."},
+    {"wait", K::Statement, "wait %1 seconds", 1, 0, F::None, "Control",
+     "Pauses this event's blocks for that many seconds while the game runs on; the event is ignored until they finish, and a hidden object's blocks stay paused."},
     {"if", K::CBlock, "if %1 then", 1, 1, F::None, "Control",
      "Runs the blocks inside only when the condition is true."},
     {"if_else", K::CBlock, "if %1 then|else", 1, 2, F::None, "Control",
@@ -60,6 +62,8 @@ const std::vector<BlockSpec> kCatalogue = {
      "Runs the blocks inside again and again for as long as the condition is true, checking it before each time."},
     {"repeat_until", K::CBlock, "repeat until %1", 1, 1, F::None, "Control",
      "Runs the blocks inside again and again until the condition is true, checking it before each time."},
+    {"wait_until", K::Statement, "wait until %1", 1, 0, F::None, "Control",
+     "Pauses this event's blocks until the condition is true, checking it once a frame; the event is ignored until they finish."},
     {"stop", K::Statement, "stop this script", 0, 0, F::None, "Control",
      "Ends this event here: the blocks after it in the event do not run this time."},
     {"show", K::Statement, "show %f", 0, 0, F::Object, "Objects",
@@ -163,7 +167,9 @@ const std::set<std::string, std::less<>> kReserved = {
     "SkinnedAnim", "Sprite", "Tile", "Timer", "UI", "Vec3",
     // event functions: a local of that name would capture the function
     "onCreate", "onUpdate", "onCollideWithPlayer", "onInteract", "onButtonPress", "onButtonRelease", "onEnable",
-    "onDisable", "onDestroy", "onSceneCreationStart", "onSceneCreationEnd", "onTriggerEnter", "onTriggerExit"};
+    "onDisable", "onDestroy", "onSceneCreationStart", "onSceneCreationEnd", "onTriggerEnter", "onTriggerExit",
+    // helpers the generated Lua defines for wait blocks
+    "tasks", "wait", "startTask", "resumeTask"};
 
 [[noreturn]] void fail(const std::string& path, const std::string& what) { throw std::runtime_error(path + ": " + what); }
 
@@ -343,6 +349,7 @@ struct Gen {
     std::vector<std::string> loopVars;
     const Hat* hat = nullptr;
     std::string stopAt;  // where the current stack's first stop is
+    bool usesWait = false;
 
     Expr nil() { return {"nil", Atom}; }
     void error(const std::string& at, const std::string& what) { errors.push_back(at + ": " + what); }
@@ -523,6 +530,17 @@ struct Gen {
                 line(out, depth, "while not " + paren(c, c.prec < Unary) + " do");
                 body(0, depth + 1);
                 line(out, depth, "end");
+            } else if (op == "wait" || op == "wait_until") {
+                if (!hat->self) error(at, "wait only works in object scripts: the scene and trigger events get no frames");
+                if (op == "wait") {
+                    usesWait = true;
+                    line(out, depth, "wait(" + input(b, 0, at).s + ")");
+                } else {
+                    Expr c = input(b, 0, at);
+                    line(out, depth, "while not " + paren(c, c.prec < Unary) + " do");
+                    line(out, depth + 1, "coroutine.yield()");
+                    line(out, depth, "end");
+                }
             } else if (op == "stop") {
                 if (i + 1 < list.size()) error(at, "nothing can follow stop");
                 if (stopAt.empty()) stopAt = at;
@@ -553,6 +571,7 @@ struct Gen {
 struct Part {
     size_t stack;
     std::string code, stopAt;
+    bool task = false;  // the stack waits, so it runs as a task
 };
 
 // Bodies of stacks sharing a hat, one after the other with a blank line
@@ -681,7 +700,23 @@ LuaGen blocksToLua(const BlockScript& script) {
         vars += "local " + v.name + " = " + e.s + "\n";
     }
 
-    std::vector<std::string> functions;
+    // A stack whose blocks wait runs them as a task: a coroutine onUpdate
+    // resumes every frame, so it runs alongside the hat's other stacks.
+    auto waits = [](const std::vector<Block>& list, size_t from, auto& self) -> bool {
+        for (size_t i = from; i < list.size(); i++) {
+            if (list[i].op == "wait" || list[i].op == "wait_until") return true;
+            for (const auto& body : list[i].bodies)
+                if (self(body, 0, self)) return true;
+        }
+        return false;
+    };
+    std::vector<std::string> tasks;
+
+    struct Function {
+        std::string name, params, body;
+        bool onlyForTasks = false;  // onUpdate with no stack of its own
+    };
+    std::vector<Function> functions;
     for (const Hat& hat : kHats) {
         g.hat = &hat;
         bool buttons = hat.op == "on_button_press" || hat.op == "on_button_release";
@@ -701,35 +736,110 @@ LuaGen blocksToLua(const BlockScript& script) {
                 }
                 arm = size_t(it - kButtons.begin());
             }
-            Part p{si + 1, {}, {}};
+            Part p{si + 1, {}, {}, false};
             g.stopAt.clear();
-            g.statements(std::vector<Block>(blocks.begin() + 1, blocks.end()), buttons ? 2 : 1, prefix, 2, p.code);
+            p.task = waits(blocks, 1, waits);
+            int depth = (buttons ? 2 : 1) + (p.task ? 1 : 0);
+            g.statements(std::vector<Block>(blocks.begin() + 1, blocks.end()), depth, prefix, 2, p.code);
             p.stopAt = g.stopAt;
             arms[arm].push_back(std::move(p));
             any = true;
         }
-        if (!any) continue;
-        std::string f = "function " + std::string(hat.name) + "(" + std::string(hat.params) + ")\n";
+        if (!any) {
+            if (hat.op == "on_update") functions.push_back({std::string(hat.name), std::string(hat.params), {}, true});
+            continue;
+        }
+        // The arm's stacks in order, each one that waits wrapped in its task;
+        // a stop in a task ends only that task.
+        auto armBody = [&](size_t a, int depth) {
+            size_t count = 0, n = 0;
+            for (const Part& p : arms[a]) count += p.task;
+            for (Part& p : arms[a]) {
+                if (!p.task) continue;
+                std::string name(hat.name);
+                if (buttons) name += "_" + std::string(kButtons[a]);
+                if (count > 1) name += "_" + std::to_string(++n);
+                tasks.push_back(name);
+                p.code = pad(depth) + "startTask(\"" + name + "\", function()\n" + p.code + pad(depth) + "end)\n";
+                p.stopAt.clear();
+            }
+            return mergeParts(arms[a], g);
+        };
+        std::string f;
         if (buttons) {
             bool first = true;
             for (size_t b = 0; b < arms.size(); b++) {
                 if (arms[b].empty()) continue;
                 f += pad(1) + (first ? "if" : "elseif") + " button == Input." + std::string(kButtons[b]) + " then\n";
-                f += mergeParts(arms[b], g);
+                f += armBody(b, 2);
                 first = false;
             }
             f += pad(1) + "end\n";
         } else {
-            f += mergeParts(arms[0], g);
+            f += armBody(0, 1);
         }
-        functions.push_back(f + "end\n");
+        functions.push_back({std::string(hat.name), std::string(hat.params), f, false});
+    }
+
+    std::string helpers;
+    if (!tasks.empty()) {
+        helpers =
+            "-- Blocks that wait run as tasks (coroutines); onUpdate resumes them every frame.\n"
+            "local tasks = {}\n"
+            "\n"
+            "local function resumeTask(name, ...)\n"
+            "    local ok, err = coroutine.resume(tasks[name], ...)\n"
+            "    if coroutine.status(tasks[name]) == \"dead\" then\n"
+            "        tasks[name] = nil\n"
+            "    end\n"
+            "    if not ok then\n"
+            "        error(err, 0)\n"
+            "    end\n"
+            "end\n"
+            "\n"
+            "-- Starts fn as the task called name, unless that task is still waiting.\n"
+            "local function startTask(name, fn)\n"
+            "    if tasks[name] == nil then\n"
+            "        tasks[name] = coroutine.create(fn)\n"
+            "        resumeTask(name)\n"
+            "    end\n"
+            "end\n";
+        if (g.usesWait)
+            helpers +=
+                "\n"
+                "-- dt counts 4096 per 30fps frame, so a second is 30 * 4096. Always lets a frame pass.\n"
+                "local function wait(seconds)\n"
+                "    local left\n"
+                "    if type(seconds) == \"table\" then\n"
+                "        left = seconds._raw * 30  -- a FixedPoint keeps 4096 per unit in _raw\n"
+                "    else\n"
+                "        left = seconds * 122880\n"
+                "    end\n"
+                "    repeat\n"
+                "        left = left - coroutine.yield()\n"
+                "    until left <= 0\n"
+                "end\n";
+    }
+    std::vector<std::string> texts;
+    for (Function& fn : functions) {
+        if (fn.name == "onUpdate") {
+            std::string resumes;
+            for (const std::string& t : tasks)
+                resumes += pad(1) + "if tasks." + t + " then\n" + pad(2) + "resumeTask(\"" + t + "\", dt)\n" + pad(1) + "end\n";
+            if (!resumes.empty() && !fn.body.empty()) resumes += "\n";
+            fn.body = resumes + fn.body;
+            if (fn.onlyForTasks && tasks.empty()) continue;
+        }
+        texts.push_back("function " + fn.name + "(" + fn.params + ")\n" + fn.body + "end\n");
     }
 
     LuaGen out;
-    out.lua = vars;
-    for (size_t i = 0; i < functions.size(); i++) {
+    out.lua = helpers;
+    if (!helpers.empty() && !vars.empty()) out.lua += "\n";
+    out.lua += vars;
+    for (const std::string& t : texts) {
         if (!out.lua.empty()) out.lua += "\n";
-        out.lua += functions[i];
+        out.lua += t;
     }
     out.errors = std::move(g.errors);
     return out;

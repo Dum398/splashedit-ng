@@ -1,0 +1,206 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [
+    {
+      "name": "frames",
+      "value": "0"
+    },
+    {
+      "name": "lit",
+      "value": "false"
+    }
+  ],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_create"
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "text",
+              "field": "lamp on"
+            }
+          ]
+        },
+        {
+          "op": "wait",
+          "args": [
+            {
+              "op": "number",
+              "field": "2"
+            }
+          ]
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "join",
+              "args": [
+                {
+                  "op": "text",
+                  "field": "two seconds, frame "
+                },
+                {
+                  "op": "var",
+                  "field": "frames"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 240,
+      "blocks": [
+        {
+          "op": "on_update"
+        },
+        {
+          "op": "change_var",
+          "field": "frames",
+          "args": [
+            {
+              "op": "number",
+              "field": "1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 440,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "CROSS"
+        },
+        {
+          "op": "show",
+          "field": "self"
+        },
+        {
+          "op": "set_var",
+          "field": "lit",
+          "args": [
+            {
+              "op": "bool",
+              "field": "true"
+            }
+          ]
+        },
+        {
+          "op": "wait",
+          "args": [
+            {
+              "op": "number",
+              "field": "0.5"
+            }
+          ]
+        },
+        {
+          "op": "hide",
+          "field": "self"
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 640,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "CIRCLE"
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "text",
+              "field": "circle"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 840,
+      "blocks": [
+        {
+          "op": "on_interact"
+        },
+        {
+          "op": "repeat",
+          "args": [
+            {
+              "op": "number",
+              "field": "3"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "log",
+                "args": [
+                  {
+                    "op": "text",
+                    "field": "tick"
+                  }
+                ]
+              },
+              {
+                "op": "wait",
+                "args": [
+                  {
+                    "op": "number",
+                    "field": "1"
+                  }
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "op": "wait_until",
+          "args": [
+            {
+              "op": "button_held",
+              "field": "SQUARE"
+            }
+          ]
+        },
+        {
+          "op": "stop"
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 1040,
+      "blocks": [
+        {
+          "op": "on_create"
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "text",
+              "field": "second stack"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

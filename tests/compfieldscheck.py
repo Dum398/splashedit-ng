@@ -1,14 +1,15 @@
 # The object inspector's component fields that only the scene file used to
 # set, driven through the GUI: Interactable's button, Repeatable, Cooldown,
-# Show prompt and prompt canvas; Player's sprint speed, gravity, step height
-# and max slope; Audio's name, sample rate, Loop and Trim silence; Mesh's
+# Show prompt and prompt canvas; Player's sprint speed, gravity, step height,
+# max slope and nav cell size/height (and Navigation's, which reach the
+# bake through splashpack-cli); Audio's name, sample rate, Loop and Trim silence; Mesh's
 # Smooth normals; a spot Light's inner angle. Each run selects an object,
 # edits, saves with Ctrl+S and reads the saved scene; the undo arms take one
 # edit back with one Ctrl+Z. Controls are clicked by name (--click
 # @obj.irepeat): the editor aims at where the frame before drew them, so no
 # pixel positions live here.
 # usage: python3 compfieldscheck.py <splashedit>   (needs a display: xvfb-run -a)
-import json, os, shutil, subprocess, sys, tempfile
+import json, os, shutil, struct, subprocess, sys, tempfile
 
 editor = os.path.abspath(sys.argv[1])
 here = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,7 @@ def project_copy():
                                        'showPrompt': False, 'promptCanvas': '', 'lineOfSight': False, 'facingAngle': 90}]))
     s['objects'].append(obj('Bell', [{'type': 'audio', 'clip': None, 'clipName': 'bell', 'sampleRate': 22050, 'loop': False,
                                       'defaultVolume': 100, 'trimLeadingSilence': False}]))
+    s['objects'].append(obj('Nav Settings', [{'type': 'navigation', 'agentHeight': 1.6, 'agentRadius': 0.3}]))
     s['canvases'] = [{'name': 'Hud', 'elements': []}, {'name': 'Hint', 'elements': []}]
     for o in s['objects']:
         if o['name'] == 'Torch Light':
@@ -49,6 +51,7 @@ def project_copy():
     return project
 
 
+lines_all = []
 mid = None  # with SAVE_MID in the script: the scene as saved at that point
 
 
@@ -69,6 +72,8 @@ def run(select, args):
     # A control the script named and the editor never drew is a broken check, not a pass.
     missing = [l for l in lines if 'no such control drawn' in l or 'no object named' in l]
     check('every control the script names was drawn', not missing, missing)
+    global lines_all
+    lines_all = lines
     out = '\n'.join(l for l in lines if not l.startswith('control '))
     return json.load(open(scene, encoding='utf-8')), out
 
@@ -143,6 +148,77 @@ check('one Ctrl+Z puts the max slope back; gravity is clamped to 0',
       player(comp(mid, 'Player Start', 'player')) == (6.5, 12, 0.5, 30) and
       player(comp(s, 'Player Start', 'player')) == (6.5, 0, 0.5, 46),
       f"{player(comp(mid, 'Player Start', 'player'))} then {player(comp(s, 'Player Start', 'player'))} | " + out[-200:])
+
+
+# Nav voxel size, on the Player and on a Navigation component (which the bake
+# takes whole when the scene has one). The caption beside the rows gives the
+# bake's voxel counts, in float32 like the editor and core/navregion.cpp.
+def f32(v):
+    return struct.unpack('f', struct.pack('f', v))[0]
+
+
+def voxels(who, height, radius, step, cs, ch):
+    """The scripted line: the cell fields as drawn (three decimals at most),
+    then the counts."""
+    import math
+    shown = ' x '.join(f'{v:.3f}'.rstrip('0').rstrip('.') for v in (cs, ch))
+    h, r, st, cs, ch = map(f32, (height, radius, step, cs, ch))
+    return f'{who} cells: {shown} voxels: height {math.ceil(h / ch)} radius {math.ceil(r / cs)} climb {math.floor(st / ch)}'
+
+
+def cells(c):
+    return c and (c['maxStepHeight'], c['walkableSlopeAngle'], c['navCellSize'], c['navCellHeight'])
+
+
+cli = os.path.join(os.path.dirname(editor), 'cli', 'splashpack-cli' + ('.exe' if editor.endswith('.exe') else ''))
+
+
+def asked(scene_json):
+    """Exports a saved scene with splashpack-cli and returns the cell size the
+    nav bake was asked for, off its --stats line."""
+    d = tempfile.mkdtemp()
+    project = os.path.join(d, 'courtyard')
+    shutil.copytree(example, project)
+    path = os.path.join(project, 'courtyard.scene')
+    json.dump(scene_json, open(path, 'w', encoding='utf-8'), indent=2)
+    r = subprocess.run([cli, 'export', path, '-o', os.path.join(d, 'out.splashpack'), '--stats'], capture_output=True, text=True,
+                       timeout=300)
+    for l in r.stdout.splitlines():
+        if l.startswith('nav regions=') and '(asked ' in l:
+            return l.split('(asked ')[1].split(')')[0]
+    return 'no nav line: ' + (r.stdout + r.stderr)[-200:]
+
+
+s, out = run('Player Start', [])
+check('the Player shows its voxel counts at open', voxels('player', 1.8, 0.5, 0.35, 0.05, 0.025) in out, out[-300:])
+check('the voxel caption is drawn', 'control obj.pvoxels at ' in '\n'.join(lines_all), '')
+s, out = run('Player Start', ['--dblclick', '@obj.pcellh', '--wait', '3', '--key', 'enter', '--wait', '3'])
+check('Enter on the Cell height field keeps 0.025 (shown to 3 decimals)',
+      cells(comp(s, 'Player Start', 'player')) == (0.35, 46, 0.05, 0.025), f"{cells(comp(s, 'Player Start', 'player'))} | " + out[-200:])
+PCELL = typed('obj.pstep', '0.4') + typed('obj.pcell', '0.1') + typed('obj.pcellh', '0.05')
+s, out = run('Player Start', PCELL)
+check('step height, cell size and cell height land in the saved Player',
+      cells(comp(s, 'Player Start', 'player')) == (0.4, 46, 0.1, 0.05), f"{cells(comp(s, 'Player Start', 'player'))} | " + out[-200:])
+check('the voxel counts follow the cells', voxels('player', 1.8, 0.5, 0.4, 0.1, 0.05) in out, out[-300:])
+s, out = run('Player Start', PCELL + SAVE_MID + UNDO + typed('obj.pcell', '0'))
+check('one Ctrl+Z puts the cell height back; cell size is clamped to 0.01',
+      cells(comp(mid, 'Player Start', 'player')) == (0.4, 46, 0.1, 0.05) and
+      cells(comp(s, 'Player Start', 'player')) == (0.4, 46, 0.01, 0.025),
+      f"{cells(comp(mid, 'Player Start', 'player'))} then {cells(comp(s, 'Player Start', 'player'))} | " + out[-200:])
+NCELL = typed('obj.nstep', '0.3') + typed('obj.nslope', '35') + typed('obj.ncell', '0.2') + typed('obj.ncellh', '0.04')
+s, out = run('Nav Settings', NCELL)
+check('Navigation step height, max slope, cell size and cell height land in the saved scene',
+      cells(comp(s, 'Nav Settings', 'navigation')) == (0.3, 35, 0.2, 0.04), f"{cells(comp(s, 'Nav Settings', 'navigation'))} | " + out[-200:])
+check('the Player keeps its own settings', cells(comp(s, 'Player Start', 'player')) == (0.35, 46, 0.05, 0.025),
+      str(cells(comp(s, 'Player Start', 'player'))))
+check('the Navigation voxel counts use its agent', voxels('navigation', 1.6, 0.3, 0.3, 0.2, 0.04) in out, out[-300:])
+check('the bake is asked for the Navigation cell size', asked(s) == '0.2', asked(s))
+s['objects'] = [o for o in s['objects'] if o['name'] != 'Nav Settings']
+for o in s['objects']:
+    for c in o['components']:
+        if c['type'] == 'player':
+            c['navCellSize'] = 0.08
+check('without a Navigation component the bake is asked for the Player cell size', asked(s) == '0.08', asked(s))
 
 
 # Audio: name, sample rate, loop, trim silence.

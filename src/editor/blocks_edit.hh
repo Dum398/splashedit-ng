@@ -51,7 +51,7 @@ const Block* blockAt(const BlockScript& s, const Path& p);
 Block* blockAt(BlockScript& s, const Path& p);
 // Reporters with a typed-in value: they sit in a slot as its value.
 bool isLiteral(const Block& b);
-// Input `arg` of `op` takes only a Boolean (if, while, and, or, not).
+// Input `arg` of `op` takes only a Boolean or a variable (if, while, and, or, not).
 bool booleanSlot(std::string_view op, int arg);
 // The block a palette drag makes: its inputs filled with literals where a
 // number or a text goes ("0", "1" for change, "10" for repeat, "" for log),
@@ -174,7 +174,7 @@ struct Target {
 // The kind rules: a hat only first in a stack (a new stack, or over a loose
 // one); statements and C blocks in lists, never under a stop nor with a stop
 // above other blocks; reporters only in inputs (a Boolean input takes a
-// Boolean only) or loose.
+// Boolean or a variable, which may hold true or false) or loose.
 bool canDrop(const BlockScript& s, const BlockStack& fragment, const Target& t);
 // The script with `fragment` at `t`, or nothing when canDrop() refuses.
 // `placed` gets the path of the fragment's first block.

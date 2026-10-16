@@ -507,7 +507,8 @@ bool slotTakes(const BlockScript& s, const Path& p, int arg, const Block& r) {
     const BlockSpec* rs = findBlockSpec(r.op);
     if (!spec || !rs || arg < 0 || arg >= spec->args) return false;
     if (rs->kind != BlockKind::Reporter && rs->kind != BlockKind::Boolean) return false;
-    return !booleanSlot(b->op, arg) || rs->kind == BlockKind::Boolean;
+    // A variable may hold true or false: it goes where a condition does.
+    return !booleanSlot(b->op, arg) || rs->kind == BlockKind::Boolean || r.op == "var";
 }
 
 }  // namespace

@@ -2004,7 +2004,10 @@ void testBlocksEdits() {
     CHECK(!eb::canDrop(s, hide, {T::Slot, P("s0.b3"), 0}));                                  // a statement is no input
     CHECK(!eb::canDrop(s, rep, {T::After, P("s0.b1")}) && !eb::canDrop(s, rep, {T::BodyTop, P("s0.b2"), 0}));
     CHECK(!eb::canDrop(s, rep, {T::StackTop, P("s1")}) && eb::canDrop(s, rep, {T::Canvas, {}, 0, 0, 0}));
-    CHECK(!eb::canDrop(s, rep, {T::Slot, P("s0.b2"), 0}) && eb::canDrop(s, boolean, {T::Slot, P("s0.b2"), 0}));  // a condition
+    // A condition: a Boolean, or a variable (it may hold true or false), not any other reporter.
+    CHECK(!eb::canDrop(s, frag({blk("add", "", {bnum("1"), bnum("2")})}), {T::Slot, P("s0.b2"), 0}) &&
+          eb::canDrop(s, boolean, {T::Slot, P("s0.b2"), 0}) && eb::canDrop(s, rep, {T::Slot, P("s0.b2"), 0}));
+    CHECK(!eb::canDrop(s, frag({blk("number", "1")}), {T::Slot, P("s0.b2"), 0}));
     CHECK(eb::canDrop(s, rep, {T::Slot, P("s0.b3"), 2}) && !eb::canDrop(s, rep, {T::Slot, P("s0.b3"), 3}));
     CHECK(!eb::canDrop(s, hide, {T::After, P("s0.b2.d0.b1")}));                              // nothing under a stop
     CHECK(!eb::canDrop(s, stop, {T::After, P("s0.b1")}) && eb::canDrop(s, stop, {T::After, P("s0.b3")}));
@@ -2055,7 +2058,7 @@ void testBlocksSnap() {
     const float hh = eb::stackSize(hat2, blkWidth, m).second;
     t = near(hat2, 300, 50 - hh);
     CHECK(t.kind == T::StackTop && t.path.str() == "s1");
-    // A reporter snaps to the input its left edge is at; a condition only takes a Boolean.
+    // A reporter snaps to the input its left edge is at; a condition only takes a Boolean or a variable.
     const splash::BlockStack var{0, 0, {bvar("opened")}}, cond{0, 0, {blk("bool", "true")}};
     const eb::Rect& y = move->slots[1];
     const float vh = eb::stackSize(var, blkWidth, m).second;
@@ -2064,7 +2067,11 @@ void testBlocksSnap() {
     const eb::Rect& c = iff->slots[0];
     t = near(cond, c.x0, c.y0);
     CHECK(t.kind == T::Slot && t.path.str() == "s0.b2" && t.index == 0);
-    CHECK(near(var, c.x0, c.y0).kind != T::Slot || near(var, c.x0, c.y0).path.str() != "s0.b2");
+    // A variable may hold true or false: it snaps there too; a sum does not.
+    t = near(var, c.x0, c.y0);
+    CHECK(t.kind == T::Slot && t.path.str() == "s0.b2" && t.index == 0);
+    const splash::BlockStack sum{0, 0, {blk("add", "", {bnum("1"), bnum("2")})}};
+    CHECK(near(sum, c.x0, c.y0).kind != T::Slot || near(sum, c.x0, c.y0).path.str() != "s0.b2");
     // The snap is what dropStack takes.
     std::optional<splash::BlockScript> d = eb::dropStack(s, hide, near(hide, hat->rect.x0 + 6, hat->rect.y1 + 5));
     CHECK(d && d->stacks[0].blocks[1].field == "Crate");

@@ -9542,18 +9542,18 @@ static void writeWav16(const fs::path& p, int rate, int channels, uint32_t frame
     for (uint32_t i = 0; i < frames * uint32_t(channels); i++) u16(uint16_t(int16_t((i * 131) % 8000 - 4000)));
 }
 
-// wavInfo reads the header; the document caches it for audio clips.
+// audioFileInfo reads a WAV header; the document caches it for audio clips.
 void testWavInfo() {
     const fs::path dir = g_outDir / "wavinfo";
     fs::remove_all(dir);
     fs::create_directories(dir);
     writeWav16(dir / "st.wav", 32000, 2, 4321);
-    splash::WavInfo w = splash::wavInfo(dir / "st.wav");
+    splash::AudioFileInfo w = splash::audioFileInfo(dir / "st.wav");
     CHECK(w.rate == 32000 && w.channels == 2 && w.frames == 4321);
     { std::ofstream(dir / "bad.wav", std::ios::binary) << "not a wav"; }
     bool threw = false;
     try {
-        splash::wavInfo(dir / "bad.wav");
+        splash::audioFileInfo(dir / "bad.wav");
     } catch (const std::runtime_error&) {
         threw = true;
     }
@@ -9583,6 +9583,92 @@ void testWavInfo() {
     ai = d.audio("st.wav");
     CHECK(ai && ai->rate == 11025 && ai->channels == 1 && ai->frames == 100);
     CHECK(d.fileExists("st.wav"));
+}
+
+// AIFF, MP3, Ogg Vorbis and FLAC clips decode to the same tone as the WAV they
+// were encoded from (tests/audio/formats), are typed Audio in the asset browser
+// and are cached by the document; a broken one is Unreadable.
+void testAudioFormats() {
+    const fs::path src = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "audio" / "formats";
+    const splash::MonoAudio ref = splash::loadAudioMono(src / "tone.wav");
+    CHECK(ref.rate == 22050 && ref.samples.size() == 5512);
+    // Best normalised correlation over lags 0..2400 (an MP3 encoder adds a delay).
+    auto match = [&](const splash::MonoAudio& a) {
+        double best = 0;
+        for (size_t lag = 0; lag <= 2400 && lag < a.samples.size(); lag++) {
+            double xy = 0, xx = 0, yy = 0;
+            for (size_t i = 0; i < ref.samples.size() && i + lag < a.samples.size(); i++) {
+                const double x = ref.samples[i], y = a.samples[i + lag];
+                xy += x * y;
+                xx += x * x;
+                yy += y * y;
+            }
+            if (xx > 0 && yy > 0) best = std::max(best, xy / std::sqrt(xx * yy));
+        }
+        return best;
+    };
+    struct Case {
+        const char* file;
+        double minMatch;
+        bool exactLength;
+    };
+    for (const Case& c : {Case{"tone.aiff", 0.9999, true}, Case{"tone.flac", 0.9999, true}, Case{"tone.ogg", 0.99, true},
+                          Case{"tone.mp3", 0.98, false}}) {
+        const fs::path f = src / c.file;
+        CHECK(splash::isAudioFile(f));
+        const splash::MonoAudio a = splash::loadAudioMono(f);
+        const double m = match(a);
+        const bool lengthOk = c.exactLength ? a.samples.size() == 5512 : a.samples.size() >= 5512 && a.samples.size() <= 5512 + 2400;
+        if (!(a.rate == 22050 && lengthOk && m >= c.minMatch))
+            std::printf("  %s: rate %d samples %zu match %.5f\n", c.file, a.rate, a.samples.size(), m);
+        CHECK(a.rate == 22050 && lengthOk && m >= c.minMatch);
+        const splash::AudioFileInfo info = splash::audioFileInfo(f);
+        CHECK(info.rate == 22050 && info.channels == 1 && info.frames == a.samples.size());
+    }
+    const splash::AudioFileInfo st = splash::audioFileInfo(src / "tone-st44.flac");
+    CHECK(st.rate == 44100 && st.channels == 2 && st.frames == 11025);
+    const splash::MonoAudio stMono = splash::loadAudioMono(src / "tone-st44.flac");
+    CHECK(stMono.rate == 44100 && stMono.samples.size() == 11025);
+
+    CHECK(splash::isAudioFile("a/B.OGG") && splash::isAudioFile("x.Mp3") && splash::isAudioFile("y.aif"));
+    CHECK(!splash::isAudioFile("notes.txt") && !splash::isAudioFile("tex.png") && !splash::isAudioFile("wav"));
+    using T = editor::AssetType;
+    for (const char* n : {"m.ogg", "m.mp3", "m.flac", "m.aiff", "m.aif", "m.WAV"}) CHECK(editor::classifyAsset(n, false) == T::Audio);
+
+    const fs::path dir = g_outDir / "audioformats";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    fs::copy_file(src / "tone.ogg", dir / "music.ogg");
+    { std::ofstream(dir / "bad.ogg", std::ios::binary) << "OggS but not really"; }
+    bool threw = false;
+    try {
+        splash::loadAudioMono(dir / "bad.ogg");
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("Ogg Vorbis") != std::string::npos;
+    }
+    CHECK(threw);
+    splash::Scene s;
+    splash::Object o = named("Music");
+    o.audio.emplace();
+    o.audio->clip = "music.ogg";
+    s.objects.push_back(o);
+    o.name = "Bad";
+    o.audio->clip = "bad.ogg";
+    s.objects.push_back(o);
+    editor::Document d;
+    d.reset(s, dir);
+    const editor::AudioInfo* ai = d.audio("music.ogg");
+    CHECK(ai && ai->status == editor::AssetStatus::Ok && ai->rate == 22050 && ai->channels == 1 && ai->frames == 5512);
+    CHECK(d.audio("bad.ogg") && d.audio("bad.ogg")->status == editor::AssetStatus::Unreadable);
+    // A re-read goes through the audio path, never the texture one.
+    fs::copy_file(src / "tone-st44.flac", dir / "music.ogg", fs::copy_options::overwrite_existing);
+    d.refreshAssets({"music.ogg"});
+    ai = d.audio("music.ogg");
+    CHECK(ai && ai->status == editor::AssetStatus::Unreadable && d.fileExists("music.ogg"));
+    fs::copy_file(src / "tone.mp3", dir / "music.mp3");
+    d.refreshAssets({"music.mp3"});
+    ai = d.audio("music.mp3");
+    CHECK(ai && ai->status == editor::AssetStatus::Ok && ai->rate == 22050 && d.fileExists("music.mp3"));
 }
 
 // Mesh colours on a mesh without vertex colours is a warning, fixed by baking.
@@ -9934,6 +10020,7 @@ int main(int argc, char** argv) {
     testDiscExportSettings();
     testAudioSizes();
     testWavInfo();
+    testAudioFormats();
     testMeshColours();
     testMaterials4bpp();
     testUvOffsetSlots();

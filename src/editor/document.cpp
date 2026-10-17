@@ -91,7 +91,7 @@ AudioInfo analyseAudio(const fs::path& file) {
     AudioInfo info;
     if (!isFile(file)) return info;
     try {
-        splash::WavInfo w = splash::wavInfo(file);
+        splash::AudioFileInfo w = splash::audioFileInfo(file);
         info.rate = w.rate;
         info.channels = w.channels;
         info.frames = w.frames;
@@ -168,9 +168,9 @@ void Document::refreshAssets(const std::vector<std::string>& projectPaths) {
     for (const std::string& p : projectPaths) {
         const fs::path ext = fs::path(p).extension();
         if (ext == ".mesh") m_meshes[p] = analyseMesh(resolve(p));
-        else if (ext == ".lua" || ext == ".blocks" || ext == ".wav" || ext == ".anim") {
+        else if (ext == ".lua" || ext == ".blocks" || ext == ".anim" || splash::isAudioFile(p)) {
             m_files[p] = isFile(resolve(p));
-            if (ext == ".wav") m_audio[p] = analyseAudio(resolve(p));
+            if (splash::isAudioFile(p)) m_audio[p] = analyseAudio(resolve(p));
         }
         else m_textures[p] = analyseTexture(resolve(p));
     }

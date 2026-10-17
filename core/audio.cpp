@@ -5,8 +5,19 @@
 #include <cstring>
 #include <stdexcept>
 
+#include <cctype>
+#include <fstream>
+#include <iterator>
+
 #define DR_WAV_IMPLEMENTATION
 #include "dr_wav.h"
+#define DR_MP3_IMPLEMENTATION
+#include "dr_mp3.h"
+#define DR_FLAC_IMPLEMENTATION
+#include "dr_flac.h"
+// The implementation is compiled in vorbis.c.
+#define STB_VORBIS_HEADER_ONLY
+#include "stb_vorbis.c"
 
 // libpsxav.h is C11 (_Static_assert).
 #define _Static_assert static_assert
@@ -17,30 +28,139 @@ extern "C" {
 
 namespace splash {
 
-MonoAudio loadWavMono(const std::filesystem::path& file) {
+namespace {
+
+enum class AudioFormat { Unknown, Wav, Mp3, Flac, Vorbis };
+
+AudioFormat formatOf(const std::filesystem::path& file) {
+    std::string e = file.extension().string();
+    for (char& c : e) c = char(std::tolower(static_cast<unsigned char>(c)));
+    if (e == ".wav" || e == ".aif" || e == ".aiff") return AudioFormat::Wav;  // dr_wav reads both containers
+    if (e == ".mp3") return AudioFormat::Mp3;
+    if (e == ".flac") return AudioFormat::Flac;
+    if (e == ".ogg") return AudioFormat::Vorbis;
+    return AudioFormat::Unknown;
+}
+
+const char* formatName(AudioFormat f) {
+    switch (f) {
+        case AudioFormat::Wav: return "WAV or AIFF";
+        case AudioFormat::Mp3: return "MP3";
+        case AudioFormat::Flac: return "FLAC";
+        case AudioFormat::Vorbis: return "Ogg Vorbis";
+        default: return "audio";
+    }
+}
+
+// The whole file, opened through std::filesystem so non-ASCII paths open on
+// Windows too; every decoder then reads from memory.
+std::vector<unsigned char> readFile(const std::filesystem::path& file, AudioFormat& fmt) {
+    const std::string path = file.string();
+    fmt = formatOf(file);
+    if (fmt == AudioFormat::Unknown)
+        throw std::runtime_error(path + ": not an audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC)");
+    std::ifstream in(file, std::ios::binary);
+    if (!in) throw std::runtime_error(path + ": cannot open");
+    std::vector<unsigned char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    if (bytes.empty()) throw std::runtime_error(path + ": not a readable " + std::string(formatName(fmt)) + " file");
+    return bytes;
+}
+
+[[noreturn]] void unreadable(const std::filesystem::path& file, AudioFormat fmt) {
+    throw std::runtime_error(file.string() + ": not a readable " + std::string(formatName(fmt)) + " file");
+}
+
+}  // namespace
+
+bool isAudioFile(const std::filesystem::path& file) { return formatOf(file) != AudioFormat::Unknown; }
+
+MonoAudio loadAudioMono(const std::filesystem::path& file) {
+    AudioFormat fmt;
+    std::vector<unsigned char> bytes = readFile(file, fmt);
     unsigned channels = 0, rate = 0;
-    drwav_uint64 frames = 0;
-    std::string path = file.string();
-    float* data = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &channels, &rate, &frames, nullptr);
-    if (!data) throw std::runtime_error(path + ": not a readable WAV file");
+    uint64_t frames = 0;
+    std::vector<float> interleaved;
+    if (fmt == AudioFormat::Wav) {
+        drwav_uint64 n = 0;
+        float* d = drwav_open_memory_and_read_pcm_frames_f32(bytes.data(), bytes.size(), &channels, &rate, &n, nullptr);
+        if (!d) unreadable(file, fmt);
+        frames = n;
+        interleaved.assign(d, d + size_t(n) * channels);
+        drwav_free(d, nullptr);
+    } else if (fmt == AudioFormat::Mp3) {
+        drmp3_config cfg{};
+        drmp3_uint64 n = 0;
+        float* d = drmp3_open_memory_and_read_pcm_frames_f32(bytes.data(), bytes.size(), &cfg, &n, nullptr);
+        if (!d) unreadable(file, fmt);
+        channels = cfg.channels;
+        rate = cfg.sampleRate;
+        frames = n;
+        interleaved.assign(d, d + size_t(n) * channels);
+        drmp3_free(d, nullptr);
+    } else if (fmt == AudioFormat::Flac) {
+        drflac_uint64 n = 0;
+        float* d = drflac_open_memory_and_read_pcm_frames_f32(bytes.data(), bytes.size(), &channels, &rate, &n, nullptr);
+        if (!d) unreadable(file, fmt);
+        frames = n;
+        interleaved.assign(d, d + size_t(n) * channels);
+        drflac_free(d, nullptr);
+    } else {
+        int err = 0;
+        stb_vorbis* v = stb_vorbis_open_memory(bytes.data(), int(bytes.size()), &err, nullptr);
+        if (!v) unreadable(file, fmt);
+        stb_vorbis_info vi = stb_vorbis_get_info(v);
+        channels = unsigned(vi.channels);
+        rate = vi.sample_rate;
+        std::vector<float> buf(4096 * size_t(std::max(1, vi.channels)));
+        for (;;) {
+            int got = stb_vorbis_get_samples_float_interleaved(v, vi.channels, buf.data(), int(buf.size()));
+            if (got <= 0) break;
+            interleaved.insert(interleaved.end(), buf.begin(), buf.begin() + std::ptrdiff_t(got) * vi.channels);
+        }
+        stb_vorbis_close(v);
+        frames = channels ? interleaved.size() / channels : 0;
+    }
+    if (channels == 0 || rate == 0) unreadable(file, fmt);
     MonoAudio a;
     a.rate = int(rate);
     a.samples.resize(size_t(frames));
     for (size_t i = 0; i < size_t(frames); i++) {
         float sum = 0;
-        for (unsigned c = 0; c < channels; c++) sum += data[i * channels + c];
+        for (unsigned c = 0; c < channels; c++) sum += interleaved[i * channels + c];
         a.samples[i] = channels > 1 ? sum / float(channels) : sum;
     }
-    drwav_free(data, nullptr);
     return a;
 }
 
-WavInfo wavInfo(const std::filesystem::path& file) {
-    std::string path = file.string();
-    drwav wav;
-    if (!drwav_init_file(&wav, path.c_str(), nullptr)) throw std::runtime_error(path + ": not a readable WAV file");
-    WavInfo info{int(wav.sampleRate), int(wav.channels), uint64_t(wav.totalPCMFrameCount)};
-    drwav_uninit(&wav);
+AudioFileInfo audioFileInfo(const std::filesystem::path& file) {
+    AudioFormat fmt;
+    std::vector<unsigned char> bytes = readFile(file, fmt);
+    AudioFileInfo info;
+    if (fmt == AudioFormat::Wav) {
+        drwav wav;
+        if (!drwav_init_memory(&wav, bytes.data(), bytes.size(), nullptr)) unreadable(file, fmt);
+        info = {int(wav.sampleRate), int(wav.channels), uint64_t(wav.totalPCMFrameCount)};
+        drwav_uninit(&wav);
+    } else if (fmt == AudioFormat::Mp3) {
+        drmp3 mp3;
+        if (!drmp3_init_memory(&mp3, bytes.data(), bytes.size(), nullptr)) unreadable(file, fmt);
+        // MP3 has no length in its header: this decodes the frames to count them.
+        info = {int(mp3.sampleRate), int(mp3.channels), uint64_t(drmp3_get_pcm_frame_count(&mp3))};
+        drmp3_uninit(&mp3);
+    } else if (fmt == AudioFormat::Flac) {
+        drflac* fl = drflac_open_memory(bytes.data(), bytes.size(), nullptr);
+        if (!fl) unreadable(file, fmt);
+        info = {int(fl->sampleRate), int(fl->channels), uint64_t(fl->totalPCMFrameCount)};
+        drflac_close(fl);
+    } else {
+        int err = 0;
+        stb_vorbis* v = stb_vorbis_open_memory(bytes.data(), int(bytes.size()), &err, nullptr);
+        if (!v) unreadable(file, fmt);
+        stb_vorbis_info vi = stb_vorbis_get_info(v);
+        info = {int(vi.sample_rate), vi.channels, uint64_t(stb_vorbis_stream_length_in_samples(v))};
+        stb_vorbis_close(v);
+    }
+    if (info.rate <= 0 || info.channels <= 0) unreadable(file, fmt);
     return info;
 }
 

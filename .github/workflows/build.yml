@@ -83,6 +83,7 @@ jobs:
           "$py" tests/luacheck.py "$cli"
           "$py" tests/blockscheck.py "$cli"
           "$py" tests/audiocheck.py "$cli"
+          "$py" tests/audioformatcheck.py "$cli"
           "$py" tests/uicheck.py "$cli"
           "$py" tests/cutscenecheck.py "$cli"
           "$py" tests/skincheck.py "$cli"
@@ -204,6 +205,9 @@ jobs:
       - name: Inspector mesh colour and audio source info
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/inspectorinfocheck.py build/splashedit
+      - name: Inspector source info for Ogg and MP3 audio clips
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/audiofilecheck.py build/splashedit
       - name: Inspector per-material texture and colour
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/materialscheck.py build/splashedit

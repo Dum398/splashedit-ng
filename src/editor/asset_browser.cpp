@@ -8,6 +8,7 @@
 #include <set>
 #include <system_error>
 
+#include "audio.hh"
 #include "blocks.hh"
 #include "editor/document.hh"
 #include "import.hh"
@@ -78,7 +79,7 @@ AssetType classifyAsset(const fs::path& file, bool directory) {
     if (e == ".mesh") return AssetType::Mesh;
     if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp" || e == ".tga" || e == ".gif") return AssetType::Texture;
     if (e == ".lua" || e == ".blocks") return AssetType::Script;
-    if (e == ".wav") return AssetType::Audio;
+    if (splash::isAudioFile(file)) return AssetType::Audio;
     if (e == ".anim") return AssetType::Animation;
     if (e == ".scene") return AssetType::Scene;
     if (e == ".ttf" || e == ".otf") return AssetType::Font;

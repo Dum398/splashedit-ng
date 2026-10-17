@@ -238,4 +238,10 @@ ExportResult exportLoaderPack(const Scene& scene, const std::filesystem::path& p
 std::vector<Vec3> exportVertexColors(const std::vector<FlatObject>& flat, const FlatObject& object,
                                      const Mesh& mesh);
 
+
+// The scene's network id as the header stores it: FNV-1a over the low byte
+// of each UTF-16 unit of `id` (what Unity writes), 0 when `id` is empty, so
+// the engine derives one from the scene index and object count.
+uint32_t hashSceneId(const std::string& id);
+
 }  // namespace splash

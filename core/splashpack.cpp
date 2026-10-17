@@ -31,6 +31,44 @@ namespace splash {
 
 namespace fs = std::filesystem;
 
+uint32_t hashSceneId(const std::string& id) {
+    if (id.empty()) return 0;
+    uint32_t h = 2166136261u;
+    auto mix = [&](uint32_t unit) {
+        h ^= unit & 0xffu;
+        h *= 16777619u;
+    };
+    // FNV-1a over the low byte of each UTF-16 unit, as Unity hashes its C#
+    // string: decode the UTF-8, split code points above U+FFFF into a
+    // surrogate pair. A malformed byte counts as one unit of its own value.
+    for (size_t i = 0; i < id.size();) {
+        const unsigned char c = static_cast<unsigned char>(id[i]);
+        const size_t len = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 0;
+        bool ok = len && i + len <= id.size();
+        uint32_t cp = len == 1 ? c : len == 2 ? c & 0x1fu : len == 3 ? c & 0x0fu : c & 0x07u;
+        for (size_t k = 1; ok && k < len; k++) {
+            const unsigned char cc = static_cast<unsigned char>(id[i + k]);
+            if ((cc >> 6) != 2) ok = false;
+            cp = (cp << 6) | (cc & 0x3fu);
+        }
+        if (!ok) {
+            mix(c);
+            i++;
+            continue;
+        }
+        if (cp >= 0x10000) {
+            cp -= 0x10000;
+            mix(0xd800u + (cp >> 10));
+            mix(0xdc00u + (cp & 0x3ffu));
+        } else {
+            mix(cp);
+        }
+        i += len;
+    }
+    // 0 means "not authored" to the engine, which then derives its own id.
+    return h == 0 ? 1 : h;
+}
+
 namespace {
 
 struct PsxVert {
@@ -474,17 +512,6 @@ Vec3 findCamPoint(Vec3 origin, float height, const std::vector<ExpObject>& expor
     if (!hit) return origin + Vec3{0, height, 0};
     Vec3 point{origin.x, float(double(origin.y) - bestT), origin.z};
     return point + Vec3{0, height, 0};
-}
-
-uint32_t hashSceneId(const std::string& id) {
-    if (id.empty()) return 0;
-    uint32_t h = 2166136261u;
-    // FNV-1a over the low byte of each UTF-16 unit; ASCII ids only for now.
-    for (unsigned char c : id) {
-        h ^= c;
-        h *= 16777619u;
-    }
-    return h == 0 ? 1 : h;
 }
 
 // One region of the stream table: (object index, triangle count) per part, in

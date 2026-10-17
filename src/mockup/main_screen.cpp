@@ -21,6 +21,7 @@
 #include "budget.hh"
 #include "disc.hh"
 #include "rooms.hh"
+#include "splashpack.hh"
 #include "import.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
@@ -5215,6 +5216,42 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 if (p.fix == editor::MemCardFix::AddIcon) pickAsset(AssetSlot::MemCardIcon, {}, -1);
                 else edit([&](splash::MemCardSettings& m) { editor::applyMemCardFix(m, p.fix, doc.sceneStem()); });
             }
+        }
+    }
+
+    // Network: the id two consoles compare before they link. Empty, the
+    // engine derives one from the scene index and object count.
+    {
+        const float stop = y;
+        const bool open = section("s_network", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::globe, color::textDim, "Network",
+                                  true, true, false);
+        if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+        y += 34 + space::xs;
+        const ImRect idRow = row("lnetid", "Network id",
+                                 "Consoles linked with Net.Begin only connect when their scenes have the same id. Name the scene "
+                                 "here to keep the id stable between builds.");
+        nameRect("scene.netid", idRow);
+        std::string typed;
+        if (textField("netid", idRow, set.networkId, &typed, "Derived from the scene"))
+            doc.editSettings([&](splash::SceneSettings& s) { s.networkId = typed; });
+        const uint32_t hash = splash::hashSceneId(set.networkId);
+        char hex[16];
+        std::snprintf(hex, sizeof hex, "0x%08X", unsigned(hash));
+        if (set.networkId.empty())
+            caption("Derived at run time: it changes when objects are added, so consoles running different builds may not "
+                    "connect.",
+                    color::textFaint);
+        else
+            caption(std::string("Locked: hash ") + hex + ".", color::good);
+        scriptLine("network", set.networkId.empty() ? std::string("network: derived")
+                                                     : "network: locked " + set.networkId + " hash " + hex);
+        y += space::xs;
+        if (!open) {
+            ImGui::PopClipRect();
+            y = stop + 34 + space::md;
+        } else {
+            dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+            y += space::sm + space::md;
         }
     }
 

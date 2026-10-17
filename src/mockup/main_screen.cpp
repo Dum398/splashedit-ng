@@ -3789,8 +3789,10 @@ static std::string fmtShort(float v, int decimals = 2) {
         std::snprintf(b, sizeof b, "%.*f", decimals, static_cast<double>(v));
         s = b;
     }
-    s.erase(s.find_last_not_of('0') + 1);
-    if (s.back() == '.') s.pop_back();
+    if (s.find('.') != std::string::npos) {  // "20" with no decimals keeps its zero
+        s.erase(s.find_last_not_of('0') + 1);
+        if (s.back() == '.') s.pop_back();
+    }
     if (s == "-0") s = "0";
     return s;
 }
@@ -6063,6 +6065,26 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                           double(s.navCellSize));
             note(buf, color::textFaint);
         }
+        // Regions whose one floor plane strays from the ground by more than
+        // the bake's Max plane error: psxsplash stands the player on the plane.
+        if (s.navRegions > 0) {
+            int over = 0;
+            for (const splash::ExportStats::NavRegionInfo& ri : s.navInfo)
+                if (ri.planeDeviation > s.navMaxPlaneError + 1e-6f) over++;
+            const std::string limit = fmtShort(s.navMaxPlaneError, 3);
+            report("navplane", "nav plane: " + std::to_string(over) + " over " + limit);
+            if (over > 0) {
+                const std::string t = (over == 1 ? std::string("1 nav region is") : std::to_string(over) + " nav regions are") +
+                                      " more than " + limit +
+                                      " m off " + (over == 1 ? "its" : "their") +
+                                      " floor plane, so the player may float or sink there. Try the Terrain preset or a lower "
+                                      "Merge region area.";
+                const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+                const float th = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str()).y;
+                nameRect("obj.navplane", ImRect(ImVec2(tx, y), ImVec2(tx + w, y + th)));
+                note(t, color::warn);
+            }
+        }
     };
     // The voxel size of the nav bake, and what the bake makes of the agent in
     // those voxels (core/navregion.cpp: height and climb in cell heights,
@@ -6090,6 +6112,117 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         report((std::string(prefix) + "vox").c_str(), std::string(who) + " cells: " + shownCs + " x " + shownCh + " voxels: height " + std::to_string(vh) + " radius " + std::to_string(vr) + " climb " +
                            std::to_string(vc));
     };
+    // The nav bake's region settings: SplashEdit's three presets, and the
+    // fields themselves under a Bake details disclosure (closed at first).
+    auto navBake = [&](const char* prefix, const char* who, const splash::NavBakeSettings& nb,
+                       splash::NavBakeSettings* (*bakeOf)(splash::Object&)) {
+        const std::string p = prefix;
+        const std::string over = std::string(who) == "player" ? " A Navigation component in the scene overrides it." : "";
+        // Preset: what the settings match now in the field column, the three
+        // buttons on the line under it (they need the panel's full width).
+        const ImRect fr = row(("l" + p + "preset").c_str(), "Preset",
+                              ("Sets the region settings below for a kind of scene. Step height and slope are kept." + over).c_str());
+        const int match = splash::matchingNavPreset(nb);
+        static const char* const matchNames[3] = {"Indoor", "Terrain", "Multi-Level"};
+        static const char* const matchKeys[3] = {"indoor", "terrain", "multilevel"};
+        const std::string now = match < 0 ? std::string("Custom") : std::string("Matches ") + matchNames[match];
+        {
+            const ImVec2 sz = measure(f.regular, type::label, now.c_str());
+            const ImVec2 at(fr.Min.x, std::floor(fr.GetCenter().y - sz.y * 0.5f));
+            text(dl, at, f.regular, type::label, match < 0 ? color::textDim : color::text, now.c_str());
+            nameRect("obj." + p + "presetnow", ImRect(at, at + sz));
+            report((p + "presetnow").c_str(), std::string(who) + " preset: " + now);
+        }
+        struct PresetButton {
+            const char* key;
+            const char* label;
+            const char* tip;
+            splash::NavPreset preset;
+        };
+        static const PresetButton presets[3] = {
+            {"indoor", "Indoor", "For architectural and indoor scenes with flat floors and walls.", splash::NavPreset::Indoor},
+            {"terrain", "Terrain", "For natural terrain, hills and outdoor scenes.", splash::NavPreset::Terrain},
+            {"multilevel", "Multi-Level", "For multi-storey buildings, bridges and overlapping floors.", splash::NavPreset::MultiLevel}};
+        float bx = x0 + space::sm;
+        for (const PresetButton& pb : presets) {
+            const std::string bid = "obj." + p + "preset." + pb.key;
+            float bw = 0;
+            if (button(bid.c_str(), ImVec2(bx, y), nullptr, pb.label, ButtonKind::Secondary, &bw, pb.tip)) {
+                const splash::NavPreset pr = pb.preset;
+                doc.edit(path, [bakeOf, pr](splash::Object& ob) { splash::applyNavPreset(*bakeOf(ob), pr); });
+            }
+            bx += bw + space::sm;
+        }
+        y += size::field + 6 + space::sm;
+        // Bake details disclosure.
+        bool& open = st.navBakeDetails[p == "p" ? 0 : 1];
+        {
+            const std::string did = "obj." + p + "bakedetails";
+            const ImRect dr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 24));
+            const Hit h = interact(did.c_str(), dr);
+            nameRect(did, dr);
+            tooltip("The settings the presets change: how the walkable ground is split into regions and how closely each region's floor follows the ground.");
+            if (h.clicked) open = !open;
+            const ImU32 col = lerpColor(color::textDim, color::text, h.hover);
+            text(dl, ImVec2(dr.Min.x, centerY(f.medium, type::icon, dr.Min.y, dr.Max.y)), f.medium, type::icon - 2, col,
+                 open ? icon::chevronDown : icon::chevronRight);
+            text(dl, ImVec2(dr.Min.x + 18, centerY(f.regular, type::label, dr.Min.y, dr.Max.y)), f.regular, type::label, col,
+                 "Bake details");
+            y += 24 + space::xs;
+        }
+        static const char* const partNames[3] = {"Watershed", "Monotone", "Layer"};
+        static const char* const partKeys[3] = {"watershed", "monotone", "layer"};
+        const int part = std::clamp(int(nb.partition), 0, 2);
+        std::string sMin = fmtShort(float(nb.minRegionArea), 0), sMerge = fmtShort(float(nb.mergeRegionArea), 0),
+                    sSimp = fmtShort(nb.maxSimplifyError), sEdge = fmtShort(nb.maxEdgeLength), sDist = fmtShort(nb.detailSampleDist),
+                    sErr = fmtShort(nb.detailMaxError, 3), sPlane = fmtShort(nb.maxPlaneError, 3);
+        if (open) {
+            const std::string pid = "obj." + p + "part";
+            const ImRect mr = row(("l" + p + "part").c_str(), "Method",
+                                  ("Watershed: classic, best for indoor and architectural scenes; can make oversized regions on rolling "
+                                   "terrain. Monotone: more uniform regions, better for open terrain. Layer: keeps overlapping floors and "
+                                   "bridges apart." + over).c_str());
+            nameRect(pid, mr);
+            const int pick = dropdownMenu(pid.c_str(), mr, nullptr, partNames[part], {partNames[0], partNames[1], partNames[2]}, part);
+            if (pick >= 0 && pick != part)
+                doc.edit(path, [bakeOf, pick](splash::Object& ob) { bakeOf(ob)->partition = splash::NavPartition(pick); });
+            auto num = [&](const char* suffix, const char* label, const std::string& tip, float v, const char* unit, float lo, float hi,
+                           void (*set)(splash::NavBakeSettings&, float), int decimals) {
+                const std::string id = p + suffix;
+                return number(id.c_str(), label, (tip + over).c_str(), v, unit, id.c_str(), lo, hi,
+                              [bakeOf, set](splash::Object& ob, float x) { set(*bakeOf(ob), x); }, decimals);
+            };
+            sMin = num("minarea", "Min region area", "Regions smaller than this many voxels are removed. Typical 4 to 16.",
+                       float(nb.minRegionArea), "voxels", 1, 1000,
+                       [](splash::NavBakeSettings& n, float x) { n.minRegionArea = int(std::lround(x)); }, 0);
+            sMerge = num("mergearea", "Merge region area",
+                         "Regions smaller than this many voxels merge into their largest neighbour. The most important setting for "
+                         "terrain: high values make big regions whose single floor plane can't follow hills; 4 to 8 keeps floors "
+                         "accurate at the cost of more regions.",
+                         float(nb.mergeRegionArea), "voxels", 1, 1000,
+                         [](splash::NavBakeSettings& n, float x) { n.mergeRegionArea = int(std::lround(x)); }, 0);
+            sSimp = num("simplify", "Max simplify error",
+                        "How far region edges may stray from the voxel outline, in metres. Flat floors 1 to 2, terrain 0.3 to 0.6.",
+                        nb.maxSimplifyError, "m", 0.1f, 10, [](splash::NavBakeSettings& n, float x) { n.maxSimplifyError = x; }, 2);
+            sEdge = num("edgelen", "Max edge length",
+                        "Longest region edge, in metres. Shorter gives smaller regions with better floor fits. Terrain 4 to 6, "
+                        "indoors 8 to 16.",
+                        nb.maxEdgeLength, "m", 0, 100, [](splash::NavBakeSettings& n, float x) { n.maxEdgeLength = x; }, 2);
+            sDist = num("detdist", "Detail sample dist",
+                        "Height sampling distance, in cell sizes. Lower follows slopes more closely. Typical 4 to 8.",
+                        nb.detailSampleDist, "x cells", 0, 32, [](splash::NavBakeSettings& n, float x) { n.detailSampleDist = x; }, 2);
+            sErr = num("deterr", "Detail max error",
+                       "Largest height error allowed when sampling the floor, in metres. Typical 0.01 to 0.05.", nb.detailMaxError, "m",
+                       0.001f, 1, [](splash::NavBakeSettings& n, float x) { n.detailMaxError = x; }, 3);
+            sPlane = num("planeerr", "Max plane error",
+                         "Regions whose floor plane is further than this from the ground get a warning: the player may float or sink "
+                         "there. Typical 0.05 to 0.2.",
+                         nb.maxPlaneError, "m", 0.001f, 10, [](splash::NavBakeSettings& n, float x) { n.maxPlaneError = x; }, 3);
+        }
+        report((p + "bake").c_str(), std::string(who) + " bake: preset " + (match < 0 ? std::string("custom") : matchKeys[match]) +
+                                         " method " + partKeys[part] + " area " + sMin + "/" + sMerge + " simplify " + sSimp +
+                                         " edge " + sEdge + " detail " + sDist + "/" + sErr + " plane " + sPlane);
+    };
     if (o->player) {
         const splash::PlayerComponent& p = *o->player;
         top = y;
@@ -6111,6 +6244,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         number("pslope", "Max slope", "Steepest ground the player can walk on. For the nav bake; a Navigation component in the scene overrides it.",
                p.nav.walkableSlopeAngle, "deg", "pslope", 0, 90, [](splash::Object& ob, float v) { ob.player->nav.walkableSlopeAngle = v; });
         navCells("p", "player", p.nav, p.playerHeight, p.playerRadius, [](splash::Object& ob) { return &ob.player->nav; });
+        navBake("p", "player", p.nav, [](splash::Object& ob) { return &ob.player->nav; });
         navNotes();
         sectionEnd(top);
     }
@@ -6127,6 +6261,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         number("nslope", "Max slope", "Steepest walkable ground. Overrides the Player's.", n.nav.walkableSlopeAngle, "deg", "nslope",
                0, 90, [](splash::Object& ob, float v) { ob.navigation->nav.walkableSlopeAngle = v; });
         navCells("n", "navigation", n.nav, n.agentHeight, n.agentRadius, [](splash::Object& ob) { return &ob.navigation->nav; });
+        navBake("n", "navigation", n.nav, [](splash::Object& ob) { return &ob.navigation->nav; });
         if (!o->player) navNotes();
         sectionEnd(top);
     }

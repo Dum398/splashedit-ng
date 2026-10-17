@@ -1992,6 +1992,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.navWanted = playerObj || navObj;
     st.navRegions = int(nav.regions.size());
     st.navCellSizeAsked = np.cellSize;
+    st.navMaxPlaneError = np.maxPlaneError;
     st.navCellSize = nav.cellSize;
     st.navExtentX = nav.extentX;
     st.navExtentZ = nav.extentZ;
@@ -2013,6 +2014,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         info.room = r.roomIndex == 0xFF ? -1 : int(r.roomIndex);
         info.surface = int(r.surfaceType);
         info.platform = (r.flags & 1) != 0;
+        info.planeDeviation = r.maxPlaneDeviation;
         for (int p = r.portalStart; p < r.portalStart + r.portalCount; p++) {
             const NavPortal& np2 = nav.portals[size_t(p)];
             info.portals.push_back({np2.neighborRegion, np2.heightDelta,

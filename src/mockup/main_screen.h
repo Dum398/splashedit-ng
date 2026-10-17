@@ -209,6 +209,8 @@ struct State {
         // The import warnings the inspector listed this frame, for scripted checks.
         std::vector<std::string> shown;
     } importPanel;
+    // The inspector's nav Bake details disclosures (Player, Navigation).
+    bool navBakeDetails[2] = {false, false};
     // Models to import again next frame (a reimport can rebuild the object the
     // inspector is drawing), and the watcher polled about once a second.
     struct Reimport {

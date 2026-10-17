@@ -767,6 +767,26 @@ void checkVersion(const json& j, const fs::path& file) {
 
 }  // namespace
 
+int uvTextureSlot(const MeshComponent& mc, size_t mat) {
+    if (mat >= mc.materials.size() || mc.materials[mat].texture.empty()) return -1;
+    std::vector<const std::string*> seen;
+    for (size_t i = 0; i <= mat; i++) {
+        const std::string& t = mc.materials[i].texture;
+        if (t.empty()) continue;
+        auto it = std::find_if(seen.begin(), seen.end(), [&](const std::string* s) { return *s == t; });
+        if (i == mat) return int(it - seen.begin());
+        if (it == seen.end()) seen.push_back(&t);
+    }
+    return -1;
+}
+
+std::vector<size_t> uvOffsetMaterials(const MeshComponent& mc, int index) {
+    std::vector<size_t> out;
+    for (size_t i = 0; i < mc.materials.size(); i++)
+        if (index >= 0 && uvTextureSlot(mc, i) == index) out.push_back(i);
+    return out;
+}
+
 std::vector<FlatObject> flatten(const Scene& scene) {
     std::vector<FlatObject> out;
     for (const Object& o : scene.objects) flattenInto(o, nullptr, out);

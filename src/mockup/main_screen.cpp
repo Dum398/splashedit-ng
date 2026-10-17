@@ -5488,7 +5488,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, materialLines, audioLine, skinLine;
+    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -5647,6 +5647,46 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         // not cutout (that is a UI-image setting), so cutout = false.
         if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty())
             y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, false) + space::sm;
+        // Which part a cutscene's UV offset track scrolls. One item per distinct
+        // texture, numbered as the exporter numbers them (splash::uvTextureSlot).
+        {
+            std::vector<std::vector<size_t>> slotMats;
+            for (size_t i = 0; i < nMat; i++) {
+                const int sl = splash::uvTextureSlot(m, i);
+                if (sl < 0) continue;
+                if (size_t(sl) >= slotMats.size()) slotMats.resize(size_t(sl) + 1);
+                slotMats[size_t(sl)].push_back(i);
+            }
+            if (!slotMats.empty()) {
+                std::vector<std::string> labels;
+                for (const std::vector<size_t>& ms : slotMats) {
+                    std::string l = ms.size() == 1 ? "Material " : "Materials ";
+                    for (size_t k = 0; k < ms.size(); k++)
+                        l += (k == 0 ? "" : k + 1 == ms.size() ? " and " : ", ") + std::to_string(ms[k] + 1);
+                    labels.push_back(l + " (" + fileName(m.materials[ms[0]].texture) + ")");
+                }
+                std::vector<const char*> items;
+                for (const std::string& l : labels) items.push_back(l.c_str());
+                const int cur = m.uvOffsetMaterial;
+                const bool valid = cur >= 0 && size_t(cur) < labels.size();
+                const ImRect uvRow = row("luvoff", "UV offset",
+                                         "The part of the model a cutscene's UV offset track scrolls, by its texture. Parts sharing an image scroll together.");
+                nameRect("obj.uvoff", uvRow);
+                const int pick = dropdownMenu("obj.uvoff", uvRow, icon::grid, valid ? labels[size_t(cur)].c_str() : "Nothing", items,
+                                              valid ? cur : -1);
+                if (pick >= 0 && pick != cur) doc.edit(path, [pick](splash::Object& ob) { ob.mesh->uvOffsetMaterial = pick; });
+                if (!valid) {
+                    const std::string warn = "Texture " + std::to_string(cur) + " does not exist, so nothing scrolls.";
+                    const ImVec2 at(x0 + space::sm, y + space::xxs);
+                    text(dl, at, f.regular, type::caption, color::warn, warn.c_str());
+                    nameRect("obj.uvoff.warn", ImRect(at, at + measure(f.regular, type::caption, warn.c_str())));
+                    y += 16 + space::sm;
+                }
+                std::string ml;
+                for (size_t i : splash::uvOffsetMaterials(m, cur)) ml += (ml.empty() ? "" : ",") + std::to_string(i);
+                uvOffLine = "uvoffset: " + std::to_string(cur) + " materials " + (ml.empty() ? std::string("none") : ml);
+            }
+        }
         // Menu order follows the labels' enum: Baked vertex, Flat, Mesh colours.
         const splash::VertexColorMode modes[3] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
                                                   splash::VertexColorMode::Mesh};
@@ -6232,6 +6272,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
 
     report("meshcol", meshColLine);
     report("materials", materialLines);
+    report("uvoffset", uvOffLine);
     report("audio", audioLine);
     report("skin", skinLine);
 

@@ -109,11 +109,15 @@ check('the export flags the crate.png parts only', n == 2 * total // 4 and one, 
 # --- pick stone.png from the menu: saved as slot 1, the export follows ---
 mesh, uv, out, project = run(['--click', '@obj.uvoff', '--wait', '3', '--click', '@' + STONE_ITEM, '--wait', '3'],
                              shot=keep_shot)
-check('both textures are offered', CRATE_ITEM in rects and STONE_ITEM in rects, sorted(k for k in rects if k.startswith('obj.uvoff')))
 check('the pick is saved as slot 1', mesh.get('uvOffsetMaterial') == 1, mesh.get('uvOffsetMaterial'))
 check('the line names material 2', uv[-1:] == ['uvoffset: 1 materials 2'], uv)
 n, one, total = flagged(project)
 check('the export flags the stone.png part only', n == total // 4 and one, (n, one, total))
+
+# --- the menu left open: one item per texture, inside the window ---
+mesh, uv, out, project = run(['--click', '@obj.uvoff', '--wait', '3'])
+check('both textures are offered', CRATE_ITEM in rects and STONE_ITEM in rects and len([k for k in rects if k.startswith('obj.uvoff/')]) == 2,
+      sorted(k for k in rects if k.startswith('obj.uvoff')))
 
 # --- one Ctrl+Z puts it back ---
 mesh, uv, out, project = run(['--click', '@obj.uvoff', '--wait', '3', '--click', '@' + STONE_ITEM, '--wait', '3', '--key', 'ctrl+z', '--wait', '3'])
@@ -127,7 +131,7 @@ def far(d):
 
 
 mesh, uv, out, project = run([], edit=far)
-check('an out-of-range value shows the warning', inside('obj.uvoff.warn') and inside('obj.uvoff'), sorted(k for k in rects if k.startswith('obj.uvoff')))
+check('an out-of-range value shows the warning', inside('obj.uvoff.warn') and inside('obj.uvoff'), [(k, rects.get(k)) for k in ('obj.panel', 'obj.uvoff', 'obj.uvoff.warn')])
 check('the line names no material', uv[-1:] == ['uvoffset: 5 materials none'], uv)
 n, one, total = flagged(project)
 check('the export flags nothing', n == 0 and total > 0, (n, total))

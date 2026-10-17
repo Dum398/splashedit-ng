@@ -5676,8 +5676,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                               valid ? cur : -1);
                 if (pick >= 0 && pick != cur) doc.edit(path, [pick](splash::Object& ob) { ob.mesh->uvOffsetMaterial = pick; });
                 if (!valid) {
-                    const std::string warn = "No texture number " + std::to_string(cur) + ", so a UV offset track scrolls nothing.";
-                    const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
+                    const std::string warn = "Texture " + std::to_string(cur) + " does not exist, so nothing scrolls.";
+                    const ImVec2 at(x0 + space::sm, y + space::xxs);
                     text(dl, at, f.regular, type::caption, color::warn, warn.c_str());
                     nameRect("obj.uvoff.warn", ImRect(at, at + measure(f.regular, type::caption, warn.c_str())));
                     y += 16 + space::sm;

@@ -5601,7 +5601,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine;
+    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -5756,10 +5756,43 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             if (card("fix4bpp", n == 1 ? "Texture could be 4 bpp" : "Textures could be 4 bpp", body, "Convert to 4 bpp"))
                 doc.edit(path, [](splash::Object& ob) { ob.mesh->bitDepth = splash::BitDepth::Bpp4; });
         }
-        // What the console will show, next to the source. Mesh textures are
-        // not cutout (that is a UI-image setting), so cutout = false.
-        if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty())
-            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, false) + space::sm;
+        // What the console will show, next to the source. A mesh texture is
+        // cutout when it has texels under half alpha (splash::hasCutoutTexels).
+        if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty()) {
+            const bool holes = ti && ti->holes;
+            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, holes) + space::sm;
+            if (holes) {
+                // Word-wrapped to the inspector's width.
+                const char* const msg = "Texels under half alpha are see-through on the console. At 4 and 8 bpp this costs one palette colour.";
+                const float wrapW = x1 - space::sm - (x0 + space::sm);
+                std::vector<std::string> rows(1);
+                std::string rest = msg;
+                while (!rest.empty()) {
+                    const size_t sp = rest.find(' ');
+                    const std::string word = rest.substr(0, sp);
+                    rest = sp == std::string::npos ? std::string() : rest.substr(sp + 1);
+                    const std::string tryRow = rows.back().empty() ? word : rows.back() + " " + word;
+                    if (!rows.back().empty() && measure(f.regular, type::caption, tryRow.c_str()).x > wrapW) rows.push_back(word);
+                    else rows.back() = tryRow;
+                }
+                const float top = y;
+                float w = 0;
+                for (const std::string& r : rows) {
+                    text(dl, ImVec2(x0 + space::sm, y + space::xxs), f.regular, type::caption, color::textDim, r.c_str());
+                    w = std::max(w, measure(f.regular, type::caption, r.c_str()).x);
+                    y += 16;
+                }
+                nameRect("obj.texholes", ImRect(ImVec2(x0 + space::sm, top), ImVec2(x0 + space::sm + w, y)));
+                y += space::sm;
+            }
+        }
+        // Whether each texture of this mesh has see-through texels.
+        for (const splash::Material& mat : m.materials) {
+            const editor::TextureInfo* t = mat.texture.empty() ? nullptr : doc.texture(mat.texture);
+            if (!t || t->status != editor::AssetStatus::Ok) continue;
+            const std::string l = std::string("texture: holes ") + (t->holes ? "yes " : "no ") + mat.texture;
+            if (texHolesLine.find(l) == std::string::npos) texHolesLine += (texHolesLine.empty() ? "" : "\n") + l;
+        }
         // Which part a cutscene's UV offset track scrolls. One item per distinct
         // texture, numbered as the exporter numbers them (splash::uvTextureSlot).
         {
@@ -6433,6 +6466,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     report("meshcol", meshColLine);
     report("materials", materialLines);
     report("uvoffset", uvOffLine);
+    report("texholes", texHolesLine);
     report("audio", audioLine);
     report("skin", skinLine);
     report("interact", interactLine);

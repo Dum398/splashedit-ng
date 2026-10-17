@@ -49,6 +49,8 @@ struct TextureInfo {
     int colors15 = 0;
     // VRAM taken by image + CLUT, in bytes, from splash::convertTexture.
     int vramBytes4 = 0, vramBytes8 = 0, vramBytes16 = 0;
+    // Some texel is under half alpha: a mesh exports it see-through (cutout).
+    bool holes = false;
     std::string error;
 };
 

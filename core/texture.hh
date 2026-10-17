@@ -52,6 +52,10 @@ struct PsxTexture {
 
 PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout = false);
 
+// True when any texel is below the cutout alpha threshold (half alpha): the
+// texture has holes, which convertTexture keeps only with cutout on.
+bool hasCutoutTexels(const Image& img);
+
 // What the console shows for a converted texture, back in Image form (5-bit
 // channels expanded to the nearest 8-bit level; transparent texels get a = 0).
 Image decodeTexture(const PsxTexture& t);

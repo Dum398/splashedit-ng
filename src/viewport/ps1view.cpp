@@ -120,7 +120,10 @@ out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
     vec2 uv = uClean == 0 ? vUvAffine : vUvPersp;
-    vec3 c = texture(uTex, fract(uv)).rgb * vCol * 2.0;
+    // Texels under half alpha export as word 0, which the console skips.
+    vec4 t = texture(uTex, fract(uv));
+    if (t.a < 0.5) discard;
+    vec3 c = t.rgb * vCol * 2.0;
     if (uFogFar > 0.0) {
         float fogNear = uFogFar * 0.125;
         c = mix(c, uFog, clamp((vDepth - fogNear) / (uFogFar - fogNear), 0.0, 1.0));

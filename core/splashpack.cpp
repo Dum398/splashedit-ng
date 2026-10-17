@@ -1407,7 +1407,6 @@ std::vector<uint8_t> memCardTable(const MemCardSettings& mc, ImageFor& imageFor,
     stack.width = n;
     stack.height = n * frames;
     stack.pixels.resize(size_t(n) * size_t(stack.height));
-    bool cutout = false;
     for (int f = 0; f < frames; f++) {
         const std::string& path = mc.icons[size_t(f)];
         try {
@@ -1422,7 +1421,6 @@ std::vector<uint8_t> memCardTable(const MemCardSettings& mc, ImageFor& imageFor,
                 for (int x = 0; x < n; x++) {
                     const Image::Px& p = img.pixels[size_t(n - 1 - r) * n + x];
                     stack.pixels[size_t(stack.height - 1 - (f * n + r)) * n + x] = p;
-                    cutout = cutout || p.a < 0.5f;
                 }
         } catch (const std::exception& ex) {
             res.errors.push_back("Memory card icon: " + std::string(ex.what()) + ": pick an image that exists");
@@ -1443,7 +1441,7 @@ std::vector<uint8_t> memCardTable(const MemCardSettings& mc, ImageFor& imageFor,
     PsxTexture icon;
     // Transparent texels take palette entry 0 (word 0, which the GPU skips),
     // and only when the icon has any; otherwise all 16 entries are colours.
-    if (frames) icon = convertTexture(stack, BitDepth::Bpp4, cutout);
+    if (frames) icon = convertTexture(stack, BitDepth::Bpp4, hasCutoutTexels(stack));
     for (size_t i = 0; i < 16; i++) t.u16(i < icon.palette.size() ? icon.palette[i] : 0);
     for (int f = 0; f < int(kMemCardIconsMax); f++)
         for (int row = 0; row < n; row++)
@@ -1545,7 +1543,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                 continue;
             }
             try {
-                textureStore.push_back(convertTexture(imageFor(mat.texture), e.mc->bitDepth));
+                // Texels under half alpha become word 0, which the GPU
+                // skips; an image without any converts exactly as before.
+                const Image& img = imageFor(mat.texture);
+                textureStore.push_back(convertTexture(img, e.mc->bitDepth, hasCutoutTexels(img)));
             } catch (const std::exception& ex) {
                 res.errors.push_back(ex.what());
                 continue;

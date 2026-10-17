@@ -57,9 +57,10 @@ TextureInfo analyseTexture(const fs::path& file) {
             colors.insert(c5(p.r) | c5(p.g) << 5 | c5(p.b) << 10);
         }
         info.colors15 = static_cast<int>(colors.size());
-        info.vramBytes4 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp4));
-        info.vramBytes8 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp8));
-        info.vramBytes16 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp16));
+        info.holes = splash::hasCutoutTexels(img);
+        info.vramBytes4 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp4, info.holes));
+        info.vramBytes8 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp8, info.holes));
+        info.vramBytes16 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp16, info.holes));
         info.status = AssetStatus::Ok;
     } catch (const std::exception& e) {
         info.status = AssetStatus::Unreadable;

@@ -402,6 +402,16 @@ of the PS1 pane; the saved scene must carry both. Needs a display (CI runs it un
 
     python3 uitexpreviewcheck.py <splashedit>
 
+`meshalphacheck.py` checks a mesh texture with an alpha hole keeps it. It builds a temp project with
+one 4 x 4 quad on a green background, textured by a generated 32 x 32 red image whose middle 16 x 16
+texels are alpha 0, at 16 bpp. The viewport centre must show green through the hole and red must show
+around it; the mesh inspector must print `texture: holes yes <path>` and draw the `obj.texholes`
+caption; `splashpack-cli export --stats` must report the texture cutout, with every hole texel VRAM
+word 0x0000 and no other. The same quad with an opaque texture is the control (`texture: holes no`,
+no caption, red in the middle, no word 0). Needs a display (CI runs it under `xvfb-run`).
+
+    python3 meshalphacheck.py <splashedit> <splashpack-cli> [screenshot.png]
+
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
 `SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in
 the Game view. They must reach the game only: the check fails if an editor menu or picker is

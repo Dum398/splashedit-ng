@@ -382,7 +382,7 @@ Args parse(int argc, char** argv) {
             // Holds the script here until the live export has caught up with the scene, up to 90 s.
             a.actions.push_back(Action(Action::WaitExport));
         } else if (!std::strcmp(argv[i], "--wait-play")) {
-            // Holds the script here while a Play or Run on hardware build is running, up to 90 s.
+            // Holds the script here while a Play, Run on hardware or Export build is running, up to 90 s.
             a.actions.push_back(Action(Action::WaitPlay));
         } else if (!std::strcmp(argv[i], "--wait-import")) {
             // Holds the script here while a model import is running (in the background), up to 90 s.
@@ -652,7 +652,7 @@ int main(int argc, char** argv) {
     Action::Kind heldKind = Action::WaitImport;
     std::chrono::steady_clock::time_point heldSince;
     // The live export is running, or its last result is for an older revision of the scene.
-    const auto playBuilding = [&] { return state.play.build.valid() || state.play.hwBuild.valid(); };
+    const auto playBuilding = [&] { return state.play.build.valid() || state.play.hwBuild.valid() || state.play.disc.valid(); };
     const auto exportBehind = [&] { return state.live.busy() || state.live.resultRevision() != doc.revision() || !state.live.result(); };
     std::string shotDue;
     // The end screenshot waits (up to 90 s, since when) for a model import still

@@ -67,6 +67,8 @@ struct State {
     std::string notice;
     bool noticeBad = false;
     double noticeUntil = 0;
+    // A file the notice offers to show in its folder (a written disc image); notify clears it.
+    std::filesystem::path noticeReveal;
     // Add object (+ / Ctrl+A) and Add component pickers: open next frame, and the shared search text.
     bool openAddObject = false;
     bool openAddComponent = false;
@@ -117,6 +119,7 @@ struct State {
         // and whether the setup popup was opened for it rather than for Play.
         std::future<splash::DiscResult> disc;
         std::filesystem::path discOut;
+        std::filesystem::path discWritten;  // the last disc image Export wrote, for Show Disc Image in Folder
         int setupFor = 0;  // which action the setup popup is for: 0 Play, 1 Export, 2 Run on hardware
         // Run on hardware (Ctrl+F5): the export it uploads, then the serial session.
         std::future<splash::ExportResult> hwBuild;

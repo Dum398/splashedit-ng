@@ -939,6 +939,7 @@ static void notify(State& st, std::string msg, bool bad) {
     st.notice = std::move(msg);
     st.noticeBad = bad;
     st.noticeUntil = ImGui::GetTime() + 8;
+    st.noticeReveal.clear();
 }
 
 // Shows a project Lua file in the script editor.
@@ -1270,7 +1271,13 @@ static void startExport(State& st, const editor::Document& doc) {
                            1, loc.c_str());
 }
 
-// Reports a finished Export in the status bar.
+// Opens the folder holding `file` in the system file manager.
+static void revealInFolder(const std::filesystem::path& file) {
+    scriptLine(nullptr, "reveal: " + utf8(file));
+    SDL_OpenURL(editor::fileUrl(file.parent_path()).c_str());
+}
+
+// Reports a finished Export in the status bar, with a link to its folder.
 static void updateExport(State& st) {
     State::Play& p = st.play;
     if (!p.disc.valid() || p.disc.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
@@ -1285,6 +1292,9 @@ static void updateExport(State& st) {
     std::filesystem::path cue = p.discOut;
     cue.replace_extension(".cue");
     notify(st, "Disc image written: " + utf8(p.discOut.filename()) + " + " + utf8(cue.filename()) + " (" + size + ")", false);
+    st.noticeReveal = p.discOut;
+    st.noticeUntil = ImGui::GetTime() + 20;
+    p.discWritten = p.discOut;
 }
 
 // Opens `file` as the document. The scene is parsed first, so a file that does
@@ -1578,6 +1588,11 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
                              [&] { toggleRun(st, doc); }));
             m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
+            {
+                std::error_code ec;
+                const bool written = !st.play.discWritten.empty() && std::filesystem::is_regular_file(st.play.discWritten, ec);
+                m.push_back(item("Show Disc Image in Folder", "", written, [&] { revealInFolder(st.play.discWritten); }));
+            }
             m.push_back(separator());
             m.push_back(item("Performance Overlay", "", true,
                              [&] { setOverlays(st, !st.play.tools.overlayPerf, st.play.tools.overlayRooms); },
@@ -6677,7 +6692,11 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                         : showNotice          ? st.notice.c_str()
                         : doc.dirty()         ? "Unsaved changes"
                                               : "All changes saved";
-    const float leftMax = size.x - space::md - (res ? 200.0f : 0.0f) - space::xl -
+    // A notice about a written file leads with a link that shows it in its folder.
+    const bool reveal = showNotice && !st.noticeReveal.empty();
+    const char* revealLabel = "Show in folder";
+    const float revealW = reveal ? measure(f.medium, type::caption, revealLabel).x + 20 + space::sm : 0.0f;
+    const float leftMax = size.x - space::md - (res ? 200.0f : 0.0f) - space::xl - revealW -
                           std::min(measure(f.regular, type::caption, saved).x, 240.0f);
     x = importStatus(dl, bar, x, st);
     x = playStatus(dl, bar, x, leftMax, st);
@@ -6686,7 +6705,7 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     // of it, beside the problems pill, and shown whole on hover.
     std::string shown = saved;
     ImVec2 s = measure(f.regular, type::caption, shown.c_str());
-    const float room = size.x - space::md - x - (res ? 200.0f : 0.0f);
+    const float room = size.x - space::md - x - (res ? 200.0f : 0.0f) - revealW;
     const bool cut = s.x > room && room > 0;
     if (cut) {
         while (!shown.empty() && measure(f.regular, type::caption, (shown + "...").c_str()).x > room) {
@@ -6703,6 +6722,18 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     if (cut) {
         interact("notice", ImRect(ImVec2(rx, bar.Min.y), bar.Max));
         tooltip(saved);
+    }
+    if (reveal) {
+        ImVec2 ls = measure(f.medium, type::caption, revealLabel);
+        ImRect lr(ImVec2(rx - revealW, bar.Min.y + 5), ImVec2(rx - space::sm, bar.Max.y - 5));
+        Hit lh = interact("notice.reveal", lr);
+        nameRect("notice.reveal", lr);
+        tooltip(("Open the folder holding " + utf8(st.noticeReveal.filename())).c_str());
+        dl->AddRectFilled(lr.Min, lr.Max, lerpColor(color::raised, color::hover, lh.hover), radius::pill);
+        text(dl, ImVec2(lr.Min.x + 10, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, color::accent,
+             revealLabel);
+        if (lh.clicked) revealInFolder(st.noticeReveal);
+        rx = lr.Min.x;
     }
     if (!res) return;
     const editor::BuildReport& built = st.play.built;

@@ -774,6 +774,8 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
                                  " elements, the format stores at most 255");
         total += int(cv.elements.size());
         uiTextures[ci].assign(cv.elements.size(), nullptr);
+        if (!cv.defaultFont.empty() && !fontIndex.count(cv.defaultFont))
+            res.errors.push_back("canvas '" + cv.name + "': no UI font named '" + cv.defaultFont + "' (its default font)");
         for (size_t ei = 0; ei < cv.elements.size(); ei++) {
             const UIElement& e = cv.elements[ei];
             std::string where = "canvas '" + cv.name + "', element '" + e.name + "'";
@@ -926,7 +928,8 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
                 w.u8(uint8_t(e.value));
                 break;
             case UIElementType::Text:
-                w.u8(uint8_t(e.font.empty() ? 0 : fontIndex.at(e.font)));
+                if (const std::string& font = effectiveFont(cv, e); !font.empty()) w.u8(uint8_t(fontIndex.at(font)));
+                else w.u8(0);
                 break;
             case UIElementType::Line:
                 w.i16(int16_t(e.from[0]));
@@ -1341,7 +1344,7 @@ static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObjec
                 case UIElementType::Line: n += kFragLine; break;
                 case UIElementType::Image: n += 2 * kFragTexturedTri; break;
                 case UIElementType::Text:
-                    if (!el.font.empty()) n += kFragTPage + uint64_t(kUiTextMax) * kFragSprite;
+                    if (!effectiveFont(cv, el).empty()) n += kFragTPage + uint64_t(kUiTextMax) * kFragSprite;
                     break;
             }
     return uint32_t(std::min<uint64_t>((n + 3) & ~uint64_t(3), UINT32_MAX));
@@ -2610,7 +2613,7 @@ ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs
     Scene fontScene;
     for (const UIFont& f : scene.fonts)
         for (const UIElement& e : canvases[0].elements)
-            if (e.type == UIElementType::Text && e.font == f.name) {
+            if (e.type == UIElementType::Text && effectiveFont(canvases[0], e) == f.name) {
                 fontScene.fonts.push_back(f);
                 break;
             }

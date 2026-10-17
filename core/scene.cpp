@@ -602,7 +602,8 @@ UIElement readElement(const json& j, const std::string& canvas) {
 json writeCanvas(const UICanvas& c) {
     json els = json::array();
     for (const UIElement& e : c.elements) els.push_back(writeElement(e));
-    json j = {{"name", c.name}, {"visible", c.visible}, {"sortOrder", c.sortOrder}, {"elements", els}};
+    json j = {{"name", c.name}, {"visible", c.visible}, {"sortOrder", c.sortOrder},
+              {"defaultFont", c.defaultFont.empty() ? json(nullptr) : json(c.defaultFont)}, {"elements", els}};
     putExtras(j, c.extra);
     return j;
 }
@@ -613,6 +614,7 @@ UICanvas readCanvas(const json& j) {
     c.visible = j.value("visible", true);
     c.sortOrder = j.value("sortOrder", 0);
     if (c.sortOrder < 0 || c.sortOrder > 255) fail("canvas '" + c.name + "': sortOrder must be 0..255");
+    if (j.contains("defaultFont") && !j["defaultFont"].is_null()) c.defaultFont = j["defaultFont"].get<std::string>();
     for (const json& ej : j.value("elements", json::array())) c.elements.push_back(readElement(ej, c.name));
     c.extra = extrasOf(j, writeCanvas(c));
     return c;
@@ -897,6 +899,10 @@ namespace {
 constexpr const char* kUIElementsMarker = "splashedit-ui-elements";
 constexpr int kUIElementsVersion = 1;
 }  // namespace
+
+const std::string& effectiveFont(const UICanvas& canvas, const UIElement& e) {
+    return e.font.empty() ? canvas.defaultFont : e.font;
+}
 
 std::string writeUIElementsText(const std::vector<UIElement>& elements) {
     json j;

@@ -99,6 +99,14 @@ struct NavBakeSettings {
     float maxPlaneError = 0.15f;
 };
 
+// SplashEdit's Indoor / Terrain / Multi-Level bake presets. They set the ten
+// region-building fields (cell size through max plane error) and never touch
+// step height or slope.
+enum class NavPreset : uint8_t { Indoor = 0, Terrain = 1, MultiLevel = 2 };
+void applyNavPreset(NavBakeSettings& n, NavPreset p);
+// Index of the preset whose ten fields all match `n` (within 1e-4), else -1.
+int matchingNavPreset(const NavBakeSettings& n);
+
 // PSXPlayer
 struct PlayerComponent {
     float playerHeight = 1.8f;

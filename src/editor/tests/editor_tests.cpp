@@ -4489,6 +4489,111 @@ void testNavInfo() {
     CHECK(sloped);
 }
 
+// The nav bake presets (SplashEdit's Indoor / Terrain / Multi-Level): the ten
+// region fields each sets, which preset a settings block matches, and the
+// per-region floor plane error the inspector warns about.
+void testNavPresets() {
+    struct Want {
+        float cs, ch;
+        int minA, mergeA;
+        float simp, edge;
+        splash::NavPartition part;
+        float dist, err, plane;
+    };
+    const Want want[3] = {{0.05f, 0.025f, 8, 20, 1.3f, 12, splash::NavPartition::Watershed, 6, 0.025f, 0.15f},
+                          {0.08f, 0.04f, 4, 6, 0.4f, 5, splash::NavPartition::Monotone, 4, 0.02f, 0.1f},
+                          {0.05f, 0.02f, 6, 12, 0.8f, 8, splash::NavPartition::Layer, 5, 0.02f, 0.12f}};
+    // Indoor is the struct's defaults.
+    CHECK(splash::matchingNavPreset(splash::NavBakeSettings{}) == 0);
+    for (int i = 0; i < 3; i++) {
+        splash::NavBakeSettings n;
+        n.maxStepHeight = 0.7f;
+        n.walkableSlopeAngle = 30;
+        // Start from another preset so every field has to be written.
+        splash::applyNavPreset(n, splash::NavPreset((i + 1) % 3));
+        splash::applyNavPreset(n, splash::NavPreset(i));
+        const Want& w = want[i];
+        CHECK(n.cellSize == w.cs && n.cellHeight == w.ch);
+        CHECK(n.minRegionArea == w.minA && n.mergeRegionArea == w.mergeA);
+        CHECK(n.maxSimplifyError == w.simp && n.maxEdgeLength == w.edge);
+        CHECK(n.partition == w.part);
+        CHECK(n.detailSampleDist == w.dist && n.detailMaxError == w.err && n.maxPlaneError == w.plane);
+        CHECK(n.maxStepHeight == 0.7f && n.walkableSlopeAngle == 30);  // never touched
+        CHECK(splash::matchingNavPreset(n) == i);
+        // Any one field off makes it custom.
+        for (int f = 0; f < 10; f++) {
+            splash::NavBakeSettings m = n;
+            switch (f) {
+                case 0: m.cellSize += 0.01f; break;
+                case 1: m.cellHeight += 0.01f; break;
+                case 2: m.minRegionArea += 1; break;
+                case 3: m.mergeRegionArea += 1; break;
+                case 4: m.maxSimplifyError += 0.1f; break;
+                case 5: m.maxEdgeLength += 1; break;
+                case 6: m.partition = splash::NavPartition((int(m.partition) + 1) % 3); break;
+                case 7: m.detailSampleDist += 1; break;
+                case 8: m.detailMaxError += 0.001f; break;
+                default: m.maxPlaneError += 0.01f; break;
+            }
+            CHECK(splash::matchingNavPreset(m) == -1);
+        }
+    }
+
+    // Floor plane error: a flat floor fits its plane; a bumpy one, baked into
+    // big regions, does not.
+    using namespace roomtest;
+    const fs::path dir = g_outDir / "navpresets";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "meshes");
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    auto grid = [](float amp) {
+        splash::Mesh m;
+        const int n = 24;
+        const float step = 0.5f, half = n * step / 2;
+        for (int z = 0; z <= n; z++)
+            for (int x = 0; x <= n; x++) {
+                const float px = x * step - half, pz = z * step - half;
+                m.positions.push_back({px, amp * std::sin(px * 0.8f) * std::cos(pz * 0.8f), pz});
+                m.normals.push_back({0, 1, 0});
+            }
+        std::vector<int> idx;
+        for (int z = 0; z < n; z++)
+            for (int x = 0; x < n; x++) {
+                const int a = z * (n + 1) + x, b = a + 1, c = a + n + 1, d = c + 1;
+                idx.insert(idx.end(), {a, c, d, a, d, b});
+            }
+        m.submeshes = {idx};
+        return m;
+    };
+    auto bake = [&](const char* name, float amp, float planeErr) {
+        splash::saveMesh(grid(amp), dir / "meshes" / (std::string(name) + ".mesh"));
+        splash::Scene s;
+        s.objects.push_back(meshObject("Ground", ("meshes/" + std::string(name) + ".mesh").c_str(), {0, 0, 0}, true));
+        splash::Object nav;
+        nav.name = "Nav";
+        nav.transform.position = {0, 1, 0};
+        nav.navigation = splash::NavigationComponent{};
+        nav.navigation->agentRadius = 0.3f;
+        nav.navigation->nav.mergeRegionArea = 400;  // big regions over the bumps
+        nav.navigation->nav.maxPlaneError = planeErr;
+        s.objects.push_back(nav);
+        return splash::exportSplashpack(s, dir, dir / (std::string(name) + ".splashpack"), dry);
+    };
+    const splash::ExportResult flat = bake("flat", 0, 0.07f);
+    CHECK(flat.ok());
+    CHECK(flat.stats.navRegions > 0);
+    CHECK(flat.stats.navMaxPlaneError == 0.07f);
+    for (const auto& info : flat.stats.navInfo) CHECK(info.planeDeviation < 1e-3f);
+    const splash::ExportResult bumpy = bake("bumpy", 0.4f, 0.15f);
+    CHECK(bumpy.ok());
+    CHECK(bumpy.stats.navRegions > 0);
+    CHECK(bumpy.stats.navMaxPlaneError == 0.15f);
+    float worst = 0;
+    for (const auto& info : bumpy.stats.navInfo) worst = std::max(worst, info.planeDeviation);
+    CHECK(worst > 0.05f);
+}
+
 // What the skin section of the inspector shows (ExportStats::skins): one
 // entry per skinned mesh with its bones, triangles and clips, and byte counts
 // that match the skin table layout psxsplash reads (recomputed here from the
@@ -9578,6 +9683,7 @@ int main(int argc, char** argv) {
     testActiveInHierarchyExport();
     testBvhBoxes();
     testNavInfo();
+    testNavPresets();
     testSkinInfo();
     testLogViewFilter();
     testLogViewClear();

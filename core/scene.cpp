@@ -1,6 +1,7 @@
 #include "scene.hh"
 
 #include <algorithm>
+#include <cmath>
 #include <charconv>
 #include <fstream>
 #include <sstream>
@@ -768,6 +769,46 @@ void checkVersion(const json& j, const fs::path& file) {
 }
 
 }  // namespace
+
+void applyNavPreset(NavBakeSettings& n, NavPreset p) {
+    struct V {
+        float cs, ch;
+        int minA, mergeA;
+        float simp, edge;
+        NavPartition part;
+        float detDist, detErr, plane;
+    };
+    static const V kPresets[3] = {
+        {0.05f, 0.025f, 8, 20, 1.3f, 12.f, NavPartition::Watershed, 6.f, 0.025f, 0.15f},
+        {0.08f, 0.04f, 4, 6, 0.4f, 5.f, NavPartition::Monotone, 4.f, 0.02f, 0.1f},
+        {0.05f, 0.02f, 6, 12, 0.8f, 8.f, NavPartition::Layer, 5.f, 0.02f, 0.12f}};
+    const V& v = kPresets[int(p)];
+    n.cellSize = v.cs;
+    n.cellHeight = v.ch;
+    n.minRegionArea = v.minA;
+    n.mergeRegionArea = v.mergeA;
+    n.maxSimplifyError = v.simp;
+    n.maxEdgeLength = v.edge;
+    n.partition = v.part;
+    n.detailSampleDist = v.detDist;
+    n.detailMaxError = v.detErr;
+    n.maxPlaneError = v.plane;
+}
+
+int matchingNavPreset(const NavBakeSettings& n) {
+    auto near = [](float a, float b) { return std::fabs(a - b) <= 1e-4f; };
+    for (int i = 0; i < 3; i++) {
+        NavBakeSettings p = n;
+        applyNavPreset(p, NavPreset(i));
+        if (near(n.cellSize, p.cellSize) && near(n.cellHeight, p.cellHeight) &&
+            n.minRegionArea == p.minRegionArea && n.mergeRegionArea == p.mergeRegionArea &&
+            near(n.maxSimplifyError, p.maxSimplifyError) && near(n.maxEdgeLength, p.maxEdgeLength) &&
+            n.partition == p.partition && near(n.detailSampleDist, p.detailSampleDist) &&
+            near(n.detailMaxError, p.detailMaxError) && near(n.maxPlaneError, p.maxPlaneError))
+            return i;
+    }
+    return -1;
+}
 
 int uvTextureSlot(const MeshComponent& mc, size_t mat) {
     if (mat >= mc.materials.size() || mc.materials[mat].texture.empty()) return -1;

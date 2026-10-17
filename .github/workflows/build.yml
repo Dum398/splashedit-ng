@@ -189,6 +189,9 @@ jobs:
       - name: Nav region inspection in the editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/navinspectcheck.py build/splashedit
+      - name: Nav bake presets and details in the editor
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/navadvcheck.py build/splashedit
       - name: Play output filter, copy and clear
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/consolecheck.py build/splashedit

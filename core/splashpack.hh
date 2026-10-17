@@ -110,6 +110,7 @@ struct ExportStats {
     int navRegions = 0;
     int navPortals = 0;  // one per direction: a shared edge counts once for each side
     float navCellSize = 0, navCellSizeAsked = 0;  // metres
+    float navMaxPlaneError = 0;  // the bake's Max plane error, metres
     float navExtentX = 0, navExtentZ = 0;         // walkable geometry, metres
 
     // World streaming (SceneSettings::streamWorld). All zero when the scene
@@ -143,6 +144,9 @@ struct ExportStats {
         int room = -1;
         int surface = 0;  // 0 flat, 1 ramp, 2 stairs
         bool platform = false;
+        // Largest distance of the region's ground samples from its floor
+        // plane, metres (NavRegion::maxPlaneDeviation).
+        float planeDeviation = 0;
         std::vector<NavPortalInfo> portals;
     };
     std::vector<NavRegionInfo> navInfo;

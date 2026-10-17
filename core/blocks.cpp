@@ -72,6 +72,12 @@ const std::vector<BlockSpec> kCatalogue = {
      "Moves the object by the x, y and z amounts from where it is now, in game units (scene metres divided by the scene's GTE scaling)."},
     {"go_to", K::Statement, "move %f to %1 %2 %3", 3, 0, F::Object, "Objects",
      "Puts the object at the x, y and z position, in game units (scene metres divided by the scene's GTE scaling)."},
+    {"light_on", K::Statement, "turn light %f on", 0, 0, F::Light, "Objects",
+     "Switches the chosen light on; only point lights lit on the console (runtime lights) can be switched, and the list offers those."},
+    {"light_off", K::Statement, "turn light %f off", 0, 0, F::Light, "Objects",
+     "Switches the chosen light off; only point lights lit on the console (runtime lights) can be switched, and the list offers those."},
+    {"remember", K::Statement, "remember %1 as %f", 1, 0, F::Key, "Variables",
+     "Keeps a whole number under the name, across scene loads until the console is reset; it is not written to the memory card, and the game keeps at most 16 names."},
     {"play_sound", K::Statement, "play sound %f", 0, 0, F::Sound, "Sound and scenes",
      "Plays the chosen sound clip."},
     {"play_cutscene", K::Statement, "play cutscene %f", 0, 0, F::Cutscene, "Sound and scenes",
@@ -89,6 +95,8 @@ const std::vector<BlockSpec> kCatalogue = {
      "True or false."},
     {"var", K::Reporter, "%f", 0, 0, F::Variable, "Variables",
      "The variable's value."},
+    {"remembered", K::Reporter, "remembered %f", 0, 0, F::Key, "Variables",
+     "The whole number last remembered under the name, in this or an earlier scene; nothing (nil) when none was, so = is false and < > or maths stop the script."},
     {"add", K::Reporter, "%1 + %2", 2, 0, F::None, "Operators",
      "The first number plus the second."},
     {"sub", K::Reporter, "%1 - %2", 2, 0, F::None, "Operators",
@@ -119,6 +127,8 @@ const std::vector<BlockSpec> kCatalogue = {
      "True while player 1 holds the chosen button down."},
     {"frame_count", K::Reporter, "frame count", 0, 0, F::None, "Debug",
      "How many frames the game has counted so far."},
+    {"my_name", K::Reporter, "my name", 0, 0, F::None, "Objects",
+     "The name of the object this script is on."},
     {"position_x", K::Reporter, "x position of %f", 0, 0, F::Object, "Objects",
      "The object's x position, in game units."},
     {"position_y", K::Reporter, "y position of %f", 0, 0, F::Object, "Objects",
@@ -412,6 +422,19 @@ struct Gen {
         return "nil";
     }
 
+    // A Persist key as a Lua string. The engine keeps 31 bytes of a key and
+    // compares the whole one, so a longer key could be set but never read.
+    std::string key(const Block& b, const std::string& at) {
+        if (b.field.empty()) error(at, "no name to remember it by");
+        else if (b.field.size() > 31) error(at, "the name is longer than 31 bytes, more than the game keeps");
+        return luaString(b.field);
+    }
+
+    std::string light(const Block& b, const std::string& at) {
+        if (b.field.empty()) error(at, "no light chosen");
+        return "Light.Find(" + luaString(b.field) + ")";
+    }
+
     std::string variable(const Block& b, const std::string& at) {
         if (b.field.empty()) error(at, "no variable chosen");
         else if (!vars.count(b.field)) error(at, "undeclared variable \"" + b.field + "\"");
@@ -461,6 +484,11 @@ struct Gen {
         }
         if (op == "button_held") return {"Input.IsHeldPlayer1(" + button(b, at) + ")", Atom};
         if (op == "frame_count") return {"Timer.GetFrameCount()", Atom};
+        if (op == "remembered") return {"Persist.Get(" + key(b, at) + ")", Atom};
+        if (op == "my_name") {
+            if (!hat->self) error(at, "my name is not available in " + std::string(hat->op));
+            return {"Actor.GetName(self)", Atom};
+        }
         if (op == "position_x" || op == "position_y" || op == "position_z")
             return {"Entity.GetPosition(" + object(b, at).s + ")." + op.substr(9), Atom};
         error(at, "unknown block");
@@ -544,6 +572,21 @@ struct Gen {
                 line(out, depth, "return");
             } else if (op == "show" || op == "hide") {
                 line(out, depth, "Entity.SetActive(" + object(b, at).s + (op == "show" ? ", true)" : ", false)"));
+            } else if (op == "light_on" || op == "light_off") {
+                line(out, depth, "Light.SetEnabled(" + light(b, at) + (op == "light_on" ? ", true)" : ", false)"));
+            } else if (op == "remember") {
+                // Persist holds a Lua number, a whole one on the PS1: anything
+                // else is kept as 0. Refuse the inputs that are never whole.
+                const Block* v = b.args.empty() ? nullptr : &b.args[0];
+                const BlockSpec* vs = v ? findBlockSpec(v->op) : nullptr;
+                std::string k = key(b, at);
+                Expr e = input(b, 0, at);
+                const bool notWhole = v && vs &&
+                                      (vs->kind == K::Boolean || v->op == "text" || v->op == "join" || v->op == "my_name" ||
+                                       v->op.rfind("position_", 0) == 0 ||
+                                       (v->op == "number" && e.s.find("FixedPoint") != std::string::npos));
+                if (notWhole) error(at, "only whole numbers can be remembered");
+                line(out, depth, "Persist.Set(" + k + ", " + e.s + ")");
             } else if (op == "move_by" || op == "go_to") {
                 std::string o = object(b, at).s;
                 Expr x = input(b, 0, at), y = input(b, 1, at), z = input(b, 2, at);

@@ -259,6 +259,7 @@ bool BlocksView::known(splash::BlockField f, const std::string& value, const Con
         case splash::BlockField::Object: return value == "self" || in(c.objects);
         case splash::BlockField::Sound: return in(c.sounds);
         case splash::BlockField::Cutscene: return in(c.cutscenes);
+        case splash::BlockField::Light: return in(c.lights);
         default: return true;
     }
 }
@@ -504,7 +505,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                     if (auto out = blk::setField(cur, h.path, b->field == "true" ? "false" : "true")) edit(std::move(*out), &res);
                 } else if (spec->field == splash::BlockField::Button || spec->field == splash::BlockField::Variable ||
                            spec->field == splash::BlockField::Object || spec->field == splash::BlockField::Sound ||
-                           spec->field == splash::BlockField::Cutscene) {
+                           spec->field == splash::BlockField::Cutscene || spec->field == splash::BlockField::Light) {
                     m_picking = h.path;
                     m_pickQuery.clear();
                     ImGui::OpenPopup(kPickId);
@@ -729,6 +730,12 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                 col = blocks::sound;
                 all = context.cutscenes;
                 break;
+            case splash::BlockField::Light:
+                title = "Light";
+                ic = icon::lightbulb;
+                col = blocks::objects;
+                all = context.lights;
+                break;
             default: break;
         }
         // The value the field has, kept in the list when it is not one of them.
@@ -743,7 +750,9 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
         std::vector<PickerItem> items;
         for (const std::string& l : labels) {
             const bool odd = stray && l == value;
-            const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script" : "Not in this scene")
+            const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script"
+                                       : kind == splash::BlockField::Light  ? "Not a runtime light in this scene"
+                                                                            : "Not in this scene")
                                 : l == "self" && kind == splash::BlockField::Object ? "The object this script is on"
                                                                                      : "";
             items.push_back({odd ? icon::warning : ic, odd ? color::warn : col, l.c_str(), blurb, nullptr});

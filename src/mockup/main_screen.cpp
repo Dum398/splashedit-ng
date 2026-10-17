@@ -7124,7 +7124,9 @@ static std::string mb(size_t bytes) {
 }
 
 // What a block script's field lists offer from the open scene: object names
-// (tree order), audio clip names, cutscene names; each once, none empty.
+// (tree order), audio clip names, cutscene names and the runtime point lights
+// the export ships (as the timeline's light tracks offer them); each once,
+// none empty.
 static BlocksView::Context blockContext(const editor::Document& doc) {
     BlocksView::Context c;
     auto add = [](std::vector<std::string>& v, const std::string& s) {
@@ -7139,6 +7141,8 @@ static BlocksView::Context blockContext(const editor::Document& doc) {
     };
     walk(doc.scene().objects);
     for (const splash::Cutscene& cs : doc.scene().cutscenes) add(c.cutscenes, cs.name);
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+        if (fo.activeInHierarchy && fo.object->light && fo.object->light->runtime) add(c.lights, fo.object->name);
     return c;
 }
 

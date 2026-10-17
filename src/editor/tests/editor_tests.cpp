@@ -2,6 +2,7 @@
 // viewport's ray picker and gizmo maths. No SDL, no GL. Run through CTest (`ctest`).
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -4592,6 +4593,153 @@ void testNavPresets() {
     float worst = 0;
     for (const auto& info : bumpy.stats.navInfo) worst = std::max(worst, info.planeDeviation);
     CHECK(worst > 0.05f);
+}
+
+// Nav walk-off zones (PSXNavWalkoffZone): a boundary edge whose midpoint, on
+// its region's floor plane, lies inside a zone's world box gets its
+// walkoffEdgeMask bit; the export counts the edges per zone, skips zones on
+// inactive objects, and the scene file keeps the size.
+void testNavWalkoff() {
+    using namespace roomtest;
+    // Bake level: a 6 m plane, its walkable edge at x ~ +2.7 (agent radius 0.3).
+    {
+        std::vector<std::string> errors;
+        splash::NavMesh base = bakePlane(6, errors);
+        CHECK(errors.empty() && !base.regions.empty());
+        auto midOf = [](const splash::NavRegion& r, size_t j) {
+            const splash::Vec2 a = r.verts[j], b = r.verts[(j + 1) % r.verts.size()];
+            return splash::Vec2{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+        };
+        // A slab over x in [2, 4], the whole depth: exactly the boundary edges
+        // whose midpoint is past x = 2 (the +X side) open.
+        splash::NavMesh nav = base;
+        const splash::Bounds slab({3, 0, 0}, {2, 2, 20});
+        splash::applyWalkoffZones(nav, {slab});
+        int opened = 0, expected = 0;
+        for (const splash::NavRegion& r : nav.regions) {
+            uint8_t want = 0;
+            for (size_t j = 0; j < r.verts.size(); j++)
+                if ((r.boundaryEdgeMask >> j & 1) && midOf(r, j).x > 2) want |= uint8_t(1 << j);
+            CHECK(r.walkoffEdgeMask == want);
+            CHECK((r.walkoffEdgeMask & ~r.boundaryEdgeMask) == 0);
+            expected += std::popcount(want);
+            opened += std::popcount(r.walkoffEdgeMask);
+        }
+        CHECK(expected > 0 && opened == expected);
+        CHECK(nav.walkoffEdgesPerZone.size() == 1 && nav.walkoffEdgesPerZone[0] == expected);
+        // The same box twice: every edge counts for the first only.
+        splash::NavMesh twice = base;
+        splash::applyWalkoffZones(twice, {slab, slab});
+        CHECK(twice.walkoffEdgesPerZone.size() == 2 && twice.walkoffEdgesPerZone[0] == expected &&
+              twice.walkoffEdgesPerZone[1] == 0);
+        // Above the floor (y 1..3): the midpoints are on the plane, nothing opens.
+        splash::NavMesh high = base;
+        splash::applyWalkoffZones(high, {splash::Bounds({3, 2, 0}, {2, 2, 20})});
+        for (const splash::NavRegion& r : high.regions) CHECK(r.walkoffEdgeMask == 0);
+        CHECK(high.walkoffEdgesPerZone.size() == 1 && high.walkoffEdgesPerZone[0] == 0);
+        // Through buildNavRegions' trailing parameter.
+        static std::vector<splash::Vec3> pos;
+        pos = {{-3, 0, -3}, {-3, 0, 3}, {3, 0, 3}, {3, 0, -3}};
+        splash::NavInputObject in{true, false, splash::Mat34::trs({0, 0, 0}, splash::Quat{0, 0, 0, 1}, {1, 1, 1}), &pos,
+                                  {0, 1, 2, 0, 2, 3}, splash::Bounds({0, 0, 0}, {6, 0, 6})};
+        splash::NavMesh built = splash::buildNavRegions({in}, splash::NavBuildParams{}, {0, 0, 0}, errors, {}, {slab});
+        CHECK(built.walkoffEdgesPerZone.size() == 1 && built.walkoffEdgesPerZone[0] == expected);
+
+        // The written nav table carries the mask: header 8 bytes, then
+        // 84-byte regions whose last byte is walkoffEdgeMask.
+        splash::BinWriter w;
+        splash::writeNavRegions(w, nav, 100.f);
+        const std::vector<uint8_t>& b = w.data();
+        CHECK(b.size() >= 8 + 84 * nav.regions.size());
+        bool anyWritten = false;
+        for (size_t i = 0; i < nav.regions.size() && 8 + 84 * (i + 1) <= b.size(); i++) {
+            CHECK(b[8 + 84 * i + 83] == nav.regions[i].walkoffEdgeMask);
+            CHECK(b[8 + 84 * i + 82] == nav.regions[i].flags);
+            anyWritten = anyWritten || b[8 + 84 * i + 83] != 0;
+        }
+        CHECK(anyWritten);
+    }
+
+    // Export level.
+    const fs::path project = g_outDir / "walkoff";
+    fs::remove_all(project);
+    fs::create_directories(project / "meshes");
+    splash::Mesh quad;
+    quad.positions = {{-3, 0, -3}, {-3, 0, 3}, {3, 0, 3}, {3, 0, -3}};
+    quad.normals.assign(4, {0, 1, 0});
+    quad.submeshes = {{0, 1, 2, 0, 2, 3}};
+    splash::saveMesh(quad, project / "meshes/quad.mesh");
+    auto sceneWith = [&](splash::Vec3 zonePos, splash::Vec3 zoneSize, bool active, bool parentOff) {
+        splash::Scene s;
+        s.objects.push_back(meshObject("Floor", "meshes/quad.mesh", {0, 0, 0}, true));
+        splash::Object nav;
+        nav.name = "Nav";
+        nav.navigation = splash::NavigationComponent{};
+        nav.navigation->agentRadius = 0.3f;
+        s.objects.push_back(nav);
+        splash::Object zone;
+        zone.name = "Ledge";
+        zone.active = active;
+        zone.transform.position = zonePos;
+        zone.walkoff = splash::WalkoffComponent{};
+        zone.walkoff->size = zoneSize;
+        if (parentOff) {
+            splash::Object parent;
+            parent.name = "Group";
+            parent.active = false;
+            parent.children.push_back(zone);
+            s.objects.push_back(parent);
+        } else {
+            s.objects.push_back(zone);
+        }
+        return s;
+    };
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    auto masks = [](const splash::ExportStats& s) {
+        int n = 0;
+        for (const auto& info : s.navInfo) n += std::popcount(unsigned(info.walkoffEdges));
+        return n;
+    };
+    // (a) Straddling the +X edge.
+    const splash::ExportResult on = splash::exportSplashpack(sceneWith({3, 0, 0}, {2, 2, 20}, true, false), project,
+                                                              project / "on.splashpack", dry);
+    CHECK(on.ok());
+    CHECK(on.stats.walkoffZones.size() == 1);
+    if (on.stats.walkoffZones.size() == 1) {
+        CHECK(on.stats.walkoffZones[0].object == "Ledge" && on.stats.walkoffZones[0].flatIndex == 2);
+        CHECK(on.stats.walkoffZones[0].edges > 0 && on.stats.walkoffZones[0].edges == masks(on.stats));
+    }
+    // (b) Away from the floor.
+    const splash::ExportResult off = splash::exportSplashpack(sceneWith({20, 0, 0}, {2, 2, 20}, true, false), project,
+                                                               project / "off.splashpack", dry);
+    CHECK(off.ok() && off.stats.walkoffZones.size() == 1 && off.stats.walkoffZones[0].edges == 0 && masks(off.stats) == 0);
+    // (c) On an inactive object, or under an inactive parent: ignored.
+    const splash::ExportResult inactive = splash::exportSplashpack(sceneWith({3, 0, 0}, {2, 2, 20}, false, false), project,
+                                                                    project / "inactive.splashpack", dry);
+    CHECK(inactive.ok() && inactive.stats.walkoffZones.empty() && masks(inactive.stats) == 0);
+    const splash::ExportResult hidden = splash::exportSplashpack(sceneWith({3, 0, 0}, {2, 2, 20}, true, true), project,
+                                                                  project / "hidden.splashpack", dry);
+    CHECK(hidden.ok() && hidden.stats.walkoffZones.empty() && masks(hidden.stats) == 0);
+    CHECK(on.stats.navRegions == inactive.stats.navRegions);
+
+    // (d) The scene file keeps the size and unknown keys.
+    splash::Scene saved = sceneWith({3, 0, 0}, {1.5f, 2.5f, 3.5f}, true, false);
+    saved.objects[2].walkoff->extra.push_back({"note", "\"cliff\""});
+    splash::saveScene(saved, project / "w.scene");
+    const splash::Scene loaded = splash::loadScene(project / "w.scene");
+    CHECK(loaded.objects.size() == 3 && loaded.objects[2].walkoff);
+    if (loaded.objects.size() == 3 && loaded.objects[2].walkoff) {
+        CHECK(loaded.objects[2].walkoff->size == (splash::Vec3{1.5f, 2.5f, 3.5f}));
+        CHECK(loaded.objects[2].walkoff->extra.size() == 1 && loaded.objects[2].walkoff->extra[0].first == "note");
+        CHECK(!loaded.objects[0].walkoff && !loaded.objects[1].walkoff);
+    }
+    // Defaults: Unity's (1, 2, 0.5).
+    splash::Object fresh;
+    CHECK(editor::addComponent(fresh, editor::ComponentKind::Walkoff) && fresh.walkoff &&
+          fresh.walkoff->size == (splash::Vec3{1, 2, 0.5f}));
+    CHECK(std::string(editor::info(editor::ComponentKind::Walkoff).label) == "Nav walk-off zone");
+    CHECK(editor::removeComponent(fresh, editor::ComponentKind::Walkoff) && !fresh.walkoff);
 }
 
 // What the skin section of the inspector shows (ExportStats::skins): one
@@ -9684,6 +9832,7 @@ int main(int argc, char** argv) {
     testBvhBoxes();
     testNavInfo();
     testNavPresets();
+    testNavWalkoff();
     testSkinInfo();
     testLogViewFilter();
     testLogViewClear();

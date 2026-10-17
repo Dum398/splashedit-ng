@@ -55,6 +55,7 @@ constexpr ImU32 trigger = rgb(0xe08cff);
 constexpr ImU32 interact = rgb(0xffb86b);
 constexpr ImU32 room = rgb(0x40e0d0);
 constexpr ImU32 portal = rgb(0xffe14d);
+constexpr ImU32 walkoff = rgb(0xff6a00);
 }  // namespace kind
 
 static void panel(ImDrawList* dl, ImRect r) {
@@ -704,6 +705,7 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Skin: return {icon::play, kind::camera};
         case K::Room: return {icon::layoutTemplate, kind::room};
         case K::Portal: return {icon::link, kind::portal};
+        case K::Walkoff: return {icon::maximize, kind::walkoff};
     }
     return {icon::box, color::textDim};
 }
@@ -718,6 +720,7 @@ static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     if (o.audio) return lookOf(K::Audio);
     if (o.portal) return lookOf(K::Portal);
     if (o.room) return lookOf(K::Room);
+    if (o.walkoff) return lookOf(K::Walkoff);
     if (!o.children.empty() && !o.collider) return {expanded ? icon::folderOpen : icon::folder, kind::folder};
     return {icon::box, color::textDim};
 }
@@ -3434,6 +3437,20 @@ static void navOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec
         dl->AddPolyline(p.data(), (int)p.size(), overlayCol(hot ? rgb(0xffffff) : kind::nav, hot ? 255 : 170), ImDrawFlags_Closed,
                         hot ? 2.2f : 1.2f);
     }
+    // Edges the player can walk off (platform edges, walk-off zones), over
+    // the outlines that share them.
+    for (size_t i = 0; i < s.navOutlines.size() && i < s.navInfo.size(); i++) {
+        const std::vector<splash::Vec3>& poly = s.navOutlines[i];
+        const uint8_t walkoff = s.navInfo[i].walkoffEdges;
+        if (!walkoff || poly.size() < 3) continue;
+        for (size_t k = 0; k < poly.size() && k < 8; k++) {
+            ImVec2 a, b;
+            if (!(walkoff & (1u << k)) || !view.project(toGl(poly[k]), mn, sz, &a) ||
+                !view.project(toGl(poly[(k + 1) % poly.size()]), mn, sz, &b))
+                continue;
+            dl->AddLine(a, b, overlayCol(kind::walkoff, 235), 2.6f);
+        }
+    }
     if (st.navPortals)
         for (const splash::ExportStats::NavRegionInfo& info : s.navInfo)
             for (const splash::ExportStats::NavPortalInfo& pt : info.portals) {
@@ -3520,6 +3537,11 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
             splash::Vec3 lo, hi;
             splash::triggerWorldBox(fo, &lo, &hi);
             selectionOutline(dl, view, mn, sz, toGl(lo), toGl(hi), overlayCol(kind::trigger, hot ? 255 : 200), hot ? 2.0f : 1.5f);
+        }
+        if (fo.object->walkoff) {
+            splash::Vec3 lo, hi;
+            splash::walkoffWorldBox(fo, &lo, &hi);
+            selectionOutline(dl, view, mn, sz, toGl(lo), toGl(hi), overlayCol(kind::walkoff, hot ? 255 : 200), hot ? 2.0f : 1.5f);
         }
         if (fo.object->interactable && fo.object->interactable->radius > 0) {
             const splash::Vec3 c = fo.localToWorld.position();
@@ -5431,7 +5453,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[static_cast<int>(editor::ComponentKind::Portal) + 1] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::Walkoff) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
@@ -6338,6 +6360,62 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         nameRect("obj.rstats", sr);
         text(dl, ImVec2(sr.Min.x, centerY(f.regular, type::body, sr.Min.y, sr.Max.y)), f.regular, type::body, tone, line.c_str());
         report("room", "room: " + o->name + " " + line);
+        sectionEnd(top);
+    }
+    if (o->walkoff) {
+        // Copies: the size edit below goes through doc.edit.
+        const splash::WalkoffComponent wk = *o->walkoff;
+        const std::string name = o->name;
+        const bool selfActive = o->active;
+        top = y;
+        compSection("s_walkoff", editor::ComponentKind::Walkoff);
+        float sz[3] = {wk.size.x, wk.size.y, wk.size.z};
+        const ImRect szr = row("lwsize", "Size", "Box that opens nav edges whose midpoint is inside it.");
+        nameVec3("obj.wsize", szr);
+        commit(vec3Field("wsize", szr, fmtFixed(wk.size.x).c_str(), fmtFixed(wk.size.y).c_str(), fmtFixed(wk.size.z).c_str(), nullptr, sz),
+               "wsize", [&](splash::Object& ob) { ob.walkoff->size = {std::max(0.0f, sz[0]), std::max(0.0f, sz[1]), std::max(0.0f, sz[2])}; });
+        // What the last live export made of this zone, matched by its place
+        // in flatten order and its name.
+        int flatIndex = -1;
+        {
+            const splash::Object* self = doc.object(path);
+            const std::vector<splash::FlatObject> fl = splash::flatten(doc.scene());
+            for (size_t i = 0; i < fl.size(); i++)
+                if (fl[i].object == self) flatIndex = int(i);
+        }
+        const std::optional<splash::ExportResult>& res = st.live.result();
+        int edges = -1;
+        std::string line = "Not exported yet";
+        ImU32 tone = color::textFaint;
+        if (res && !res->ok()) {
+            line = "Export failed: see problems";
+            tone = color::bad;
+        } else if (res) {
+            line = !selfActive       ? "Not exported: the object is off"
+                   : !offVia.empty() ? "Not exported: '" + offVia + "' is off"
+                                     : "Not in the last export";
+            for (const splash::ExportStats::WalkoffInfo& wi : res->stats.walkoffZones)
+                if (wi.flatIndex == flatIndex && wi.object == name) edges = wi.edges;
+        }
+        if (edges > 0) {
+            line = "Opens " + std::to_string(edges) + (edges == 1 ? " nav edge." : " nav edges.");
+            tone = color::textDim;
+        }
+        if (edges == 0) {
+            // Long: wrapped across the section from its left edge.
+            const std::string warn = "Opens no nav edges: place the box across the edge of a walkable floor.";
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y + space::xs);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, warn.c_str());
+            dl->AddText(f.regular, type::caption, at, color::warn, warn.c_str(), nullptr, w);
+            nameRect("obj.wstats", ImRect(at, at + ts));
+            y += ts.y + space::xs + space::sm;
+        } else {
+            const ImRect sr = row("lwstats", "Exported", "From the last export: the nav edges this box lets the player walk off.");
+            nameRect("obj.wstats", sr);
+            text(dl, ImVec2(sr.Min.x, centerY(f.regular, type::body, sr.Min.y, sr.Max.y)), f.regular, type::body, tone, line.c_str());
+        }
+        report("walkoff", "walkoff: " + name + (edges >= 0 ? " edges " + std::to_string(edges) : std::string(" no export")));
         sectionEnd(top);
     }
     if (o->portal) {

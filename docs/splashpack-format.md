@@ -162,8 +162,11 @@ platform flags (`collider.platform`), start region, and the binary layout above.
 (`AssignRoomsFromPSXRooms`): with Room objects in the scene, each region's `roomIndex` is the
 smallest-volume room whose world box, 0.5 m larger per side, contains the region centroid (XZ mean
 of its vertices, Y from its plane), else 0xFF; the room indices are the room block's (2.9). Only a
-scene without Room objects falls back to numbering connectivity islands. Not ported:
-`PSXNavWalkoffZone` (no component; the walkoff mask only gets platform bits). The multi-step float expressions in the builder's own code are evaluated
+scene without Room objects falls back to numbering connectivity islands. Then
+`ApplyWalkoffZones` (the `walkoff` component, active objects only): for each boundary edge j of each
+region, the midpoint of its two XZ vertices at the region plane's Y; if any zone's world box (the
+AABB of the 8 corners +-size/2 through the object's transform) contains it, inclusive, bit j is set
+in `walkoffEdgeMask`. The multi-step float expressions in the builder's own code are evaluated
 in double, as Unity's Mono does; DotRecast's internals are not, so float-order differences inside
 Recast stay possible on sloped or rotated geometry. Checked against Unity on one flat region only.
 

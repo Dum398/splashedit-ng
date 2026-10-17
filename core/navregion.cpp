@@ -253,7 +253,8 @@ int findClosestRegion(const NavMesh& nav, Vec3 spawn) {
 }  // namespace
 
 NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBuildParams& p, Vec3 spawn,
-                        std::vector<std::string>& errors, const std::vector<Bounds>& roomBoxes) {
+                        std::vector<std::string>& errors, const std::vector<Bounds>& roomBoxes,
+                        const std::vector<Bounds>& walkoffBoxes) {
     NavMesh nav;
 
     // 1. World-space geometry
@@ -465,8 +466,31 @@ NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBui
     else
         assignRoomsFromBoxes(nav, roomBoxes);
     applyPlatformFlags(nav, objects);
+    applyWalkoffZones(nav, walkoffBoxes);
     nav.startRegion = findClosestRegion(nav, spawn);
     return nav;
+}
+
+void applyWalkoffZones(NavMesh& nav, const std::vector<Bounds>& boxes) {
+    nav.walkoffEdgesPerZone.assign(boxes.size(), 0);
+    if (boxes.empty()) return;
+    for (NavRegion& r : nav.regions) {
+        const size_t n = r.verts.size();
+        for (size_t j = 0; j < n && j < 8; j++) {
+            if (!(r.boundaryEdgeMask & (1u << j))) continue;
+            const Vec2 a = r.verts[j], b = r.verts[(j + 1) % n];
+            const Vec2 mid{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f};
+            const Vec3 p{mid.x, evalY(r, mid), mid.y};
+            for (size_t z = 0; z < boxes.size(); z++) {
+                const Vec3 mn = boxes[z].min(), mx = boxes[z].max();
+                if (p.x >= mn.x && p.x <= mx.x && p.y >= mn.y && p.y <= mx.y && p.z >= mn.z && p.z <= mx.z) {
+                    r.walkoffEdgeMask |= uint8_t(1u << j);
+                    nav.walkoffEdgesPerZone[z]++;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void writeNavRegions(BinWriter& w, const NavMesh& nav, float gte) {

@@ -613,6 +613,17 @@ overlay: the Trigger box, the Interactable's reach ring and the export's nav reg
 
     python3 gizmocheck.py <splashedit> [keep.png]
 
+`walkoffcheck.py` adds a Nav walk-off zone from the Add component picker to an empty object (Ledge) over
+the courtyard floor's front edge and types its Size (`obj.wsize.x/.y/.z`). The editor prints
+`walkoff: Ledge edges N` from the live export: the default box floats above the floor (0, with the
+warning `obj.wstats` inside the section), 20 x 4 x 1 straddles the edge (N > 0), 20 x 1 x 1 floats again
+(0). The saved scene keeps the size, and the scene view draws the box in orange only with `vp.gizmos` on.
+The saved scenes are exported again with `splashpack-cli export --stats`, whose `walkoff` lines give
+each zone's edges and the walk-off bits in the written nav regions (`mask_edges`): the box must add
+exactly the edges the inspector reported.
+
+    python3 walkoffcheck.py <splashedit> [keep.png]
+
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
 ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is

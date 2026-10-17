@@ -1,4 +1,5 @@
 // splashpack-cli: export a scene file to a splashpack without the editor.
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -454,6 +455,13 @@ int main(int argc, char** argv) {
                 std::printf("nav regions=%d cell=%g (asked %g) extent=%gx%g portals=%d\n", st.navRegions,
                             double(st.navCellSize), double(st.navCellSizeAsked), double(st.navExtentX),
                             double(st.navExtentZ), st.navPortals);
+            if (!st.walkoffZones.empty()) {
+                // mask_edges: walk-off bits in the written regions (platform edges included).
+                int maskEdges = 0;
+                for (const auto& info : st.navInfo) maskEdges += std::popcount(unsigned(info.walkoffEdges));
+                std::printf("walkoff zones=%zu mask_edges=%d\n", st.walkoffZones.size(), maskEdges);
+                for (const auto& z : st.walkoffZones) std::printf("walkoff edges=%d %s\n", z.edges, z.object.c_str());
+            }
             {
                 int leaves = 0;
                 for (const auto& b : st.bvhBoxes) leaves += b.leaf ? 1 : 0;

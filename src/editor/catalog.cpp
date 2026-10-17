@@ -19,6 +19,7 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::Skin, "Skinned animation", "skeleton bones clips anim", "Plays animation clips on a skinned mesh."},
         {ComponentKind::Room, "Room", "portal culling interior zone visibility", "A box whose geometry draws only when it can be seen."},
         {ComponentKind::Portal, "Portal", "door doorway opening room link culling", "An opening between two Rooms the camera can see through."},
+        {ComponentKind::Walkoff, "Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box."},
     };
     return list;
 }
@@ -43,6 +44,7 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::Skin: return o.skin.has_value();
         case ComponentKind::Room: return o.room.has_value();
         case ComponentKind::Portal: return o.portal.has_value();
+        case ComponentKind::Walkoff: return o.walkoff.has_value();
     }
     return false;
 }
@@ -69,6 +71,7 @@ bool addComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Skin: o.skin.emplace(); break;
         case ComponentKind::Room: o.room.emplace(); break;
         case ComponentKind::Portal: o.portal.emplace(); break;
+        case ComponentKind::Walkoff: o.walkoff.emplace(); break;
     }
     return true;
 }
@@ -92,6 +95,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Skin: o.skin.reset(); break;
         case ComponentKind::Room: o.room.reset(); break;
         case ComponentKind::Portal: o.portal.reset(); break;
+        case ComponentKind::Walkoff: o.walkoff.reset(); break;
     }
     return true;
 }
@@ -110,6 +114,7 @@ const std::vector<ObjectPreset>& presets() {
         {"Navigation", "navmesh walkable", "Bakes walkable ground without a player.", {K::Navigation}},
         {"Room", "portal culling interior zone", "A box whose geometry draws only when it can be seen.", {K::Room}},
         {"Portal", "door doorway opening room link", "An opening between two Rooms the camera can see through.", {K::Portal}},
+        {"Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box.", {K::Walkoff}},
     };
     return list;
 }

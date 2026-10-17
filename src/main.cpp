@@ -598,6 +598,10 @@ int main(int argc, char** argv) {
     state.viewMode = args.viewMode;
     state.gizmos = args.overlays;
     state.play.bundleDir = baseDir();
+    {
+        const std::string templates = resourceDir("templates", SPLASHEDIT_TEMPLATE_DIR);
+        state.newProject.templatesDir = std::filesystem::path(std::u8string(templates.begin(), templates.end()));
+    }
     state.play.exportTo = std::filesystem::path(std::u8string(args.exportTo.begin(), args.exportTo.end()));
     // Play's tool paths persist per user; screenshot runs read only the environment.
     if (!args.screenshot) {

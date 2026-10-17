@@ -1,0 +1,100 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [
+    {
+      "name": "lit",
+      "value": "true"
+    },
+    {
+      "name": "pulls",
+      "value": "0"
+    }
+  ],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_interact"
+        },
+        {
+          "op": "set_var",
+          "field": "lit",
+          "args": [
+            {
+              "op": "not",
+              "args": [
+                {
+                  "op": "var",
+                  "field": "lit"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "op": "change_var",
+          "field": "pulls",
+          "args": [
+            {
+              "op": "number",
+              "field": "1"
+            }
+          ]
+        },
+        {
+          "op": "if_else",
+          "args": [
+            {
+              "op": "var",
+              "field": "lit"
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "show",
+                "field": "Lamp (Blocks)"
+              }
+            ],
+            [
+              {
+                "op": "hide",
+                "field": "Lamp (Blocks)"
+              }
+            ]
+          ]
+        },
+        {
+          "op": "log",
+          "args": [
+            {
+              "op": "join",
+              "args": [
+                {
+                  "op": "text",
+                  "field": "Blocks lever pulled "
+                },
+                {
+                  "op": "join",
+                  "args": [
+                    {
+                      "op": "var",
+                      "field": "pulls"
+                    },
+                    {
+                      "op": "text",
+                      "field": " times"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

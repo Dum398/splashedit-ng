@@ -196,6 +196,18 @@ struct State {
     bool unsavedShown = false;   // the prompt is up; document shortcuts wait
     bool quitRequested = false;  // window close: asks first when there are changes
 
+    // New Project (Ctrl+N): the modal that picks a template, a name and a
+    // folder. templatesDir is the editor's templates/ (main.cpp sets it).
+    struct NewProjectDialog {
+        std::filesystem::path templatesDir;
+        std::vector<editor::TemplateInfo> templates;  // listed when the modal opens
+        int selected = 0;
+        std::string name, location;
+        std::string error;  // why the last Create failed, shown in the modal
+        bool open = false;   // open the modal next frame
+        bool shown = false;  // the modal is up; document shortcuts wait
+    } newProject;
+
     // The inspector's Import settings: the model the shown object's mesh came
     // from and its sidecar, looked up again about once a second. `editing`
     // holds a scrub until it is released.

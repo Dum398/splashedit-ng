@@ -68,6 +68,17 @@ else()
     target_compile_options(make_example PRIVATE -Wall -Wextra)
 endif()
 
+# Regenerates the new-project templates (templates/first-person, templates/third-person).
+# Not built by default: `cmake --build build --target make_templates && ./build/make_templates`.
+add_executable(make_templates EXCLUDE_FROM_ALL tools/make_templates.cpp)
+target_link_libraries(make_templates PRIVATE splashcore)
+target_compile_definitions(make_templates PRIVATE SPLASHEDIT_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/templates")
+if(MSVC)
+    target_compile_options(make_templates PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(make_templates PRIVATE -Wall -Wextra)
+endif()
+
 # The editor's document model (history, picking): no SDL or GL, so it builds
 # and tests headless, also with SPLASHEDIT_BUILD_EDITOR off.
 add_library(splasheditdoc STATIC
@@ -195,6 +206,7 @@ if(NOT SPLASHEDIT_VERSION)
 endif()
 target_compile_definitions(splashedit PRIVATE SPLASHEDIT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets"
     SPLASHEDIT_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/courtyard"
+    SPLASHEDIT_TEMPLATE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/templates"
     SPLASHEDIT_VERSION="${SPLASHEDIT_VERSION}")
 if(WIN32)
     target_compile_definitions(splashedit PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)

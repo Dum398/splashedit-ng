@@ -1,0 +1,952 @@
+{
+  "format": "splashedit-ng/scene",
+  "version": 1,
+  "settings": {
+    "gteScaling": 100.0,
+    "sceneType": "exterior",
+    "fog": {
+      "enabled": false,
+      "color": [
+        0.5,
+        0.5,
+        0.6
+      ],
+      "density": 5
+    },
+    "networkId": "",
+    "script": null
+  },
+  "objects": [
+    {
+      "name": "Environment",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [],
+      "children": [
+        {
+          "name": "Floor",
+          "active": true,
+          "transform": {
+            "position": [
+              0.0,
+              -0.1,
+              0.0
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/floor.mesh",
+              "materials": [
+                {
+                  "texture": "textures/stone.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Back Wall",
+          "active": true,
+          "transform": {
+            "position": [
+              0.0,
+              1.5,
+              8.15
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/wall.mesh",
+              "materials": [
+                {
+                  "texture": "textures/brick.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Left Wall",
+          "active": true,
+          "transform": {
+            "position": [
+              -8.15,
+              1.5,
+              0.0
+            ],
+            "rotation": [
+              0.0,
+              0.70710677,
+              0.0,
+              0.70710677
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/wall.mesh",
+              "materials": [
+                {
+                  "texture": "textures/brick.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Right Wall",
+          "active": true,
+          "transform": {
+            "position": [
+              8.15,
+              1.5,
+              0.0
+            ],
+            "rotation": [
+              0.0,
+              0.70710677,
+              0.0,
+              0.70710677
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/wall.mesh",
+              "materials": [
+                {
+                  "texture": "textures/brick.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Pillar",
+          "active": true,
+          "transform": {
+            "position": [
+              -5.0,
+              1.5,
+              -2.0
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/pillar.mesh",
+              "materials": [
+                {
+                  "texture": "textures/stone.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Pillar (2)",
+          "active": true,
+          "transform": {
+            "position": [
+              5.0,
+              1.5,
+              -2.0
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/pillar.mesh",
+              "materials": [
+                {
+                  "texture": "textures/stone.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Crate",
+          "active": true,
+          "transform": {
+            "position": [
+              5.5,
+              0.5,
+              3.0
+            ],
+            "rotation": [
+              0.0,
+              -0.13052619,
+              0.0,
+              0.9914449
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/crate.mesh",
+              "materials": [
+                {
+                  "texture": "textures/crate.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Crate (2)",
+          "active": true,
+          "transform": {
+            "position": [
+              6.4,
+              0.5,
+              4.4
+            ],
+            "rotation": [
+              0.0,
+              0.087155744,
+              0.0,
+              0.9961947
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/crate.mesh",
+              "materials": [
+                {
+                  "texture": "textures/crate.png",
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Lamp Post",
+          "active": true,
+          "transform": {
+            "position": [
+              -4.4,
+              1.0,
+              6.5
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/lamp_post.mesh",
+              "materials": [
+                {
+                  "texture": null,
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        },
+        {
+          "name": "Lamp Post (2)",
+          "active": true,
+          "transform": {
+            "position": [
+              4.4,
+              1.0,
+              6.5
+            ],
+            "rotation": [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ],
+            "scale": [
+              1.0,
+              1.0,
+              1.0
+            ]
+          },
+          "components": [
+            {
+              "type": "mesh",
+              "mesh": "meshes/lamp_post.mesh",
+              "materials": [
+                {
+                  "texture": null,
+                  "color": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ]
+                }
+              ],
+              "bitDepth": 8,
+              "vertexColors": "baked",
+              "flatColor": [
+                128,
+                128,
+                128
+              ],
+              "smoothNormals": true,
+              "uvOffsetMaterial": 0,
+              "dynamicLighting": "auto"
+            },
+            {
+              "type": "collider",
+              "kind": "static",
+              "platform": false
+            }
+          ],
+          "children": []
+        }
+      ]
+    },
+    {
+      "name": "Lever (Lua)",
+      "active": true,
+      "transform": {
+        "position": [
+          -3.0,
+          0.0,
+          6.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "mesh",
+          "mesh": "meshes/lever.mesh",
+          "materials": [
+            {
+              "texture": null,
+              "color": [
+                0.75,
+                0.2,
+                0.15,
+                1.0
+              ]
+            }
+          ],
+          "bitDepth": 8,
+          "vertexColors": "baked",
+          "flatColor": [
+            128,
+            128,
+            128
+          ],
+          "smoothNormals": true,
+          "uvOffsetMaterial": 0,
+          "dynamicLighting": "auto"
+        },
+        {
+          "type": "script",
+          "lua": "scripts/lever_lua.lua"
+        },
+        {
+          "type": "interactable",
+          "radius": 2.0,
+          "button": 15,
+          "repeatable": true,
+          "cooldownFrames": 30,
+          "showPrompt": false,
+          "promptCanvas": "",
+          "lineOfSight": false,
+          "facingAngle": 90.0
+        }
+      ],
+      "children": []
+    },
+    {
+      "name": "Lamp (Lua)",
+      "active": true,
+      "transform": {
+        "position": [
+          -4.4,
+          2.25,
+          6.5
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "mesh",
+          "mesh": "meshes/lamp.mesh",
+          "materials": [
+            {
+              "texture": null,
+              "color": [
+                1.0,
+                0.9,
+                0.35,
+                1.0
+              ]
+            }
+          ],
+          "bitDepth": 8,
+          "vertexColors": "baked",
+          "flatColor": [
+            128,
+            128,
+            128
+          ],
+          "smoothNormals": true,
+          "uvOffsetMaterial": 0,
+          "dynamicLighting": "auto"
+        }
+      ],
+      "children": []
+    },
+    {
+      "name": "Lever (Blocks)",
+      "active": true,
+      "transform": {
+        "position": [
+          3.0,
+          0.0,
+          6.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "mesh",
+          "mesh": "meshes/lever.mesh",
+          "materials": [
+            {
+              "texture": null,
+              "color": [
+                0.75,
+                0.2,
+                0.15,
+                1.0
+              ]
+            }
+          ],
+          "bitDepth": 8,
+          "vertexColors": "baked",
+          "flatColor": [
+            128,
+            128,
+            128
+          ],
+          "smoothNormals": true,
+          "uvOffsetMaterial": 0,
+          "dynamicLighting": "auto"
+        },
+        {
+          "type": "script",
+          "lua": "scripts/lever_blocks.blocks"
+        },
+        {
+          "type": "interactable",
+          "radius": 2.0,
+          "button": 15,
+          "repeatable": true,
+          "cooldownFrames": 30,
+          "showPrompt": false,
+          "promptCanvas": "",
+          "lineOfSight": false,
+          "facingAngle": 90.0
+        }
+      ],
+      "children": []
+    },
+    {
+      "name": "Lamp (Blocks)",
+      "active": true,
+      "transform": {
+        "position": [
+          4.4,
+          2.25,
+          6.5
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "mesh",
+          "mesh": "meshes/lamp.mesh",
+          "materials": [
+            {
+              "texture": null,
+              "color": [
+                1.0,
+                0.9,
+                0.35,
+                1.0
+              ]
+            }
+          ],
+          "bitDepth": 8,
+          "vertexColors": "baked",
+          "flatColor": [
+            128,
+            128,
+            128
+          ],
+          "smoothNormals": true,
+          "uvOffsetMaterial": 0,
+          "dynamicLighting": "auto"
+        }
+      ],
+      "children": []
+    },
+    {
+      "name": "Player",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          0.0,
+          -5.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "player",
+          "playerHeight": 1.8,
+          "playerRadius": 0.5,
+          "moveSpeed": 3.0,
+          "sprintSpeed": 8.0,
+          "maxStepHeight": 0.35,
+          "walkableSlopeAngle": 46.0,
+          "navCellSize": 0.05,
+          "navCellHeight": 0.025,
+          "navMinRegionArea": 8,
+          "navMergeRegionArea": 20,
+          "navMaxSimplifyError": 1.3,
+          "navMaxEdgeLength": 12.0,
+          "navPartitionMethod": "watershed",
+          "navDetailSampleDist": 6.0,
+          "navDetailMaxError": 0.025,
+          "navMaxPlaneError": 0.15,
+          "jumpHeight": 2.0,
+          "gravity": 20.0
+        }
+      ],
+      "children": []
+    },
+    {
+      "name": "Sun",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          6.0,
+          0.0
+        ],
+        "rotation": [
+          0.40821788,
+          -0.23456971,
+          0.10938165,
+          0.8754261
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "light",
+          "kind": "directional",
+          "color": [
+            1.0,
+            0.95,
+            0.85
+          ],
+          "intensity": 0.75,
+          "range": 10.0,
+          "spotAngle": 30.0,
+          "innerSpotAngle": 0.0,
+          "enabled": true,
+          "runtime": false
+        }
+      ],
+      "children": []
+    },
+    {
+      "name": "Fill",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          6.0,
+          0.0
+        ],
+        "rotation": [
+          0.07782839,
+          0.9212198,
+          -0.2904595,
+          0.2468401
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "light",
+          "kind": "directional",
+          "color": [
+            0.6,
+            0.65,
+            0.85
+          ],
+          "intensity": 0.35,
+          "range": 10.0,
+          "spotAngle": 30.0,
+          "innerSpotAngle": 0.0,
+          "enabled": true,
+          "runtime": false
+        }
+      ],
+      "children": []
+    }
+  ]
+}

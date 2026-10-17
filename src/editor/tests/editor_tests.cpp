@@ -1513,6 +1513,108 @@ void testProject() {
     CHECK(std::find(back.items().begin(), back.items().end(), proj / "s9.scene") == back.items().end());
 }
 
+// New Project's templates: the listing (built-in empty first, then by order
+// and name, broken folders skipped), a project copied from one, and the
+// shipped templates themselves.
+void testProjectTemplates() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path root = g_outDir / "templates";
+    fs::remove_all(root, ec);
+    const fs::path lib = root / "lib";
+    auto write = [](const fs::path& p, const std::string& text) {
+        fs::create_directories(p.parent_path());
+        std::ofstream out(p, std::ios::binary);
+        out << text;
+    };
+    // An empty or missing templates folder still offers Empty.
+    std::vector<editor::TemplateInfo> none = editor::listTemplates(root / "missing");
+    CHECK(none.size() == 1 && none[0].id == "empty" && none[0].dir.empty() && !none[0].name.empty());
+
+    write(lib / "zeta" / "template.json", R"({"name": "Zeta", "description": "last by order", "order": 30})");
+    write(lib / "zeta" / "zeta.scene", "{}");
+    write(lib / "beta" / "template.json", R"({"name": "Beta", "description": "b", "order": 5})");
+    write(lib / "alpha" / "template.json", R"({"name": "Alpha", "order": 5})");
+    write(lib / "early" / "template.json", R"({"name": "Early", "order": -10})");
+    write(lib / "nojson" / "readme.txt", "no template.json");
+    write(lib / "broken" / "template.json", "{not json");
+    write(lib / "noname" / "template.json", R"({"description": "no name", "order": 1})");
+    write(lib / "badorder" / "template.json", R"({"name": "Bad", "order": "first"})");
+    write(lib / "empty" / "template.json", R"({"name": "Shadow of empty", "order": -100})");
+    write(lib / "loose.json", R"({"name": "Not a folder"})");
+    std::vector<editor::TemplateInfo> list = editor::listTemplates(lib);
+    std::vector<std::string> ids;
+    for (const editor::TemplateInfo& t : list) ids.push_back(t.id);
+    // Empty first even though "early" orders below 0; equal orders by name.
+    CHECK((ids == std::vector<std::string>{"empty", "early", "alpha", "beta", "zeta"}));
+    CHECK(list.size() == 5 && list[0].dir.empty() && list[4].name == "Zeta" && list[4].description == "last by order" &&
+          list[4].order == 30 && list[4].dir == lib / "zeta" && list[2].description.empty());
+
+    // The shipped templates: empty, first person, third person.
+    const fs::path shipped = fs::path(SPLASHEDIT_SOURCE_DIR) / "templates";
+    std::vector<editor::TemplateInfo> real = editor::listTemplates(shipped);
+    ids.clear();
+    for (const editor::TemplateInfo& t : real) ids.push_back(t.id);
+    CHECK((ids == std::vector<std::string>{"empty", "first-person", "third-person"}));
+
+    // Copying one: the scene (named after the folder), its meshes, textures
+    // and both scripts, and no template.json.
+    for (size_t i = 1; i < real.size(); ++i) {
+        const fs::path proj = root / ("Game " + real[i].id);
+        editor::NewProject made = editor::createProject(proj, &real[i]);
+        CHECK(made.error.empty());
+        CHECK(made.scene == fs::path("Game " + real[i].id + ".scene"));
+        CHECK(fs::is_regular_file(proj / made.scene) && editor::firstScene(proj) == made.scene);
+        CHECK(fs::is_regular_file(proj / "scripts" / "lever_lua.lua"));
+        CHECK(fs::is_regular_file(proj / "scripts" / "lever_blocks.blocks"));
+        CHECK(fs::is_regular_file(proj / "meshes" / "floor.mesh") && fs::is_regular_file(proj / "textures" / "stone.png"));
+        CHECK(!fs::exists(proj / "template.json"));
+        CHECK(fs::is_regular_file(proj / "scripts" / "third_person_camera.lua") == (real[i].id == "third-person"));
+        editor::Document doc;
+        CHECK(!doc.load(proj, made.scene) && !doc.dirty());
+        CHECK(doc.objectCount() > 5 && doc.selectByName("Player") && doc.selectByName("Lever (Lua)") &&
+              doc.selectByName("Lever (Blocks)"));
+        // Again into the same folder: refused, it already holds a scene.
+        editor::NewProject again = editor::createProject(proj, &real[i]);
+        CHECK(!again.error.empty() && again.scene.empty() && again.error.find("already holds") != std::string::npos);
+    }
+
+    // Empty through the template path behaves as createProject(dir).
+    {
+        const fs::path proj = root / "Plain";
+        editor::NewProject made = editor::createProject(proj, &real[0]);
+        CHECK(made.error.empty() && made.scene == fs::path("Plain.scene") && fs::is_regular_file(proj / made.scene));
+        CHECK(fs::is_directory(proj / "scripts") && fs::is_empty(proj / "scripts"));
+    }
+
+    // A file that would land on an existing one: nothing copied, the error names it.
+    {
+        const fs::path proj = root / "Clash";
+        write(proj / "scripts" / "lever_lua.lua", "-- mine\n");
+        editor::NewProject made = editor::createProject(proj, &real[1]);
+        CHECK(!made.error.empty() && made.scene.empty() && made.error.find("scripts/lever_lua.lua") != std::string::npos);
+        CHECK(editor::firstScene(proj).empty() && !fs::exists(proj / "meshes" / "floor.mesh"));
+        std::ifstream in(proj / "scripts" / "lever_lua.lua", std::ios::binary);
+        std::string kept((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(kept == "-- mine\n");
+    }
+    // A template whose files cannot be read fails naming the file.
+    {
+        editor::TemplateInfo ghost = list[4];  // zeta: its scene is there
+        write(lib / "zeta" / "meshes" / "m.mesh", "x");
+        fs::permissions(lib / "zeta" / "meshes" / "m.mesh", fs::perms::none, ec);
+        std::ifstream probe(lib / "zeta" / "meshes" / "m.mesh", std::ios::binary);
+        if (!probe) {  // not when running as root, or on Windows
+            editor::NewProject made = editor::createProject(root / "Ghost", &ghost);
+            CHECK(!made.error.empty() && made.error.find("meshes/m.mesh") != std::string::npos);
+            CHECK(editor::firstScene(root / "Ghost").empty());  // what was copied is taken back
+        }
+        probe.close();
+        fs::permissions(lib / "zeta" / "meshes" / "m.mesh", fs::perms::owner_all, ec);
+    }
+    fs::remove_all(root, ec);
+}
+
 // Block scripts: the Lua each block makes, parenthesised only where Lua's
 // precedence needs it, decimals as fixed-point fractions, hats merged per
 // event, every error located, and the file format byte-stable.
@@ -10061,6 +10163,7 @@ int main(int argc, char** argv) {
     testBuildReport();
     testVramLayout();
     testProject();
+    testProjectTemplates();
     testAdoptAsset();
     testNewScript();
     testNewBlocksScript();

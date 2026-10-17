@@ -6,6 +6,7 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -61,6 +62,11 @@ public:
                        const std::function<std::string(const std::string&)>& fn);
     int rewriteUnsavedBlocks(const std::vector<std::filesystem::path>& files,
                              const std::function<std::string(const std::string&)>& fn);
+    // The tab showing `file`: its text now, unsaved edits included (a block
+    // tab's JSON), and a number that changes whenever that text does. Both
+    // empty when no tab shows the file.
+    std::optional<std::string> tabText(const std::filesystem::path& file) const;
+    std::optional<uint64_t> tabRevision(const std::filesystem::path& file) const;
 
     // What the open scene has, for the block tabs' field lists (objects,
     // sounds, cutscenes); set each frame before draw().
@@ -84,6 +90,7 @@ private:
     void tabMenu();
     void convertPrompt();
     void pollDisk();
+    const Tab* tabOf(const std::filesystem::path& file) const;
     double m_polledAt = -1;
     static constexpr int kScene = -1, kUi = -2;
     std::vector<std::unique_ptr<Tab>> m_tabs;

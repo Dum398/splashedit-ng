@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <map>
@@ -1151,12 +1152,17 @@ static bool slotField(State& st, int slot, const editor::ObjectPath& path, const
 // The inspector's New blocks and New Lua: writes scripts/<name>.blocks or
 // .lua from a starter, sets it on the object's Script component (its Trigger
 // component with `trigger`, the scene's script when `object` is null) as one
-// undo step and opens it in the block or script editor.
+// undo step and opens it in the block or script editor. An object with an
+// Interactable gets the starter with onInteract(self). With `addScript` the
+// object's Script component is added in the same undo step.
 static void newScript(State& st, editor::Document& doc, const editor::ObjectPath* object, editor::ScriptLanguage lang,
-                      bool trigger = false) {
+                      bool trigger = false, bool addScript = false) {
     const splash::Object* o = object ? doc.object(*object) : nullptr;
-    if (object && (!o || !(trigger ? o->trigger.has_value() : o->script.has_value()))) return;
-    const editor::ScriptKind kind = !o ? editor::ScriptKind::Scene : trigger ? editor::ScriptKind::Trigger : editor::ScriptKind::Object;
+    if (object && (!o || !(trigger ? o->trigger.has_value() : o->script.has_value() || addScript))) return;
+    const editor::ScriptKind kind = !o        ? editor::ScriptKind::Scene
+                                    : trigger ? editor::ScriptKind::Trigger
+                                    : o->interactable ? editor::ScriptKind::Interactable
+                                                      : editor::ScriptKind::Object;
     editor::NewScript ns = editor::createScript(doc.projectRoot(), o ? o->name : doc.sceneStem(), kind, lang);
     if (!ns.error.empty()) {
         notify(st, "Cannot create a script: " + ns.error, true);
@@ -1164,8 +1170,12 @@ static void newScript(State& st, editor::Document& doc, const editor::ObjectPath
     }
     if (o) {
         doc.edit(*object, [&](splash::Object& ob) {
-            if (trigger) ob.trigger->lua = ns.path;
-            else ob.script->lua = ns.path;
+            if (trigger) {
+                ob.trigger->lua = ns.path;
+            } else {
+                if (!ob.script) ob.script.emplace();
+                ob.script->lua = ns.path;
+            }
         });
         doc.endMerge();
     } else {
@@ -1187,6 +1197,94 @@ static std::optional<editor::ScriptLanguage> newScriptButtons(const char* blocks
     if (button(luaId, ImVec2(at.x + bw + space::xs, at.y), icon::plus, "New Lua", ButtonKind::Secondary, nullptr, luaTip))
         clicked = editor::ScriptLanguage::Lua;
     return clicked;
+}
+
+static bool isBlocksPath(const std::string& p) {
+    return p.size() >= 7 && p.compare(p.size() - 7, 7, ".blocks") == 0;
+}
+
+static std::optional<std::string> readTextFile(const std::filesystem::path& p) {
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return std::nullopt;
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+// Whether the script at `lua` (a project path) defines onInteract: its tab's
+// text when it is open in one, else the file. Worked out again when the tab's
+// text changes, or for a file at most once a second and when its time does.
+static bool interactDefined(State& st, const editor::Document& doc, const std::string& lua, bool* exists) {
+    State::InteractEvent& c = st.interactEvent;
+    const std::filesystem::path abs = doc.resolve(lua);
+    const bool blocks = isBlocksPath(lua);
+    if (std::optional<uint64_t> rev = st.scripts.tabRevision(abs)) {
+        if (c.file != lua || c.tabRevision != rev) {
+            c.file = lua;
+            c.tabRevision = rev;
+            c.exists = true;
+            c.checkedAt = -1;
+            c.defined = editor::scriptDefinesCallback(st.scripts.tabText(abs).value_or(std::string()), blocks, "onInteract");
+        }
+        *exists = c.exists;
+        return c.defined;
+    }
+    const double now = ImGui::GetTime();
+    if (c.file == lua && !c.tabRevision && c.checkedAt >= 0 && now - c.checkedAt < 1.0) {
+        *exists = c.exists;
+        return c.defined;
+    }
+    std::error_code ec;
+    const std::filesystem::file_time_type mtime = std::filesystem::last_write_time(abs, ec);
+    const bool there = !ec;
+    if (c.file != lua || c.tabRevision || c.checkedAt < 0 || there != c.exists || (there && mtime != c.mtime)) {
+        std::optional<std::string> text = there ? readTextFile(abs) : std::nullopt;
+        c.file = lua;
+        c.tabRevision.reset();
+        c.mtime = there ? mtime : std::filesystem::file_time_type{};
+        c.exists = there && text.has_value();
+        c.defined = text && editor::scriptDefinesCallback(*text, blocks, "onInteract");
+    }
+    c.checkedAt = now;
+    *exists = c.exists;
+    return c.defined;
+}
+
+// The Interactable section's Add onInteract: an empty onInteract(self) added
+// to the object's script file (a block script gets an "when interacted with"
+// stack under its others), and to its tab's unsaved text when it has some;
+// then the script opens.
+static void addInteractEvent(State& st, editor::Document& doc, const std::string& lua) {
+    const std::filesystem::path abs = doc.resolve(lua);
+    const bool blocks = isBlocksPath(lua);
+    std::optional<std::string> text = readTextFile(abs);
+    if (!text) {
+        notify(st, "Cannot read " + lua, true);
+        return;
+    }
+    if (!editor::scriptDefinesCallback(*text, blocks, "onInteract")) {
+        const std::string out = editor::addInteractCallback(*text, blocks);
+        if (out.empty()) {
+            notify(st, "Cannot add onInteract: " + fileName(lua) + " is not a block script that loads", true);
+            return;
+        }
+        std::ofstream o(abs, std::ios::binary | std::ios::trunc);
+        o << out;
+        if (!o.flush()) {
+            notify(st, "Cannot write " + lua, true);
+            return;
+        }
+    }
+    auto add = [blocks](const std::string& t) {
+        if (editor::scriptDefinesCallback(t, blocks, "onInteract")) return t;
+        const std::string out = editor::addInteractCallback(t, blocks);
+        return out.empty() ? t : out;
+    };
+    if (blocks) st.scripts.rewriteUnsavedBlocks({abs}, add);
+    else st.scripts.rewriteUnsaved({abs}, add);
+    st.scripts.reloadFromDisk();
+    doc.refreshAssets({lua});
+    st.interactEvent.checkedAt = -1;
+    st.interactEvent.file.clear();
+    openScript(st, doc, lua);
 }
 
 // ---- File menu: projects, scenes, and the unsaved-changes prompt ----
@@ -5503,7 +5601,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine;
+    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -5817,8 +5915,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 openScript(st, doc, lua);
         } else {
             if (auto lang = newScriptButtons("newblocks", "newlua", ImVec2(x0 + space::sm + lw, y + space::xxs), x1 - space::sm,
-                                             "Writes scripts/<object name>.blocks with a when-created stack, and opens it.",
-                                             "Writes scripts/<object name>.lua with onCreate ready to fill in, and opens it."))
+                                             o->interactable ? "Writes scripts/<object name>.blocks with 'when created' and 'when the player interacts' stacks, and opens it."
+                                                             : "Writes scripts/<object name>.blocks with a when-created stack, and opens it.",
+                                             o->interactable ? "Writes scripts/<object name>.lua with onCreate and onInteract ready to fill in, and opens it."
+                                                             : "Writes scripts/<object name>.lua with onCreate ready to fill in, and opens it."))
                 newScript(st, doc, &path, *lang);
         }
         y += size::field + space::sm;
@@ -6179,6 +6279,51 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                               : "Not used: turn on Require facing first. How far to either side of straight ahead the object can be and still count as faced.",
                in.facingAngle, "deg", "iangle", 0, 180, [](splash::Object& ob, float v) { ob.interactable->facingAngle = v; });
         if (!in.lineOfSight) dl->AddRectFilled(ImVec2(x0 + space::sm, angleTop), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150));
+        {
+            // What using it runs: psxsplash calls onInteract(self) in the
+            // object's own script.
+            const ImRect er = row("lievent", "Event", "What the console calls when the player uses it.");
+            nameRect("obj.ievent", er);
+            const ImVec2 at(er.Min.x, er.Min.y - 3);
+            std::string caption;
+            bool warn = true;
+            if (!o->script) {
+                caption = "Nothing happens when it is used: the console calls onInteract(self) in this object's script.";
+                interactLine = "interact: event none";
+                if (auto lang = newScriptButtons("newiblocks", "newilua", at, x1 - space::sm,
+                                                 "Adds a Script component with scripts/<object name>.blocks, a 'when the player interacts' stack ready, and opens it.",
+                                                 "Adds a Script component with scripts/<object name>.lua, onInteract ready to fill in, and opens it."))
+                    newScript(st, doc, &path, *lang, false, true);
+            } else {
+                const std::string& lua = o->script->lua;
+                bool exists = false;
+                const bool defined = !lua.empty() && interactDefined(st, doc, lua, &exists);
+                if (defined) {
+                    warn = false;
+                    caption = "onInteract(self) in " + fileName(lua);
+                    interactLine = "interact: event defined " + lua;
+                    if (button("iedit", at, icon::fileCode, "Edit script", ButtonKind::Secondary, nullptr,
+                               "Opens the script in the script editor, beside the Scene."))
+                        openScript(st, doc, lua);
+                } else {
+                    interactLine = "interact: event missing " + (lua.empty() ? std::string("(no file)") : lua);
+                    if (lua.empty()) {
+                        caption = "The Script component has no file, so using it does nothing. Make one with New blocks or New Lua in the Script section.";
+                    } else if (!exists) {
+                        caption = fileName(lua) + " does not exist, so using it does nothing. Make it with Create script in the Script section.";
+                    } else {
+                        caption = fileName(lua) + " has no onInteract(self), so using it does nothing.";
+                        if (button("iaddevent", at, icon::plus, "Add onInteract", ButtonKind::Secondary, nullptr,
+                                   "Adds an empty onInteract(self) to the script and opens it."))
+                            addInteractEvent(st, doc, lua);
+                    }
+                }
+            }
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            y += space::xs;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y), warn ? color::warn : color::textDim, caption.c_str(), nullptr, w);
+            y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, caption.c_str()).y + space::sm;
+        }
         sectionEnd(top);
     }
     if (o->audio) {
@@ -6290,6 +6435,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     report("uvoffset", uvOffLine);
     report("audio", audioLine);
     report("skin", skinLine);
+    report("interact", interactLine);
 
     // Add component.
     ImRect add(ImVec2(x0, y), ImVec2(x1, y + 34));

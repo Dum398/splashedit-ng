@@ -205,6 +205,12 @@ std::string scriptFileStem(const std::string& name) {
     return out.empty() ? "script" : out;
 }
 
+static const char kInteractStub[] =
+    "\n"
+    "-- The player pressed the interact button near this object.\n"
+    "function onInteract(self)\n"
+    "end\n";
+
 std::string scriptTemplate(const std::string& name, ScriptKind kind) {
     std::string title;
     for (char c : name) title += c == '\n' || c == '\r' ? ' ' : c;
@@ -230,16 +236,18 @@ std::string scriptTemplate(const std::string& name, ScriptKind kind) {
                "-- After every object is created and its onCreate has run.\n"
                "function onSceneCreationEnd()\n"
                "end\n";
-    return "-- " + title +
-           "\n"
-           "\n"
-           "-- Once, after the scene has loaded. self is this object.\n"
-           "function onCreate(self)\n"
-           "end\n"
-           "\n"
-           "-- Every frame; dt is 4096 for one 30 fps frame. Leave it out unless needed.\n"
-           "-- function onUpdate(self, dt)\n"
-           "-- end\n";
+    std::string text = "-- " + title +
+                       "\n"
+                       "\n"
+                       "-- Once, after the scene has loaded. self is this object.\n"
+                       "function onCreate(self)\n"
+                       "end\n"
+                       "\n"
+                       "-- Every frame; dt is 4096 for one 30 fps frame. Leave it out unless needed.\n"
+                       "-- function onUpdate(self, dt)\n"
+                       "-- end\n";
+    if (kind == ScriptKind::Interactable) text += kInteractStub;
+    return text;
 }
 
 std::string blocksTemplate(ScriptKind kind) {
@@ -250,6 +258,7 @@ std::string blocksTemplate(ScriptKind kind) {
         hat("on_trigger_exit", 160);
     } else {
         hat(kind == ScriptKind::Scene ? "on_scene_start" : "on_create", 40);
+        if (kind == ScriptKind::Interactable) hat("on_interact", 160);
     }
     return splash::saveBlocks(s);
 }
@@ -283,6 +292,88 @@ NewScript writeNewScript(const fs::path& project, const std::string& folder, con
     }
     r.path = (folder.empty() ? "" : folder + "/") + utf8(dest.filename());
     return r;
+}
+
+bool scriptDefinesCallback(const std::string& text, bool blocks, std::string_view callback) {
+    if (callback.empty()) return false;
+    if (blocks) {
+        try {
+            splash::BlockScript b = splash::parseBlocks(text, "script");
+            for (const splash::BlockStack& st : b.stacks)
+                if (!st.blocks.empty() && splash::hatCallback(st.blocks[0].op) == callback) return true;
+        } catch (const std::exception&) {
+        }
+        return false;
+    }
+    // Walk the lines, skipping --[[ ]] (or --[==[ ]==]) block comments.
+    std::string closer;  // "]]" style closer while inside a block comment
+    size_t pos = 0;
+    while (pos <= text.size()) {
+        size_t eol = text.find('\n', pos);
+        if (eol == std::string::npos) eol = text.size();
+        std::string_view line(text.data() + pos, eol - pos);
+        if (!closer.empty()) {
+            size_t e = line.find(closer);
+            if (e == std::string_view::npos) {
+                pos = eol + 1;
+                continue;
+            }
+            line.remove_prefix(e + closer.size());
+            closer.clear();
+        }
+        size_t i = 0;
+        while (i < line.size() && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r')) i++;
+        std::string_view rest = line.substr(i);
+        if (rest.starts_with("--[")) {
+            size_t j = 3, eq = 0;
+            while (j < rest.size() && rest[j] == '=') j++, eq++;
+            if (j < rest.size() && rest[j] == '[') {
+                std::string close = "]" + std::string(eq, '=') + "]";
+                if (rest.find(close, j + 1) == std::string_view::npos) closer = close;
+            }
+        } else if (rest.starts_with("function")) {
+            rest.remove_prefix(8);
+            if (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) {
+                while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
+                if (rest.starts_with(callback)) {
+                    rest.remove_prefix(callback.size());
+                    while (!rest.empty() && (rest[0] == ' ' || rest[0] == '\t')) rest.remove_prefix(1);
+                    if (rest.empty() || rest[0] == '(' || rest[0] == '\r') return true;
+                }
+            }
+        }
+        pos = eol + 1;
+    }
+    return false;
+}
+
+std::string addInteractCallback(const std::string& text, bool blocks) {
+    if (blocks) {
+        splash::BlockScript b;
+        try {
+            if (!text.empty()) b = splash::parseBlocks(text, "script");
+        } catch (const std::exception&) {
+            return {};
+        }
+        float y = 40;
+        // Below every stack: about 60 px a block (C block bodies included).
+        auto count = [](auto&& self, const std::vector<splash::Block>& bs) -> int {
+            int n = 0;
+            for (const splash::Block& bl : bs) {
+                n++;
+                for (const auto& body : bl.bodies) n += self(self, body);
+            }
+            return n;
+        };
+        for (const splash::BlockStack& st : b.stacks)
+            y = std::max(y, st.y + 60.0f * float(count(count, st.blocks)) + 60.0f);
+        b.stacks.push_back({40, y, {splash::Block{"on_interact", {}, {}, {}}}});
+        return splash::saveBlocks(b);
+    }
+    std::string out = text;
+    if (!out.empty() && out.back() != '\n') out += '\n';
+    out += out.empty() ? std::string(kInteractStub + 1) : std::string(kInteractStub);
+    return out;
 }
 
 NewScript createScript(const fs::path& project, const std::string& name, ScriptKind kind, ScriptLanguage lang) {

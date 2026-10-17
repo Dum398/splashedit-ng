@@ -2334,6 +2334,83 @@ void testNewScript() {
     CHECK(t.error.empty() && t.path == "scripts/game_logic_trigger.lua");
     std::ifstream tin(proj / "scripts" / "game_logic_trigger.lua", std::ios::binary);
     CHECK(std::string((std::istreambuf_iterator<char>(tin)), {}) == editor::scriptTemplate("Game Logic", editor::ScriptKind::Trigger));
+    // An Interactable object's script: the object starter plus onInteract,
+    // which psxsplash calls (L.OnInteract(go)) when the player uses it.
+    const std::string inter = editor::scriptTemplate("Lever", editor::ScriptKind::Interactable);
+    CHECK(inter.find("function onCreate(self)") != std::string::npos);
+    CHECK(inter.find("function onInteract(self)") != std::string::npos);
+    CHECK(inter.find("-- The player pressed the interact button near this object.") != std::string::npos);
+    CHECK(editor::lua::check(inter).ok());
+    CHECK(editor::scriptDefinesCallback(inter, false, "onInteract") && editor::scriptDefinesCallback(inter, false, "onCreate"));
+    {
+        const editor::lua::ApiSymbol* api = editor::lua::findApi("", "onInteract");
+        CHECK(api && inter.find(api->signature) != std::string::npos);
+    }
+    editor::NewScript ia = editor::createScript(proj, "Lever", editor::ScriptKind::Interactable);
+    CHECK(ia.error.empty() && ia.path == "scripts/lever.lua");
+    std::ifstream iin(proj / "scripts" / "lever.lua", std::ios::binary);
+    CHECK(std::string((std::istreambuf_iterator<char>(iin)), {}) == inter);
+}
+
+// The Interactable section's Event row: does the script define the callback,
+// and Add onInteract's edit of a Lua or block script.
+void testScriptDefinesCallback() {
+    using editor::scriptDefinesCallback;
+    // Lua.
+    CHECK(scriptDefinesCallback("function onInteract(self)\nend\n", false, "onInteract"));
+    CHECK(scriptDefinesCallback("-- x\n  \tfunction onInteract(self)\nend", false, "onInteract"));
+    CHECK(scriptDefinesCallback("function  onInteract (self) end", false, "onInteract"));
+    CHECK(scriptDefinesCallback("function onCreate(self)\nend\r\nfunction onInteract(self)\r\nend\r\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("function onCreate(self)\nend\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("-- function onInteract(self)\n-- end\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("  --function onInteract(self)\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("--[[\nfunction onInteract(self)\nend\n]]\n", false, "onInteract"));
+    CHECK(scriptDefinesCallback("--[[ off ]]\nfunction onInteract(self)\nend\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("function onInteractX(self)\nend\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("function onInteract_2(self)\nend\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("functiononInteract(self)\n", false, "onInteract"));
+    CHECK(!scriptDefinesCallback("local function_onInteract = 1\n", false, "onInteract"));
+    // Blocks: a stack whose hat makes the function.
+    const std::string withHat = editor::blocksTemplate(editor::ScriptKind::Interactable);
+    const std::string without = editor::blocksTemplate(editor::ScriptKind::Object);
+    {
+        const splash::BlockScript hats = splash::parseBlocks(withHat, "lever.blocks");
+        CHECK(hats.stacks.size() == 2 && hats.stacks[0].blocks[0].op == "on_create" && hats.stacks[1].blocks[0].op == "on_interact");
+    }
+    CHECK(scriptDefinesCallback(withHat, true, "onInteract"));
+    CHECK(scriptDefinesCallback(withHat, true, "onCreate"));
+    CHECK(!scriptDefinesCallback(without, true, "onInteract"));
+    CHECK(!scriptDefinesCallback("{ not json", true, "onInteract"));
+    CHECK(!scriptDefinesCallback("", true, "onInteract"));
+    // Lua text read as blocks, and blocks JSON read as Lua: neither counts.
+    CHECK(!scriptDefinesCallback("function onInteract(self)\nend\n", true, "onInteract"));
+    CHECK(!scriptDefinesCallback(withHat, false, "onInteract"));
+    {
+        // A hat that is not the first block of its stack does not count.
+        splash::BlockScript bs;
+        bs.stacks.push_back({40, 40, {splash::Block{"on_create", {}, {}, {}}, splash::Block{"on_interact", {}, {}, {}}}});
+        CHECK(!scriptDefinesCallback(splash::saveBlocks(bs), true, "onInteract"));
+    }
+    CHECK(splash::hatCallback("on_interact") == "onInteract" && splash::hatCallback("say").empty());
+
+    // Add onInteract: Lua gets the stub once, at the end.
+    const std::string obj = editor::scriptTemplate("Lever", editor::ScriptKind::Object);
+    const std::string added = editor::addInteractCallback(obj, false);
+    CHECK(added.starts_with(obj) && scriptDefinesCallback(added, false, "onInteract"));
+    CHECK(added.find("function onInteract(self)\nend\n") == added.size() - std::string("function onInteract(self)\nend\n").size());
+    CHECK(editor::lua::check(added).ok());
+    CHECK(editor::addInteractCallback("x = 1", false).starts_with("x = 1\n"));
+    CHECK(scriptDefinesCallback(editor::addInteractCallback("", false), false, "onInteract"));
+    // Blocks: an on_interact stack below the others; the rest untouched.
+    const std::string addedB = editor::addInteractCallback(without, true);
+    CHECK(scriptDefinesCallback(addedB, true, "onInteract"));
+    const splash::BlockScript before = splash::parseBlocks(without, "a"), after = splash::parseBlocks(addedB, "b");
+    CHECK(after.stacks.size() == before.stacks.size() + 1);
+    CHECK(std::equal(before.stacks.begin(), before.stacks.end(), after.stacks.begin()));
+    for (const splash::BlockStack& st : before.stacks) CHECK(after.stacks.back().y >= st.y + 80);
+    CHECK(splash::blocksFileToLua(addedB, "b").find("function onInteract(self)") != std::string::npos);
+    CHECK(editor::addInteractCallback("{ not json", true).empty());
 }
 
 // New blocks: a .blocks starter per kind that makes Lua with the same
@@ -2356,7 +2433,9 @@ void testNewBlocksScript() {
     for (const Want& w : {Want{editor::ScriptKind::Object, "scripts/game_logic.blocks", {"function onCreate(self)"}},
                           Want{editor::ScriptKind::Scene, "scripts/game_logic.blocks", {"function onSceneCreationEnd()"}},
                           Want{editor::ScriptKind::Trigger, "scripts/game_logic_trigger.blocks",
-                               {"function onTriggerEnter(index)", "function onTriggerExit(index)"}}}) {
+                               {"function onTriggerEnter(index)", "function onTriggerExit(index)"}},
+                          Want{editor::ScriptKind::Interactable, "scripts/game_logic.blocks",
+                               {"function onCreate(self)", "function onInteract(self)"}}}) {
         fs::remove_all(proj / "scripts", ec);
         editor::NewScript n = editor::createScript(proj, "Game Logic", w.kind, editor::ScriptLanguage::Blocks);
         CHECK(n.error.empty() && n.path == w.path);
@@ -9402,6 +9481,7 @@ int main(int argc, char** argv) {
     testAdoptAsset();
     testNewScript();
     testNewBlocksScript();
+    testScriptDefinesCallback();
     testBlockHelp();
     testBlocks();
     testBlocksLayout();

@@ -56,6 +56,14 @@ def said(out, what):
     return re.findall(r'^uicanvas: ' + what + r' (.*)$', out, re.M)
 
 
+def element_fonts(out):
+    """The 'uicanvas: element font <shown> width <px>' lines: (shown, px)."""
+    return [(m.group(1), int(m.group(2))) for m in re.finditer(r'^uicanvas: element font (.*) width (\d+)$', out, re.M)]
+
+
+SYS_WIDTH = 8 * len('system font')  # the text of 'sys' in the system font, 8 px a character
+
+
 def font_of(scene, element):
     for e in scene['canvases'][0]['elements']:
         if e['name'] == element:
@@ -83,8 +91,8 @@ check('the project has fonts to pick from', [f['name'] for f in scene['fonts']] 
 scene, text, out, ctl = run(['--click', SYS, '--wait', '5', '--click', '@ui.font', '--wait', '5'])
 check('the Font menu is open at the end', 'popups open: yes' in out, out[-300:])
 check('clicking sys selects it', 'uicanvas: inspector element sys' in out, out[-400:])
-check('without a canvas default, a fontless text element shows the system font',
-      said(out, 'element font') == ['System (8 x 16)'], said(out, 'element font'))
+check('without a canvas default, a fontless text element shows the system font and its width',
+      element_fonts(out) == [('System (8 x 16)', SYS_WIDTH)], element_fonts(out))
 check('without a canvas default, its Font menu offers the system font',
       'ui.font/System (8 x 16)' in ctl and not any(k.startswith('ui.font/Canvas default') for k in ctl), sorted(k for k in ctl if k.startswith('ui.font')))
 
@@ -102,8 +110,10 @@ check('the default font is saved with the canvas', scene['canvases'][0].get('def
 check('the text element keeps no font of its own', font_of(scene, 'sys') == '', font_of(scene, 'sys'))
 check('the other text elements keep theirs', font_of(scene, 'title') == 'title' and font_of(scene, 'body') == 'body',
       (font_of(scene, 'title'), font_of(scene, 'body')))
+ef = element_fonts(out)
 check('the fontless text element shows the canvas default', 'uicanvas: inspector element sys' in out and
-      said(out, 'element font') == ['Canvas default (title)'], said(out, 'element font'))
+      [s for s, _ in ef] == ['Canvas default (title)'], ef)
+check('and is measured in the canvas default, not the system font', len(ef) == 1 and ef[0][1] > 0 and ef[0][1] != SYS_WIDTH, ef)
 scene, text, out, ctl = run(['--click', '@cv.font', '--wait', '5', '--click', '@cv.font/title', '--wait', '5',
                              '--click', SYS, '--wait', '5', '--click', '@ui.font', '--wait', '5'])
 check('its Font menu offers the canvas default instead of the system font',

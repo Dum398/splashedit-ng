@@ -1321,10 +1321,6 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                                  "a text element uses its canvas's default font.");
             nameRect("ui.font", ff);
             const std::string fl = e.font.empty() ? own : e.font;
-            if (reportLayout && m_elFontReported != fl) {
-                std::printf("uicanvas: element font %s\n", (m_elFontReported = fl).c_str());
-                std::fflush(stdout);
-            }
             if (pickField("font", ff, icon::type, rgb(0xf2c25c), fl.c_str())) ImGui::OpenPopup("##fontmenu");
             ImGui::SetNextWindowPos(ImVec2(ff.Min.x, ff.Max.y + space::xs));
             pushMenuStyle();
@@ -1341,7 +1337,16 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                 ImGui::EndPopup();
             }
             popMenuStyle();
-            const int tw = uic::textWidth(doc.scene(), m_assets, splash::effectiveFont(ecv, e), e.text);
+            // The width of the font it draws with (its own or its canvas's default).
+            const int tw = uic::textWidth(doc.scene(), m_assets, splash::effectiveFont(doc.scene().canvases[size_t(c)], e), e.text);
+            if (reportLayout) {
+                // Scripted tests: what the Font field shows and the width it resolves to.
+                const std::string line = fl + " width " + std::to_string(tw);
+                if (m_elFontReported != line) {
+                    std::printf("uicanvas: element font %s\n", (m_elFontReported = line).c_str());
+                    std::fflush(stdout);
+                }
+            }
             char info[96];
             std::snprintf(info, sizeof info, "%d px wide, %d of %d bytes", tw, int(std::min<size_t>(e.text.size(), 999)), uic::kTextMax);
             text(dl, ImVec2(x0 + space::sm + rows.lw, rows.y - 4), f.regular, type::caption, color::textFaint, info);

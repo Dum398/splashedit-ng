@@ -1982,8 +1982,22 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (const auto& sm : e.mesh->submeshes) n.triangles.insert(n.triangles.end(), sm.begin(), sm.end());
         navIn.push_back(std::move(n));
     }
+    // Walk-off zones: active objects only, like trigger boxes.
+    std::vector<Bounds> walkoffBoxes;
+    for (size_t i = 0; i < flat.size(); i++) {
+        const FlatObject& fo = flat[i];
+        if (!fo.activeInHierarchy || !fo.object->active || !fo.object->walkoff) continue;
+        Vec3 lo, hi;
+        walkoffWorldBox(fo, &lo, &hi);
+        Bounds b;
+        b.setMinMax(lo, hi);
+        walkoffBoxes.push_back(b);
+        st.walkoffZones.push_back({fo.object->name, int(i), 0});
+    }
     NavMesh nav = buildNavRegions(navIn, np, playerObj ? playerPos : navObj ? navSpawn : playerPos, res.errors,
-                                  roomBoxes(roomObjs));
+                                  roomBoxes(roomObjs), walkoffBoxes);
+    for (size_t z = 0; z < st.walkoffZones.size() && z < nav.walkoffEdgesPerZone.size(); z++)
+        st.walkoffZones[z].edges = nav.walkoffEdgesPerZone[z];
     if (!res.ok()) return res;
     if (nav.regions.size() > 65535 || nav.portals.size() > 65535) {
         res.errors.push_back("too many nav regions or portals");
@@ -2014,6 +2028,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         info.room = r.roomIndex == 0xFF ? -1 : int(r.roomIndex);
         info.surface = int(r.surfaceType);
         info.platform = (r.flags & 1) != 0;
+        info.walkoffEdges = r.walkoffEdgeMask;
         info.planeDeviation = r.maxPlaneDeviation;
         for (int p = r.portalStart; p < r.portalStart + r.portalCount; p++) {
             const NavPortal& np2 = nav.portals[size_t(p)];

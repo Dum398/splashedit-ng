@@ -70,6 +70,9 @@ struct NavMesh {
     float cellSize = 0;
     // Width and depth of the walkable geometry, in world units.
     float extentX = 0, extentZ = 0;
+    // Per walk-off box (in the order passed to buildNavRegions): how many
+    // boundary edges it opened. An edge inside two boxes counts for the first.
+    std::vector<int> walkoffEdgesPerZone;
 };
 
 // Recast's compact heightfield indexes spans with 24 bits (rcCompactCell::index),
@@ -85,8 +88,16 @@ constexpr int kNavSpanBudget = 1000000;
 // roomBoxes: the Room objects' world boxes (unexpanded) in room order. With
 // any, each region's roomIndex is the smallest room whose box (0.5 larger
 // per side) holds its centroid, else 0xFF; with none, connectivity islands.
+// walkoffBoxes: the walk-off zones' world boxes; a boundary edge whose
+// midpoint (on the region's floor plane) lies inside one becomes walk-off.
 NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBuildParams& params, Vec3 spawn,
-                        std::vector<std::string>& errors, const std::vector<Bounds>& roomBoxes = {});
+                        std::vector<std::string>& errors, const std::vector<Bounds>& roomBoxes = {},
+                        const std::vector<Bounds>& walkoffBoxes = {});
+
+// PSXNavRegionBuilder.ApplyWalkoffZones: sets walkoffEdgeMask bits for the
+// boundary edges whose midpoint lies inside a box (inclusive) and fills
+// nav.walkoffEdgesPerZone.
+void applyWalkoffZones(NavMesh& nav, const std::vector<Bounds>& boxes);
 
 // PSXNavRegionBuilder.WriteToBinary
 void writeNavRegions(BinWriter& w, const NavMesh& nav, float gte);

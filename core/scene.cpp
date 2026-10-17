@@ -197,6 +197,12 @@ json writeRoom(const RoomComponent& r) {
     return j;
 }
 
+json writeWalkoff(const WalkoffComponent& w) {
+    json j = {{"type", "walkoff"}, {"size", vec3(w.size)}};
+    putExtras(j, w.extra);
+    return j;
+}
+
 json writePortal(const PortalComponent& p) {
     json j = {{"type", "portal"}, {"roomA", p.roomA}, {"roomB", p.roomB}, {"width", p.width}, {"height", p.height}};
     putExtras(j, p.extra);
@@ -319,6 +325,11 @@ Object readObject(const json& j) {
             if (c.contains("offset")) r.offset = vec3(c["offset"]);
             r.extra = extrasOf(c, writeRoom(r));
             o.room = r;
+        } else if (type == "walkoff") {
+            WalkoffComponent w;
+            if (c.contains("size")) w.size = vec3(c["size"]);
+            w.extra = extrasOf(c, writeWalkoff(w));
+            o.walkoff = w;
         } else if (type == "portal") {
             PortalComponent pc;
             pc.roomA = c.value("roomA", pc.roomA);
@@ -387,6 +398,7 @@ json writeObject(const Object& o) {
     if (o.navigation) comps.push_back(writeNavigation(*o.navigation));
     if (o.trigger) comps.push_back(writeTrigger(*o.trigger));
     if (o.room) comps.push_back(writeRoom(*o.room));
+    if (o.walkoff) comps.push_back(writeWalkoff(*o.walkoff));
     if (o.portal) comps.push_back(writePortal(*o.portal));
     if (o.interactable) comps.push_back(writeInteractable(*o.interactable));
     if (o.audio) comps.push_back(writeAudio(*o.audio));

@@ -144,6 +144,9 @@ struct ExportStats {
         int room = -1;
         int surface = 0;  // 0 flat, 1 ramp, 2 stairs
         bool platform = false;
+        // Bit j: the edge from outline vertex j to j+1 lets the player walk
+        // off (a platform's boundary, or inside a walk-off zone).
+        uint8_t walkoffEdges = 0;
         // Largest distance of the region's ground samples from its floor
         // plane, metres (NavRegion::maxPlaneDeviation).
         float planeDeviation = 0;
@@ -151,6 +154,14 @@ struct ExportStats {
     };
     std::vector<NavRegionInfo> navInfo;
     bool navIslands = false;
+    // Nav walk-off zones on active objects, in flatten order: the boundary
+    // edges each one opened (an edge inside two counts for the first).
+    struct WalkoffInfo {
+        std::string object;  // the object's name
+        int flatIndex = 0;   // its index in flatten(scene)
+        int edges = 0;
+    };
+    std::vector<WalkoffInfo> walkoffZones;
 
     // Skinned meshes, in skin table order. bytes is the skin's 12-byte table
     // entry plus its whole data block (alignment padding included); a clip's

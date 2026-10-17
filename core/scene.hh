@@ -145,6 +145,13 @@ struct RoomComponent {
     ExtraKeys extra;
 };
 
+// PSXNavWalkoffZone: a box (+- size/2 in the object's local space). Nav
+// boundary edges whose midpoint lies inside it let the player walk off.
+struct WalkoffComponent {
+    Vec3 size{1, 2, 0.5f};
+    ExtraKeys extra;
+};
+
 // PSXPortalLink: a width x height rectangle in the object's local XY plane
 // (normal = local +Z), joining two Room objects named by object name.
 struct PortalComponent {
@@ -199,6 +206,7 @@ struct Object {
     std::optional<NavigationComponent> navigation;
     std::optional<TriggerComponent> trigger;
     std::optional<RoomComponent> room;
+    std::optional<WalkoffComponent> walkoff;
     std::optional<PortalComponent> portal;
     std::optional<InteractableComponent> interactable;
     std::optional<AudioComponent> audio;
@@ -452,6 +460,18 @@ inline void roomWorldBox(const FlatObject& fo, Vec3* mn, Vec3* mx) {
     for (int i = 0; i < 8; i++) {
         const Vec3 c{(i & 1) ? half.x : -half.x, (i & 2) ? half.y : -half.y, (i & 4) ? half.z : -half.z};
         const Vec3 p = fo.localToWorld.point(off + c);
+        *mn = i ? vmin(*mn, p) : p;
+        *mx = i ? vmax(*mx, p) : p;
+    }
+}
+
+// An object's walk-off zone in world space: the axis-aligned bounds of the
+// 8 corners of +- size/2 after the object's transform.
+inline void walkoffWorldBox(const FlatObject& fo, Vec3* mn, Vec3* mx) {
+    const Vec3 half = fo.object->walkoff ? fo.object->walkoff->size * 0.5f : Vec3{};
+    for (int i = 0; i < 8; i++) {
+        const Vec3 c{(i & 1) ? half.x : -half.x, (i & 2) ? half.y : -half.y, (i & 4) ? half.z : -half.z};
+        const Vec3 p = fo.localToWorld.point(c);
         *mn = i ? vmin(*mn, p) : p;
         *mx = i ? vmax(*mx, p) : p;
     }

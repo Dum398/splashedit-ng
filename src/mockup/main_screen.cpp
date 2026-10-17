@@ -6828,14 +6828,17 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     dl->AddRectFilled(bar.Min, bar.Max, color::chrome);
     float x = space::md;
     const std::optional<splash::ExportResult>& res = st.live.result();
-    if (res && res->ok()) {
-        const splash::ExportStats& s = res->stats;
-        splash::Budget v = splash::vramBudget(s), a = splash::spuBudget(s), r = splash::ramBudget(s);
+    // A failed export keeps the last good one's meters up, marked as such.
+    const splash::ExportResult* shownRes = res && res->ok() ? &*res : st.live.lastGood() ? &*st.live.lastGood() : nullptr;
+    if (shownRes) {
+        const splash::ExportStats& s = shownRes->stats;
+        splash::Budget v = splash::vramBudget(s), a = splash::spuBudget(s), r = splash::ramBudget(s),
+                       t = splash::triangleBudget(s);
         std::string vs = kb(v.used) + " / " + kb(v.capacity) + " KB";
         std::string as = kb(a.used) + " / " + kb(a.capacity) + " KB";
         std::string rs = mb(r.used) + " / " + mb(r.capacity) + " MB";
-        char ts[32];
-        std::snprintf(ts, sizeof ts, "%d", s.triangles);
+        std::string ts = std::to_string(s.triangles);
+        if (s.trianglesInView != uint64_t(s.triangles)) ts += ", up to " + std::to_string(s.trianglesInView) + " in view";
         x += meter("m_vram", ImVec2(x, bar.Min.y), icon::grid, "VRAM", v.fraction(), vs.c_str(),
                    "Framebuffers, texture atlases, palettes and fonts, as the export packs them.") +
              space::xl;
@@ -6846,9 +6849,19 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                    "Scene data, the renderer's buffers, its visible-triangle list, the world streaming slots and what "
                    "psxsplash and Lua allocate for each object, in psxsplash's heap at the peak of loading.") +
              space::xl;
-        x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", -1, ts,
-                   "Triangles in the exported meshes. How many are drawn depends on the camera.") +
+        x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", t.fraction(), ts.c_str(),
+                   "Triangles in the exported meshes, and the most that can be in view at once (what the meter "
+                   "measures). The psxsplash docs suggest 1000 to 2000 visible triangles per frame at 30 fps.") +
              space::xl;
+        auto meterLine = [](const char* name, const splash::Budget& m) {
+            scriptLine((std::string("statusbar.") + name).c_str(),
+                       std::string("statusbar: ") + name + " " + std::to_string(m.used) + "/" + std::to_string(m.capacity) +
+                           " " + splash::budgetBand(m.fraction()));
+        };
+        meterLine("vram", v);
+        meterLine("spu", a);
+        meterLine("ram", r);
+        meterLine("tris", t);
         if (!s.rooms.empty()) {
             char rs2[64];
             std::snprintf(rs2, sizeof rs2, "%d, catch-all %d tris", int(s.rooms.size()), s.roomCatchAllTris);
@@ -6857,13 +6870,19 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
                        "which psxsplash draws every frame wherever the camera is.") +
                  space::xl;
         }
-    } else {
-        const char* msg = res ? "Export failed: see problems" : "Measuring...";
-        ImVec2 ms = measure(f.regular, type::caption, msg);
+    }
+    if (!res || !res->ok()) {
+        std::string msg = !res ? "Measuring..." : "Export failed: see problems";
+        if (res && shownRes) msg += " (meters from the last good export)";
+        ImVec2 ms = measure(f.regular, type::caption, msg.c_str());
         text(dl, ImVec2(x, bar.Min.y + (size::statusBar - ms.y) * 0.5f), f.regular, type::caption,
-             res ? color::bad : color::textFaint, msg);
+             res ? color::bad : color::textFaint, msg.c_str());
         x += ms.x + space::xl;
     }
+    if (res)
+        scriptLine("statusbar.export", res->ok()  ? "statusbar: export ok"
+                                       : shownRes ? "statusbar: export failed, meters from last good"
+                                                  : "statusbar: export failed, no meters");
     // Right side: problems and save state. Play's and Run on hardware's
     // entries are cut to stop short of it (a failed build's first error can be
     // long), and shown whole on hover.

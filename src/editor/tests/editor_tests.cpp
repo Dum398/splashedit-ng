@@ -3894,6 +3894,51 @@ bool hasError(const splash::ExportResult& r, const std::string& part) {
 
 }  // namespace roomtest
 
+// The Triangles meter: the most triangles that can be in view in one frame,
+// against the psxsplash docs' 1000-2000 visible triangles at 30 fps. Without
+// streaming every triangle can be in view; with it, only the non-streamed
+// ones plus the streamed ones within the draw distance (streamDrawTris).
+void testTriangleBudget() {
+    using namespace roomtest;
+    const fs::path project = g_outDir / "tris-in-view";
+    fs::remove_all(project);
+    splash::Scene rooms = twoRooms(project);
+    splash::ExportResult r = splash::exportSplashpack(rooms, project, project / "scene.splashpack");
+    CHECK(r.ok() && r.stats.triangles > 0 && r.stats.streamRegions == 0);
+    CHECK(r.stats.trianglesInView == uint64_t(r.stats.triangles));
+    CHECK(splash::triangleBudget(r.stats).used == size_t(r.stats.triangles));
+    CHECK(splash::triangleBudget(r.stats).capacity == splash::kVisibleTriangleGuide);
+
+    // 40 floor quads 50 m apart along X, far past the draw distance, and one
+    // that cannot stream (a dynamic collider keeps it loaded).
+    splash::Scene world;
+    for (int i = 0; i < 40; i++)
+        world.objects.push_back(meshObject(("Tile " + std::to_string(i)).c_str(), "meshes/quad.mesh",
+                                           {float(50 * i), 0, 0}, false));
+    splash::Object kept = meshObject("Kept", "meshes/quad.mesh", {0, 0, 10}, false);
+    kept.collider = splash::ColliderComponent{splash::ColliderKind::Dynamic, false, {}};
+    world.objects.push_back(kept);
+    world.settings.streamWorld = true;
+    splash::ExportResult w = splash::exportSplashpack(world, project, project / "world.splashpack");
+    CHECK(w.ok());
+    const splash::ExportStats& s = w.stats;
+    CHECK(s.triangles == 41 * 2 && s.streamRegions > 1 && s.streamedObjects == 40);
+    CHECK(s.streamDrawTris > 0 && s.streamDrawTris < 80);
+    CHECK(s.trianglesInView == 2 + s.streamDrawTris);
+    CHECK(s.trianglesInView < uint64_t(s.triangles));
+
+    // The bands the meter colours by: under 75% good, under 90% warn.
+    splash::ExportStats b;
+    b.trianglesInView = 1499;
+    CHECK(std::string(splash::budgetBand(splash::triangleBudget(b).fraction())) == "good");
+    b.trianglesInView = 1500;
+    CHECK(std::string(splash::budgetBand(splash::triangleBudget(b).fraction())) == "warn");
+    b.trianglesInView = 1799;
+    CHECK(std::string(splash::budgetBand(splash::triangleBudget(b).fraction())) == "warn");
+    b.trianglesInView = 1800;
+    CHECK(std::string(splash::budgetBand(splash::triangleBudget(b).fraction())) == "bad");
+}
+
 // Exports the two-room scene and reads the room block back the way psxsplash
 // does. The block is found through ExportStats::roomBlockOffset; the nav
 // block right before it is found by its size from the header counts, which
@@ -9512,6 +9557,7 @@ int main(int argc, char** argv) {
     testScriptWithoutMesh();
     testWorldStreamPlan();
     testWorldStreamExport();
+    testTriangleBudget();
     testNavBigWorld();
     testRoomsExport();
     testActiveInHierarchyExport();

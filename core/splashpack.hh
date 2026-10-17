@@ -46,6 +46,10 @@ struct ExportStats {
     // starts at 0x1010 and rounds each clip's address and size up to 16 bytes.
     size_t spuEnd = 0;
     int triangles = 0;
+    // Most triangles that can be in view in one frame: every triangle of the
+    // objects that do not stream plus streamDrawTris (the same worst case
+    // bumpAllocatorNeed sizes the render buffer for).
+    uint64_t trianglesInView = 0;
     // psxsplash render buffers. The *Need values are the exporter's worst case
     // for this scene; the plain ones are what the splashpack carries, which is
     // the scene's override when it has one.

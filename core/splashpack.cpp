@@ -2000,6 +2000,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
 
     BinWriter w;
     st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases);
+    st.trianglesInView = st.streamDrawTris;
+    for (size_t i = 0; i < exporters.size(); i++)
+        if (!streamed[i]) st.trianglesInView += exporters[i].tris.size();
     st.bumpAllocatorSize = scene.settings.bumpAllocatorSize > 0 ? (uint32_t(scene.settings.bumpAllocatorSize) + 3) & ~3u
                                                                  : st.bumpAllocatorNeed;
 

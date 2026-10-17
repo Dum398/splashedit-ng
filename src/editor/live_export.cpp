@@ -16,6 +16,7 @@ LiveExport::~LiveExport() {
 void LiveExport::collect() {
     if (!m_job.valid() || m_job.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     m_result = m_job.get();
+    if (m_result->ok()) m_lastGood = m_result;
     m_resultRev = m_jobRev;
 }
 

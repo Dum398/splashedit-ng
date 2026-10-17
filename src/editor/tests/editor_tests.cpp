@@ -8142,6 +8142,109 @@ void testUiFonts() {
     CHECK(std::count(px.begin(), px.end(), 0xffffffffu) > 10);
 }
 
+// A canvas's default font (PSXCanvas.defaultFont): the scene file keeps it
+// (null for the system font, never in the extras); a text element without a
+// font of its own resolves to it; font rename and delete rewrite it in the
+// same undo step as the elements; the preview draws with it; a default font
+// the scene does not have is a canvas problem.
+void testUiCanvasDefaultFont() {
+    using namespace editor::uic;
+    namespace fs = std::filesystem;
+    // Scene file round trip.
+    const fs::path dir = g_outDir / "cvfont";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Scene rt = uiScene();
+    rt.canvases[0].defaultFont = "font (2)";
+    splash::saveScene(rt, dir / "rt.scene");
+    std::string text;
+    {
+        std::ifstream in(dir / "rt.scene", std::ios::binary);
+        text.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    CHECK(text.find("\"defaultFont\": \"font (2)\"") != std::string::npos);
+    CHECK(text.find("\"defaultFont\": null") != std::string::npos);  // the second canvas: the system font
+    const splash::Scene back = splash::loadScene(dir / "rt.scene");
+    CHECK(back.canvases.size() == 2 && back.canvases[0].defaultFont == "font (2)" && back.canvases[1].defaultFont.empty());
+    CHECK(back.canvases[0].extra.empty() && back.canvases[1].extra.empty());
+    // An unknown key still goes to the extras, and back out.
+    {
+        std::string withExtra = text;
+        const size_t at = withExtra.find("\"defaultFont\": \"font (2)\"");
+        withExtra.insert(at, "\"futureKey\": 7, ");
+        std::ofstream(dir / "extra.scene", std::ios::binary) << withExtra;
+        const splash::Scene ex = splash::loadScene(dir / "extra.scene");
+        CHECK(ex.canvases[0].defaultFont == "font (2)" && ex.canvases[0].extra.size() == 1 &&
+              ex.canvases[0].extra[0].first == "futureKey");
+    }
+
+    // The resolver.
+    splash::UICanvas cv;
+    splash::UIElement el;
+    el.type = splash::UIElementType::Text;
+    CHECK(splash::effectiveFont(cv, el).empty());
+    cv.defaultFont = "font (2)";
+    CHECK(splash::effectiveFont(cv, el) == "font (2)");
+    el.font = "font";
+    CHECK(splash::effectiveFont(cv, el) == "font");
+
+    // Rename and delete.
+    editor::Document d;
+    splash::Scene sc = uiScene();
+    splash::UIElement t0 = uiBox("t0", 0, 0, 50, 16);
+    t0.type = splash::UIElementType::Text;
+    t0.text = "Hi";
+    sc.canvases[0].elements.push_back(t0);
+    d.reset(sc);
+    CHECK(addFont(d, "fonts/a.ttf") == 0 && addFont(d, "fonts/b.ttf") == 1 && d.scene().fonts[1].name == "font (2)");
+    CHECK(editCanvas(d, 0, [](splash::UICanvas& c) { c.defaultFont = "font (2)"; }) && d.scene().canvases[0].defaultFont == "font (2)");
+    const size_t h0 = d.historySize();
+    CHECK(fontUses(d.scene(), "font (2)") == 1 && fontUses(d.scene(), "font") == 0);
+    CHECK(d.undo() && d.scene().canvases[0].defaultFont.empty() && d.redo() && d.scene().canvases[0].defaultFont == "font (2)");
+    CHECK(renameFont(d, 1, "body") && d.scene().canvases[0].defaultFont == "body" && d.scene().canvases[1].defaultFont.empty());
+    CHECK(d.historySize() == h0 + 1);
+    CHECK(d.undo() && d.scene().canvases[0].defaultFont == "font (2)" && d.scene().fonts[1].name == "font (2)");
+    CHECK(d.redo() && d.scene().canvases[0].defaultFont == "body");
+    CHECK(canvasProblems(d, 0).empty());
+    CHECK(deleteFont(d, 1) && d.scene().canvases[0].defaultFont.empty() && d.historySize() == h0 + 2);
+    CHECK(d.undo() && d.scene().canvases[0].defaultFont == "body" && d.scene().fonts.size() == 2);
+    // A default font the scene does not have: the canvas says so.
+    CHECK(editCanvas(d, 0, [](splash::UICanvas& c) { c.defaultFont = "gone"; }));
+    bool reported = false;
+    for (const Problem& p : canvasProblems(d, 0)) reported |= p.title == "No such default font" && p.body.find("'gone'") != std::string::npos;
+    CHECK(reported);
+    CHECK(canvasProblems(d, 1).empty());
+
+    // The preview draws a fontless text element with its canvas's default.
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    fs::copy_file(src / "assets" / "fonts" / "Inter-Regular.ttf", dir / "inter.ttf");
+    Assets assets;
+    assets.refresh(dir, 0);
+    splash::Scene ps;
+    splash::UIFont uf;
+    uf.name = "inter";
+    uf.source = "inter.ttf";
+    uf.size = 16;
+    ps.fonts.push_back(uf);
+    splash::UICanvas pc;
+    pc.name = "p";
+    splash::UIElement pt = uiBox("t", 0, 0, 200, 20);
+    pt.type = splash::UIElementType::Text;
+    pt.text = "Hello Wq";
+    pt.color = {1, 1, 1};
+    pc.elements.push_back(pt);
+    ps.canvases.push_back(pc);
+    Screen s;
+    const std::vector<uint32_t> sys = render(ps, {true}, s, assets, 0);
+    ps.canvases[0].defaultFont = "inter";
+    const std::vector<uint32_t> viaDefault = render(ps, {true}, s, assets, 0);
+    ps.canvases[0].defaultFont.clear();
+    ps.canvases[0].elements[0].font = "inter";
+    const std::vector<uint32_t> own = render(ps, {true}, s, assets, 0);
+    CHECK(sys != own);  // the control: the font draws differently from the system font
+    CHECK(viaDefault == own);
+}
+
 // Copy, cut and paste of UI elements: the clipboard text, the offset, the
 // names, one undo step each, and text of the other kind refused both ways.
 void testUiClipboard() {
@@ -8639,6 +8742,100 @@ void testLoaderPack() {
     CHECK(pr.ok() && readAll(dir / "scene_0.loading") == b);
     pr = editor::exportForPlay(plain, project, dir);
     CHECK(pr.ok() && fs::exists(dir / "scene_0.splashpack") && !fs::exists(dir / "scene_0.loading"));
+}
+
+// A canvas's default font in the export: a text element with no font of its
+// own gets its canvas's default font's index, its own font wins, a default
+// font the scene does not have is an error naming the canvas; the loader pack
+// carries the default font of its canvas.
+void testExportCanvasDefaultFont() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "cvfontexport";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "examples" / "courtyard", project, fs::copy_options::recursive);
+    fs::copy_file(src / "assets" / "fonts" / "Inter-Regular.ttf", project / "inter.ttf");
+
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    scene.canvases.clear();
+    scene.settings.loadingCanvas.clear();
+    splash::UIFont font;
+    font.source = "inter.ttf";
+    font.size = 12;
+    font.name = "font";
+    scene.fonts.push_back(font);
+    font.name = "font (2)";
+    font.size = 14;
+    scene.fonts.push_back(font);
+    auto textEl = [](const char* name, const char* f) {
+        splash::UIElement t = uiBox(name, 8, 8, 100, 16);
+        t.type = splash::UIElementType::Text;
+        t.text = "Hi";
+        t.font = f;
+        return t;
+    };
+    splash::UICanvas hud;
+    hud.name = "hud";
+    hud.defaultFont = "font (2)";
+    hud.elements.push_back(textEl("dflt", ""));
+    hud.elements.push_back(textEl("own", "font"));
+    scene.canvases.push_back(hud);
+    splash::UICanvas plain;
+    plain.name = "plain";
+    plain.elements.push_back(textEl("sys", ""));
+    scene.canvases.push_back(plain);
+
+    // The font byte (element offset 24) of each text element, by name.
+    auto fontBytes = [](const std::string& b) {
+        std::map<std::string, int> out;
+        if (b.size() < 100) return out;
+        const size_t canvases = rd16(b, 92), fonts = uint8_t(b[94]), table = size_t(rd32(b, 96));
+        for (size_t c = 0; c < canvases; c++) {
+            const size_t cv = table + fonts * 112 + 12 * c;
+            if (cv + 12 > b.size()) return out;
+            const size_t elems = size_t(rd32(b, cv)), count = uint8_t(b[cv + 6]);
+            for (size_t k = 0; k < count && elems + 48 * (k + 1) <= b.size(); k++) {
+                const size_t e = elems + 48 * k;
+                const size_t off = size_t(rd32(b, e + 4)), len = uint8_t(b[e + 2]);
+                if (uint8_t(b[e]) == 2 && off + len <= b.size()) out[b.substr(off, len)] = uint8_t(b[e + 24]);
+            }
+        }
+        return out;
+    };
+    splash::ExportResult r = splash::exportSplashpack(scene, project, project / "cv.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "canvas default font: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string b = readAll(project / "cv.splashpack");
+    CHECK(b.size() > 100 && uint8_t(b[94]) == 2);
+    std::map<std::string, int> fb = fontBytes(b);
+    CHECK(fb.size() == 3);
+    CHECK(fb.count("dflt") && fb["dflt"] == 2);  // "font (2)", the canvas's default
+    CHECK(fb.count("own") && fb["own"] == 1);    // its own font wins
+    CHECK(fb.count("sys") && fb["sys"] == 0);    // no default: the system font
+
+    // A default font the scene does not have: an error naming the canvas.
+    splash::Scene missing = scene;
+    missing.canvases[0].defaultFont = "gone";
+    splash::ExportResult mr = splash::exportSplashpack(missing, project, project / "missing.splashpack");
+    CHECK(!mr.ok() && hasError(mr, "canvas 'hud'") && hasError(mr, "'gone'") && hasError(mr, "default font"));
+
+    // The loader pack carries the fonts its canvas draws with, its default too.
+    splash::Scene ld = scene;
+    ld.canvases[1].defaultFont = "font (2)";
+    ld.settings.loadingCanvas = "plain";
+    splash::ExportResult lr = splash::exportLoaderPack(ld, project, project / "cv.loading");
+    CHECK(lr.ok());
+    const std::string l = readAll(project / "cv.loading");
+    CHECK(l.size() > 16 && uint8_t(l[4]) == 1 && uint8_t(l[5]) == 1);
+    if (l.size() > 16) {
+        const size_t cv = size_t(rd32(l, 12)) + uint8_t(l[4]) * 112;
+        const size_t e = size_t(rd32(l, cv));
+        CHECK(e + 48 <= l.size() && uint8_t(l[e]) == 2 && uint8_t(l[e + 24]) == 1);
+    }
+    splash::Scene ldMissing = ld;
+    ldMissing.canvases[1].defaultFont = "gone";
+    CHECK(hasError(splash::exportLoaderPack(ldMissing, project, project / "missing.loading"), "canvas 'plain'"));
 }
 
 namespace disctest {
@@ -9240,12 +9437,14 @@ int main(int argc, char** argv) {
     testUiUndo();
     testUiLoadingRename();
     testUiFonts();
+    testUiCanvasDefaultFont();
     testUiClipboard();
     testUiMultiSelect();
     testUiProblems();
     testUiRender();
     testUiMatchesRuntime();
     testLoaderPack();
+    testExportCanvasDefaultFont();
     testDiscLicenceParse();
     testDiscSettings();
     testDiscLicenceImage();

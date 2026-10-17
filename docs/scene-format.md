@@ -137,7 +137,7 @@ Two optional top-level arrays after `objects`.
   { "name": "pixel", "bitmap": "fonts/pixel.png", "glyphWidth": 8, "glyphHeight": 12 }
 ],
 "canvases": [
-  { "name": "hud", "visible": true, "sortOrder": 0, "elements": [
+  { "name": "hud", "visible": true, "sortOrder": 0, "defaultFont": null, "elements": [
     { "type": "box", "name": "bar", "visible": true, "rect": [0, -20, 0, 20],
       "anchorMin": [0, 1], "anchorMax": [1, 1], "color": [0.1, 0.3, 0.8] },
     { "type": "text", "name": "score", "visible": true, "rect": [8, 8, 120, 16],
@@ -155,6 +155,12 @@ In the editor, the UI tab's canvas inspector (select a canvas, no element) has a
 section that adds, edits and removes fonts: name, source file, size or glyph cells, with the sheet
 and VRAM each one costs and a sample line. Renaming a font renames it in every text element that
 uses it; deleting one puts those elements back on the system font. Each change is one undo step.
+
+A canvas's `defaultFont` (a font name, `null` for the system font; Unity's PSXCanvas.defaultFont)
+is the font of its text elements whose own `font` is `null`. The export resolves it: such an
+element is written with the default font's index, and a default font the scene does not have is an
+export error. The canvas inspector's Default font row picks it; renaming or deleting the font
+follows into it as into the elements.
 
 Elements are drawn in array order. `type` is `box`, `text`, `progress`, `line` or `image`. Colours
 are 0..1. Layout is in screen pixels: on each axis with `anchorMin` equal to `anchorMax`, `rect`

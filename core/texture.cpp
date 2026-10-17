@@ -469,6 +469,12 @@ void savePng(const Image& img, const std::filesystem::path& file) {
         throw std::runtime_error("cannot write " + file.string());
 }
 
+bool hasCutoutTexels(const Image& img) {
+    for (const Image::Px& p : img.pixels)
+        if (p.a < kCutoutAlpha) return true;
+    return false;
+}
+
 PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout) {
     PsxTexture t;
     t.bitDepth = depth;

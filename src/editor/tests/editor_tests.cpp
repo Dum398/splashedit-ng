@@ -9401,6 +9401,92 @@ void testUvOffsetSlots() {
     CHECK(splash::uvOffsetMaterials(mc, 0).empty());
 }
 
+// Mesh textures with texels under half alpha export cutout: the hole is VRAM
+// word 0 (what the GPU skips); an image without one exports as before.
+void testMeshAlpha() {
+    namespace fs = std::filesystem;
+    auto image = [](int w, int h, auto px) {
+        splash::Image img;
+        img.width = w, img.height = h;
+        img.pixels.resize(size_t(w) * h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) img.pixels[size_t(y) * w + x] = px(x, h - 1 - y);  // top row first
+        return img;
+    };
+    // Top-left texel a hole, the next one opaque black, the rest a gradient.
+    const splash::Image holed = image(16, 16, [](int x, int y) {
+        if (x == 0 && y == 0) return splash::Image::Px{1, 1, 1, 0};
+        if (x == 1 && y == 0) return splash::Image::Px{0, 0, 0, 1};
+        return splash::Image::Px{float(x) / 15.f, float(y) / 15.f, 0.5f, 1};
+    });
+    const splash::Image opaque = image(16, 16, [](int x, int y) {
+        return splash::Image::Px{float(x) / 15.f, float(y) / 15.f, 0.5f, x == 0 && y == 0 ? 0.5f : 1.f};  // 0.5 is not a hole
+    });
+    CHECK(splash::hasCutoutTexels(holed));
+    CHECK(!splash::hasCutoutTexels(opaque));
+    splash::Image almost = opaque;
+    almost.pixels[7].a = 0.49f;
+    CHECK(splash::hasCutoutTexels(almost));
+
+    const fs::path dir = g_outDir / "meshalpha";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "out", ec);
+    fs::copy_file(fs::path(SPLASHEDIT_SOURCE_DIR) / "examples/courtyard/meshes/crate.mesh", dir / "crate.mesh", ec);
+    splash::savePng(holed, dir / "holed.png");
+    splash::savePng(opaque, dir / "opaque.png");
+
+    auto exportOne = [&](const char* tex, splash::BitDepth depth, splash::ExportStats::TexturePlacement& t, std::vector<uint16_t>& vram) {
+        splash::Scene scene;
+        splash::Object o = named("Quad");
+        splash::MeshComponent m;
+        m.mesh = "crate.mesh";
+        m.materials.push_back({tex, {1, 1, 1, 1}, {}});
+        m.bitDepth = depth;
+        o.mesh = m;
+        scene.objects.push_back(o);
+        splash::ExportResult r = splash::exportSplashpack(scene, dir, dir / "out" / "scene.splashpack");
+        CHECK(r.ok() && r.stats.textures.size() == 1);
+        if (!r.ok() || r.stats.textures.size() != 1) return false;
+        t = r.stats.textures[0];
+        vram = vramFromFile(dir / "out" / "scene.vram");
+        CHECK(!vram.empty());
+        return !vram.empty();
+    };
+    splash::ExportStats::TexturePlacement t;
+    std::vector<uint16_t> vram;
+    auto at = [&](int x, int y) { return vram[size_t(y) * 1024 + x]; };
+
+    if (exportOne("holed.png", splash::BitDepth::Bpp16, t, vram)) {
+        CHECK(t.cutout);
+        CHECK(at(t.x, t.y) == 0x0000);      // the hole
+        CHECK(at(t.x + 1, t.y) == 0x8000);  // opaque black stays drawn
+        int zeros = 0;
+        for (int y = 0; y < 16; y++)
+            for (int x = 0; x < 16; x++) zeros += at(t.x + x, t.y + y) == 0;
+        CHECK(zeros == 1);
+    }
+    if (exportOne("holed.png", splash::BitDepth::Bpp8, t, vram)) {
+        CHECK(t.cutout);
+        CHECK(at(t.clutX, t.clutY) == 0);           // CLUT entry 0 is the transparent word
+        CHECK((at(t.x, t.y) & 0xff) == 0);          // the hole's index
+        CHECK(((at(t.x, t.y) >> 8) & 0xff) != 0);   // black is a real colour
+        CHECK(at(t.clutX + ((at(t.x, t.y) >> 8) & 0xff), t.clutY) == 0x8000);
+    }
+    // No hole: byte for byte what convertTexture(img, depth, false) makes.
+    for (splash::BitDepth depth : {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8, splash::BitDepth::Bpp16}) {
+        if (!exportOne("opaque.png", depth, t, vram)) continue;
+        CHECK(!t.cutout);
+        const splash::PsxTexture want = splash::convertTexture(splash::loadImage(dir / "opaque.png"), depth, false);
+        bool same = true;
+        for (int y = 0; y < want.height; y++)
+            for (int x = 0; x < want.quantizedWidth; x++) same &= at(t.x + x, t.y + y) == want.word(x, y);
+        for (size_t i = 0; i < want.palette.size(); i++) same &= at(t.clutX + int(i), t.clutY) == want.palette[i];
+        CHECK(same);
+        if (!same) std::fprintf(stderr, "mesh alpha: an opaque texture changed at %d bpp\n", int(depth));
+    }
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -9507,6 +9593,7 @@ int main(int argc, char** argv) {
     testImportWarnings();
     testQuantizer();
     testTexturePreview();
+    testMeshAlpha();
     testAssetBrowser();
     testBlocksConvert();
     testUiLayout();

@@ -204,6 +204,9 @@ jobs:
       - name: Inspector UV offset material and its export flags
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/uvoffsetcheck.py build/splashedit build/cli/splashpack-cli
+      - name: Mesh texture alpha holes
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/meshalphacheck.py build/splashedit build/cli/splashpack-cli
       - name: Inspector skinned mesh bones, clips and sizes
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/skininfocheck.py build/splashedit

@@ -307,7 +307,7 @@ bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
     nlohmann::json j = nlohmann::json::object();
     j["volume"] = s.volume;
     j["licence"] = s.licence;
-    j["tracks"] = s.tracks;
+    if (!s.tracks.empty()) j["tracks"] = s.tracks;  // written only when there is music
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     out << j.dump(2) << '\n';

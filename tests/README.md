@@ -586,7 +586,10 @@ lights added (a runtime point light, a baked one, a runtime one on an inactive o
 from the Objects section must offer only the active runtime light in its field's list (what Light.Find can
 reach), "remember ... as ..." from Variables gets its name typed, and the saved file must make the expected
 Lua through `splashpack-cli blocks`, counted by the Lua panel's scripted line. A light name with no runtime
-light stays in the list. With `--shot <png>` it also saves a picture of `blocks/beacon.blocks` in the tab.
+light stays in the list. The Light section's Runtime toggle (`obj.lruntime`) puts a light in the picker and
+Ctrl+Z takes it out; with no runtime lights the picker's one row says to turn Runtime on; with 18 runtime
+lights the inspector warns (`obj.lruntimemax`, scripted line `light: ...`) and its fix turns the light's off.
+With `--shot <png>` it also saves a picture of `blocks/beacon.blocks` in the tab, Beacon Light selected.
 
     python3 blockslightcheck.py <splashedit> [<splashpack-cli>] [--shot <png>]
 

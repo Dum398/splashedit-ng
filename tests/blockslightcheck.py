@@ -10,8 +10,11 @@
 # Lua the saved file makes through `splashpack-cli blocks`, which must be the
 # expected Lua. A light name the scene has no runtime light for stays in the
 # list (marked) rather than being dropped. Last, blocks/beacon.blocks opened
-# in the tab with --shot <png> saves a picture of every new block and the Lua
-# panel.
+# in the tab with --shot <png> saves a picture of every new block, the Lua
+# panel and Beacon Light's inspector. The Light section's Runtime toggle
+# (obj.lruntime) adds a light to the picker and Ctrl+Z takes it out; with no
+# runtime lights the picker says to turn Runtime on; over 16 runtime lights
+# the inspector warns (obj.lruntimemax) and its fix turns this light's off.
 # usage: python3 blockslightcheck.py <splashedit> [<splashpack-cli>] [--shot <png>]   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -48,7 +51,7 @@ def light(name, runtime, active=True, x=0.0):
             'components': [comp], 'children': []}
 
 
-def project_copy(blocks=None):
+def project_copy(blocks=None, lights=None):
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     scene = os.path.join(project, 'courtyard.scene')
@@ -56,7 +59,8 @@ def project_copy(blocks=None):
     logic = [o for o in s['objects'] if o['name'] == 'Game Logic']
     assert len(logic) == 1 and logic[0]['components'] == [{'type': 'script', 'lua': 'scripts/game_logic.lua'}], logic
     logic[0]['components'][0]['lua'] = 'scripts/door.blocks'
-    s['objects'] += [light('Beacon Light', True), light('Fill Light', False, x=2.0), light('Off Beacon', True, False, x=-2.0)]
+    s['objects'] += lights if lights is not None else [light('Beacon Light', True), light('Fill Light', False, x=2.0),
+                                                       light('Off Beacon', True, False, x=-2.0)]
     json.dump(s, open(scene, 'w', encoding='utf-8', newline='\n'), indent=2)
     dest = os.path.join(project, 'scripts', 'door.blocks')
     if blocks is None:
@@ -69,11 +73,11 @@ def project_copy(blocks=None):
 out = ''  # the last run's output
 
 
-def run(args, blocks=None, png=None):
+def run(args, blocks=None, png=None, lights=None):
     """The editor on a fresh project copy, then `args`: the project and the
     named controls as last drawn; `out` gets what it printed."""
     global out
-    project = project_copy(blocks)
+    project = project_copy(blocks, lights)
     cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5'] + OPEN + args + [
         '--wait', '10', '--screenshot', png or os.path.join(project, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=180)
@@ -170,10 +174,54 @@ check("a light that is not a runtime light stays in the field's list", picks(c) 
 check('... and makes Lua all the same (Light.Find gives nil, SetEnabled ignores it)',
       'blocks: lua 3 lines, 0 errors' in out, [l for l in out.splitlines() if l.startswith('blocks: lua')])
 
+# The Light section's Runtime toggle: on, the light joins the picker; Ctrl+Z takes it back out.
+ONE = json.dumps({'format': 'splashedit-blocks', 'version': 1, 'variables': [], 'stacks': [
+    {'x': HAT_AT[0], 'y': HAT_AT[1], 'blocks': [{'op': 'on_interact'}, {'op': 'light_on'}]}]})
+PICK = ['--click', '@blocks.field.s0.b1', '--wait', '5']
+# --select is applied before the run (it would aim Edit script elsewhere): the tree's rows pick instead.
+def tree(name):
+    return ['--click', '@tree.' + name, '--wait', '5']
+
+
+RUNTIME_ON = tree('Fill Light') + ['--click', '@obj.lruntime', '--wait', '5']
+project, c = run(RUNTIME_ON, blocks=ONE)
+check('the Light section of a point light has a Runtime toggle', 'obj.lruntime' in c, sorted(k for k in c if k.startswith('obj.l')))
+check('... and no over-the-limit warning with two runtime lights', 'obj.lruntimemax' not in c and 'light: ' not in out)
+_, c = run(RUNTIME_ON + tree('Game Logic') + PICK, blocks=ONE)
+check('turning Runtime on puts the light in the picker', picks(c) == ['Beacon Light', 'Fill Light'], picks(c))
+_, c = run(RUNTIME_ON + ['--key', 'ctrl+z', '--wait', '5'] + tree('Game Logic') + PICK, blocks=ONE)
+check('Ctrl+Z takes it out again', picks(c) == ['Beacon Light'], picks(c))
+project, _ = run(RUNTIME_ON + ['--key', 'ctrl+s', '--wait', '5'], blocks=ONE)
+fill = [o for o in json.load(open(os.path.join(project, 'courtyard.scene'), encoding='utf-8'))['objects'] if o['name'] == 'Fill Light']
+check('the toggle is saved in the light component', fill and fill[0]['components'][0].get('runtime') is True,
+      fill and fill[0]['components'])
+
+# No runtime lights: the picker says how to make one.
+_, c = run(PICK, blocks=ONE, lights=[light('Fill Light', False)])
+check('with no runtime lights the picker says to turn Runtime on', picks(c) == ['No runtime lights'], picks(c))
+_, c = run(PICK + ['--click', '@blocks.pick/No runtime lights', '--wait', '3', '--key', 'ctrl+s', '--wait', '5'],
+           blocks=ONE, lights=[light('Fill Light', False)])
+check('... and that row cannot be picked', 'blocks: lua error stack 1, block 2 (light_on): no light chosen' in out,
+      [l for l in out.splitlines() if l.startswith('blocks: lua')])
+
+# More than 16 runtime lights: a warning on each, with a fix that turns this one's off.
+MANY = [light('Lamp %02d' % i, True, x=float(i)) for i in range(18)]
+_, c = run(tree('Lamp 03'), blocks=ONE, lights=MANY)
+warned = [l for l in out.splitlines() if l.startswith('light: ')]
+check('18 runtime lights warn, naming the two left out',
+      'obj.lruntimemax' in c and warned and warned[-1] == 'light: The scene has 18 runtime point lights and the PS1 holds 16; '
+      'left out: Lamp 16, Lamp 17. Turn Runtime off on lights that never change while the game runs.', warned)
+project, c = run(tree('Lamp 03') + ['--click', '@obj.lruntimemax.fix', '--wait', '5', '--key', 'ctrl+s', '--wait', '5'],
+                 blocks=ONE, lights=MANY)
+lamp = [o for o in json.load(open(os.path.join(project, 'courtyard.scene'), encoding='utf-8'))['objects'] if o['name'] == 'Lamp 03']
+check("the warning's fix turns this light's Runtime off", lamp and not lamp[0]['components'][0].get('runtime'), lamp)
+check('... and the warning leaves this light', 'obj.lruntime' in c and 'obj.lruntimemax' not in c,
+      sorted(k for k in c if k.startswith('obj.lrun')))
+
 # The picture: every new block, and the Lua panel.
 if shot:
     beacon = open(os.path.join(here, 'blocks', 'beacon.blocks'), encoding='utf-8').read()
-    _, c = run(['--click', '@blocks.category.Objects', '--wait', '5'], blocks=beacon, png=shot)
+    _, c = run(['--click', '@blocks.category.Objects', '--wait', '5'] + tree('Beacon Light'), blocks=beacon, png=shot)
     check('the beacon script opens with its blocks', 'blocks.block.s2.b2' in c and 'blocks: lua 22 lines, 0 errors' in out,
           [l for l in out.splitlines() if l.startswith('blocks: lua')])
     check('the picture is saved', os.path.exists(shot), shot)

@@ -6272,7 +6272,34 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         int cur = (int)(std::find(std::begin(kinds), std::end(kinds), l.kind) - std::begin(kinds));
         int pick = dropdownMenu("lkind", row("llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away."),
                                 nullptr, lightKindLabel(l.kind), {"Point", "Spot", "Directional"}, cur);
-        if (pick >= 0) doc.edit(path, [&](splash::Object& ob) { ob.light->kind = kinds[pick]; });
+        // Only point lights can be runtime lights (the scene file refuses others).
+        if (pick >= 0) doc.edit(path, [&](splash::Object& ob) {
+            ob.light->kind = kinds[pick];
+            if (ob.light->kind != splash::LightKind::Point) ob.light->runtime = false;
+        });
+        if (l.kind == splash::LightKind::Point) {
+            toggleRow("lruntime", "Runtime",
+                      "Lit on the console instead of baked into vertex colours, so Lua, blocks and timeline light tracks can find "
+                      "this light by its object name and switch, move or recolour it. At most 16 per scene.",
+                      l.runtime, [](splash::Object& ob) { ob.light->runtime = !ob.light->runtime; });
+            // The export ships the first 16 active runtime lights in tree order
+            // (splashpack.cpp, kMaxSceneLights) and warns about the rest.
+            std::vector<std::string> runtimeNames;
+            for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+                if (fo.activeInHierarchy && fo.object->light && fo.object->light->runtime) runtimeNames.push_back(fo.object->name);
+            constexpr size_t kMaxRuntimeLights = 16;
+            std::string over;
+            if (l.runtime && runtimeNames.size() > kMaxRuntimeLights) {
+                std::string dropped;
+                for (size_t i = kMaxRuntimeLights; i < runtimeNames.size(); i++) dropped += (dropped.empty() ? "" : ", ") + runtimeNames[i];
+                over = "The scene has " + std::to_string(runtimeNames.size()) + " runtime point lights and the PS1 holds " +
+                       std::to_string(kMaxRuntimeLights) + "; left out: " + dropped +
+                       ". Turn Runtime off on lights that never change while the game runs.";
+                if (card("lruntimemax", "Too many runtime lights", over, "Turn Runtime off"))
+                    doc.edit(path, [](splash::Object& ob) { ob.light->runtime = false; });
+            }
+            report("runtimelights", over.empty() ? std::string() : "light: " + over);
+        }
         const ImRect colRow = row("llcol", "Colour", "The colour of the light. Click to pick one.");
         if (colorField("lcol", colRow, toColor(l.color), toHex(l.color).c_str())) ImGui::OpenPopup("##lcolpick");
         // Right-aligned under the field, so it stays inside the inspector.

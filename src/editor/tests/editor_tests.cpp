@@ -1897,8 +1897,9 @@ void testBlocks() {
               "function onSceneCreationEnd()\n    Light.SetEnabled(Light.Find(\"Lamp\"), false)\nend\n");
         CHECK(lua(blockScript({{"n", "2"}}, {{blk("on_scene_start"), blk("remember", "score", {blk("add", "", {bvar("n"), bnum("1")})}),
                                               blk("set_var", "n", {blk("remembered", "score")})}})) ==
-              "local n = 2\n\nfunction onSceneCreationEnd()\n    Persist.Set(\"score\", n + 1)\n    n = Persist.Get(\"score\")\nend\n");
-        CHECK(expr(blk("lt", "", {blk("remembered", "best"), bnum("3")})) == "Persist.Get(\"best\") < 3");
+              "local n = 2\n\nfunction onSceneCreationEnd()\n    Persist.Set(\"score\", n + 1)\n    n = (Persist.Get(\"score\") or 0)\nend\n");
+        CHECK(expr(blk("lt", "", {blk("remembered", "best"), bnum("3")})) == "(Persist.Get(\"best\") or 0) < 3");
+        CHECK(expr(blk("add", "", {blk("remembered", "best"), bnum("1")})) == "(Persist.Get(\"best\") or 0) + 1");
         CHECK(error(blockScript({}, {{blk("on_create"), blk("remember", "", {bnum("1")})}})) ==
               "stack 1, block 2 (remember): no name to remember it by");
         CHECK(error(blockScript({}, {{blk("on_create"), blk("remember", "k")}})) == "stack 1, block 2 (remember): missing input 1");

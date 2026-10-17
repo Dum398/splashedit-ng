@@ -1,5 +1,5 @@
 function onInteract(self)
-    if not (Persist.Get("beacon_lit") == 1) then
+    if not ((Persist.Get("beacon_lit") or 0) == 1) then
         Light.SetEnabled(Light.Find("Beacon Light"), true)
         Persist.Set("beacon_lit", 1)
         Debug.Log("lit by " .. Actor.GetName(self))
@@ -14,7 +14,7 @@ function onButtonPress(self, button)
 end
 
 function onSceneCreationEnd()
-    if Persist.Get("beacon_lit") == 1 then
+    if (Persist.Get("beacon_lit") or 0) == 1 then
         Light.SetEnabled(Light.Find("Beacon Light"), true)
     else
         Light.SetEnabled(Light.Find("Beacon Light"), false)

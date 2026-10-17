@@ -96,7 +96,7 @@ const std::vector<BlockSpec> kCatalogue = {
     {"var", K::Reporter, "%f", 0, 0, F::Variable, "Variables",
      "The variable's value."},
     {"remembered", K::Reporter, "remembered %f", 0, 0, F::Key, "Variables",
-     "The whole number last remembered under the name, in this or an earlier scene; nothing (nil) when none was, so = is false and < > or maths stop the script."},
+     "The whole number last remembered under the name, in this or an earlier scene; 0 when nothing was."},
     {"add", K::Reporter, "%1 + %2", 2, 0, F::None, "Operators",
      "The first number plus the second."},
     {"sub", K::Reporter, "%1 - %2", 2, 0, F::None, "Operators",
@@ -484,7 +484,8 @@ struct Gen {
         }
         if (op == "button_held") return {"Input.IsHeldPlayer1(" + button(b, at) + ")", Atom};
         if (op == "frame_count") return {"Timer.GetFrameCount()", Atom};
-        if (op == "remembered") return {"Persist.Get(" + key(b, at) + ")", Atom};
+        // An unset key reads nil on the engine; 0 keeps = < > and maths working.
+        if (op == "remembered") return {"(Persist.Get(" + key(b, at) + ") or 0)", Atom};
         if (op == "my_name") {
             if (!hat->self) error(at, "my name is not available in " + std::string(hat->op));
             return {"Actor.GetName(self)", Atom};

@@ -67,15 +67,19 @@ static int usage() {
                  "usage: splashpack-cli blocks <in.blocks>\n"
                  "  prints the Lua a block script exports as\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
-                 "    [--licence <file|psxsplash|none>] [--volume <name>]\n"
+                 "    [--licence <file|psxsplash|none>] [--volume <name>] [--track <audio file>]...\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
                  "  (the game starts in the first); the engine is a LOADER=cdrom build\n"
-                 "  with --project, the volume and licence come from <dir>/disc.json; the options override it\n"
+                 "  with --project, the volume, licence and music tracks come from <dir>/disc.json; the options\n"
+                 "    override it\n"
                  "  --licence writes sectors 0-15 from a licence file (12 or 16 sectors of 2336, 2352 or\n"
                  "    2048 bytes), the built-in psxsplash one, or none (the default); in disc.json a\n"
                  "    relative licence path is relative to the project\n"
                  "  --volume names the volume (A-Z, 0-9 and _ kept, upper-cased, 31 at most); the default\n"
                  "    is the first scene's file name\n"
+                 "  --track adds a CD-DA music track (WAV, AIFF, MP3, Ogg Vorbis or FLAC; relative to the\n"
+                 "    working directory), tracks 2 and up in the order given (Audio.PlayCDDA(2) plays the\n"
+                 "    first); any --track replaces disc.json's list\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
                  "  builds one UI font sheet the way export does and prints its cell size and height\n");
@@ -333,6 +337,7 @@ static int font(int argc, char** argv) {
 static int discCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, licence, volume;
+    std::vector<std::string> tracks;
     bool hasLicence = false, hasVolume = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
@@ -341,6 +346,9 @@ static int discCmd(int argc, char** argv) {
         else if (a == "--licence" && i + 1 < argc) {
             licence = argv[++i];
             hasLicence = true;
+        } else if (a == "--track" && i + 1 < argc) {
+            std::u8string u = fs::absolute(fs::path(argv[++i])).u8string();
+            tracks.push_back(std::string(u.begin(), u.end()));
         } else if (a == "--volume" && i + 1 < argc) {
             volume = argv[++i];
             hasVolume = true;
@@ -380,12 +388,16 @@ static int discCmd(int argc, char** argv) {
             disc.licence = std::string(u.begin(), u.end());
         }
         if (hasVolume) disc.volume = volume;
+        if (!tracks.empty()) disc.tracks = tracks;
         splash::DiscResult r = splash::exportDisc(ptrs, root, engine, outPath, names.front(), names,
                                                      splash::readVramSettings(root / "vram.json"), disc);
         for (auto& m : r.exported.warnings) std::fprintf(stderr, "warning: %s\n", m.c_str());
         for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (!r.exported.ok()) return 1;
         std::printf("%s sectors=%u\n", outPath.c_str(), r.disc.sectors);
+        for (size_t t = 0; t < r.disc.tracks.size(); t++)
+            std::printf("track %zu lba=%u sectors=%u length=%s\n", t + 2, r.disc.tracks[t].start,
+                        r.disc.tracks[t].sectors, splash::cueTime(r.disc.tracks[t].sectors).c_str());
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());

@@ -1,5 +1,7 @@
 #include "disc.hh"
 
+#include "audio.hh"
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -293,6 +295,10 @@ DiscSettings readDiscSettings(const fs::path& file) {
     };
     str("volume", s.volume);
     str("licence", s.licence);
+    auto tr = j.find("tracks");
+    if (tr != j.end() && tr->is_array())
+        for (const auto& t : *tr)
+            if (t.is_string()) s.tracks.push_back(t.get<std::string>());
     return s;
 }
 
@@ -301,6 +307,7 @@ bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
     nlohmann::json j = nlohmann::json::object();
     j["volume"] = s.volume;
     j["licence"] = s.licence;
+    if (!s.tracks.empty()) j["tracks"] = s.tracks;  // written only when there is music
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     out << j.dump(2) << '\n';
@@ -346,8 +353,19 @@ std::vector<LicenceSector> resolveLicence(const std::string& licence, const fs::
     return out;
 }
 
+std::string cueTime(uint32_t lba) {
+    char b[16];
+    std::snprintf(b, sizeof b, "%02u:%02u:%02u", unsigned(lba / (60 * kSectorsPerSecond)),
+                  unsigned((lba / kSectorsPerSecond) % 60), unsigned(lba % kSectorsPerSecond));
+    return b;
+}
+
 DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& volume, const fs::path& bin,
-                        const std::vector<LicenceSector>& licence) {
+                        const std::vector<LicenceSector>& licence, const std::vector<std::vector<int16_t>>& tracks) {
+    if (tracks.size() + 1 > kMaxDiscTracks)
+        throw std::runtime_error("A disc holds at most " + std::to_string(kMaxDiscTracks) + " tracks; this one has " +
+                                 std::to_string(tracks.size() + 1) + " (the data and " + std::to_string(tracks.size()) +
+                                 " music)");
     // Directories: the root plus one level, which is all the loader uses.
     std::map<std::string, Dir> dirs;
     dirs[""];
@@ -527,6 +545,26 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
                 std::max<uint32_t>(1, uint32_t((e.size + kSector - 1) / kSector)));
     }
     while (lba < total) emit(nullptr, 0);
+
+    // CD-DA tracks: a 150-sector silent pregap, then the PCM, last sector padded.
+    DiscInfo info;
+    info.dataSectors = total;
+    std::memset(raw, 0, kRawSectorSize);
+    for (const std::vector<int16_t>& pcm : tracks) {
+        for (uint32_t s = 0; s < kAudioPregap; s++, lba++) out.write(reinterpret_cast<const char*>(raw), kRawSectorSize);
+        const size_t bytes = pcm.size() * 2;
+        const uint32_t sectors = uint32_t((bytes + kRawSectorSize - 1) / kRawSectorSize);
+        info.tracks.push_back({lba, sectors});
+        uint8_t buf[kRawSectorSize];
+        for (uint32_t s = 0; s < sectors; s++, lba++) {
+            std::memset(buf, 0, kRawSectorSize);
+            const size_t first = size_t(s) * (kRawSectorSize / 2);
+            const size_t n = std::min(kRawSectorSize / 2, pcm.size() - first);
+            for (size_t k = 0; k < n; k++) le16(buf + 2 * k, uint16_t(pcm[first + k]));
+            out.write(reinterpret_cast<const char*>(buf), kRawSectorSize);
+        }
+    }
+    info.sectors = lba;
     out.close();
     if (!out) throw std::runtime_error("Cannot write " + utf8(bin));
 
@@ -536,8 +574,15 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
     c << "FILE \"" << utf8(bin.filename()) << "\" BINARY\r\n"
       << "  TRACK 01 MODE2/2352\r\n"
       << "    INDEX 01 00:00:00\r\n";
+    for (size_t i = 0; i < info.tracks.size(); i++) {
+        char num[8];
+        std::snprintf(num, sizeof num, "%02u", unsigned(i + 2));
+        c << "  TRACK " << num << " AUDIO\r\n"
+          << "    INDEX 00 " << cueTime(info.tracks[i].start - kAudioPregap) << "\r\n"
+          << "    INDEX 01 " << cueTime(info.tracks[i].start) << "\r\n";
+    }
     if (!c) throw std::runtime_error("Cannot write " + utf8(cue));
-    return {total};
+    return info;
 }
 
 EngineKind engineKind(const std::vector<uint8_t>& exe) {
@@ -590,6 +635,25 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         r.exported.errors.push_back(licenceError);
         return r;
     }
+    // Music: CD-DA tracks 2 and up.
+    std::vector<std::vector<int16_t>> music;
+    for (size_t i = 0; i < disc.tracks.size(); i++) {
+        const std::string& t = disc.tracks[i];
+        fs::path p = fs::path(std::u8string(t.begin(), t.end()));
+        if (p.is_relative() && !projectRoot.empty()) p = projectRoot / p;
+        const std::string tag = "music track " + std::to_string(i + 2) + ": ";
+        std::error_code fe;
+        if (!fs::is_regular_file(p, fe)) {
+            r.exported.errors.push_back(tag + utf8(p) + ": no such file");
+            continue;
+        }
+        try {
+            music.push_back(loadCdAudio(p));
+        } catch (const std::exception& e) {
+            r.exported.errors.push_back(tag + e.what());
+        }
+    }
+    if (!r.exported.errors.empty()) return r;
 
     std::error_code ec;
     fs::path tmp = fs::temp_directory_path(ec) / ("splashedit-disc-" + std::to_string(std::time(nullptr)) + "-" +
@@ -637,7 +701,23 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             if (fs::exists(part.replace_extension(".loading"))) files.push_back({dir + ".LDG", readFile(part)});
         }
         if (r.exported.errors.empty()) {
-            r.disc = writeDiscImage(files, discVolume(disc.volume, title), bin, licence);
+            // The length check needs the layout; write, then drop an over-long image.
+            r.disc = writeDiscImage(files, discVolume(disc.volume, title), bin, licence, music);
+            const double minutes = double(r.disc.sectors) / (60.0 * kSectorsPerSecond);
+            char len[32];
+            std::snprintf(len, sizeof len, "%.1f", minutes);
+            if (r.disc.sectors > kDiscMaxSectors) {
+                r.exported.errors.push_back("The disc is " + std::string(len) +
+                                            " minutes long; a CD holds at most 80 minutes (remove music tracks)");
+                fs::path cue = bin;
+                cue.replace_extension(".cue");
+                fs::remove(bin, ec);
+                fs::remove(cue, ec);
+                r.disc = {};
+            } else if (r.disc.sectors > kDiscWarnSectors) {
+                r.exported.warnings.push_back("The disc is " + std::string(len) +
+                                              " minutes long; past 74 minutes it may not fit every CD-R");
+            }
         }
     } catch (const std::exception& e) {
         r.exported.errors.push_back(e.what());

@@ -94,6 +94,7 @@ jobs:
           "$py" tests/importcheck.py "$cli"
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
+          "$py" tests/cddacheck.py "$cli"
           "$py" tests/bvhstatscheck.py "$cli"
           "$py" tests/navstatscheck.py "$cli"
           "$py" tests/splashdiffcheck.py "$cli"
@@ -163,6 +164,9 @@ jobs:
       - name: Disc settings
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/discsettingscheck.py build/splashedit
+      - name: Disc music tracks
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/discmusiccheck.py build/splashedit
       - name: Debug overlays
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/overlaycheck.py build/splashedit

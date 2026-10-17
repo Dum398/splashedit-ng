@@ -74,12 +74,23 @@ std::vector<unsigned char> readFile(const std::filesystem::path& file, AudioForm
 
 bool isAudioFile(const std::filesystem::path& file) { return formatOf(file) != AudioFormat::Unknown; }
 
-MonoAudio loadAudioMono(const std::filesystem::path& file) {
-    AudioFormat fmt;
-    std::vector<unsigned char> bytes = readFile(file, fmt);
+namespace {
+
+struct Interleaved {
+    std::vector<float> samples;  // frames * channels
     unsigned channels = 0, rate = 0;
     uint64_t frames = 0;
-    std::vector<float> interleaved;
+};
+
+// The whole clip as its decoder gives it: interleaved floats at its rate.
+Interleaved decodeInterleaved(const std::filesystem::path& file) {
+    AudioFormat fmt;
+    std::vector<unsigned char> bytes = readFile(file, fmt);
+    Interleaved r;
+    unsigned& channels = r.channels;
+    unsigned& rate = r.rate;
+    uint64_t& frames = r.frames;
+    std::vector<float>& interleaved = r.samples;
     if (fmt == AudioFormat::Wav) {
         drwav_uint64 n = 0;
         float* d = drwav_open_memory_and_read_pcm_frames_f32(bytes.data(), bytes.size(), &channels, &rate, &n, nullptr);
@@ -121,15 +132,43 @@ MonoAudio loadAudioMono(const std::filesystem::path& file) {
         frames = channels ? interleaved.size() / channels : 0;
     }
     if (channels == 0 || rate == 0) unreadable(file, fmt);
+    return r;
+}
+
+}  // namespace
+
+MonoAudio loadAudioMono(const std::filesystem::path& file) {
+    Interleaved d = decodeInterleaved(file);
+    const unsigned channels = d.channels;
     MonoAudio a;
-    a.rate = int(rate);
-    a.samples.resize(size_t(frames));
-    for (size_t i = 0; i < size_t(frames); i++) {
+    a.rate = int(d.rate);
+    a.samples.resize(size_t(d.frames));
+    for (size_t i = 0; i < size_t(d.frames); i++) {
         float sum = 0;
-        for (unsigned c = 0; c < channels; c++) sum += interleaved[i * channels + c];
+        for (unsigned c = 0; c < channels; c++) sum += d.samples[i * channels + c];
         a.samples[i] = channels > 1 ? sum / float(channels) : sum;
     }
     return a;
+}
+
+std::vector<int16_t> loadCdAudio(const std::filesystem::path& file) {
+    Interleaved d = decodeInterleaved(file);
+    const size_t frames = size_t(d.frames);
+    MonoAudio ch[2];
+    for (unsigned c = 0; c < 2; c++) {
+        const unsigned src = d.channels > 1 ? c : 0u;  // mono to both; past two dropped
+        ch[c].rate = int(d.rate);
+        ch[c].samples.resize(frames);
+        for (size_t i = 0; i < frames; i++) ch[c].samples[i] = d.samples[i * d.channels + src];
+        if (ch[c].rate != kCdRate) ch[c] = resample(ch[c], kCdRate);
+    }
+    std::vector<int16_t> l = toPcm16(ch[0].samples), r = toPcm16(ch[1].samples);
+    std::vector<int16_t> out(l.size() * 2);
+    for (size_t i = 0; i < l.size(); i++) {
+        out[2 * i] = l[i];
+        out[2 * i + 1] = r[i];
+    }
+    return out;
 }
 
 AudioFileInfo audioFileInfo(const std::filesystem::path& file) {

@@ -24,6 +24,14 @@ inline constexpr const char* kAudioExtensions = "wav;aif;aiff;mp3;ogg;flac";
 // Ogg Vorbis (stb_vorbis), chosen by extension. Channels are averaged.
 MonoAudio loadAudioMono(const std::filesystem::path& file);
 
+// CD-DA's sample rate.
+inline constexpr int kCdRate = 44100;
+// The clip as a CD audio track: interleaved stereo 16-bit at 44100 Hz (L, R,
+// L, R...). A mono clip goes to both channels; past two, the first two are
+// kept. Each channel is resampled (resample()) when the clip's rate is not
+// 44100. Throws like loadAudioMono.
+std::vector<int16_t> loadCdAudio(const std::filesystem::path& file);
+
 // A clip's rate, channels and length. An MP3 is decoded to count its frames.
 struct AudioFileInfo {
     int rate = 0;

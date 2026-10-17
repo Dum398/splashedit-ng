@@ -15,7 +15,6 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fmt = os.path.join(here, 'audio', 'formats')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
-# Fold the sections above Disc, then wheel down to the music sub-list.
 # Folding the sections above Disc brings the Disc section and its short music
 # sub-list fully into view at 1600x960, so no scrolling is needed here.
 FOLDS = ['--click', '@s_sequences', '--wait', '3', '--click', '@s_rendering', '--wait', '3', '--click', '@s_loading', '--wait', '3',

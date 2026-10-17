@@ -75,6 +75,9 @@ struct BlockSpec {
 
 const std::vector<BlockSpec>& blockCatalogue();
 const BlockSpec* findBlockSpec(std::string_view op);
+// The psxsplash function a hat's stack becomes ("on_interact" -> "onInteract");
+// empty when op is not a hat.
+std::string_view hatCallback(std::string_view op);
 // Button names a Button field takes, in the order Input numbers them.
 const std::vector<std::string_view>& blockButtons();
 // The palette's sections, in order: Events (every hat), Control, Objects,

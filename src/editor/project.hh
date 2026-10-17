@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "disc.hh"
@@ -94,8 +95,9 @@ AdoptedAsset adoptAsset(const std::filesystem::path& project, const std::filesys
 // scene, onTriggerEnter/Exit for a Trigger component's script, whose file is
 // <name>_trigger. The block starter is one hat stack per callback: "when
 // created", "when the scene starts", or "when the player enters the trigger"
-// and "when the player leaves the trigger".
-enum class ScriptKind { Object, Scene, Trigger };
+// and "when the player leaves the trigger". An Interactable object's script
+// is the object starter plus onInteract(self) ("when interacted with").
+enum class ScriptKind { Object, Scene, Trigger, Interactable };
 enum class ScriptLanguage { Lua, Blocks };
 std::string scriptFileStem(const std::string& name);
 std::string scriptTemplate(const std::string& name, ScriptKind kind);
@@ -120,6 +122,17 @@ inline NewScript createScript(const std::filesystem::path& project, const std::s
 // <stem>_2 when a file of either extension has the stem. Creates the folder.
 NewScript writeNewScript(const std::filesystem::path& project, const std::string& folder, const std::string& stem,
                          ScriptLanguage lang, const std::string& text);
+
+// Whether a script's text defines the psxsplash callback `callback`. Lua: a
+// `function <callback>` (or `function <callback>(`) at the start of a line,
+// leading whitespace allowed; a line inside a -- comment does not count.
+// Blocks (`blocks` true): a stack whose hat makes that function. Malformed
+// block JSON defines nothing.
+bool scriptDefinesCallback(const std::string& text, bool blocks, std::string_view callback);
+// `text` with an empty onInteract(self) added: the commented Lua stub
+// appended, or for blocks an "on_interact" hat stack placed below the
+// existing stacks. Returns empty when block JSON does not parse.
+std::string addInteractCallback(const std::string& text, bool blocks);
 
 // The objects an imported model becomes, the top one named `name`. A model of
 // one node, or any model with `settings.mergeMeshes`, is one object drawing

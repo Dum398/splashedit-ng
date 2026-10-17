@@ -300,6 +300,29 @@ int ScriptTabs::rewriteUnsavedBlocks(const std::vector<std::filesystem::path>& f
     return n;
 }
 
+const ScriptTabs::Tab* ScriptTabs::tabOf(const std::filesystem::path& file) const {
+    std::error_code ec;
+    std::filesystem::path want = std::filesystem::weakly_canonical(file, ec);
+    if (ec) want = file;
+    for (const auto& t : m_tabs) {
+        std::filesystem::path have = std::filesystem::weakly_canonical(t->script.path(), ec);
+        if ((ec ? t->script.path() : have) == want) return t.get();
+    }
+    return nullptr;
+}
+
+std::optional<std::string> ScriptTabs::tabText(const std::filesystem::path& file) const {
+    const Tab* t = tabOf(file);
+    if (!t) return std::nullopt;
+    return t->script.buffer.text();
+}
+
+std::optional<uint64_t> ScriptTabs::tabRevision(const std::filesystem::path& file) const {
+    const Tab* t = tabOf(file);
+    if (!t) return std::nullopt;
+    return t->script.buffer.revision();
+}
+
 std::optional<std::filesystem::path> ScriptTabs::takeConvertRequest() {
     std::optional<std::filesystem::path> r;
     r.swap(m_convertRequest);

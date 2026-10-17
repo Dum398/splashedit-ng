@@ -607,6 +607,12 @@ const BlockSpec* findBlockSpec(std::string_view op) {
     return nullptr;
 }
 
+std::string_view hatCallback(std::string_view op) {
+    for (const Hat& hat : kHats)
+        if (hat.op == op) return hat.name;
+    return {};
+}
+
 const std::vector<std::string_view>& blockButtons() { return kButtons; }
 
 const std::vector<std::string_view>& blockCategories() { return kCategories; }

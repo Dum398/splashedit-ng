@@ -261,6 +261,17 @@ struct State {
     ui::CanvasView canvasView;
     std::filesystem::path scriptsProject;  // the project they belong to
     unsigned scriptsAssets = 0;            // doc.assetsId() the tabs last matched disk at
+    // The Interactable section's Event row: whether the object's script
+    // defines onInteract, from its open tab's text or the file on disk (read
+    // again at most once a second, or when its time changes).
+    struct InteractEvent {
+        std::string file;                         // project path it was worked out for
+        std::optional<uint64_t> tabRevision;      // set when it came from a tab
+        std::filesystem::file_time_type mtime{};  // the file's, when it came from disk
+        bool exists = false;
+        double checkedAt = -1;
+        bool defined = false;
+    } interactEvent;
 
     // Cutscene and animation tracks, docked under the Scene.
     ui::TimelinePanel timeline;

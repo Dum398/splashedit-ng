@@ -73,7 +73,7 @@ env = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PS
 show = '@menu.build/Show Disc Image in Folder'
 notice_shot = os.path.join(tmp, 'notice.png')
 cmd = [editor, '--size', '1600x960', '--project', project, '--export-to', ed_bin, '--wait', '30',
-       '--click', '@menu.build', '--wait', '3', '--click', show, '--wait', '3', '--key', 'ctrl+b', '--wait-play', '--wait', '5',
+       '--click', '@menu.build', '--wait', '3', '--click', show, '--wait', '3', '--key', 'escape', '--wait', '3', '--key', 'ctrl+b', '--wait-play', '--wait', '5',
        '--shot', notice_shot, '--click', '@notice.reveal', '--wait', '3', '--click', '@menu.build', '--wait', '3',
        '--click', show, '--wait', '3', '--screenshot', os.path.join(tmp, 'shot.png')]
 r = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=120)

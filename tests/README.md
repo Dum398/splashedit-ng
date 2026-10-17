@@ -522,6 +522,24 @@ the scene unchanged. Controls are clicked by name. Needs a display.
 
     python3 buildscenescheck.py <splashedit>
 
+`newprojectcheck.py` drives File > New Project (Ctrl+N): checks the modal draws a card per template
+(`@newproj.tmpl.empty`, `@newproj.tmpl.first-person`, `@newproj.tmpl.third-person`) and its name,
+location, Choose folder..., Create and Cancel controls; that Create does nothing without a name and
+Cancel closes it; then, for each template, types a name and a temp location and clicks Create, checking
+the `newproject: created <template id> <scene>` line, the scene on disk and opened, and for First and
+Third person a `.lua` and a `.blocks` script copied (template.json left behind). A folder that already
+holds a scene prints `newproject: failed ...` and keeps the modal open; with unsaved changes the Save
+changes prompt comes first. The optional PNG is the modal with Third person picked. Needs a display.
+
+    python3 newprojectcheck.py <splashedit> [modal.png]
+
+`templatecheck.py` checks the shipped templates (`templates/<id>/`, made by `make_templates`): each
+template.json has a name, description and order, and each scene exports with the CLI without warnings,
+has a Player and nav regions, and attaches at least one Lua and one blocks script, the blocks
+converting to Lua; Third person's Lua camera script takes the camera over.
+
+    python3 templatecheck.py <splashpack-cli>
+
 `buildproblemscheck.py` presses F5 on courtyard copies whose `scenes.list` adds `level2.scene` (memory
 card warnings), `level3.scene` (memory card errors) or `zbroken.scene` (not a scene), with pcsx-redux and
 the engine set to `/bin/true`. It checks the editor's `build report: Play scenes N errors E warnings W`,

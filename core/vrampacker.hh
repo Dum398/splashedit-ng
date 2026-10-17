@@ -21,12 +21,18 @@ struct Atlas {
 
 struct VramLayout {
     std::vector<Atlas> atlases;  // finalised (placed) atlases, in placement order
+    // Fog mask CLUTs for 4bpp and 8bpp cutout textures, as CLUT attribute words
+    // (y << 6 | x / 16), or -1 when not asked for or out of VRAM.
+    int fogMaskClut4 = -1, fogMaskClut8 = -1;
 };
 
 // `textures` in collection order (object textures in object order, then UI and
 // sprite textures). Duplicates (same source, depth and cutout) receive the
 // placement of the first copy. Errors (does not fit) are appended to `errors`.
+// `fogMask4` / `fogMask8` also place the fog mask CLUT of that depth (16 or 256
+// words) after the texture CLUTs; one that does not fit is left out (-1) and
+// psxsplash draws the fog over those textures the old way.
 VramLayout packVram(std::vector<PsxTexture*>& textures, const VramSettings& settings,
-                    std::vector<std::string>& errors);
+                    std::vector<std::string>& errors, bool fogMask4 = false, bool fogMask8 = false);
 
 }  // namespace splash

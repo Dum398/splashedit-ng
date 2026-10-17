@@ -60,10 +60,10 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 52 | 2 | u16 | jumpVelocity | fp12 |
 | 54 | 2 | u16 | gravity | fp12 |
 | 56 | 2 | u16 | playerRadius | `(ushort)ConvertCoordinateToPSX(playerRadius, gte)` |
-| 58 | 2 | u16 | pad1 | 0 |
+| 58 | 2 | u16 | fogMaskClut4 | CLUT word `y << 6 \| x / 16` of the 4bpp fog mask CLUT, 0 = none (sec. 4.4) |
 | 60 | 4 | u32 | nameTableOffset | backfilled; always written (object name table) |
 | 64 | 2 | u16 | audioClipCount | |
-| 66 | 2 | u16 | pad2 | 0 |
+| 66 | 2 | u16 | fogMaskClut8 | the same for the 8bpp fog mask CLUT, 0 = none |
 | 68 | 4 | u32 | audioTableOffset | backfilled only if audioClipCount>0, else 0 |
 | 72 | 1 | u8 | fogEnabled | 0/1 |
 | 73 | 3 | u8[3] | fogR,G,B | `Clamp(RoundToInt(c*255),0,255)` |
@@ -217,9 +217,9 @@ Reader (R:splashpack.cpp): `cursor += sizeof(SPLASHPACKTextureAtlas)` / `sizeof(
 | 44 | 2 | tpage (TPageAttr info) or 0xFFFF if untextured |
 | 46 | 2 | clutX (`ClutPackingX`, units of 16 px), 0 if untextured |
 | 48 | 2 | clutY, 0 if untextured |
-| 50 | 2 | flags: bit0 = `exporter.UVOffsetMaterial == tri.TextureIndex` |
+| 50 | 2 | flags: bit0 = `exporter.UVOffsetMaterial == tri.TextureIndex`; bit1 = paletted cutout texture whose depth has a fog mask CLUT |
 
-Untextured: UVs all zero, `tpage = 0xFFFF`, clut = 0. Reader: `Tri`, `static_assert(sizeof(Tri) == 52`, `UNTEXTURED_TPAGE = 0xFFFF`, `ANIM_FLAG = 0x1`. Same record is used in `.geo`.
+Untextured: UVs all zero, `tpage = 0xFFFF`, clut = 0. Reader: `Tri`, `static_assert(sizeof(Tri) == 52`, `UNTEXTURED_TPAGE = 0xFFFF`, `ANIM_FLAG = 0x1`, `CUTOUT_FLAG = 0x2`. Same record is used in `.geo`.
 
 ### 2.13 Object name table (header nameTableOffset). `AlignToFourBytes`, then per exporter `{u8 len, bytes(UTF-8 of name truncated to 24 chars), 0}`. Reader walks `nameLen + 1` bytes per object.
 
@@ -448,7 +448,9 @@ public static int ConvertWorldToFixed12(float value)
 - Atlas rectangles `(PositionX, PositionY, Width, 256)` are in the `.vram` file (and, redundantly, in 2.10).
 
 ### 4.4 `.vram` file
-`{ 'V','R'; u16 atlasCount; u16 clutCount; u8 fontCount; u8 0 }` (8 B), then per atlas `{u16 x, u16 y, u16 width, u16 256}` + `width*256` u16 pixels (row-major, `vramPixels[x,y]` iterated y outer) + pad to 4; per CLUT `{u16 clutPackingX, u16 clutPackingY, u16 length, u16 0}` + `length` u16 + pad to 4; per font `{u8 glyphW, u8 glyphH, u16 vramX, u16 vramY, u16 textureH, u32 dataSize}` + 4bpp bitmap (`256/2 * textureH` bytes, two texels per byte, low nibble = left, row 0 = top, 1 = alpha>0.5) + pad to 4. Reader (R:scenemanager.cpp `uploadVramData`) uploads atlas `width x height` at `(x,y)`, CLUT at `(clutPackingX*16, clutPackingY)`, `length x 1`, font `64 x textureH` at `(vramX,vramY)`, then overwrites 2x1 words at the same `(vramX,vramY)` with a white CLUT `{0x0000,0x7FFF}`.
+`{ 'V','R'; u16 atlasCount; u16 clutCount; u8 fontCount; u8 0 }` (8 B), then per atlas `{u16 x, u16 y, u16 width, u16 256}` + `width*256` u16 pixels (row-major, `vramPixels[x,y]` iterated y outer) + pad to 4; per CLUT `{u16 clutPackingX, u16 clutPackingY, u16 length, u16 0}` + `length` u16 + pad to 4 (the texture CLUTs, then the fog mask CLUTs, so `clutCount` here can be up to 2 more than the header's); per font `{u8 glyphW, u8 glyphH, u16 vramX, u16 vramY, u16 textureH, u32 dataSize}` + 4bpp bitmap (`256/2 * textureH` bytes, two texels per byte, low nibble = left, row 0 = top, 1 = alpha>0.5) + pad to 4. Reader (R:scenemanager.cpp `uploadVramData`) uploads atlas `width x height` at `(x,y)`, CLUT at `(clutPackingX*16, clutPackingY)`, `length x 1`, font `64 x textureH` at `(vramX,vramY)`, then overwrites 2x1 words at the same `(vramX,vramY)` with a white CLUT `{0x0000,0x7FFF}`.
+
+Fog mask CLUTs: when fog is on and a mesh uses a 4bpp (or 8bpp) cutout texture, one 16 (or 256) entry CLUT `{0x0000, 0xFFFF, ...}` is placed after the texture CLUTs and its position written to the header. psxsplash draws the fog pass over such a triangle as the same textured triangle through that CLUT, additive: entry 0 is the transparent texel, so the holes get no fog. 16bpp textures, and packs without the CLUTs, keep the untextured fog pass.
 
 ### 4.5 `.spu` file
 `{ 'S','A'; u16 clipCount }`, then per clip `{u32 sizeBytes, u16 sampleRate, u8 loop, u8 0}` + ADPCM + pad to 4. Clip bytes come from `AudioConvertDelegate(AudioClip, sampleRate, loop, trimLeadingSilence)` (registered by an editor-only `PSXAudioConverter`, source not part of the files read).
@@ -544,7 +546,7 @@ M2. **Agent waypoint Y not negated**, unlike every other position: `writer.Write
 M3. **Animation keyframes for `CameraH` tracks are written with no payload.** `PSXAnimationExporter.ExportAnimations` filters only `CameraPosition`/`CameraRotation` (`if (track.TrackType == PSXTrackType.CameraPosition || track.TrackType == PSXTrackType.CameraRotation) ... continue;`) and its keyframe `switch` has no `CameraH` case, so only the 2-byte `frameAndInterp` is emitted per keyframe, while the reader indexes `CutsceneKeyframe` (8 B, `static_assert(sizeof(CutsceneKeyframe) == 8`) with the same stride for animation tracks. (Cutscene exporter does have the `CameraH` case.)
 M4. **Palette padding always adds 1-4 entries** (W:PSXTexture2D.cs:205-210, quoted in sec. 4.1); the reader just uploads `length` words (`R:scenemanager.cpp uploadVramData`, `renderer.VramUpload(..., clutPackingX * 16, clutPackingY, length, 1)`). A 256-colour palette becomes a 260-word CLUT; `AllocateCLUTs` allocates that many words. Not a size mismatch, but surprising.
 M5. **Font CLUT upload overwrites font bitmap words.** Writer puts font bitmap at `(VramX, VramY)` (W:PSXUIExporter.cs:135-136, `VramX = 960`); reader writes the white CLUT to the same coordinates: `R:scenemanager.cpp renderer.VramUpload(whiteCLUT, (int16_t)fontVramX, (int16_t)fontVramY, 2, 1);` replacing 2 words (8 texels) of bitmap row 0. Harmless only if those texels are blank.
-M6. **Fields written but not consumed by the reader**: header `pixelDataOffset` (always 0; no use found in R:splashpack.cpp), `uiPad5`, `pad1/2/3`; atlas metadata and CLUT metadata records (skipped by size only, 2.10); `boundaryEdgeMask` has no field of its own and is ORed into `walkoffEdgeMask`; collider records are read into `setup.colliders` (consumption elsewhere not checked); `worldCollisionMeshCount/TriCount` written 0 (reader has a legacy skip path for non-zero).
+M6. **Fields written but not consumed by the reader**: header `pixelDataOffset` (always 0; no use found in R:splashpack.cpp), `uiPad5`, `pad3`; atlas metadata and CLUT metadata records (skipped by size only, 2.10); `boundaryEdgeMask` has no field of its own and is ORed into `walkoffEdgeMask`; collider records are read into `setup.colliders` (consumption elsewhere not checked); `worldCollisionMeshCount/TriCount` written 0 (reader has a legacy skip path for non-zero).
 M7. **Reader comments with stale sizes** (behaviour correct, layout is sequential): `R:splashpack.cpp "SPLASHPACKCutscene: 12 bytes at dataOffset"` vs actual 20 (2+1+1+4+4 then +1+3+4 for v19+); `"SPLASHPACKAnimation: 8 bytes"` vs actual 16. Writer comment `"Phase 2: Write element records (56 bytes each)"` vs 48 actual / reader 48. Writer class doc says "v16"/"v20".
 M8. **Header field naming**: writer's `reservedMemcard` (offset 124) is the reader's `streamTableOffset`; writer's sprite-block comment names the same words differently. Same bytes, no layout mismatch.
 M9. **Skin bone-index count depends on `polyCount` of the object record**: reader `polyCount = setup.objects[gameObjectIndex]->polyCount; skinPtr += polyCount * 3;`. The writer sets `polyCount = 0` for streamed objects; this is safe only because `FindEligible` excludes skinned proxies (`inp.Skinned.Contains(e)`), not because of any check at the write site.

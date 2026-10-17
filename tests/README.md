@@ -502,6 +502,13 @@ Needs a display (CI runs it under `xvfb-run`).
 
     python3 statusbudgetcheck.py <splashedit> [screenshot dir]
 
+`fogmaskcheck.py` exports a fogged scene with a 4, an 8 and a 16 bpp cutout quad and checks the
+fog mask CLUTs: header words at offsets 58 and 66 set, one 16 and one 256 entry CLUT
+`{0x0000, 0xFFFF, ...}` at those positions after the texture CLUTs in the `.vram`, and no two CLUTs
+overlapping. The same scene with fog off is the control (both words 0, no extra CLUT).
+
+    python3 fogmaskcheck.py <splashpack-cli>
+
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
 `SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in
 the Game view. They must reach the game only: the check fails if an editor menu or picker is

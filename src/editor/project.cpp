@@ -10,6 +10,8 @@
 #include <set>
 #include <system_error>
 
+#include <nlohmann/json.hpp>
+
 #include "blocks.hh"
 #include "editor/catalog.hh"
 #include "scene.hh"
@@ -85,7 +87,44 @@ std::vector<fs::path> buildScenes(const fs::path& project, const fs::path& openS
     return out;
 }
 
-NewProject createProject(const fs::path& dir) {
+std::vector<TemplateInfo> listTemplates(const fs::path& templatesDir) {
+    std::vector<TemplateInfo> out;
+    std::error_code ec;
+    for (fs::directory_iterator it(templatesDir, ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code dec;
+        if (!it->is_directory(dec)) continue;
+        TemplateInfo t;
+        t.id = utf8(it->path().filename());
+        if (t.id == "empty") continue;
+        std::ifstream in(it->path() / "template.json", std::ios::binary);
+        if (!in) continue;
+        nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
+        if (!j.is_object() || !j.contains("name") || !j["name"].is_string()) continue;
+        t.name = j["name"].get<std::string>();
+        if (t.name.empty()) continue;
+        if (j.contains("description")) {
+            if (!j["description"].is_string()) continue;
+            t.description = j["description"].get<std::string>();
+        }
+        if (j.contains("order")) {
+            if (!j["order"].is_number_integer()) continue;
+            t.order = j["order"].get<int>();
+        }
+        t.dir = it->path();
+        out.push_back(std::move(t));
+    }
+    std::sort(out.begin(), out.end(), [](const TemplateInfo& a, const TemplateInfo& b) {
+        return a.order != b.order ? a.order < b.order : a.name != b.name ? a.name < b.name : a.id < b.id;
+    });
+    TemplateInfo empty;
+    empty.id = "empty";
+    empty.name = "Empty";
+    empty.description = "An empty scene with meshes/, textures/ and scripts/ folders, ready for your own content.";
+    out.insert(out.begin(), std::move(empty));
+    return out;
+}
+
+NewProject createProject(const fs::path& dir, const TemplateInfo* tmpl) {
     NewProject r;
     if (dir.empty()) {
         r.error = "no folder given";
@@ -95,17 +134,75 @@ NewProject createProject(const fs::path& dir) {
         r.error = utf8(dir.filename()) + " already holds " + utf8(existing) + "; open it instead";
         return r;
     }
+    std::string stem = utf8(dir.filename());
+    if (stem.empty() || stem == "." || stem == "..") stem = "main";
+    const fs::path scene = fromUtf8(stem + ".scene");
     std::error_code ec;
+
+    // The template's files (relative to its folder) and where each goes.
+    std::vector<std::pair<fs::path, fs::path>> files;
+    if (tmpl && !tmpl->dir.empty()) {
+        std::vector<fs::path> topScenes;
+        for (fs::recursive_directory_iterator it(tmpl->dir, ec), end; !ec && it != end; it.increment(ec)) {
+            std::error_code fec;
+            if (!it->is_regular_file(fec)) continue;
+            fs::path rel = it->path().lexically_relative(tmpl->dir);
+            if (rel == fs::path("template.json")) continue;
+            if (rel.extension() == ".scene" && !rel.has_parent_path()) topScenes.push_back(rel);
+            files.emplace_back(rel, rel);
+        }
+        if (ec) {
+            r.error = "could not read template " + utf8(tmpl->dir) + ": " + ec.message();
+            return r;
+        }
+        if (topScenes.empty()) {
+            r.error = "template " + tmpl->id + " has no scene";
+            return r;
+        }
+        if (topScenes.size() == 1) {
+            for (auto& [from, to] : files)
+                if (from == topScenes[0]) to = scene;
+            r.scene = scene;
+        } else {
+            std::sort(topScenes.begin(), topScenes.end());
+            r.scene = topScenes[0];
+        }
+        for (const auto& [from, to] : files)
+            if (fs::exists(dir / to, ec)) {
+                r.error = utf8(fs::path(to.generic_u8string())) + " already exists in " +
+                          utf8(dir.filename());
+                r.scene.clear();
+                return r;
+            }
+    }
+
     for (const char* sub : {"meshes", "textures", "scripts"}) {
         fs::create_directories(dir / sub, ec);
         if (ec) {
             r.error = "could not create " + utf8(dir / sub) + ": " + ec.message();
+            r.scene.clear();
             return r;
         }
     }
-    std::string stem = utf8(dir.filename());
-    if (stem.empty() || stem == "." || stem == "..") stem = "main";
-    fs::path scene = fromUtf8(stem + ".scene");
+    if (tmpl && !tmpl->dir.empty()) {
+        // A copy that fails part way takes back what it copied, so the
+        // folder can be tried again.
+        std::vector<fs::path> copied;
+        for (const auto& [from, to] : files) {
+            const fs::path dest = dir / to;
+            if (dest.has_parent_path()) fs::create_directories(dest.parent_path(), ec);
+            if (!ec) fs::copy_file(tmpl->dir / from, dest, fs::copy_options::none, ec);
+            if (ec) {
+                r.error = "could not copy " + utf8(fs::path(from.generic_u8string())) + ": " + ec.message();
+                r.scene.clear();
+                std::error_code rec;
+                for (const fs::path& p : copied) fs::remove(p, rec);
+                return r;
+            }
+            copied.push_back(dest);
+        }
+        return r;
+    }
     try {
         splash::saveScene(splash::Scene{}, dir / scene);
     } catch (const std::exception& e) {

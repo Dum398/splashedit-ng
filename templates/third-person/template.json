@@ -1,0 +1,5 @@
+{
+  "name": "Third person",
+  "description": "The same yard seen from behind a visible player body. The camera that follows it is a Lua script (blocks have no camera blocks); the two levers are one Lua, one blocks.",
+  "order": 20
+}

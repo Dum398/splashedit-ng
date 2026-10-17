@@ -1,0 +1,5 @@
+{
+  "name": "First person",
+  "description": "A walled yard you walk around in first person. Two levers switch a lamp on and off and count the pulls: one runs a Lua script, the other the same steps as blocks.",
+  "order": 10
+}

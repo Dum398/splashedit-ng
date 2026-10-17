@@ -1298,7 +1298,7 @@ static float centerY(ImFont* font, float size, float y0, float y1) {
 }
 
 // File dialogs answer on their own thread; the result is picked up next frame.
-enum class FileAsk { None, NewFolder, Open, SaveAs, ExportDisc };
+enum class FileAsk { None, Open, SaveAs, ExportDisc };
 static std::mutex g_fileMutex;
 static FileAsk g_fileAsk = FileAsk::None;
 static std::string g_filePath;
@@ -1311,6 +1311,15 @@ static void SDLCALL onFilePicked(void* kind, const char* const* files, int) {
 }
 
 static const SDL_DialogFileFilter kSceneFilter[] = {{"psxsplash scene", "scene"}};
+
+// The folder New Project's Choose folder... picked, for its Location field.
+static std::mutex g_newProjMutex;
+static std::optional<std::string> g_newProjPicked;
+static void SDLCALL onNewProjectFolder(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_newProjMutex);
+    g_newProjPicked = files[0];
+}
 static const SDL_DialogFileFilter kDiscFilter[] = {{"Disc image", "bin"}};
 
 // The licence file the Disc section's Choose file... picked, until it is saved.
@@ -1454,10 +1463,23 @@ static void saveDocAs(editor::Document& doc) {
 
 static void perform(State& st, editor::Document& doc, State::Pending what, const std::filesystem::path& path) {
     switch (what) {
-        case State::Pending::New:
-            SDL_ShowOpenFolderDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::NewFolder)), nullptr, nullptr,
-                                     false);
+        case State::Pending::New: {
+            // The New Project modal: templates listed afresh, the name cleared,
+            // the location kept from last time (Documents the first time).
+            State::NewProjectDialog& np = st.newProject;
+            np.templates = editor::listTemplates(np.templatesDir);
+            np.selected = 0;
+            np.name.clear();
+            np.error.clear();
+            if (np.location.empty()) {
+                const char* docs = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS);
+                if (!docs) docs = SDL_GetUserFolder(SDL_FOLDER_HOME);
+                if (docs) np.location = docs;
+                while (np.location.size() > 1 && (np.location.back() == '/' || np.location.back() == '\\')) np.location.pop_back();
+            }
+            np.open = true;
             break;
+        }
         case State::Pending::Open: {
             const std::string loc = utf8(doc.projectRoot());
             SDL_ShowOpenFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::Open)), nullptr, kSceneFilter, 1,
@@ -1500,18 +1522,6 @@ static void filesPending(State& st, editor::Document& doc) {
     const std::filesystem::path path = fromUtf8(picked);
     if (ask == FileAsk::Open) {
         openScene(st, doc, path);
-    } else if (ask == FileAsk::NewFolder) {
-        if (std::filesystem::path existing = editor::firstScene(path); !existing.empty()) {
-            if (openScene(st, doc, path / existing))
-                notify(st, utf8(path.filename()) + " already holds a scene, so it was opened rather than replaced", false);
-            return;
-        }
-        editor::NewProject made = editor::createProject(path);
-        if (!made.error.empty()) {
-            notify(st, "Could not create the project: " + made.error, true);
-            return;
-        }
-        if (openScene(st, doc, path / made.scene)) notify(st, "Created project " + utf8(path.filename()), false);
     } else if (ask == FileAsk::ExportDisc) {
         buildDisc(st, doc, path);
     } else if (ask == FileAsk::SaveAs) {
@@ -1591,6 +1601,170 @@ static void unsavedPrompt(State& st, editor::Document& doc, ImVec2 size) {
         st.pending = State::Pending::None;
         st.pendingPath.clear();
         if (go != State::Pending::None) perform(st, doc, go, path);
+    }
+    ImGui::EndPopup();
+}
+
+// New Project: a card per template (name and description, the chosen one
+// lit), the project's name and the folder it goes in (typed, or picked with
+// Choose folder...), then Create, which makes <location>/<name> from the
+// template and opens its scene. Scripted runs print "newproject: created
+// <template id> <scene>" or "newproject: failed <reason>".
+static void newProjectModal(State& st, editor::Document& doc, ImVec2 size) {
+    State::NewProjectDialog& np = st.newProject;
+    {
+        std::lock_guard<std::mutex> lock(g_newProjMutex);
+        if (g_newProjPicked) {
+            np.location = *g_newProjPicked;
+            g_newProjPicked.reset();
+        }
+    }
+    const char* id = "##newproject";
+    if (np.open) {
+        np.open = false;
+        ImGui::OpenPopup(id);
+    }
+    const float w = 680;
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.42f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    np.shown = open;
+    if (!open) return;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float inner = w - space::lg * 2;
+    float y = o.y;
+    text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, "New Project");
+    y += 26;
+    text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, "Start from a template. It is copied into a new folder you can change freely.");
+    y += 30;
+
+    // Template cards, three to a row.
+    if (np.templates.empty()) np.templates = editor::listTemplates(np.templatesDir);
+    np.selected = std::clamp(np.selected, 0, int(np.templates.size()) - 1);
+    const int perRow = 3;
+    const float gap = space::sm, cardW = std::floor((inner - gap * (perRow - 1)) / perRow), cardH = 112;
+    for (size_t i = 0; i < np.templates.size(); ++i) {
+        const editor::TemplateInfo& t = np.templates[i];
+        const int col = int(i) % perRow;
+        if (i > 0 && col == 0) y += cardH + gap;
+        const ImRect r(ImVec2(o.x + col * (cardW + gap), y), ImVec2(o.x + col * (cardW + gap) + cardW, y + cardH));
+        const std::string name = "newproj.tmpl." + t.id;
+        const Hit h = interact(name.c_str(), r);
+        nameRect(name, r);
+        const bool sel = int(i) == np.selected;
+        if (h.clicked) np.selected = int(i);
+        dl->AddRectFilled(r.Min, r.Max, sel ? color::accentSoft : h.hovered ? color::hover : color::field, radius::card);
+        dl->AddRect(r.Min, r.Max, sel ? color::accent : color::border, radius::card, 0, sel ? 2.0f : 1.0f);
+        ImGui::PushClipRect(r.Min, r.Max, true);
+        text(dl, ImVec2(r.Min.x + space::md, r.Min.y + space::sm + 2), f.semibold, type::body, color::text, t.name.c_str());
+        dl->AddText(f.regular, type::caption, ImVec2(r.Min.x + space::md, r.Min.y + space::sm + 26), color::textDim,
+                    t.description.c_str(), nullptr, cardW - space::md * 2);
+        ImGui::PopClipRect();
+    }
+    if (!np.templates.empty()) y += cardH + space::md;
+
+    // Project name and Location: label on the left, a field on the right.
+    const float labelW = 110, rowH = size::field + 8;
+    auto field = [&](const char* label, const char* fieldId, const char* ctl, const char* hint, std::string* value, float right) {
+        text(dl, ImVec2(o.x, centerY(f.medium, type::body, y, y + rowH)), f.medium, type::body, color::text, label);
+        const float fx = o.x + labelW, fw = inner - labelW - right;
+        ImGui::SetCursorScreenPos(ImVec2(fx, y + (rowH - size::field) * 0.5f));
+        ImGui::SetNextItemWidth(fw);
+        ImGui::PushFont(f.regular, type::body);
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, color::field);
+        ImGui::PushStyleColor(ImGuiCol_Text, color::text);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(space::sm, (size::field - type::body) * 0.5f - 1));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, radius::field);
+        ImGui::InputTextWithHint(fieldId, hint, value->data(), value->capacity() + 1,
+                                 ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_AutoSelectAll, resizePort, value);
+        const ImRect fr(ImVec2(fx, y), ImVec2(fx + fw, y + rowH));
+        interactiveRects().push_back(fr);
+        nameRect(ctl, fr);
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+        ImGui::PopFont();
+    };
+    field("Project name", "##newprojname", "newproj.name", "my_game", &np.name, 0);
+    y += rowH + space::sm;
+    const float bw = buttonWidth(icon::folderOpen, "Choose folder...");
+    field("Location", "##newprojlocation", "newproj.location", "The folder the project folder goes in", &np.location, bw + space::sm);
+    if (button("newproj.browse", ImVec2(o.x + inner - bw, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Choose folder...",
+               ButtonKind::Secondary)) {
+        const std::string loc = np.location;
+        SDL_ShowOpenFolderDialog(onNewProjectFolder, nullptr, nullptr, loc.empty() ? nullptr : loc.c_str(), false);
+    }
+    y += rowH + space::sm;
+
+    // Where it goes, or why Create is off.
+    auto trimmed = [](std::string v) {
+        while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+        size_t a = v.find_first_not_of(" \t");
+        return a == std::string::npos ? std::string() : v.substr(a);
+    };
+    const std::string name = trimmed(np.name), location = trimmed(np.location);
+    std::string reason;
+    if (name.empty()) reason = "Enter a project name";
+    else if (name.find_first_of("/\\:") != std::string::npos || name == "." || name == "..")
+        reason = "A project name cannot hold / \\ or :";
+    else if (location.empty()) reason = "Choose a location";
+    const std::filesystem::path dir = reason.empty() ? fromUtf8(location) / fromUtf8(name) : std::filesystem::path();
+    const std::string where = reason.empty() ? "Creates " + utf8(dir) : reason;
+    ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + 20), true);
+    text(dl, ImVec2(o.x + labelW, y), f.regular, type::caption, reason.empty() ? color::textFaint : color::warn, where.c_str());
+    ImGui::PopClipRect();
+    y += 20;
+    if (!np.error.empty()) {
+        ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + 20), true);
+        text(dl, ImVec2(o.x + labelW, y), f.regular, type::caption, color::bad, ("Could not create it: " + np.error).c_str());
+        ImGui::PopClipRect();
+    }
+    y += 20 + space::sm;
+
+    // Create (off, and drawn dim, while there is a reason) and Cancel.
+    const float crw = buttonWidth(icon::plus, "Create"), cw = buttonWidth(icon::x, "Cancel");
+    const float bx = o.x + inner - crw;
+    bool create = false;
+    if (reason.empty()) {
+        create = button("newproj.create", ImVec2(bx, y), icon::plus, "Create", ButtonKind::Primary) ||
+                 (ImGui::IsKeyPressed(ImGuiKey_Enter, false) && !ImGui::IsAnyItemActive());
+    } else {
+        const ImRect r(ImVec2(bx, y), ImVec2(bx + crw, y + size::field + 6));
+        nameRect("newproj.create", r);
+        dl->AddRectFilled(r.Min, r.Max, color::raised, radius::button);
+        dl->AddRect(r.Min, r.Max, color::border, radius::button);
+        textCentered(dl, r, f.medium, type::body, color::textFaint, "Create");
+    }
+    bool close = false;
+    if (button("newproj.cancel", ImVec2(bx - cw - space::sm, y), icon::x, "Cancel", ButtonKind::Ghost) ||
+        (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsAnyItemActive()))
+        close = true;
+    y += size::field + 6;
+    ImGui::SetCursorScreenPos(o);
+    ImGui::Dummy(ImVec2(inner, y - o.y));
+
+    if (create && !np.templates.empty()) {
+        const editor::TemplateInfo tmpl = np.templates[size_t(np.selected)];
+        editor::NewProject made = editor::createProject(dir, &tmpl);
+        if (!made.error.empty()) {
+            np.error = made.error;
+            scriptLine(nullptr, "newproject: failed " + made.error);
+        } else {
+            std::u8string rel = made.scene.generic_u8string();
+            scriptLine(nullptr, "newproject: created " + tmpl.id + " " + std::string(rel.begin(), rel.end()));
+            close = true;
+            np.error.clear();
+            if (openScene(st, doc, dir / made.scene))
+                notify(st, "Created project " + name + " from the " + tmpl.name + " template", false);
+        }
+    }
+    if (close) {
+        ImGui::CloseCurrentPopup();
+        np.shown = false;
     }
     ImGui::EndPopup();
 }
@@ -7420,11 +7594,11 @@ static void shortcuts(State& st, editor::Document& doc) {
     // The script editor keeps the keyboard, but Play and Run on hardware still answer.
     // Not gated on WantTextInput: the editor asks for text input itself, so it is set.
     if (st.scripts.hasKeyboard()) {
-        if (st.unsavedShown || st.menuOpen >= 0) return;
+        if (st.unsavedShown || st.newProject.shown || st.menuOpen >= 0) return;
         if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
         return;
     }
-    if (io.WantTextInput || st.unsavedShown || st.menuOpen >= 0) return;
+    if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.menuOpen >= 0) return;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
     if (st.play.gameFocus && st.play.game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
@@ -7678,6 +7852,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         request(st, doc, State::Pending::Quit);
     }
     unsavedPrompt(st, doc, size);
+    newProjectModal(st, doc, size);
     ImGui::End();
     return bar;
 }

@@ -61,11 +61,32 @@ std::vector<std::filesystem::path> buildScenes(const std::filesystem::path& proj
 // writes an empty scene named after the folder. A folder that already holds a
 // scene is refused, so New never overwrites one; open it instead. On success
 // returns the new scene's file name, relative to `dir`.
+//
+// New Project's templates: the editor's templates/ folder holds one folder
+// per template, <id>/template.json ({"name", "description", "order"}) beside
+// the project tree it starts from. "empty" is built in (no folder; an empty
+// scene as above) and always listed first; the rest follow by order, then
+// name. A folder without a readable template.json holding a non-empty
+// string "name" (and, when present, a string "description" and an integer
+// "order") is skipped, as is one named "empty".
+struct TemplateInfo {
+    std::string id, name, description;
+    int order = 0;
+    std::filesystem::path dir;  // empty for the built-in "empty"
+};
+std::vector<TemplateInfo> listTemplates(const std::filesystem::path& templatesDir);
+
+// With a template that has a folder, createProject copies its tree into `dir`
+// instead of writing an empty scene, all but template.json; when the
+// template has exactly one .scene at its top it is named after the folder
+// like the empty one. Nothing is copied when any file would land on an
+// existing one, and the error names that file, as it names a file that
+// cannot be copied. meshes/, textures/ and scripts/ are made either way.
 struct NewProject {
     std::filesystem::path scene;
     std::string error;  // empty on success
 };
-NewProject createProject(const std::filesystem::path& dir);
+NewProject createProject(const std::filesystem::path& dir, const TemplateInfo* tmpl = nullptr);
 
 // Where Save As may put a scene: inside `project`, since every asset path in
 // it is relative to the project folder. Returns the path relative to the

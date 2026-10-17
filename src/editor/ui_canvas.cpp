@@ -61,7 +61,8 @@ bool sameElement(const UIElement& a, const UIElement& b) {
 }
 
 bool sameCanvas(const UICanvas& a, const UICanvas& b) {
-    if (a.name != b.name || a.visible != b.visible || a.sortOrder != b.sortOrder || a.elements.size() != b.elements.size())
+    if (a.name != b.name || a.visible != b.visible || a.sortOrder != b.sortOrder || a.defaultFont != b.defaultFont ||
+        a.elements.size() != b.elements.size())
         return false;
     for (size_t i = 0; i < a.elements.size(); i++)
         if (!sameElement(a.elements[i], b.elements[i])) return false;
@@ -849,9 +850,11 @@ bool renameFont(Document& doc, int i, const std::string& newName, std::string* w
     std::vector<splash::UIFont> fonts = was;
     fonts[size_t(i)].name = newName;
     std::vector<UICanvas> after = doc.scene().canvases;
-    for (UICanvas& cv : after)
+    for (UICanvas& cv : after) {
+        if (!old.empty() && cv.defaultFont == old) cv.defaultFont = newName;
         for (UIElement& e : cv.elements)
             if (!old.empty() && e.font == old) e.font = newName;
+    }
     commit(doc, std::move(after), doc.uiSelection(), {}, nullptr, &fonts);
     return true;
 }
@@ -866,9 +869,11 @@ bool deleteFont(Document& doc, int i) {
     const bool still = std::any_of(fonts.begin(), fonts.end(), [&](const splash::UIFont& f) { return f.name == old; });
     std::vector<UICanvas> after = doc.scene().canvases;
     if (!still)
-        for (UICanvas& cv : after)
+        for (UICanvas& cv : after) {
+            if (!old.empty() && cv.defaultFont == old) cv.defaultFont.clear();
             for (UIElement& e : cv.elements)
                 if (!old.empty() && e.font == old) e.font.clear();
+        }
     commit(doc, std::move(after), doc.uiSelection(), {}, nullptr, &fonts);
     return true;
 }
@@ -877,7 +882,8 @@ int fontUses(const splash::Scene& scene, const std::string& name) {
     int n = 0;
     if (name.empty()) return 0;
     for (const UICanvas& cv : scene.canvases)
-        for (const UIElement& e : cv.elements) n += e.font == name;
+        for (const UIElement& e : cv.elements)
+            n += (e.type == UIElementType::Text ? splash::effectiveFont(cv, e) : e.font) == name;
     return n;
 }
 
@@ -969,9 +975,12 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
                                Fix::AsciiText});
                 break;
             }
+        // The font it draws with: its own, else its canvas's default (whose
+        // absence the canvas reports).
+        const std::string& fontName = splash::effectiveFont(scene.canvases[size_t(c)], e);
         const splash::UIFont* font = nullptr;
         for (const splash::UIFont& f : scene.fonts)
-            if (f.name == e.font) font = &f;
+            if (f.name == fontName) font = &f;
         if (!e.font.empty() && !font)
             out.push_back({"No such font", "The scene has no font named '" + e.font +
                                                "', so the export fails. Pick one of the scene's fonts, or System.",
@@ -1097,6 +1106,10 @@ std::vector<Problem> canvasProblems(const Document& doc, int c) {
         }
     if (cv.sortOrder < 0 || cv.sortOrder > 255)
         out.push_back({"Sort order out of range", "Sort order is stored in a byte: keep it within 0 (back) to 255 (front)."});
+    if (!cv.defaultFont.empty() &&
+        std::none_of(scene.fonts.begin(), scene.fonts.end(), [&](const splash::UIFont& f) { return f.name == cv.defaultFont; }))
+        out.push_back({"No such default font", "The scene has no font named '" + cv.defaultFont +
+                                                   "', so the export fails. Pick one of the scene's fonts as Default font, or System."});
     return out;
 }
 
@@ -1331,13 +1344,15 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
                         }
                     break;
                 }
-                case UIElementType::Text:
-                    if (e.font.empty()) {
+                case UIElementType::Text: {
+                    const std::string& font = splash::effectiveFont(scene.canvases[size_t(c)], e);
+                    if (font.empty()) {
                         systemText.push_back({r.x, r.y, flat(e.color), &e.text});
-                    } else if (const splash::FontSheet* sh = assets.font(scene, e.font)) {
+                    } else if (const splash::FontSheet* sh = assets.font(scene, font)) {
                         drawFontText(f, r.x, r.y, e.text, *sh, tint(0x7fff, e.color));
                     }
                     break;
+                }
             }
         }
     // System-font text goes out after the ordering table, queued from the

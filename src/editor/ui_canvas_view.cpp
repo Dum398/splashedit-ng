@@ -1311,23 +1311,42 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
             ImRect tf = rows.row("ltext", "Text", "ASCII, at most 63 bytes. Lua's UI.SetText changes it while playing.");
             std::string t;
             if (textField("text", tf, e.text, "(empty)", &t)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.text = t; });
-            ImRect ff = rows.row("lfont", "Font", "The system font (8 x 16, fixed width) or one of the scene's fonts.");
-            const std::string fl = e.font.empty() ? std::string("System (8 x 16)") : e.font;
+            // No font of its own: its canvas's default font, else the system
+            // font. With a canvas default there is no way to pick the system
+            // font for one element (as in Unity's PSXCanvas).
+            const UICanvas& ecv = doc.scene().canvases[size_t(c)];
+            const std::string own = ecv.defaultFont.empty() ? std::string("System (8 x 16)") : "Canvas default (" + ecv.defaultFont + ")";
+            ImRect ff = rows.row("lfont", "Font",
+                                 "The system font (8 x 16, fixed width) or one of the scene's fonts. Without one of its own, "
+                                 "a text element uses its canvas's default font.");
+            nameRect("ui.font", ff);
+            const std::string fl = e.font.empty() ? own : e.font;
             if (pickField("font", ff, icon::type, rgb(0xf2c25c), fl.c_str())) ImGui::OpenPopup("##fontmenu");
             ImGui::SetNextWindowPos(ImVec2(ff.Min.x, ff.Max.y + space::xs));
             pushMenuStyle();
             if (ImGui::BeginPopup("##fontmenu")) {
-                if (menuItem(e.font.empty() ? icon::chevronRight : nullptr, color::accent, "System (8 x 16)"))
-                    uic::editElement(doc, c, ei, [](UIElement& el) { el.font.clear(); });
+                const bool pickOwn = menuItem(e.font.empty() ? icon::chevronRight : nullptr, color::accent, own.c_str());
+                nameRect("ui.font/" + own, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (pickOwn) uic::editElement(doc, c, ei, [](UIElement& el) { el.font.clear(); });
                 for (const splash::UIFont& uf : doc.scene().fonts) {
                     std::string meta = uf.bitmap.empty() ? std::to_string(uf.size) + " px" : "bitmap";
-                    if (menuItem(e.font == uf.name ? icon::chevronRight : nullptr, color::accent, uf.name.c_str(), meta.c_str()))
-                        uic::editElement(doc, c, ei, [&](UIElement& el) { el.font = uf.name; });
+                    const bool picked = menuItem(e.font == uf.name ? icon::chevronRight : nullptr, color::accent, uf.name.c_str(), meta.c_str());
+                    nameRect("ui.font/" + uf.name, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                    if (picked) uic::editElement(doc, c, ei, [&](UIElement& el) { el.font = uf.name; });
                 }
                 ImGui::EndPopup();
             }
             popMenuStyle();
-            const int tw = uic::textWidth(doc.scene(), m_assets, e.font, e.text);
+            // The width of the font it draws with (its own or its canvas's default).
+            const int tw = uic::textWidth(doc.scene(), m_assets, splash::effectiveFont(doc.scene().canvases[size_t(c)], e), e.text);
+            if (reportLayout) {
+                // Scripted tests: what the Font field shows and the width it resolves to.
+                const std::string line = fl + " width " + std::to_string(tw);
+                if (m_elFontReported != line) {
+                    std::printf("uicanvas: element font %s\n", (m_elFontReported = line).c_str());
+                    std::fflush(stdout);
+                }
+            }
             char info[96];
             std::snprintf(info, sizeof info, "%d px wide, %d of %d bytes", tw, int(std::min<size_t>(e.text.size(), 999)), uic::kTextMax);
             text(dl, ImVec2(x0 + space::sm + rows.lw, rows.y - 4), f.regular, type::caption, color::textFaint, info);
@@ -1484,6 +1503,34 @@ void CanvasView::canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Docu
         if (fe.changed)
             uic::editCanvas(doc, c, [&](UICanvas& x) { x.sortOrder = std::clamp(int(std::lround(v)), 0, 255); }, "uicvsort");
         if (fe.done) doc.endMerge();
+
+        // Default font: what its text elements without a font of their own draw with.
+        const std::string dfont = cv.defaultFont;  // a copy: a pick below replaces the canvas
+        if (reportLayout && m_cvFontReported != (dfont.empty() ? "none" : dfont)) {
+            m_cvFontReported = dfont.empty() ? "none" : dfont;
+            std::printf("uicanvas: default font %s\n", m_cvFontReported.c_str());
+            std::fflush(stdout);
+        }
+        ImRect df = rows.row("lcvfont", "Default font", "Text elements without a font of their own use this one.");
+        nameRect("cv.font", df);
+        const std::string dl0 = dfont.empty() ? std::string("System (8 x 16)") : dfont;
+        if (pickField("cvfont", df, icon::type, rgb(0xf2c25c), dl0.c_str())) ImGui::OpenPopup("##cvfontmenu");
+        ImGui::SetNextWindowPos(ImVec2(df.Min.x, df.Max.y + space::xs));
+        pushMenuStyle();
+        if (ImGui::BeginPopup("##cvfontmenu")) {
+            const char* sys = "System (8 x 16)";
+            const bool pickSys = menuItem(dfont.empty() ? icon::chevronRight : nullptr, color::accent, sys);
+            nameRect(std::string("cv.font/") + sys, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+            if (pickSys) uic::editCanvas(doc, c, [](UICanvas& x) { x.defaultFont.clear(); });
+            for (const splash::UIFont& uf : doc.scene().fonts) {
+                std::string meta = uf.bitmap.empty() ? std::to_string(uf.size) + " px" : "bitmap";
+                const bool picked = menuItem(dfont == uf.name ? icon::chevronRight : nullptr, color::accent, uf.name.c_str(), meta.c_str());
+                nameRect("cv.font/" + uf.name, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (picked) uic::editCanvas(doc, c, [&](UICanvas& x) { x.defaultFont = uf.name; });
+            }
+            ImGui::EndPopup();
+        }
+        popMenuStyle();
         rows.gap();
     }
     fontsSection(dl, x0, x1, &rows.y, doc);
@@ -1595,7 +1642,8 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
         std::snprintf(head, sizeof head, "Font %d of %d   %s", i + 1, n,
                       uses == 0 ? "unused" : uses == 1 ? "used by 1 text element" : (std::to_string(uses) + " text elements").c_str());
         text(dl, ImVec2(x0 + space::sm, rows.y + 8), f.medium, type::caption, color::textDim, head);
-        const char* delTip = "Removes the font. Text elements that use it go back to the system font. Ctrl+Z brings both back.";
+        const char* delTip = "Removes the font. Text elements and canvases that use it go back to the system font (a text element "
+                             "to its canvas's default font, if that is another). Ctrl+Z brings them back.";
         const float dw = buttonWidth(icon::trash, "Delete");
         if (button((id + ".delete").c_str(), ImVec2(x1 - space::sm - dw, rows.y), icon::trash, "Delete", ButtonKind::Ghost, nullptr, delTip))
             remove = i;

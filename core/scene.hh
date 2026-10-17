@@ -327,9 +327,14 @@ struct UICanvas {
     std::string name;
     bool visible = true;
     int sortOrder = 0;  // 0 = back, 255 = front
+    std::string defaultFont;  // UIFont name, empty = system font
     std::vector<UIElement> elements;
     ExtraKeys extra;
 };
+
+// The font a text element draws with: its own when it names one, else its
+// canvas's default font; empty means the system font.
+const std::string& effectiveFont(const UICanvas& canvas, const UIElement& e);
 
 // Cutscene track types, numbered as psxsplash's TrackType.
 enum class TrackType : uint8_t {

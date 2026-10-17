@@ -369,6 +369,17 @@ Ctrl+Z. `editor_tests` covers the model (`testUiFonts`).
 
     python3 uifontscheck.py <splashedit>
 
+`cvfontcheck.py` drives the canvas inspector's Default font row on the same copy of `ui/ui.scene`.
+With `--ui` the editor prints `uicanvas: default font <name|none>` and, for a selected text element,
+`uicanvas: element font <shown> width <px>` (the text's width in the font it resolves to), each when it changes. It checks the row and its menu (the system
+font and each scene font), picks `title` (reported, saved as the canvas's `defaultFont`, the text
+elements' own fonts untouched), that the fontless text element `sys` then shows `Canvas default
+(title)` and is measured in that font, and its Font menu offers that instead of the system font (and, without a default, shows
+and offers the system font), picks System again (saved as null) and takes a pick back with Ctrl+Z.
+`editor_tests` covers the model and the export (`testUiCanvasDefaultFont`, `testExportCanvasDefaultFont`).
+
+    python3 cvfontcheck.py <splashedit>
+
 `uicanvassmallcheck.py` opens the same UI tab at a small editor window (`--size 1024x768`) and reads
 the canvas header's layout, which the editor prints with `--ui` (each item as `x0-x1`, or `-` when it
 gives way). At 1024x768 the resolution and the hint text step aside so the toolbar (fit, zoom in and

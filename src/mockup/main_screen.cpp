@@ -6114,8 +6114,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     // The nav bake's region settings: SplashEdit's three presets, and the
     // fields themselves under a Bake details disclosure (closed at first).
-    auto navBake = [&](const char* prefix, const char* who, const splash::NavBakeSettings& nb,
+    auto navBake = [&](const char* prefix, const char* who, const splash::NavBakeSettings& live,
                        splash::NavBakeSettings* (*bakeOf)(splash::Object&)) {
+        // A copy: a preset click edits the component mid-frame, and the
+        // caption, fields and scripted line all show the frame's start.
+        const splash::NavBakeSettings nb = live;
         const std::string p = prefix;
         const std::string over = std::string(who) == "player" ? " A Navigation component in the scene overrides it." : "";
         // Preset: what the settings match now in the field column, the three

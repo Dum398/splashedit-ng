@@ -78,6 +78,9 @@ check('the default settings are the Indoor preset', bake[:1] == [INDOOR] and pre
 check('the default bake has no region off its plane', plane[:1] == ['nav plane: 0 over 0.15'], plane)
 check('Terrain sets the Terrain values', TERRAIN in bake, bake)
 check('the caption says Matches Terrain', 'player preset: Matches Terrain' in pre, pre)
+VALUES = {INDOOR.split(' method ')[1]: 'indoor', TERRAIN.split(' method ')[1]: 'terrain'}
+torn = [l for l in bake if VALUES.get(l.split(' method ')[1], l.split()[3]) != l.split()[3]]
+check('every bake line names the preset its values match (no half-edited frame)', not torn, torn)
 check('Terrain is one undo step back to Indoor', bake[-2:] == [TERRAIN, INDOOR] and pre[-1:] == ['player preset: Matches Indoor'],
       bake)
 check('the preset buttons and caption are drawn',

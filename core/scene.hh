@@ -468,6 +468,14 @@ inline PortalFrame portalWorldFrame(const FlatObject& fo) {
     return f;
 }
 
+// Material mat's texture index as the exporter numbers them: the object's
+// distinct textures in material order, a repeated image keeping its first
+// number. -1 when the material has no texture or does not exist.
+int uvTextureSlot(const MeshComponent& mc, size_t mat);
+// The materials whose triangles a UV offset track scrolls: the exporter flags a
+// triangle when its texture index equals uvOffsetMaterial.
+std::vector<size_t> uvOffsetMaterials(const MeshComponent& mc, int index);
+
 std::vector<FlatObject> flatten(const Scene& scene);
 
 Scene loadScene(const std::filesystem::path& file);

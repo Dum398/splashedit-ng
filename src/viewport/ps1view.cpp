@@ -307,8 +307,8 @@ void Ps1View::rebuild() {
         std::vector<splash::Vec3> wp(mesh->positions.size());
         for (size_t i = 0; i < mesh->positions.size(); ++i) wp[i] = fo.localToWorld.point(mesh->positions[i]);
         const bool haveUv = mesh->uv.size() == mesh->positions.size();
-        // A UV offset track: texels added on the mesh's uvOffsetMaterial, as
-        // the runtime adds them to that material's triangles.
+        // A UV offset track: texels added to the triangles the exporter flags,
+        // those whose texture index (splash::uvTextureSlot) is uvOffsetMaterial.
         std::optional<std::array<float, 2>> uvOff;
         if (auto pit = m_preview.objects.find(fo.object->name); pit != m_preview.objects.end() && pit->second.uvOffset &&
                                                               uvPosed.insert(fo.object->name).second)
@@ -320,7 +320,7 @@ void Ps1View::rebuild() {
             unsigned tex = textureFor(mat.texture);
             bool textured = !mat.texture.empty();
             splash::Vec2 duv{0, 0};
-            if (uvOff && textured && int(std::min(sub, mc.materials.size() - 1)) == mc.uvOffsetMaterial) {
+            if (uvOff && textured && splash::uvTextureSlot(mc, std::min(sub, mc.materials.size() - 1)) == mc.uvOffsetMaterial) {
                 // PSX u = uv.x * (w - 1), v = (1 - uv.y) * (h - 1).
                 auto ts = m_texSize.find(tex);
                 if (ts != m_texSize.end() && ts->second.first > 1 && ts->second.second > 1)

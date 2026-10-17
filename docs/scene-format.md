@@ -62,7 +62,7 @@ Components so far (more are added feature by feature, matching the splashpack se
 
 | type | fields |
 |---|---|
-| `mesh` | `mesh` (path to a `.mesh`), `materials` (one per submesh: `texture` path or null, `color` RGBA 0..1), `bitDepth` 4/8/16, `vertexColors` `baked`/`flat`/`mesh`, `flatColor` RGB 0..255, `smoothNormals`, `uvOffsetMaterial`, `dynamicLighting` `auto`/`on`/`off`/`smooth` (whether runtime point lights light it on the console: `auto` when one reaches its bounds, `smooth` lights per vertex at about nine times the cost) |
+| `mesh` | `mesh` (path to a `.mesh`), `materials` (one per submesh: `texture` path or null, `color` RGBA 0..1), `bitDepth` 4/8/16, `vertexColors` `baked`/`flat`/`mesh`, `flatColor` RGB 0..255, `smoothNormals`, `uvOffsetMaterial` (which texture a cutscene's UV offset track scrolls, counting the distinct textures in material order from 0; the inspector's UV offset row), `dynamicLighting` `auto`/`on`/`off`/`smooth` (whether runtime point lights light it on the console: `auto` when one reaches its bounds, `smooth` lights per vertex at about nine times the cost) |
 | `collider` | `kind`: `none`, `static`, `dynamic`; `platform` bool |
 | `script` | `lua`: path to a `.lua` file |
 | `light` | `kind` `directional`/`point`/`spot`, `color` RGB 0..1, `intensity`, `range`, `spotAngle`, `innerSpotAngle`, `enabled` true, `runtime` false (point lights only: lit on the console and switchable from Lua instead of baked; up to 16 per scene and 4 per mesh, in scene order; a mesh lit at runtime leaves runtime lights out of its baked colours, any other mesh bakes them) |

@@ -9101,6 +9101,30 @@ void testMaterials4bpp() {
     CHECK(!d.couldBe4bpp(*d.object({0})->mesh));
 }
 
+// uvTextureSlot numbers a mesh's distinct textures in material order (an
+// untextured material has none, a repeated image keeps its first number), the
+// numbering the exporter compares uvOffsetMaterial against.
+void testUvOffsetSlots() {
+    splash::MeshComponent mc;
+    auto mat = [](const char* t) {
+        splash::Material m;
+        m.texture = t;
+        return m;
+    };
+    mc.materials = {mat(""), mat("a.png"), mat("b.png"), mat("a.png")};
+    CHECK(splash::uvTextureSlot(mc, 0) == -1);
+    CHECK(splash::uvTextureSlot(mc, 1) == 0);
+    CHECK(splash::uvTextureSlot(mc, 2) == 1);
+    CHECK(splash::uvTextureSlot(mc, 3) == 0);
+    CHECK(splash::uvTextureSlot(mc, 4) == -1);
+    CHECK((splash::uvOffsetMaterials(mc, 0) == std::vector<size_t>{1, 3}));
+    CHECK((splash::uvOffsetMaterials(mc, 1) == std::vector<size_t>{2}));
+    CHECK(splash::uvOffsetMaterials(mc, 2).empty());
+    CHECK(splash::uvOffsetMaterials(mc, -1).empty());
+    mc.materials = {mat(""), mat("")};
+    CHECK(splash::uvOffsetMaterials(mc, 0).empty());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -9230,6 +9254,7 @@ int main(int argc, char** argv) {
     testWavInfo();
     testMeshColours();
     testMaterials4bpp();
+    testUvOffsetSlots();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

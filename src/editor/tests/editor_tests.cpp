@@ -9422,6 +9422,21 @@ void testMaterials4bpp() {
     CHECK(!d.couldBe4bpp(*d.object({0})->mesh));
 }
 
+// hashSceneId matches Unity's HashSceneId: FNV-1a over the low byte of each
+// UTF-16 unit. Expected values from a Python run of that formula on
+// str.encode('utf-16-le').
+void testSceneNetworkId() {
+    CHECK(splash::hashSceneId("") == 0);
+    CHECK(splash::hashSceneId("lobby") == 0x1c5a0ed3u);
+    CHECK(splash::hashSceneId("\xc3\xa9t\xc3\xa9") == 0xa39e1b7bu);  // "été": one unit per letter
+    CHECK(splash::hashSceneId("a\xf0\x9f\x98\x80") == 0x2cb0f1f9u);  // U+1F600: a surrogate pair
+    editor::Document d;
+    d.editSettings([](splash::SceneSettings& st) { st.networkId = "lobby"; });
+    CHECK(d.scene().settings.networkId == "lobby");
+    CHECK(d.undo());
+    CHECK(d.scene().settings.networkId.empty());
+}
+
 // uvTextureSlot numbers a mesh's distinct textures in material order (an
 // untextured material has none, a repeated image keeps its first number), the
 // numbering the exporter compares uvOffsetMaterial against.
@@ -9667,6 +9682,7 @@ int main(int argc, char** argv) {
     testMeshColours();
     testMaterials4bpp();
     testUvOffsetSlots();
+    testSceneNetworkId();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

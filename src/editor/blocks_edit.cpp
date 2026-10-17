@@ -203,6 +203,8 @@ const char* placeholder(BlockField f) {
         case BlockField::Button: return "button";
         case BlockField::Sound: return "sound";
         case BlockField::Cutscene: return "cutscene";
+        case BlockField::Light: return "light";
+        case BlockField::Key: return "name";
         default: return "";
     }
 }

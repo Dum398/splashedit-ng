@@ -26,6 +26,7 @@ constexpr float kDragStart = 4;  // pixels the pointer moves before a press is a
 constexpr float kBlockRadius = 5;
 const char* const kFieldId = "##blockfield";
 const char* const kPickId = "blocks.pick";
+const char* const kNoLights = "No runtime lights";
 
 ImU32 categoryColor(std::string_view c) {
     if (c == "Events") return blocks::events;
@@ -259,6 +260,7 @@ bool BlocksView::known(splash::BlockField f, const std::string& value, const Con
         case splash::BlockField::Object: return value == "self" || in(c.objects);
         case splash::BlockField::Sound: return in(c.sounds);
         case splash::BlockField::Cutscene: return in(c.cutscenes);
+        case splash::BlockField::Light: return in(c.lights);
         default: return true;
     }
 }
@@ -504,7 +506,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                     if (auto out = blk::setField(cur, h.path, b->field == "true" ? "false" : "true")) edit(std::move(*out), &res);
                 } else if (spec->field == splash::BlockField::Button || spec->field == splash::BlockField::Variable ||
                            spec->field == splash::BlockField::Object || spec->field == splash::BlockField::Sound ||
-                           spec->field == splash::BlockField::Cutscene) {
+                           spec->field == splash::BlockField::Cutscene || spec->field == splash::BlockField::Light) {
                     m_picking = h.path;
                     m_pickQuery.clear();
                     ImGui::OpenPopup(kPickId);
@@ -729,6 +731,12 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                 col = blocks::sound;
                 all = context.cutscenes;
                 break;
+            case splash::BlockField::Light:
+                title = "Light";
+                ic = icon::lightbulb;
+                col = blocks::objects;
+                all = context.lights;
+                break;
             default: break;
         }
         // The value the field has, kept in the list when it is not one of them.
@@ -743,14 +751,20 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
         std::vector<PickerItem> items;
         for (const std::string& l : labels) {
             const bool odd = stray && l == value;
-            const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script" : "Not in this scene")
+            const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script"
+                                       : kind == splash::BlockField::Light  ? "Not a runtime light in this scene"
+                                                                            : "Not in this scene")
                                 : l == "self" && kind == splash::BlockField::Object ? "The object this script is on"
                                                                                      : "";
             items.push_back({odd ? icon::warning : ic, odd ? color::warn : col, l.c_str(), blurb, nullptr});
         }
+        // No runtime lights: say how to make one rather than show an empty list.
+        // It cannot be picked, and sits past `labels` so no pick maps to it.
+        const bool noLights = kind == splash::BlockField::Light && context.lights.empty();
+        if (noLights) items.push_back({icon::lightbulb, color::textFaint, kNoLights, nullptr, "Turn on Runtime in a point light's inspector"});
         ImVec2 at = mouse;
         if (const blk::BlockBox* b = curL.find(m_picking)) at = ImVec2(o.x + b->field.x0, o.y + b->field.y1 + space::xs);
-        const int pick = picker(kPickId, at, 240, title, &m_pickQuery, items);
+        const int pick = picker(kPickId, at, noLights ? 300 : 240, title, &m_pickQuery, items);
         if (pick >= 0 && size_t(pick) < labels.size()) {
             if (auto ns = blk::setField(m_history.current(), m_picking, labels[size_t(pick)])) edit(std::move(*ns), &res);
             m_picking = {};

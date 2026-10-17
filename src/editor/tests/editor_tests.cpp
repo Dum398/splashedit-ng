@@ -1886,6 +1886,47 @@ void testBlocks() {
         CHECK(error(blockScript({{"wait", "1"}}, {})) == "variable 1 (wait): \"wait\" is reserved");
         CHECK(error(blockScript({{"tasks", "1"}}, {})) == "variable 1 (tasks): \"tasks\" is reserved");
     }
+    // Lights, Persist and my name: the engine calls they make, and what they refuse.
+    {
+        CHECK(lua(blockScript({}, {{blk("on_interact"), blk("light_on", "Beacon \"1\""), blk("light_off", "Lamp")}})) ==
+              "function onInteract(self)\n    Light.SetEnabled(Light.Find(\"Beacon \\\"1\\\"\"), true)\n"
+              "    Light.SetEnabled(Light.Find(\"Lamp\"), false)\nend\n");
+        CHECK(error(blockScript({}, {{blk("on_create"), blk("light_on")}})) == "stack 1, block 2 (light_on): no light chosen");
+        // Scene scripts can switch lights too: Light.Find needs no self.
+        CHECK(lua(blockScript({}, {{blk("on_scene_start"), blk("light_off", "Lamp")}})) ==
+              "function onSceneCreationEnd()\n    Light.SetEnabled(Light.Find(\"Lamp\"), false)\nend\n");
+        CHECK(lua(blockScript({{"n", "2"}}, {{blk("on_scene_start"), blk("remember", "score", {blk("add", "", {bvar("n"), bnum("1")})}),
+                                              blk("set_var", "n", {blk("remembered", "score")})}})) ==
+              "local n = 2\n\nfunction onSceneCreationEnd()\n    Persist.Set(\"score\", n + 1)\n    n = (Persist.Get(\"score\") or 0)\nend\n");
+        CHECK(expr(blk("lt", "", {blk("remembered", "best"), bnum("3")})) == "(Persist.Get(\"best\") or 0) < 3");
+        CHECK(expr(blk("add", "", {blk("remembered", "best"), bnum("1")})) == "(Persist.Get(\"best\") or 0) + 1");
+        CHECK(error(blockScript({}, {{blk("on_create"), blk("remember", "", {bnum("1")})}})) ==
+              "stack 1, block 2 (remember): no name to remember it by");
+        CHECK(error(blockScript({}, {{blk("on_create"), blk("remember", "k")}})) == "stack 1, block 2 (remember): missing input 1");
+        const std::string k31(31, 'k');
+        CHECK(lua(blockScript({}, {{blk("on_create"), blk("remember", k31.c_str(), {bnum("1")})}})).find("Persist.Set(\"" + k31 + "\", 1)") !=
+              std::string::npos);
+        CHECK(error(blockScript({}, {{blk("on_create"), blk("remember", (k31 + "k").c_str(), {bnum("1")})}})) ==
+              "stack 1, block 2 (remember): the name is longer than 31 bytes, more than the game keeps");
+        for (splash::Block v : {blk("bool", "true"), blk("text", "3"), bnum("0.5"), blk("position_x", "self"), blk("my_name"),
+                                blk("gt", "", {bnum("1"), bnum("2")})})
+            CHECK(error(blockScript({}, {{blk("on_create"), blk("remember", "k", {v})}})) ==
+                  "stack 1, block 2 (remember): only whole numbers can be remembered");
+        CHECK(lua(blockScript({}, {{blk("on_create"), blk("remember", "k", {bnum("-7")})}})).find("Persist.Set(\"k\", -7)") !=
+              std::string::npos);
+        CHECK(error(blockScript({}, {{blk("on_create"), blk("log", "", {blk("remembered")})}})) ==
+              "stack 1, block 2 (log), input 1 (remembered): no name to remember it by");
+        CHECK(lua(blockScript({}, {{blk("on_create"), blk("log", "", {blk("my_name")})}})) ==
+              "function onCreate(self)\n    Debug.Log(Actor.GetName(self))\nend\n");
+        CHECK(error(blockScript({}, {{blk("on_trigger_enter"), blk("log", "", {blk("my_name")})}})) ==
+              "stack 1, block 2 (log), input 1 (my_name): my name is not available in on_trigger_enter");
+        CHECK(splash::findBlockSpec("light_on")->field == splash::BlockField::Light &&
+              splash::findBlockSpec("remember")->field == splash::BlockField::Key &&
+              splash::findBlockSpec("remembered")->kind == splash::BlockKind::Reporter &&
+              splash::findBlockSpec("my_name")->field == splash::BlockField::None);
+        CHECK(!splash::blockNameError("Light").empty() && !splash::blockNameError("Persist").empty() &&
+              !splash::blockNameError("Actor").empty());
+    }
     // Several errors are all reported; the file form throws the first.
     CHECK(splash::blocksToLua(blockScript({}, {{blk("on_create"), blk("hide"), blk("teleport")}})).errors.size() == 2);
     std::string thrown;
@@ -2046,6 +2087,17 @@ void testBlocksLayout() {
     const eb::Layout pl = eb::layout(ph, blkWidth, m);
     CHECK(pl.blocks.size() == 1 && pl.blocks[0].pieces.size() == 2 && pl.blocks[0].pieces[1].placeholder &&
           pl.blocks[0].pieces[1].text == "sound");
+    // turn light [light] on; remember [0] as [name].
+    splash::BlockScript lp;
+    lp.stacks.push_back({0, 0, {blk("light_on"), eb::newBlock("remember")}});
+    const eb::Layout ll = eb::layout(lp, blkWidth, m);
+    auto fieldText = [&](const char* path) {
+        if (const eb::BlockBox* bb = ll.find(eb::parsePath(path)))
+            for (const eb::Piece& p : bb->pieces)
+                if (p.kind == eb::Piece::Field) return (p.placeholder ? "?" : "") + p.text;
+        return std::string("<none>");
+    };
+    CHECK(fieldText("s0.b0") == "?light" && fieldText("s0.b1") == "?name");
     // Paths, as control names spell them.
     CHECK(eb::parsePath("s0.b2.d0.b1").str() == "s0.b2.d0.b1" && eb::parsePath("s12.b3.a1").stack == 12);
     CHECK(eb::parsePath("s0.x1").empty() && eb::parsePath("b1").empty() && eb::parsePath("s0.b").empty());
@@ -2314,6 +2366,8 @@ void testBlocksNewBlock() {
     CHECK(args(eb::newBlock("eq")) == "number=0,number=0");
     CHECK(eb::newBlock("on_button_press").field == "CROSS" && eb::newBlock("bool").field == "true" && eb::newBlock("number").field == "0");
     CHECK(eb::newBlock("hide").args.empty() && eb::newBlock("hide").bodies.empty() && eb::newBlock("fly").op == "fly");
+    CHECK(eb::newBlock("light_on").field.empty() && eb::newBlock("light_off").args.empty());
+    CHECK(args(eb::newBlock("remember")) == "number=0" && eb::newBlock("remember").field.empty() && eb::newBlock("remembered").args.empty());
     // Every block fits the catalogue, and the statements that need no choice make Lua as they come.
     bool shapes = true;
     for (const splash::BlockSpec& sp : splash::blockCatalogue()) {

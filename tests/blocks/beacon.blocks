@@ -1,0 +1,139 @@
+{
+  "format": "splashedit-blocks",
+  "version": 1,
+  "variables": [],
+  "stacks": [
+    {
+      "x": 40,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_scene_start"
+        },
+        {
+          "op": "if_else",
+          "args": [
+            {
+              "op": "eq",
+              "args": [
+                {
+                  "op": "remembered",
+                  "field": "beacon_lit"
+                },
+                {
+                  "op": "number",
+                  "field": "1"
+                }
+              ]
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "light_on",
+                "field": "Beacon Light"
+              }
+            ],
+            [
+              {
+                "op": "light_off",
+                "field": "Beacon Light"
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "x": 40,
+      "y": 240,
+      "blocks": [
+        {
+          "op": "on_interact"
+        },
+        {
+          "op": "if",
+          "args": [
+            {
+              "op": "not",
+              "args": [
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "remembered",
+                      "field": "beacon_lit"
+                    },
+                    {
+                      "op": "number",
+                      "field": "1"
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "bodies": [
+            [
+              {
+                "op": "light_on",
+                "field": "Beacon Light"
+              },
+              {
+                "op": "remember",
+                "field": "beacon_lit",
+                "args": [
+                  {
+                    "op": "number",
+                    "field": "1"
+                  }
+                ]
+              },
+              {
+                "op": "log",
+                "args": [
+                  {
+                    "op": "join",
+                    "args": [
+                      {
+                        "op": "text",
+                        "field": "lit by "
+                      },
+                      {
+                        "op": "my_name"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "x": 400,
+      "y": 40,
+      "blocks": [
+        {
+          "op": "on_button_press",
+          "field": "SELECT"
+        },
+        {
+          "op": "light_off",
+          "field": "Beacon Light"
+        },
+        {
+          "op": "remember",
+          "field": "beacon_lit",
+          "args": [
+            {
+              "op": "number",
+              "field": "0"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -68,7 +68,8 @@ public:
     // What the scene has for the field lists: object names (the list puts
     // "self" first), audio clip names, cutscene names.
     struct Context {
-        std::vector<std::string> objects, sounds, cutscenes;
+        // lights: the runtime point lights, the ones Light.Find can reach.
+        std::vector<std::string> objects, sounds, cutscenes, lights;
     };
     // The tab's content in `r`. `focused` is the tab's keyboard: a click in
     // `r` takes it, one elsewhere lets it go; the shortcuts need it.

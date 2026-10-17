@@ -7,7 +7,8 @@
 //   op      block id from blockCatalogue()
 //   field   the block's one typed-in or chosen value: a variable name, an
 //           object ("self" or an object name), a button (CROSS ... R3), a
-//           number/text/bool literal, a sound clip or a cutscene name.
+//           number/text/bool literal, a sound clip, a cutscene name, a
+//           runtime light's object name or a Persist key.
 //           position_x/_y/_z take the object here; the axis is in the op.
 //   args    inputs in order; a block with an empty op is an empty slot
 //   bodies  the statement lists of a C block (if_else: then, else)
@@ -57,7 +58,7 @@ BlockScript parseBlocks(const std::string& json, const std::string& path);
 std::string saveBlocks(const BlockScript& script);
 
 enum class BlockKind { Hat, Statement, CBlock, Reporter, Boolean };
-enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene };
+enum class BlockField { None, Variable, Object, Button, Number, Text, Bool, Sound, Cutscene, Light, Key };
 
 // Label templates (English, for the block editor): %f is the field, %1..%9
 // the inputs; '|' separates the label shown before each body after the

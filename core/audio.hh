@@ -1,4 +1,4 @@
-// Audio clips: WAV -> mono 16-bit PCM at the clip's rate -> SPU-ADPCM, laid
+// Audio clips: WAV, AIFF, MP3, Ogg Vorbis or FLAC -> mono 16-bit PCM at the clip's rate -> SPU-ADPCM, laid
 // out the way `psxavenc -t spu -f <rate> [-L]` writes it (SplashEdit 2.4).
 #pragma once
 
@@ -14,16 +14,23 @@ struct MonoAudio {
     int rate = 0;
 };
 
-// Any PCM or float WAV dr_wav reads. Channels are averaged.
-MonoAudio loadWavMono(const std::filesystem::path& file);
+// True for the extensions loadAudioMono reads (.wav .aif .aiff .mp3 .ogg
+// .flac, any case).
+bool isAudioFile(const std::filesystem::path& file);
+// The extensions isAudioFile accepts, for file dialog filters.
+inline constexpr const char* kAudioExtensions = "wav;aif;aiff;mp3;ogg;flac";
 
-// A WAV file's format and length, from its header alone.
-struct WavInfo {
+// Decodes the whole clip: WAV and AIFF (dr_wav), MP3 (dr_mp3), FLAC (dr_flac),
+// Ogg Vorbis (stb_vorbis), chosen by extension. Channels are averaged.
+MonoAudio loadAudioMono(const std::filesystem::path& file);
+
+// A clip's rate, channels and length. An MP3 is decoded to count its frames.
+struct AudioFileInfo {
     int rate = 0;
     int channels = 0;
     uint64_t frames = 0;
 };
-WavInfo wavInfo(const std::filesystem::path& file);
+AudioFileInfo audioFileInfo(const std::filesystem::path& file);
 
 // SplashEdit 2.4's "Trim Leading Silence": drop samples below 1/512 at the
 // start, keeping 4 ms before the first loud one. A fully silent clip is kept.

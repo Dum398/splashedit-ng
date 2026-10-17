@@ -161,9 +161,9 @@ struct PortalComponent {
     ExtraKeys extra;
 };
 
-// PSXAudioClip: a WAV converted to SPU-ADPCM at export.
+// PSXAudioClip: an audio file (WAV, AIFF, MP3, Ogg Vorbis, FLAC) converted to SPU-ADPCM at export.
 struct AudioComponent {
-    std::string clip;      // project-relative WAV path, empty = no data
+    std::string clip;      // project-relative audio file path, empty = no data
     std::string clipName;  // name Lua plays it by
     int sampleRate = 22050;
     bool loop = false;

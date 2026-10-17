@@ -1006,7 +1006,7 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
     }
     static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
     static const SDL_DialogFileFilter lua[] = {{"Lua scripts", "lua"}};
-    static const SDL_DialogFileFilter wav[] = {{"WAV audio", "wav"}};
+    static const SDL_DialogFileFilter wav[] = {{"Audio (WAV, AIFF, MP3, Ogg, FLAC)", splash::kAudioExtensions}};
     static const SDL_DialogFileFilter anim[] = {{"Animation clips", "anim"}};
     const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? images
                                          : slot == AssetSlot::Clip    ? wav
@@ -6617,7 +6617,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         top = y;
         compSection("s_audio", editor::ComponentKind::Audio);
         bool found = doc.fileExists(a.clip);
-        if (slotField(st, static_cast<int>(AssetSlot::Clip), path, "clip", row("lclip", "Clip", "A WAV file, converted to SPU ADPCM at export. Click to pick one."), icon::music,
+        if (slotField(st, static_cast<int>(AssetSlot::Clip), path, "clip", row("lclip", "Clip", "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one."), icon::music,
                        found ? kind::audio : color::warn, a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr) |
             fileCard("fixclip", found ? editor::AssetStatus::Ok : editor::AssetStatus::Missing, a.clip, std::string()))
             pickAsset(AssetSlot::Clip, path);
@@ -6634,7 +6634,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const std::string bound = a.trimLeadingSilence ? "at most " : "";
             const std::string out = "-> " + std::to_string(a.sampleRate) + " Hz ADPCM, " + bound + fmtKB(int(bytes));
             const float lineH = 18;
-            const ImRect ir = row("lainfo", "Source", "The WAV file as it is, and the sound RAM the exported clip takes. With Trim silence "
+            const ImRect ir = row("lainfo", "Source", "The audio file as it is, and the sound RAM the exported clip takes. With Trim silence "
                                                     "it can take less: how much depends on the file's quiet start.");
             y += lineH;
             nameRect("obj.ainfo", ImRect(ir.Min, ImVec2(ir.Max.x, ir.Max.y + lineH)));

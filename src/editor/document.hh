@@ -33,7 +33,7 @@ struct MeshInfo {
     std::string error;
 };
 
-// A WAV clip's header, for the inspector's size estimate.
+// An audio clip's format and length, for the inspector's size estimate.
 struct AudioInfo {
     AssetStatus status = AssetStatus::Missing;
     int rate = 0, channels = 0;

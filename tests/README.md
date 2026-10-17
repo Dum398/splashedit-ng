@@ -259,6 +259,15 @@ Resampling is our own windowed sinc; psxavenc's goes through ffmpeg, so resample
 `splashpack-cli audio <in.wav> -o <out> --rate <hz> [--loop] [--trim] --pcm <src.wav>` writes the
 PCM it starts from, which is what was fed to psxavenc to make the expected files.
 
+Clips can also be AIFF, MP3, Ogg Vorbis or FLAC. `audio/formats/` holds a 440 Hz tone as `tone.wav`
+and the same tone encoded to each (sox, lame, oggenc, flac). `audioformatcheck.py` decodes each
+through `splashpack-cli audio` and matches it against the WAV (the MP3 at its best lag, for the
+encoder delay), and exports an Audio source with the Ogg clip; `audiofilecheck.py` checks the
+inspector's Source row for Ogg and MP3 clips.
+
+    python3 audioformatcheck.py <splashpack-cli>
+    xvfb-run -a python3 audiofilecheck.py <splashedit> [ogg.png]
+
 ## Cutscenes
 
 `cutscenecheck.py` exports `cutscene/cutscene.scene` with extra tracks and reads the cutscene table

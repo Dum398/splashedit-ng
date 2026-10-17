@@ -1800,7 +1800,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         std::vector<uint8_t> data;
         if (!a.clip.empty()) {
             try {
-                MonoAudio src = loadWavMono(root / a.clip);
+                MonoAudio src = loadAudioMono(root / a.clip);
                 if (a.trimLeadingSilence) trimLeadingSilence(src);
                 data = encodeSpuAdpcm(toPcm16(resample(src, a.sampleRate).samples), a.loop);
             } catch (const std::exception& ex) {

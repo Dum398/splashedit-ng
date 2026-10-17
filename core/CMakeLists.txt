@@ -64,6 +64,15 @@ if(NOT MSVC)
     target_compile_options(psxav PRIVATE -w)
 endif()
 
+# stb_vorbis decodes Ogg Vorbis audio clips (audio.cpp).
+add_library(stbvorbis STATIC vorbis.c)
+target_include_directories(stbvorbis PRIVATE ${stb_SOURCE_DIR})
+if(MSVC)
+    target_compile_options(stbvorbis PRIVATE /w)
+else()
+    target_compile_options(stbvorbis PRIVATE -w)
+endif()
+
 add_library(splashcore STATIC
     audio.cpp
     blend.cpp
@@ -87,7 +96,7 @@ target_include_directories(splashcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR} ${dr_libs_SOURCE_DIR} ${cgltf_SOURCE_DIR} ${ufbx_SOURCE_DIR})
 # .blend import runs Blender from a worker thread (blend.cpp).
 find_package(Threads REQUIRED)
-target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE recast psxlua psxav)
+target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE recast psxlua psxav stbvorbis)
 # The writer reproduces SplashEdit 2.4's float results bit for bit: no FMA
 # contraction, no fast-math.
 if(MSVC)

@@ -52,7 +52,7 @@ static int usage() {
                  "    and a texture line per packed texture with its VRAM and CLUT position\n"
                  "usage: splashpack-cli texstats <image> [--bpp 4|8|16] [--cutout] [--out <decoded.png>]\n"
                  "  converts one image the way export does and prints its error against the source\n"
-                 "usage: splashpack-cli audio <in.wav> -o <out.adpcm> [--rate <hz>] [--loop] [--trim]\n"
+                 "usage: splashpack-cli audio <in.wav|aif|mp3|ogg|flac> -o <out.adpcm> [--rate <hz>] [--loop] [--trim]\n"
                  "    [--pcm <src.wav>] [--decoded <out.wav>]\n"
                  "  encodes one clip the way export does and prints its SNR against the source;\n"
                  "  --pcm writes the 16-bit mono WAV the encoder starts from, before resampling\n"
@@ -157,7 +157,7 @@ static int audio(int argc, char** argv) {
     }
     if (in.empty() || out.empty() || rate <= 0) return usage();
     try {
-        splash::MonoAudio src = splash::loadWavMono(in);
+        splash::MonoAudio src = splash::loadAudioMono(in);
         if (trim) splash::trimLeadingSilence(src);
         if (!pcmOut.empty()) writeWav16(pcmOut, splash::toPcm16(src.samples), src.rate);
         splash::MonoAudio res = splash::resample(src, rate);

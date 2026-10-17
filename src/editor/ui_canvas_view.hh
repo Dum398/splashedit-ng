@@ -166,6 +166,8 @@ private:
     std::array<FontSample, editor::uic::kMaxFonts> m_samples;
     std::vector<std::string> m_fontsReported;
     std::string m_fontsCountReported;
+    // Scripted tests: the canvas's Default font and the element's Font field, last reported.
+    std::string m_cvFontReported, m_elFontReported;
 };
 
 }  // namespace ui

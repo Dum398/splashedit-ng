@@ -175,7 +175,7 @@ void setFontFile(splash::UIFont& f, const std::string& path);
 bool isBitmapFontFile(const std::string& path);
 // `base`, or `base (2)`... whichever no font of `fonts` has.
 std::string uniqueFontName(const std::vector<splash::UIFont>& fonts, const std::string& base);
-// How many text elements of the scene use font `name`.
+// How many text elements of the scene use font `name`, their own or their canvas's default.
 int fontUses(const splash::Scene& scene, const std::string& name);
 
 // `base`, or `base (2)`, `base (3)`... whichever no element of `cv` has.

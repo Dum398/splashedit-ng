@@ -21,6 +21,9 @@ public:
     void wait();
     // The last finished export, for the revision in resultRevision().
     const std::optional<splash::ExportResult>& result() const { return m_result; }
+    // The last finished export that succeeded (ok()), so the meters can stay
+    // up while an edit breaks the export.
+    const std::optional<splash::ExportResult>& lastGood() const { return m_lastGood; }
     unsigned resultRevision() const { return m_resultRev; }
     bool busy() const { return m_job.valid(); }
     // Something the export reads besides the scene changed (the project's
@@ -38,6 +41,7 @@ private:
     double m_seenAt = 0;
     bool m_started = false;  // an export has been started for m_seenRev
     std::optional<splash::ExportResult> m_result;
+    std::optional<splash::ExportResult> m_lastGood;
 };
 
 }  // namespace editor

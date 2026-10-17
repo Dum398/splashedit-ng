@@ -412,6 +412,16 @@ no caption, red in the middle, no word 0). Needs a display (CI runs it under `xv
 
     python3 meshalphacheck.py <splashedit> <splashpack-cli> [screenshot.png]
 
+`statusbudgetcheck.py` checks the status bar's Triangles meter and what the meters show when the
+live export fails. It builds a temp project with one flat grid mesh: 1700 triangles must print
+`statusbar: tris 1700/2000 warn` (the most triangles in view against the psxsplash docs' 2000 per
+frame) and 2100 `statusbar: tris 2100/2000 bad`, with a `statusbar: vram` line as the control. Then
+it clicks Enable saves on a scene whose memory card product code is empty, which fails the export:
+the bar must print `statusbar: export failed, meters from last good` and keep the tris line.
+Needs a display (CI runs it under `xvfb-run`).
+
+    python3 statusbudgetcheck.py <splashedit> [screenshot dir]
+
 `gamekeys.sh` starts Play against a stand-in pcsx-redux (`emulator_tests` with
 `SPLASHEDIT_FAKE_REDUX` set publishes an empty display block), then presses arrows and Enter in
 the Game view. They must reach the game only: the check fails if an editor menu or picker is

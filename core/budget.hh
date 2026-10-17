@@ -21,8 +21,27 @@ constexpr size_t kSpuRamCapacity = 512 * 1024;
 // default build). The stack grows down into the same space.
 constexpr size_t kEngineHeapBytes = 0x80200000 - 0x8009f600;
 
+// psxsplash-docs components/objects.md: "roughly 1000-2000 visible triangles
+// per frame at 30fps". The top of that range is the meter's capacity.
+constexpr size_t kVisibleTriangleGuide = 2000;
+
+// The meters' colour bands, shared by the meter widget and the scripted
+// status bar lines: under 75% good, under 90% warn, else bad.
+enum class BudgetBand { Good, Warn, Bad };
+inline BudgetBand budgetBandOf(float fraction) {
+    return fraction < 0.75f ? BudgetBand::Good : fraction < 0.9f ? BudgetBand::Warn : BudgetBand::Bad;
+}
+inline const char* budgetBand(float fraction) {
+    switch (budgetBandOf(fraction)) {
+        case BudgetBand::Good: return "good";
+        case BudgetBand::Warn: return "warn";
+        default: return "bad";
+    }
+}
+
 inline Budget vramBudget(const ExportStats& s) { return {s.vramBytes(), kVramCapacity}; }
 inline Budget spuBudget(const ExportStats& s) { return {s.spuEnd, kSpuRamCapacity}; }
+inline Budget triangleBudget(const ExportStats& s) { return {size_t(s.trianglesInView), kVisibleTriangleGuide}; }
 // What psxsplash allocates for each game object when a scene loads, none of
 // it in the splashpack. Measured on psxsplash 669fb6b in pcsx-redux, printing
 // the heap break (psyqo_heap_end) and lua_gc(LUA_GCCOUNT) through

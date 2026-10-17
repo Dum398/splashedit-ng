@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 
+#include "budget.hh"
 #include "ui/icons.h"
 
 using namespace theme;
@@ -972,7 +973,11 @@ float meter(const char* id, ImVec2 pos, const char* ic, const char* label, float
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // A negative fraction is a plain readout: no bar.
-    ImU32 col = fraction < 0 ? color::textDim : fraction < 0.75f ? color::good : fraction < 0.9f ? color::warn : color::bad;
+    const splash::BudgetBand band = splash::budgetBandOf(fraction);
+    ImU32 col = fraction < 0                           ? color::textDim
+                : band == splash::BudgetBand::Good ? color::good
+                : band == splash::BudgetBand::Warn ? color::warn
+                                                   : color::bad;
     float barW = fraction < 0 ? -space::sm : 64;
     float labelW = measure(f.medium, type::caption, label).x;
     float valueW = measure(f.regular, type::caption, value).x;

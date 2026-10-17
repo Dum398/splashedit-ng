@@ -46,14 +46,19 @@ std::vector<LicenceSector> parseLicence(const std::vector<uint8_t>& bytes, std::
 const std::vector<uint8_t>& psxsplashLicence();
 
 // A project's disc settings file (disc.json): {"volume": "...", "licence":
-// "..."}. `volume` empty = the volume name comes from the title. `licence`
-// "" = none, "psxsplash" = psxsplashLicence(), else a licence file (relative
-// paths against the project root). A missing or unreadable file, or a value
-// that is not a string, reads as the defaults. writeDiscSettings returns
+// "...", "tracks": ["...", ...]}. `volume` empty = the volume name comes from
+// the title. `licence` "" = none, "psxsplash" = psxsplashLicence(), else a
+// licence file (relative paths against the project root). `tracks` are the
+// CD-DA music tracks in disc order, audio files (isAudioFile), relative paths
+// against the project root with '/' separators: the first is disc track 2
+// (track 1 is the data), which psxsplash's Audio.PlayCDDA(2) plays. A missing
+// or unreadable file, or a value that is not a string, reads as the defaults;
+// a "tracks" entry that is not a string is skipped. writeDiscSettings returns
 // false when the file cannot be written.
 struct DiscSettings {
     std::string volume;
     std::string licence;
+    std::vector<std::string> tracks;
 };
 DiscSettings readDiscSettings(const std::filesystem::path& file);
 bool writeDiscSettings(const std::filesystem::path& file, const DiscSettings& s);
@@ -78,18 +83,48 @@ struct DiscFile {
     std::vector<uint8_t> data;
 };
 
-struct DiscInfo {
-    uint32_t sectors = 0;  // every sector in the .bin, trailing gap included
+// A CD-DA track as written: `start` is its INDEX 01 LBA (after its 150-sector
+// pregap), `sectors` its PCM sectors (the pregap not counted).
+struct DiscTrack {
+    uint32_t start = 0;
+    uint32_t sectors = 0;
 };
 
-// Writes `bin` and a .cue next to it. With no `licence`, sectors 0-15 are
+struct DiscInfo {
+    uint32_t sectors = 0;      // every sector in the .bin: data, trailing gap, pregaps and audio
+    uint32_t dataSectors = 0;  // the data track (track 1), trailing gap included
+    std::vector<DiscTrack> tracks;  // disc tracks 2, 3, ...
+};
+
+// CD-DA: 2352 bytes of 16-bit stereo per sector, 75 sectors a second.
+constexpr uint32_t kAudioPregap = 150;
+constexpr size_t kCdFramesPerSector = kRawSectorSize / 4;  // 588 stereo frames
+constexpr uint32_t kSectorsPerSecond = 75;
+// A disc past 74 minutes may not fit a CD-R; past 80 it does not.
+constexpr uint32_t kDiscWarnSectors = 74 * 60 * kSectorsPerSecond;  // 333000
+constexpr uint32_t kDiscMaxSectors = 80 * 60 * kSectorsPerSecond;   // 360000
+// At most this many tracks on a disc, data included.
+constexpr size_t kMaxDiscTracks = 99;
+
+// `lba` as a cue sheet's mm:ss:ff (75 frames a second, from the file start).
+std::string cueTime(uint32_t lba);
+
+// Writes `bin` and a .cue next to it. `tracks` are CD-DA audio tracks
+// (interleaved stereo 44100 Hz 16-bit PCM, as loadCdAudio), disc tracks 2 and
+// up: after the data track's last sector (its trailing gap included) each is
+// 150 zero sectors of pregap then its PCM as raw 2352-byte sectors, the last
+// one zero-padded; the cue gives each "TRACK nn AUDIO" with INDEX 00 at the
+// pregap and INDEX 01 at the PCM. The ISO volume space size stays the data
+// track's. More than 98 tracks throw. With no tracks the image is as before.
+// With no `licence`, sectors 0-15 are
 // empty Form 1 data sectors. Otherwise sector i < licence.size() is
 // licence[i] with its subheader kept: Form 2 EDC when sub[2] & 0x20, else
 // Form 1 EDC/ECC; the rest up to 15 are blank Form 2 (subheader 00 00 20 00
 // 00 00 20 00, EDC), as mkpsxiso writes LBA 12-15. At most 16 licence
 // sectors are used. Throws std::runtime_error on a bad name or a write error.
 DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& volume, const std::filesystem::path& bin,
-                        const std::vector<LicenceSector>& licence = {});
+                        const std::vector<LicenceSector>& licence = {},
+                        const std::vector<std::vector<int16_t>>& tracks = {});
 
 // A bootable disc: SYSTEM.CNF, the engine as PSX.EXE, and each scene's files
 // under SCENE<i>/ as SCENE_<i>.SPK, .VRM, .SPU (and .GEO when it streams),
@@ -99,7 +134,13 @@ DiscInfo writeDiscImage(const std::vector<DiscFile>& files, const std::string& v
 // is empty (letters, digits and _ kept, upper-cased, at most 31; PSXSPLASH
 // when nothing is left). `disc.licence` goes into sectors 0-15 (see
 // resolveLicence and writeDiscImage); a licence that cannot be read or has a
-// bad size is an error. Errors land in the result; with more than one scene,
+// bad size is an error. `disc.tracks` become CD-DA tracks 2 and up (paths
+// relative to `projectRoot`, decoded with loadCdAudio); one that is missing
+// or cannot be decoded is the error "music track <N>: <why>" (N its disc
+// track number, 2 for the first). A disc longer than 74 minutes (333000
+// sectors) is a warning naming its length in minutes; longer than 80
+// (360000) is an error and no image is written. Errors land in the result;
+// with more than one scene,
 // each error and warning starts with its scene's index and, when `names`
 // gives one, its name ("scene 1 (cave): ..."). No image is written when any
 // scene fails. The stats are scene 0's. Every scene packs VRAM with `vram`

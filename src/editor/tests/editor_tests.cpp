@@ -9671,6 +9671,101 @@ void testAudioFormats() {
     CHECK(ai && ai->status == editor::AssetStatus::Ok && ai->rate == 22050 && d.fileExists("music.mp3"));
 }
 
+// loadCdAudio, writeDiscImage with music tracks, and exportDisc's music errors.
+void testDiscMusic() {
+    using namespace disctest;
+    const fs::path src = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "audio" / "formats";
+
+    // Settings round-trip carries the track list; a missing key reads as empty.
+    const fs::path dir = g_outDir / "discmusic";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::DiscSettings s;
+    s.tracks = {"music/one.wav", "two.flac"};
+    CHECK(splash::writeDiscSettings(dir / "disc.json", s));
+    splash::DiscSettings back = splash::readDiscSettings(dir / "disc.json");
+    CHECK(back.tracks.size() == 2 && back.tracks[0] == "music/one.wav" && back.tracks[1] == "two.flac");
+    std::ofstream(dir / "old.json", std::ios::binary) << R"({"volume": "V", "licence": ""})";
+    CHECK(splash::readDiscSettings(dir / "old.json").tracks.empty());
+    std::ofstream(dir / "mixed.json", std::ios::binary) << R"({"tracks": ["a.wav", 7, "b.wav"]})";
+    splash::DiscSettings mixed = splash::readDiscSettings(dir / "mixed.json");
+    CHECK(mixed.tracks.size() == 2 && mixed.tracks[0] == "a.wav" && mixed.tracks[1] == "b.wav");
+
+    // loadCdAudio: interleaved stereo 44100; a mono clip has L == R and the
+    // resampled frame count.
+    const std::vector<int16_t> cd = splash::loadCdAudio(src / "tone.wav");
+    const size_t frames = splash::resampledCount(5512, 22050, 44100);
+    CHECK(cd.size() == frames * 2);
+    bool lr = true;
+    for (size_t i = 0; i < frames; i++) lr = lr && cd[2 * i] == cd[2 * i + 1];
+    CHECK(lr);
+    // A 44100 stereo clip is passed through at its own rate (frames unchanged).
+    const std::vector<int16_t> st = splash::loadCdAudio(src / "tone-st44.flac");
+    CHECK(st.size() == 11025 * 2);
+
+    // writeDiscImage with two small tracks: the cue text, the DiscInfo, zero
+    // pregaps, the PCM bytes at the track start.
+    const char* cnf = "BOOT = cdrom:\\PSX.EXE;1\r\n";
+    std::vector<splash::DiscFile> files = {{"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))}};
+    std::vector<int16_t> a(1000), b(600);  // one sector and change, one short of a sector
+    for (size_t i = 0; i < a.size(); i++) a[i] = int16_t((i * 131) % 40000 - 20000);
+    for (size_t i = 0; i < b.size(); i++) b[i] = int16_t((i * 977) % 40000 - 20000);
+    splash::DiscInfo info = splash::writeDiscImage(files, "MUSIC", dir / "m.bin", {}, {a, b});
+    std::vector<uint8_t> bin = bytesOf(dir / "m.bin");
+
+    CHECK(info.tracks.size() == 2);
+    CHECK(info.tracks[0].start == info.dataSectors + splash::kAudioPregap);
+    const uint32_t secA = uint32_t((a.size() * 2 + 2351) / 2352);
+    const uint32_t secB = uint32_t((b.size() * 2 + 2351) / 2352);
+    CHECK(info.tracks[0].sectors == secA && info.tracks[1].sectors == secB);
+    CHECK(info.tracks[1].start == info.tracks[0].start + secA + splash::kAudioPregap);
+    CHECK(info.sectors == info.tracks[1].start + secB);
+    CHECK(bin.size() == size_t(info.sectors) * 2352);
+
+    // The pregap before each track is 150 zero sectors.
+    bool pregapZero = true;
+    for (uint32_t lba = info.dataSectors; lba < info.tracks[0].start; lba++)
+        pregapZero = pregapZero && std::all_of(rawSector(bin, lba), rawSector(bin, lba) + 2352, [](uint8_t v) { return v == 0; });
+    CHECK(pregapZero);
+
+    // The PCM, little-endian, starts at INDEX 01.
+    bool pcmOk = true;
+    const uint8_t* p = rawSector(bin, info.tracks[0].start);
+    for (size_t i = 0; i < a.size(); i++) {
+        uint16_t v = uint16_t(uint8_t(p[2 * i]) | (uint8_t(p[2 * i + 1]) << 8));
+        pcmOk = pcmOk && int16_t(v) == a[i];
+    }
+    CHECK(pcmOk);
+    // The last sector of track 1 is zero-padded past the PCM.
+    const uint8_t* last = rawSector(bin, info.tracks[0].start + secA - 1);
+    CHECK(last[2351] == 0 || a.size() * 2 % 2352 == 0);
+
+    // The cue text, exact.
+    std::ifstream cf(dir / "m.cue", std::ios::binary);
+    std::string cue((std::istreambuf_iterator<char>(cf)), {});
+    std::string want = "FILE \"m.bin\" BINARY\r\n  TRACK 01 MODE2/2352\r\n    INDEX 01 00:00:00\r\n";
+    want += "  TRACK 02 AUDIO\r\n    INDEX 00 " + splash::cueTime(info.dataSectors) + "\r\n    INDEX 01 " +
+            splash::cueTime(info.tracks[0].start) + "\r\n";
+    want += "  TRACK 03 AUDIO\r\n    INDEX 00 " + splash::cueTime(info.tracks[0].start + secA) + "\r\n    INDEX 01 " +
+            splash::cueTime(info.tracks[1].start) + "\r\n";
+    CHECK(cue == want);
+
+    // Empty tracks: the image is the one without music (its pinned hash).
+    splash::writeDiscImage(files, "PLAIN", dir / "plain.bin", {});
+    std::vector<uint8_t> plain = bytesOf(dir / "plain.bin");
+    CHECK(plain.size() >= 16 * 2352 && fnv(plain.data(), 16 * 2352) == 0x618f843db4644257ull);
+
+    // exportDisc: a missing music track is "music track 2: ..." and no image.
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    writeBytes(dir / "cd.ps-exe", cdEngine());
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    splash::DiscSettings ds;
+    ds.tracks = {"nope.wav"};
+    splash::DiscResult r = splash::exportDisc(scene, project, dir / "cd.ps-exe", dir / "miss.bin", "courtyard", {}, ds);
+    CHECK(!r.exported.ok() && !fs::exists(dir / "miss.bin"));
+    CHECK(!r.exported.errors.empty() && r.exported.errors[0].find("music track 2") != std::string::npos);
+}
+
 // Mesh colours on a mesh without vertex colours is a warning, fixed by baking.
 void testMeshColours() {
     const fs::path dir = g_outDir / "meshcolours";
@@ -10021,6 +10116,7 @@ int main(int argc, char** argv) {
     testAudioSizes();
     testWavInfo();
     testAudioFormats();
+    testDiscMusic();
     testMeshColours();
     testMaterials4bpp();
     testUvOffsetSlots();

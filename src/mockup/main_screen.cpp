@@ -1325,6 +1325,16 @@ static void SDLCALL onLicencePicked(void*, const char* const* files, int) {
 
 static const SDL_DialogFileFilter kLicenceFilter[] = {{"Disc licence", "dat"}, {"All files", "*"}};
 
+static std::mutex g_trackMutex;
+static std::optional<std::string> g_trackPicked;
+static void SDLCALL onTrackPicked(void*, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_trackMutex);
+    g_trackPicked = files[0];
+}
+static const SDL_DialogFileFilter kAudioFilter[] = {{"Audio (WAV, AIFF, MP3, Ogg, FLAC)", splash::kAudioExtensions},
+                                                    {"All files", "*"}};
+
 // A typed volume name character: upper-cased, dropped unless the volume name
 // keeps it (splash::volumeName's rule).
 static int volumeChar(ImGuiInputTextCallbackData* d) {
@@ -4727,6 +4737,146 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             }
             y += errH + space::xs;
         }
+
+        // Music (CD-DA): the audio tracks Export writes as disc tracks 2 and
+        // up. Drawn from a copy of the list so a button that edits mid-frame
+        // leaves the rest of this frame on the old list (no held pointers).
+        const std::vector<std::string> tracks = ds.tracks;
+        {
+            std::optional<std::string> picked;
+            {
+                std::lock_guard<std::mutex> lock(g_trackMutex);
+                picked.swap(g_trackPicked);
+            }
+            if (picked && !root.empty()) {
+                std::error_code ec;
+                const fs::path abs = fs::weakly_canonical(fs::path(std::u8string(picked->begin(), picked->end())), ec);
+                const fs::path base = fs::weakly_canonical(root, ec);
+                const fs::path rel = abs.lexically_relative(base);
+                const std::u8string u = (!rel.empty() && *rel.begin() != "..") ? rel.generic_u8string() : abs.generic_u8string();
+                splash::DiscSettings next = ds;
+                next.tracks.push_back(std::string(u.begin(), u.end()));
+                save(std::move(next));
+            }
+        }
+        // Each track's duration, recomputed when the list changes or now and
+        // then (a file that appears or changes). "missing"/"unreadable" else.
+        static std::vector<std::string> durFor, durList;
+        static double durAt = -1;
+        if (durFor != tracks || now - durAt > 1.0) {
+            durFor = tracks;
+            durAt = now;
+            durList.clear();
+            for (const std::string& rel : tracks) {
+                const fs::path p = root.empty() ? fs::path(std::u8string(rel.begin(), rel.end()))
+                                                : root / fs::path(std::u8string(rel.begin(), rel.end()));
+                std::error_code fe;
+                std::string d;
+                if (!fs::is_regular_file(p, fe)) {
+                    d = "missing";
+                } else {
+                    try {
+                        const splash::AudioFileInfo info = splash::audioFileInfo(p);
+                        const long secs = info.rate > 0 ? long(info.frames / uint64_t(info.rate)) : 0;
+                        char b[32];
+                        std::snprintf(b, sizeof b, "%ld:%02ld", secs / 60, secs % 60);
+                        d = b;
+                    } catch (const std::exception&) {
+                        d = "unreadable";
+                    }
+                }
+                durList.push_back(d);
+            }
+        }
+
+        caption("Music (CD-DA)", color::textDim);
+        int tMove = -1, tMoveBy = 0, tRemove = -1;
+        for (size_t i = 0; i < tracks.size(); ++i) {
+            const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 28));
+            nameRect("disc.track" + std::to_string(i), rr);
+            const float ty = centerY(f.regular, type::body, rr.Min.y, rr.Max.y);
+            const std::string num = "Track " + std::to_string(i + 2);
+            text(dl, ImVec2(rr.Min.x + space::xs, ty), f.medium, type::body, color::textFaint, num.c_str());
+            const fs::path rp(std::u8string(tracks[i].begin(), tracks[i].end()));
+            const std::string file = utf8(rp.filename());
+            dl->AddText(f.regular, type::body, ImVec2(rr.Min.x + 62, ty), color::text, file.c_str(), nullptr);
+            const std::string& d = i < durList.size() ? durList[i] : std::string();
+            const bool bad = d == "missing" || d == "unreadable";
+            const float dw = f.regular->CalcTextSizeA(type::body, FLT_MAX, 0, d.c_str()).x;
+            dl->AddText(f.regular, type::body, ImVec2(rr.Max.x - 3 * 22 - 8 - dw, ty), bad ? color::warn : color::textDim,
+                        d.c_str(), nullptr);
+            ImGui::PushID(int(1000 + i));
+            const float bw = 22;
+            const ImRect up(ImVec2(rr.Max.x - 3 * bw - 4, rr.Min.y + 3), ImVec2(rr.Max.x - 2 * bw - 4, rr.Max.y - 3));
+            const ImRect down(ImVec2(rr.Max.x - 2 * bw - 2, rr.Min.y + 3), ImVec2(rr.Max.x - bw - 2, rr.Max.y - 3));
+            const ImRect del(ImVec2(rr.Max.x - bw, rr.Min.y + 3), ImVec2(rr.Max.x, rr.Max.y - 3));
+            nameRect("disc.track" + std::to_string(i) + ".up", up);
+            nameRect("disc.track" + std::to_string(i) + ".down", down);
+            nameRect("disc.track" + std::to_string(i) + ".remove", del);
+            if (iconButton("tup", up, icon::arrowUp, false, "Move up", color::textDim, i > 0)) {
+                tMove = int(i);
+                tMoveBy = -1;
+            }
+            if (iconButton("tdown", down, icon::arrowDown, false, "Move down", color::textDim, i + 1 < tracks.size())) {
+                tMove = int(i);
+                tMoveBy = 1;
+            }
+            if (iconButton("tremove", del, icon::x, false, "Remove track")) tRemove = int(i);
+            ImGui::PopID();
+            y += 28;
+        }
+        if (tMove >= 0) {
+            splash::DiscSettings next = ds;
+            std::swap(next.tracks[size_t(tMove)], next.tracks[size_t(tMove + tMoveBy)]);
+            save(std::move(next));
+        } else if (tRemove >= 0) {
+            splash::DiscSettings next = ds;
+            next.tracks.erase(next.tracks.begin() + tRemove);
+            save(std::move(next));
+        }
+        // Add: the project's audio files, then "Choose file...".
+        static std::vector<std::string> audioFiles;
+        static fs::path audioRoot;
+        static double audioAt = -1;
+        if (root != audioRoot || now - audioAt > 1.0) {
+            audioRoot = root;
+            audioAt = now;
+            audioFiles.clear();
+            std::error_code ec;
+            if (!root.empty())
+                for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+                     !ec && it != end; it.increment(ec))
+                    if (it->is_regular_file(ec) && splash::isAudioFile(it->path()))
+                        audioFiles.push_back(utf8(it->path().lexically_relative(root).generic_u8string()));
+            std::sort(audioFiles.begin(), audioFiles.end());
+        }
+        std::vector<const char*> addItems;
+        for (const std::string& a : audioFiles) addItems.push_back(a.c_str());
+        addItems.push_back("Choose file...");
+        const ImRect addRow(ImVec2(x0 + space::sm, y + space::xs), ImVec2(x0 + space::sm + 220, y + space::xs + size::field));
+        nameRect("disc.addtrack", addRow);
+        const int addPick = dropdownMenu("disc.addtrack", addRow, icon::plus, "Add track", addItems, -1);
+        if (addPick >= 0 && addPick < int(audioFiles.size())) {
+            splash::DiscSettings next = ds;
+            next.tracks.push_back(audioFiles[size_t(addPick)]);
+            save(std::move(next));
+        } else if (addPick == int(audioFiles.size())) {
+            const std::string loc = utf8(root);
+            SDL_ShowOpenFileDialog(onTrackPicked, nullptr, nullptr, kAudioFilter, 1, root.empty() ? nullptr : loc.c_str(),
+                                   false);
+        }
+        y += size::field + space::xs + space::sm;
+        caption("Music plays from a disc image only (Build > Disc image), as tracks 2 and up: Audio.PlayCDDA(2) is the first.",
+                color::textFaint);
+        if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
+            // Scripted tests: the whole list after every change, one block.
+            std::string block = "disc music: " + std::to_string(tracks.size()) + " tracks";
+            for (size_t i = 0; i < tracks.size(); ++i)
+                block += "\ndisc music: track " + std::to_string(i + 2) + " " + tracks[i] + " " +
+                         (i < durList.size() ? durList[i] : std::string("missing"));
+            scriptLine("discmusic", block);
+        }
+
         if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty()) {
             // Scripted tests: the settings after every change.
             static std::string reportedVolume, reportedLicence, reportedError;

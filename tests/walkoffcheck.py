@@ -8,7 +8,10 @@
 # as it changes. The default box (1 x 2 x 0.5) floats above the floor and
 # opens nothing; 20 x 4 x 1 straddles the edge and opens some; 20 x 1 x 1
 # floats again. The viewport draws the box in orange while the overlay
-# toggle (vp.gizmos) is on.
+# toggle (vp.gizmos) is on. The saved scenes are exported again with
+# splashpack-cli --stats, whose walkoff lines count the walk-off bits in the
+# written nav regions (mask_edges): the edges the inspector reports must be
+# the bits the box adds there.
 # usage: python3 walkoffcheck.py <splashedit> [keep.png]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
@@ -91,7 +94,26 @@ def run(name, args):
         m = re.match(r'control (\S+) at (-?\d+),(-?\d+) (-?\d+),(-?\d+)$', l)
         if m: rects[m.group(1)] = tuple(int(v) for v in m.groups()[1:])
     s = json.load(open(os.path.join(project, 'courtyard.scene'), encoding='utf-8'))
+    last_project[0] = project
     return s, [l for l in lines if l.startswith('walkoff: ')], rects, shot
+
+
+last_project = [None]
+cli = os.path.join(os.path.dirname(editor), 'cli', 'splashpack-cli' + ('.exe' if editor.endswith('.exe') else ''))
+
+
+def exported(project):
+    """(mask_edges, {zone name: edges}) off splashpack-cli's --stats for the
+    project's saved scene; (None, {}) when it prints no walkoff line."""
+    r = subprocess.run([cli, 'export', os.path.join(project, 'courtyard.scene'), '-o', os.path.join(project, 'out.splashpack'),
+                        '--stats'], capture_output=True, text=True, timeout=300)
+    mask, zones = None, {}
+    for l in r.stdout.splitlines():
+        m = re.match(r'walkoff zones=\d+ mask_edges=(\d+)$', l)
+        if m: mask = int(m.group(1))
+        m = re.match(r'walkoff edges=(\d+) (.*)$', l)
+        if m: zones[m.group(2)] = int(m.group(1))
+    return mask, zones
 
 
 def walkoff(scene):
@@ -131,12 +153,19 @@ check('the box across the edge opens nav edges', n[-1:] and n[-1] > 0, out)
 check('the saved scene has the typed size', walkoff(s) == {'type': 'walkoff', 'size': [20, 4, 1]}, walkoff(s))
 check('the caption row is drawn', 'obj.wstats' in rects, sorted(k for k in rects if k.startswith('obj.w')))
 if keep: shutil.copyfile(hit, keep)
+hit_mask, hit_zones = exported(last_project[0])
+check('the cli export of the saved scene counts the same edges', n[-1:] and hit_zones == {'Ledge': n[-1]}, (hit_zones, n))
 
 # 3. Lowered height: it floats again, back to 0 and the warning.
 s, out, rects, _ = run('miss', ADD + HIT + MISS)
 n = counts(out)
 check('the box goes from some edges back to 0', len(n) >= 3 and n[0] == 0 and max(n) > 0 and n[-1] == 0, out)
 check('the saved scene has height 1', walkoff(s) == {'type': 'walkoff', 'size': [20, 1, 1]}, walkoff(s))
+miss_mask, miss_zones = exported(last_project[0])
+check('the cli export of the floating box opens nothing', miss_zones == {'Ledge': 0}, miss_zones)
+check('the written nav regions carry the opened edges as walk-off bits',
+      hit_mask is not None and miss_mask is not None and hit_zones.get('Ledge', 0) > 0 and
+      hit_mask - miss_mask == hit_zones.get('Ledge'), (hit_mask, miss_mask, hit_zones))
 ws = rects.get('obj.wstats', (0, 0, 1e9, 0))
 check('the warning is back inside the section', panel[0] <= ws[0] and ws[2] <= rects.get('s_walkoff', (0, 0, 0, 0))[2], (ws, rects.get('s_walkoff')))
 

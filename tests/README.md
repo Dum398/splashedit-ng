@@ -618,6 +618,9 @@ the courtyard floor's front edge and types its Size (`obj.wsize.x/.y/.z`). The e
 `walkoff: Ledge edges N` from the live export: the default box floats above the floor (0, with the
 warning `obj.wstats` inside the section), 20 x 4 x 1 straddles the edge (N > 0), 20 x 1 x 1 floats again
 (0). The saved scene keeps the size, and the scene view draws the box in orange only with `vp.gizmos` on.
+The saved scenes are exported again with `splashpack-cli export --stats`, whose `walkoff` lines give
+each zone's edges and the walk-off bits in the written nav regions (`mask_edges`): the box must add
+exactly the edges the inspector reported.
 
     python3 walkoffcheck.py <splashedit> [keep.png]
 

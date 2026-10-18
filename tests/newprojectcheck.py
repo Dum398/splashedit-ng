@@ -70,6 +70,16 @@ def controls(lines):
     return {l.split(' ')[1] for l in lines if l.startswith('control ')}
 
 
+def rects(lines):
+    """control name -> (x0, y0, x1, y1), from 'control <name> at x0,y0 x1,y1'."""
+    out = {}
+    for l in lines:
+        p = l.split(' ')
+        if l.startswith('control ') and len(p) == 5 and p[2] == 'at':
+            out[p[1]] = tuple(int(v) for v in p[3].split(',') + p[4].split(','))
+    return out
+
+
 def created(lines):
     return [l for l in lines if l.startswith('newproject:')]
 
@@ -87,6 +97,16 @@ check('the modal shows name, location, browse, create, cancel', FIELDS <= have,
 if os.path.isdir(sample):
     check('the modal shows the Lamplighter card', 'newproj.tmpl.lamplighter' in have,
           sorted(c for c in have if c.startswith('newproj.tmpl')))
+# Each card's wrapped description (newproj.tmpl.<id>.desc) fits inside it, so no text is cut.
+box = rects(lines)
+cards = sorted(n for n in box if n.startswith('newproj.tmpl.') and not n.endswith('.desc'))
+for n in cards:
+    c, d = box[n], box.get(n + '.desc')
+    check(n + ': the description fits the card',
+          d is not None and c[0] <= d[0] and c[1] <= d[1] and d[2] <= c[2] and d[3] <= c[3], ('card', c, 'desc', d))
+check('the cards in a row are the same height',
+      all(box[a][3] - box[a][1] == box[b][3] - box[b][1] for a in cards for b in cards if box[a][1] == box[b][1]),
+      {n: box[n] for n in cards})
 check('Create without a name creates nothing', created(lines) == [], created(lines))
 check('and the modal stays open', 'popups open: yes' in lines, [l for l in lines if l.startswith('popups')])
 

@@ -43,7 +43,8 @@ bool tryPlace(Atlas& atlas, PsxTexture* t) {
 
 }  // namespace
 
-VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::vector<std::string>& errors) {
+VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::vector<std::string>& errors,
+                    bool fogMask4, bool fogMask8) {
     std::vector<Rect> reserved;
     for (const auto& a : s.prohibited) reserved.push_back({a.x, a.y, a.w, a.h});
     reserved.push_back({0, 0, s.resolutionX, s.resolutionY});
@@ -143,6 +144,20 @@ VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::v
                 }
             if (!placed) errors.push_back("CLUT for " + t->source + " does not fit in VRAM");
         }
+
+    auto placeFogMask = [&](int length, int& out) {
+        for (int x = 0; x < kVramW; x += 16)
+            for (int y = 0; y < kVramH; y++) {
+                Rect cand{x, y, length, 1};
+                if (valid(cand)) {
+                    cluts.push_back(cand);
+                    out = (y << 6) | (x / 16);
+                    return;
+                }
+            }
+    };
+    if (fogMask4) placeFogMask(16, out.fogMaskClut4);
+    if (fogMask8) placeFogMask(256, out.fogMaskClut8);
 
     for (Atlas& a : out.atlases) {
         a.pixels.assign(size_t(a.width) * Atlas::kHeight, 0);

@@ -2084,7 +2084,17 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (PsxTexture* t : cv)
             if (t) all.push_back(t);
     for (PsxTexture* t : spriteTextures) all.push_back(t);
-    VramLayout vram = packVram(all, options.vram, res.errors);
+    // With fog on, psxsplash draws the fog over a 4bpp or 8bpp cutout texture
+    // through a mask CLUT, so the texture's holes get no fog.
+    bool fogMask4 = false, fogMask8 = false;
+    if (scene.settings.fog.enabled)
+        for (ExpObject& e : exporters)
+            for (const PsxTexture* t : e.textures) {
+                if (!t || !t->cutout || !t->hasPalette) continue;
+                if (t->bitDepth == BitDepth::Bpp4) fogMask4 = true;
+                if (t->bitDepth == BitDepth::Bpp8) fogMask8 = true;
+            }
+    VramLayout vram = packVram(all, options.vram, res.errors, fogMask4, fogMask8);
     // psxsplash steps through a sheet's cells with 8-bit texture coordinates
     // from its top-left corner, so the whole grid must sit in one 256x256 page.
     const bool packed = res.ok();  // a texture that did not fit keeps 0,0: no page to check
@@ -2125,6 +2135,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                 if (key[0] < vs.resolutionX && key[1] < vs.resolutionY) continue;
                 map.push_back({K::Clut, key[0], key[1], key[2], 1, "CLUT of " + t->source});
             }
+        if (vram.fogMaskClut4 >= 0)
+            map.push_back({K::Clut, (vram.fogMaskClut4 & 63) * 16, vram.fogMaskClut4 >> 6, 16, 1, "Fog mask CLUT (4 bpp)"});
+        if (vram.fogMaskClut8 >= 0)
+            map.push_back({K::Clut, (vram.fogMaskClut8 & 63) * 16, vram.fogMaskClut8 >> 6, 256, 1, "Fog mask CLUT (8 bpp)"});
         std::vector<std::string> fontNames(fontSheets.size());
         for (const auto& [name, idx] : fontIndex)
             if (idx >= 1 && size_t(idx) <= fontNames.size()) fontNames[idx - 1] = name;
@@ -2479,12 +2493,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         float grav = gravity / gte;
         w.u16(uint16_t(clampv(roundToInt(grav * 4096.f), 0, 65535)));
         w.u16(uint16_t(toPsxCoord(playerRadius, gte)));
-        w.u16(0);
+        w.u16(uint16_t(std::max(vram.fogMaskClut4, 0)));  // was padding: 0 = no 4bpp fog mask
     }
     size_t nameTableOffsetPos = w.pos();
     w.u32(0);
     w.u16(uint16_t(audioSources.size()));
-    w.u16(0);
+    w.u16(uint16_t(std::max(vram.fogMaskClut8, 0)));  // was padding: 0 = no 8bpp fog mask
     size_t audioTableOffsetPos = w.pos();
     w.u32(0);
     const FogSettings& fog = scene.settings.fog;
@@ -2693,7 +2707,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
 
     // ---- mesh data (52-byte Tri). Streamed objects' triangles go to the .geo
     // file instead and their offset stays 0.
-    auto writeTri = [](BinWriter& w, const ExpObject& e, const PsxTri& t) {
+    // Tri flag 0x2: a paletted cutout texture whose depth has a fog mask CLUT.
+    auto writeTri = [&vram](BinWriter& w, const ExpObject& e, const PsxTri& t) {
         for (const PsxVert& v : t.v) {
             w.i16(v.vx);
             w.i16(v.vy);
@@ -2729,6 +2744,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.u16(tpage);
             w.u16(tex->clutPackingX);
             w.u16(tex->clutPackingY);
+            if (tex->cutout && tex->hasPalette &&
+                ((tex->bitDepth == BitDepth::Bpp4 && vram.fogMaskClut4 >= 0) ||
+                 (tex->bitDepth == BitDepth::Bpp8 && vram.fogMaskClut8 >= 0)))
+                flags |= 2;
             w.u16(flags);
         }
     };
@@ -2984,7 +3003,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     v.u8('V');
     v.u8('R');
     v.u16(uint16_t(vram.atlases.size()));
-    v.u16(uint16_t(clutCount));
+    v.u16(uint16_t(clutCount + (vram.fogMaskClut4 >= 0) + (vram.fogMaskClut8 >= 0)));
     v.u8(uint8_t(fontSheets.size()));
     v.u8(0);
     for (Atlas& a : vram.atlases) {
@@ -3005,6 +3024,17 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             for (uint16_t c : t->palette) v.u16(c);
             v.align4();
         }
+    // Fog masks: entry 0 transparent, every other entry white with STP set.
+    for (auto [id, length] : {std::pair{vram.fogMaskClut4, 16}, std::pair{vram.fogMaskClut8, 256}}) {
+        if (id < 0) continue;
+        v.u16(uint16_t(id & 63));
+        v.u16(uint16_t(id >> 6));
+        v.u16(uint16_t(length));
+        v.u16(0);
+        v.u16(0x0000);
+        for (int i = 1; i < length; i++) v.u16(0xFFFF);
+        v.align4();
+    }
     for (size_t i = 0; i < fontSheets.size(); i++) {
         std::vector<uint8_t> px = fontSheets[i].packed4bpp();
         v.u8(uint8_t(fontSheets[i].glyphWidth));

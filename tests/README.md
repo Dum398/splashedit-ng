@@ -528,7 +528,7 @@ sheet `hero` (4 bpp, 16x16 cells, one `idle` animation); a typed cell width, an 
 its typed frames and frame time land in the saved scene's `spriteSheets` and in the section's
 `scene: sprite <i> <name> texture ... cell WxH grid CxR anims <name>:<first>+<count>@<vsyncs>[L]`
 line. Each of those edits goes back in one Ctrl+Z (Add sheet's too, leaving no `spriteSheets` key).
-The preview's `scene: sprite preview <sheet>/<anim> cell N` lines must step through cells 1, 2, 3 and
+The preview's `scene: sprite preview <sheet>/<anim> cell N` lines after the last edit must step through 1, 2, 3 and
 wrap; a 24 px cell on the 64 px texture must show in `scene: sprite problems` and fail the live
 export; the sheet's trash deletes it. Controls are checked to be on screen. A second argument saves
 the screenshot of the edited section.

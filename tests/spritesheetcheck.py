@@ -104,9 +104,12 @@ want = [('hero', 'textures/hero.png', 4, 32, 16, [('idle', 0, 1, 6, True), ('ani
 check('cell width, the new animation and its frames land in the saved scene', summary(s) == want, f'{summary(s)} | ' + out[-200:])
 check('the section reports the 2x2 grid and the animation',
       'scene: sprite 0 hero texture textures/hero.png bpp 4 cell 32x16 grid 2x2 anims idle:0+1@6L anim:1+3@2L' in out, out[-400:])
-cells = [int(m) for m in re.findall(r'^scene: sprite preview hero/anim cell (\d+)$', out, re.M)]
-check('the preview plays cells 1, 2, 3 and loops', cells[:1] == [1] and {1, 2, 3} <= set(cells) and
-      any(a == 3 and b == 1 for a, b in zip(cells, cells[1:])), cells)
+# Only after the last edit (the frame time): every edit restarts the preview's
+# clock as PlayAnim does, so a jump back to cell 1 before it is not a loop.
+after = out[out.find('anim:1+3@2L'):] if 'anim:1+3@2L' in out else ''
+cells = [int(m) for m in re.findall(r'^scene: sprite preview hero/anim cell (\d+)$', after, re.M)]
+check('the preview plays cells 1, 2, 3 in order and loops', len(cells) >= 4 and
+      all(b == (a % 3) + 1 for a, b in zip(cells, cells[1:])) and cells.count(1) >= 2, cells)
 probs = re.findall(r'^scene: sprite problems (.*)$', out, re.M)
 check('no problems with a whole grid', probs[-1:] == ['none'], probs)
 

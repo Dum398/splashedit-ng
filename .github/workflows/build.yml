@@ -97,6 +97,7 @@ jobs:
           "$py" tests/interactcheck.py "$cli"
           "$py" tests/agentcheck.py "$cli"
           "$py" tests/memcardcheck.py "$cli"
+          "$py" tests/spritecheck.py "$cli"
           "$py" tests/importcheck.py "$cli"
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
@@ -124,6 +125,9 @@ jobs:
       - name: Memory card settings
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/memcardeditcheck.py build/splashedit
+      - name: Sprite sheets
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/spritesheetcheck.py build/splashedit
       - name: Timeline
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/timelinecheck.py build/splashedit

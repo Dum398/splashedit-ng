@@ -40,6 +40,10 @@ while IFS= read -r line || [ -n "$line" ]; do
     fi
     rm -rf "${dest:?}/$id"
     cp -R "$src/project" "$dest/$id"
+    if [ ! -f "$dest/$id/template.json" ]; then
+        echo "fetch-samples: $id: nothing copied to $dest/$id" >&2
+        exit 1
+    fi
     echo "fetch-samples: $id at $sha -> $dest/$id"
     count=$((count + 1))
 done < "$lock"

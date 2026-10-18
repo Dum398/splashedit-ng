@@ -104,6 +104,14 @@ def white(shot, r):
     return n
 
 
+def inkRows(shot, r):
+    """Rows of rect r holding any white pixel: the sample's drawn height."""
+    w, h, bpp, rows = readpng(shot)
+    return sum(1 for y in range(max(0, r[1]), min(h, r[3]))
+               if any(rows[y][x * bpp] > 240 and rows[y][x * bpp + 1] > 240 and rows[y][x * bpp + 2] > 240
+                      for x in range(max(0, r[0]), min(w, r[2]))))
+
+
 LINE = re.compile(r'fonts: (\d+) (.+?) (ttf|bitmap) (\S+) (\d+px|\d+x\d+) vram (\d+)$')
 
 
@@ -129,7 +137,11 @@ check('a TTF font shows no glyph cell fields', 'cvfont.0.gw' not in ctl and 'cvf
 if 'cvfont.0.sample' in ctl and 'cvfont.1.sample' in ctl:
     s0, s1 = white(shot, ctl['cvfont.0.sample']), white(shot, ctl['cvfont.1.sample'])
     check('each sample line draws the font', s0 > 30 and s1 > 30, (s0, s1))
-    check('the bigger font draws more ink', s0 > s1, (s0, s1))
+    # A sample that fits is drawn at twice the size (four times the pixels), and
+    # nearest sampling keeps every upscaled texel white: compare per texel.
+    k0 = 4 if inkRows(shot, ctl['cvfont.0.sample']) > 16 * 1.1 else 1
+    k1 = 4 if inkRows(shot, ctl['cvfont.1.sample']) > 12 * 1.1 else 1
+    check('the bigger font draws more ink', s0 / k0 > s1 / k1, (s0, k0, s1, k1))
 check('the scene keeps its fonts', [f['name'] for f in scene0['fonts']] == ['title', 'body'], scene0['fonts'])
 
 # Size: font 1 from 12 to 14 px; its line and its VRAM follow.

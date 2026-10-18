@@ -34,7 +34,6 @@ RULER_Y = 668
 # The Project panel's collapse chevron; the View menu and its Panels > Project item for the courtyard.
 COLLAPSE = '1222,733'
 VIEW_MENU = '322,20'
-VIEW_PROJECT = '350,391'
 # The root's grid: meshes, scripts, textures, courtyard.scene, then a file.
 TEXTURES_TILE = '726,812'
 ROOT_FILE_TILE = '922,812'
@@ -313,7 +312,7 @@ project = project_copy()
 out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3'])
 check('the chevron folds the Project panel', getattr(run, 'open', None) is False, out[-200:])
 out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3', '--click', VIEW_MENU + ',0', '--wait', '3',
-                           '--click', VIEW_PROJECT + ',0', '--wait', '5'])
+                           '--click', '@menu.view/Project', '--wait', '5'])
 check('View > Project opens it again on the project root', getattr(run, 'open', None) is True and
       shown == ['meshes', 'scripts', 'textures', 'courtyard.scene'] and 'popups open: no' in out, str(shown) + ' | ' + out[-200:])
 

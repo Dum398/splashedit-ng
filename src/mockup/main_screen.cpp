@@ -1643,30 +1643,42 @@ static void newProjectModal(State& st, editor::Document& doc, ImVec2 size) {
     text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim, "Start from a template. It is copied into a new folder you can change freely.");
     y += 30;
 
-    // Template cards, three to a row.
+    // Template cards, three to a row; a row is as tall as its longest
+    // wrapped description needs, and never shorter than 112.
     if (np.templates.empty()) np.templates = editor::listTemplates(np.templatesDir);
     np.selected = std::clamp(np.selected, 0, int(np.templates.size()) - 1);
     const int perRow = 3;
-    const float gap = space::sm, cardW = std::floor((inner - gap * (perRow - 1)) / perRow), cardH = 112;
+    const float gap = space::sm, cardW = std::floor((inner - gap * (perRow - 1)) / perRow), minCardH = 112;
+    const float descTop = space::sm + 26, descW = cardW - space::md * 2;
+    auto descSize = [&](const editor::TemplateInfo& t) {
+        return f.regular->CalcTextSizeA(type::caption, FLT_MAX, descW, t.description.c_str());
+    };
+    std::vector<float> cardRowH((np.templates.size() + perRow - 1) / perRow, minCardH);
+    for (size_t i = 0; i < np.templates.size(); ++i)
+        cardRowH[i / perRow] = std::max(cardRowH[i / perRow], std::ceil(descTop + descSize(np.templates[i]).y + space::md));
     for (size_t i = 0; i < np.templates.size(); ++i) {
         const editor::TemplateInfo& t = np.templates[i];
         const int col = int(i) % perRow;
-        if (i > 0 && col == 0) y += cardH + gap;
+        if (i > 0 && col == 0) y += cardRowH[i / perRow - 1] + gap;
+        const float cardH = cardRowH[i / perRow];
         const ImRect r(ImVec2(o.x + col * (cardW + gap), y), ImVec2(o.x + col * (cardW + gap) + cardW, y + cardH));
         const std::string name = "newproj.tmpl." + t.id;
         const Hit h = interact(name.c_str(), r);
         nameRect(name, r);
+        // The description's wrapped extent, so a check can see it fits the card.
+        const ImVec2 ds = descSize(t);
+        const ImVec2 dmin(r.Min.x + space::md, r.Min.y + descTop);
+        nameRect(name + ".desc", ImRect(dmin, ImVec2(dmin.x + ds.x, dmin.y + ds.y)));
         const bool sel = int(i) == np.selected;
         if (h.clicked) np.selected = int(i);
         dl->AddRectFilled(r.Min, r.Max, sel ? color::accentSoft : h.hovered ? color::hover : color::field, radius::card);
         dl->AddRect(r.Min, r.Max, sel ? color::accent : color::border, radius::card, 0, sel ? 2.0f : 1.0f);
         ImGui::PushClipRect(r.Min, r.Max, true);
         text(dl, ImVec2(r.Min.x + space::md, r.Min.y + space::sm + 2), f.semibold, type::body, color::text, t.name.c_str());
-        dl->AddText(f.regular, type::caption, ImVec2(r.Min.x + space::md, r.Min.y + space::sm + 26), color::textDim,
-                    t.description.c_str(), nullptr, cardW - space::md * 2);
+        dl->AddText(f.regular, type::caption, dmin, color::textDim, t.description.c_str(), nullptr, descW);
         ImGui::PopClipRect();
     }
-    if (!np.templates.empty()) y += cardH + space::md;
+    if (!np.templates.empty()) y += cardRowH.back() + space::md;
 
     // Project name and Location: label on the left, a field on the right.
     const float labelW = 110, rowH = size::field + 8;

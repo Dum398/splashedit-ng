@@ -164,8 +164,16 @@ NewProject createProject(const fs::path& dir, const TemplateInfo* tmpl) {
                 if (from == topScenes[0]) to = scene;
             r.scene = scene;
         } else {
+            // The template's build list says which scene the game starts
+            // on; without one (or with none of its entries among the top
+            // scenes) the alphabetically first opens.
             std::sort(topScenes.begin(), topScenes.end());
             r.scene = topScenes[0];
+            for (const fs::path& p : loadBuildList(tmpl->dir))
+                if (std::find(topScenes.begin(), topScenes.end(), p) != topScenes.end()) {
+                    r.scene = p;
+                    break;
+                }
         }
         for (const auto& [from, to] : files)
             if (fs::exists(dir / to, ec)) {

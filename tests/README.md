@@ -529,9 +529,14 @@ Cancel closes it; then, for each template, types a name and a temp location and 
 the `newproject: created <template id> <scene>` line, the scene on disk and opened, and for First and
 Third person a `.lua` and a `.blocks` script copied (template.json left behind). A folder that already
 holds a scene prints `newproject: failed ...` and keeps the modal open; with unsaved changes the Save
-changes prompt comes first. The optional PNG is the modal with Third person picked. Needs a display.
+changes prompt comes first. The optional PNG is the modal with Third person picked. With the
+Lamplighter sample fetched (`tools/fetch-samples.sh templates`) it also checks its card and that a
+project made from it prints `newproject: created lamplighter title.scene` (the first entry of its
+`scenes.list`), holds its four scenes, and that each exports with the `cli/splashpack-cli` beside the
+editor; unfetched, that fails unless `--allow-missing` is given. `--sample-shots <dir>` writes the modal
+with Lamplighter picked and the project it made. Needs a display.
 
-    python3 newprojectcheck.py <splashedit> [modal.png]
+    python3 newprojectcheck.py <splashedit> [modal.png] [--allow-missing] [--sample-shots <dir>]
 
 `templatecheck.py` checks the shipped templates (`templates/<id>/`, made by `make_templates`): each
 template.json has a name, description and order, and each scene exports with the CLI without warnings,
@@ -539,6 +544,14 @@ has a Player and nav regions, and attaches at least one Lua and one blocks scrip
 converting to Lua; Third person's Lua camera script takes the camera over.
 
     python3 templatecheck.py <splashpack-cli>
+
+`samplecheck.py` checks the sample games pinned in `templates/samples.lock`, as `tools/fetch-samples.sh`
+copies them into a templates folder (the tree's by default): Lamplighter's template.json is one New
+Project lists, by the name Lamplighter; its four scenes are at the top and its `scenes.list` starts on
+title.scene; each exports with the CLI and leaves the template untouched. A sample not fetched fails
+unless `--allow-missing` is given.
+
+    python3 samplecheck.py <splashpack-cli> [<templates-dir>] [--allow-missing]
 
 `buildproblemscheck.py` presses F5 on courtyard copies whose `scenes.list` adds `level2.scene` (memory
 card warnings), `level3.scene` (memory card errors) or `zbroken.scene` (not a scene), with pcsx-redux and

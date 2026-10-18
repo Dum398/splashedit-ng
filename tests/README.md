@@ -352,6 +352,11 @@ sheet). With `--stats`:
 
     python3 spritecheck.py <splashpack-cli>
 
+Booted on psxsplash (pcdrv, e.g. psxsplash's `tests/boot/boot.sh` on the exported `scene_0.*` with
+token `SPRITE OK`), `sprite/sprite.lua` looks both sheets and the three animations up by name,
+expects the indices the table gives them, makes a sprite from each sheet, plays an animation on each
+and prints `SPRITE OK` when `Sprite.Count()` is 2, else `SPRITE FAIL` and `BOOT FAIL`.
+
 ## UI
 
 `uicheck.py` exports `ui/ui.scene`, reads the UI table back the way `uisystem.cpp` does and resolves

@@ -689,6 +689,17 @@ exactly the edges the inspector reported.
 
     python3 walkoffcheck.py <splashedit> [keep.png]
 
+`agenteditcheck.py` adds an Agent from the Add component picker to an empty object (Guard, turned 45
+degrees) on a copy of the courtyard example, types Move speed (`obj.agspeed`), adds waypoints with
+`agaddobj` (the object's world position) and `agaddview` (under the view centre, at the object's
+height), types `obj.agwp1.x`, then reorders (`obj.agwp1.up`), deletes (`obj.agwp0.del`) and undoes.
+The editor prints `agent: <name> enabled on speed ... waypoints N clips ... bytes B warnings K`; the
+saved scene must hold each edit. Dragging the waypoint dots in the viewport (`vp.agwp<i>`) moves them on
+their own height, the first one even where it sits on the move gizmo's centre (the Guard stays put).
+The viewport draws the vision cone, hearing square and patrol in pink only with `vp.gizmos` on.
+
+    python3 agenteditcheck.py <splashedit> [keep.png]
+
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
 ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is

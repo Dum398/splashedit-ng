@@ -11,6 +11,7 @@
 
 #include "budget.hh"
 #include "ui/icons.h"
+#include "ui/scrub.hh"
 
 using namespace theme;
 
@@ -553,7 +554,8 @@ static ScrubState& scrubState() {
     return s;
 }
 
-FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit, ImU32 axis, const char* axisLabel, float* edit) {
+FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit, ImU32 axis, const char* axisLabel, float* edit,
+                      bool integer) {
     FieldEdit out;
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -601,11 +603,8 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
             if (!sc.dragging && ImGui::IsMouseDragPastThreshold(0)) sc.dragging = true;
             float dx = ImGui::GetIO().MouseDelta.x;
             if (sc.dragging && dx != 0) {
-                // Steps grow with the value: 0.01 per pixel below 1, then 1% of it.
-                float speed = std::max(0.01f, std::fabs(sc.value) * 0.01f) * (ImGui::GetIO().KeyShift ? 0.1f : 1.0f);
-                sc.value += dx * speed;
-                float step = std::pow(10.0f, std::floor(std::log10(speed)));
-                float shown = std::round(sc.value / step) * step;
+                // scrubRate(): one per pixel for whole numbers, else growing with the value.
+                const float shown = scrubTo(sc.value, dx, integer, ImGui::GetIO().KeyShift);
                 if (shown != *edit) {
                     *edit = shown;
                     out.changed = true;

@@ -4509,13 +4509,13 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
         nameRect("scene.spritecellw", cw);
         nameRect("scene.spritecellh", ch);
         float wv = float(s.cellW), hv = float(s.cellH);
-        FieldEdit fw = numberField("spritecellw", cw, std::to_string(s.cellW).c_str(), "px", color::textFaint, "W", &wv);
+        FieldEdit fw = numberField("spritecellw", cw, std::to_string(s.cellW).c_str(), "px", color::textFaint, "W", &wv, true);
         if (fw.changed) {
             const int v = std::clamp(int(std::lround(wv)), 1, 255);
             edit([v](splash::SpriteSheet& e) { e.cellW = v; }, "spritecellw");
         }
         if (fw.done) doc.endMerge();
-        FieldEdit fh = numberField("spritecellh", ch, std::to_string(s.cellH).c_str(), "px", color::textFaint, "H", &hv);
+        FieldEdit fh = numberField("spritecellh", ch, std::to_string(s.cellH).c_str(), "px", color::textFaint, "H", &hv, true);
         if (fh.changed) {
             const int v = std::clamp(int(std::lround(hv)), 1, 255);
             edit([v](splash::SpriteSheet& e) { e.cellH = v; }, "spritecellh");
@@ -4611,7 +4611,7 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 const ImRect rr = row(lid, label, tip);
                 nameRect(std::string("scene.") + id, rr);
                 float v = float(value);
-                if (numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v).changed)
+                if (numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v, true).changed)
                     value = std::clamp(int(std::lround(v)), lo, hi);
             };
             formInt("ldirframes", "Frames", "Cells each direction plays, one after another.", "dirsetframes", dirSpec.framesPerDirection,
@@ -4668,7 +4668,7 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 const ImRect rr = row(lid, label, tip);
                 nameRect(std::string("scene.") + id, rr);
                 float v = float(value);
-                FieldEdit fe = numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v);
+                FieldEdit fe = numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v, true);
                 if (fe.changed) {
                     const int n = std::clamp(int(std::lround(v)), lo, hi);
                     editAnim([&](splash::SpriteAnim& e) { set(e, n); }, id);

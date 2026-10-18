@@ -106,8 +106,9 @@ struct FieldEdit {
 // A number in a well. With `edit`, it is editable: drag horizontally to
 // scrub (faster for larger values, Shift for fine steps), double-click to
 // type (Enter or clicking away commits, Esc cancels). `value` is the text shown.
+// An `integer` field (pixels, frames) scrubs one per pixel (ui/scrub.hh).
 FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0,
-                      const char* axisLabel = nullptr, float* edit = nullptr);
+                      const char* axisLabel = nullptr, float* edit = nullptr, bool integer = false);
 // Three numberFields; `edit` points at three floats.
 FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit = nullptr,
                     float* edit = nullptr);

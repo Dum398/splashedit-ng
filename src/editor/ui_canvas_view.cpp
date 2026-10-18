@@ -1252,7 +1252,8 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
     auto number = [&](const char* id, ImRect field, int value, const char* unit, ImU32 axis, const char* axisLabel,
                       const std::function<void(UIElement&, int)>& set) {
         float v = float(value);
-        FieldEdit fe = numberField(id, field, std::to_string(value).c_str(), unit, axis, axisLabel, &v);
+        nameRect(std::string("ui.") + id, field);  // scripted tests: ui.posa, ui.sizeb, ...
+        FieldEdit fe = numberField(id, field, std::to_string(value).c_str(), unit, axis, axisLabel, &v, true);
         if (fe.changed) uic::editElement(doc, c, ei, [&](UIElement& el) { set(el, int(std::lround(v))); }, std::string("uinum") + id);
         if (fe.done) doc.endMerge();
     };
@@ -1569,7 +1570,7 @@ void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Docum
         const float half = (field.GetWidth() - space::xs) * 0.5f;
         auto number = [&](const char* id, ImRect fr, int value, ImU32 axis, const char* axisLabel, bool isX) {
             float v = float(value);
-            FieldEdit fe = numberField(id, fr, std::to_string(value).c_str(), nullptr, axis, axisLabel, &v);
+            FieldEdit fe = numberField(id, fr, std::to_string(value).c_str(), nullptr, axis, axisLabel, &v, true);
             if (fe.changed) {
                 const int d = int(std::lround(v)) - value;
                 uic::editElements(doc, c, sels, [&](UIElement& el, size_t) {
@@ -1617,7 +1618,7 @@ void CanvasView::canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Docu
             uic::editCanvas(doc, c, [](UICanvas& x) { x.visible = !x.visible; });
         ImRect sf = rows.row("lcvsort", "Sort order", "0 is at the back, 255 in front; canvases with higher orders draw over lower ones.");
         float v = float(cv.sortOrder);
-        FieldEdit fe = numberField("cvsort", sf, std::to_string(cv.sortOrder).c_str(), nullptr, 0, nullptr, &v);
+        FieldEdit fe = numberField("cvsort", sf, std::to_string(cv.sortOrder).c_str(), nullptr, 0, nullptr, &v, true);
         if (fe.changed)
             uic::editCanvas(doc, c, [&](UICanvas& x) { x.sortOrder = std::clamp(int(std::lround(v)), 0, 255); }, "uicvsort");
         if (fe.done) doc.endMerge();
@@ -1805,7 +1806,7 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             ImRect zf = rows.row("lfsize", "Size", "Pixels per em the TTF/OTF is rasterised at, 4 to 64.");
             nameRect(id + ".size", zf);
             float v = float(uf.size);
-            FieldEdit fe = numberField("fsize", zf, std::to_string(uf.size).c_str(), "px", 0, nullptr, &v);
+            FieldEdit fe = numberField("fsize", zf, std::to_string(uf.size).c_str(), "px", 0, nullptr, &v, true);
             if (fe.changed)
                 uic::editFont(doc, i, [&](splash::UIFont& x) { x.size = std::clamp(int(std::lround(v)), 4, 64); }, "uifontsize" + id);
             if (fe.done) doc.endMerge();
@@ -1816,11 +1817,11 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             nameRect(id + ".gw", wf);
             nameRect(id + ".gh", hf);
             float w = float(uf.glyphWidth), h = float(uf.glyphHeight);
-            FieldEdit fw = numberField("fgw", wf, std::to_string(uf.glyphWidth).c_str(), nullptr, color::axisX, "W", &w);
+            FieldEdit fw = numberField("fgw", wf, std::to_string(uf.glyphWidth).c_str(), nullptr, color::axisX, "W", &w, true);
             if (fw.changed)
                 uic::editFont(doc, i, [&](splash::UIFont& x) { x.glyphWidth = std::clamp(int(std::lround(w)), 4, 64); }, "uifontgw" + id);
             if (fw.done) doc.endMerge();
-            FieldEdit fh = numberField("fgh", hf, std::to_string(uf.glyphHeight).c_str(), nullptr, color::axisY, "H", &h);
+            FieldEdit fh = numberField("fgh", hf, std::to_string(uf.glyphHeight).c_str(), nullptr, color::axisY, "H", &h, true);
             if (fh.changed)
                 uic::editFont(doc, i, [&](splash::UIFont& x) { x.glyphHeight = std::clamp(int(std::lround(h)), 4, 64); }, "uifontgh" + id);
             if (fh.done) doc.endMerge();

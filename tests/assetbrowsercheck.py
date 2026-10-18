@@ -9,7 +9,9 @@
 # prompt, and Ctrl+Z brings it back; opening the project empties deletes
 # a month old from .trash. A rename leaves the scene unsaved; a file dropped
 # on a folder tile moves into it; View > Project reopens the folded panel,
-# whose chevron points up (the way it opens) and down when open.
+# whose chevron points up (the way it opens) and down when open. A right-click
+# on a folder of the tree opens that folder's menu (its Rename renames it, the
+# scene's references along); on the tree's root, the grid's menu for the root.
 # The dock's tab strip is the Timeline's 46 px with either in front. Drives the editor headless on copies of
 # the courtyard example and reads the saved scenes and the files on disk.
 # usage: python3 assetbrowsercheck.py <splashedit>   (needs a display: xvfb-run -a)
@@ -100,6 +102,12 @@ def find(objects, name):
         if hit:
             return hit
     return None
+
+
+def flat(objects):
+    for o in objects:
+        yield o
+        yield from flat(o.get('children', []))
 
 
 def comp(obj, kind):
@@ -386,6 +394,28 @@ out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3', '--click',
                            '--click', '@menu.view/Project', '--wait', '5'])
 check('View > Project opens it again on the project root', getattr(run, 'open', None) is True and
       shown == ['meshes', 'scripts', 'textures', 'courtyard.scene'] and 'popups open: no' in out, str(shown) + ' | ' + out[-200:])
+
+# --- the folder tree's right-click menu: a folder's own (as its grid tile has),
+# and the grid's menu for the project root ---
+project = project_copy()
+out, shown = run(project, ['--click', MESHES_ROW + ',1', '--wait', '3'])
+check('right-clicking a folder in the tree opens its menu', 'popups open: yes' in out and 'control assets.menu/Rename at' in out
+      and 'control assets.menu/Delete at' in out, out[-300:])
+out, shown = run(project, ['--click', MESHES_ROW + ',1', '--wait', '3', '--click', '@assets.menu/Rename', '--wait', '3',
+                           '--text', 'props', '--key', 'enter', '--wait', '5', '--key', 'ctrl+s', '--wait', '5'])
+meshes = sorted({comp(o, 'mesh')['mesh'].split('/')[0] for o in flat(scene(project)['objects']) if comp(o, 'mesh')})
+check("its Rename renames the folder, the scene's references along", os.path.isdir(os.path.join(project, 'props')) and
+      not os.path.exists(os.path.join(project, 'meshes')) and meshes == ['props'], (os.listdir(project), meshes, out[-300:]))
+root = re.search(r'control assets\.tree/\. at (\d+),(\d+) (\d+),(\d+)', out)
+check('the tree names its root row', root is not None, out[-300:])
+if root:
+    x0, y0, x1, y1 = map(int, root.groups())
+    rootRow = '%d,%d' % ((x0 + x1) // 2, (y0 + y1) // 2)
+    project = project_copy()
+    out, shown = run(project, ['--click', MESHES_ROW + ',0', '--wait', '3', '--click', rootRow + ',1', '--wait', '3',
+                               '--click', '@assets.menu/New folder', '--wait', '3', '--key', 'enter', '--wait', '5'])
+    check("the root's menu makes a new folder in the root (shown there to rename)",
+          os.path.isdir(os.path.join(project, 'New Folder')) and 'New Folder' in (shown or []), (os.listdir(project), shown))
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

@@ -878,7 +878,11 @@ reference along. Delete is refused on a used file and moves an unused one into t
 `.trash/1/` after the prompt; Ctrl+Z brings it back. Opening a project empties a `.trash/<n>/`
 older than 30 days (and keeps a newer one), saying so in the status bar. The chevron folds the
 panel and View > Project opens it again; it points up while the panel is folded (the panel opens
-upward) and down while it is open, and so does the scene panel's Assets row (read off the screenshot). The Timeline tab is clicked low in the dock's tab strip,
+upward) and down while it is open, and so does the scene panel's Assets row (read off the screenshot).
+A right-click on a folder of the panel's tree (rows named `assets.tree/<folder>`, the root
+`assets.tree/.`) opens that folder's menu, as its grid tile does: its Rename renames `meshes`, the
+scene's references along. On the root it opens the grid's menu for the root: New folder, with the
+grid showing another folder, makes `New Folder` in the root and shows the root to rename it. The Timeline tab is clicked low in the dock's tab strip,
 which is 46 px high (the Timeline's header) with Project in front too. Needs a display (CI runs it
 under `xvfb-run` on Linux).
 

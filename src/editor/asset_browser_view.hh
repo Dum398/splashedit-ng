@@ -119,6 +119,7 @@ class AssetBrowser {
     std::string m_renaming;
     bool m_renameStart = false;
     std::string m_menuFor;
+    std::string m_menuIn;  // with no m_menuFor: the folder the menu's New items write into
     bool m_openMenu = false;
     ImVec2 m_menuPos;
     enum class Ask { None, Delete, CannotRename, CannotDelete } m_ask = Ask::None;

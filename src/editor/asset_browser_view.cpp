@@ -461,7 +461,16 @@ void AssetBrowser::folderTree(ImDrawList*, ImRect r) {
         row.expanded = expanded;
         row.selected = p == m_folder && m_query.empty() && !m_types;
         Hit h = treeRow(("f:" + p).c_str(), rr, row);
+        nameRect("assets.tree/" + (p.empty() ? std::string(".") : p), rr);  // scripted tests
         m_folderTargets.push_back({ImRect(ImMax(rr.Min, r.Min), ImMin(rr.Max, r.Max)), p});
+        // Right-click: the folder's menu, as its tile in the grid has; the
+        // project root (no tile) has the grid's own menu, for the root (#161).
+        if (h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+            m_menuFor = p;
+            m_menuIn = p;
+            m_openMenu = true;
+            m_menuPos = io.MousePos;
+        }
         if (h.clicked) {
             if (hasChildren && io.MousePos.x < rr.Min.x + space::xs + depth * 16.0f + 16)
                 m_collapsed[p] = expanded;
@@ -648,6 +657,7 @@ void AssetBrowser::files(ImDrawList* dl, ImRect r, editor::Document& doc) {
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             m_selected.clear();
             m_menuFor.clear();
+            m_menuIn = m_folder;
             m_openMenu = true;
             m_menuPos = io.MousePos;
         }
@@ -801,12 +811,21 @@ void AssetBrowser::menu(editor::Document& doc) {
         items.push_back({});
         const bool generated = !e->madeBy.empty();
         const bool holdsOpen = holdsOpenScene(*e);
-        items.push_back({"Rename", "F2", true, [this, path, generated, holdsOpen] {
+        const std::string holder = e->folder;
+        items.push_back({"Rename", "F2", true, [this, path, holder, generated, holdsOpen] {
                              if (generated || holdsOpen) {
                                  m_ask = Ask::CannotRename;
                                  m_askFor = path;
                                  m_openAsk = true;
                              } else {
+                                 // Renamed in place in the grid: from the tree, show the folder holding it.
+                                 if (std::find(m_shown.begin(), m_shown.end(), path) == m_shown.end()) {
+                                     m_folder = holder;
+                                     m_query.clear();
+                                     m_types = 0;
+                                     m_scroll = 0;
+                                 }
+                                 m_selected = path;
                                  m_renaming = path;
                                  m_renameStart = true;
                              }
@@ -823,7 +842,8 @@ void AssetBrowser::menu(editor::Document& doc) {
                          }});
         items.push_back({"Copy path", "", true, [path] { SDL_SetClipboardText(path.c_str()); }});
     } else {
-        const std::string folder = m_folder;
+        // The grid's folder, or the root's from the tree: what is made there shows in the grid.
+        const std::string folder = m_menuIn;
         items.push_back({"New folder", "", m_query.empty() && !m_types, [this, &doc, project, folder] {
                              std::string name = "New Folder";
                              std::error_code ec;
@@ -837,6 +857,7 @@ void AssetBrowser::menu(editor::Document& doc) {
                              }
                              m_index.scan(project);
                              m_refs.update(m_index, doc.scene(), m_openScene, doc.revision());
+                             m_folder = folder;
                              m_selected = rel;
                              m_renaming = rel;
                              m_renameStart = true;
@@ -853,6 +874,7 @@ void AssetBrowser::menu(editor::Document& doc) {
             }
             m_index.scan(project);
             m_refs.update(m_index, doc.scene(), m_openScene, doc.revision());
+            m_folder = folder;
             m_selected = ns.path;
             m_renaming = ns.path;
             m_renameStart = true;

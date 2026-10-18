@@ -117,6 +117,122 @@ SpriteGrid spriteGrid(const splash::SpriteSheet& s, int width, int height) {
     return g;
 }
 
+std::vector<DirectionSet> directionSets(const splash::SpriteSheet& s) {
+    std::vector<DirectionSet> out;
+    const int n = int(s.anims.size());
+    for (int i = 0; i < n;) {
+        const std::string& name = s.anims[size_t(i)].name;
+        int found = 0;
+        if (name.size() > 2 && name.compare(name.size() - 2, 2, "_n") == 0) {
+            const std::string base = name.substr(0, name.size() - 2);
+            for (int count : {8, 4}) {
+                const std::vector<std::string>& suf = splash::spriteDirectionSuffixes(count);
+                bool all = i + count <= n;
+                for (int d = 0; all && d < count; d++) all = s.anims[size_t(i + d)].name == base + "_" + suf[size_t(d)];
+                if (all) {
+                    out.push_back({base, count, i});
+                    found = count;
+                    break;
+                }
+            }
+        }
+        i += found ? found : 1;
+    }
+    return out;
+}
+
+const DirectionSet* directionSetOf(const std::vector<DirectionSet>& sets, int anim) {
+    for (const DirectionSet& d : sets)
+        if (anim >= d.first && anim < d.first + d.count) return &d;
+    return nullptr;
+}
+
+std::string facingLuaLine(const DirectionSet& set) {
+    return "Sprite.SetFacingFromYaw(sprite, \"" + set.base + "_n\", " + std::to_string(set.count) + ", yaw)";
+}
+
+namespace {
+
+// UTF-16 code units in UTF-8 `s`: psxsplash keeps 24 of them of a name.
+size_t utf16Units(const std::string& s) {
+    size_t n = 0;
+    for (size_t i = 0; i < s.size();) {
+        const unsigned char c = uint8_t(s[i]);
+        const size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        n += len == 4 ? 2 : 1;
+        i += len;
+    }
+    return n;
+}
+
+}  // namespace
+
+DirectionSetSpec defaultDirectionSet(const splash::SpriteSheet& s, int directions, int cols, int rows) {
+    DirectionSetSpec d;
+    d.directions = directions == 4 ? 4 : 8;
+    d.framesPerDirection = std::max(cols, 1);
+    int next = 0;
+    for (const splash::SpriteAnim& o : s.anims) next = std::max(next, o.firstFrame + std::max(o.frameCount, 1));
+    if (cols > 0) next = (next + cols - 1) / cols * cols;  // the start of the next row
+    const int cells = cols * rows;
+    d.firstCell = cells > 0 && next + d.directions * d.framesPerDirection > cells ? 0 : next;
+    return d;
+}
+
+int addDirectionSet(Document& doc, int sheet, const DirectionSetSpec& spec, int cells, std::string* error) {
+    auto fail = [&](const std::string& why) {
+        if (error) *error = why;
+        return -1;
+    };
+    if (!validSheet(doc, sheet)) return fail("No sprite sheet is selected.");
+    const std::vector<splash::SpriteSheet>& sheets = doc.scene().spriteSheets;
+    const std::vector<std::string>& suffixes = splash::spriteDirectionSuffixes(spec.directions);
+    if (suffixes.empty()) return fail("A direction set has 4 or 8 directions.");
+    const int n = spec.directions;
+    if (spec.base.empty()) return fail("Type a base name: the animations are named base_n, base_e and so on.");
+    if (utf16Units(spec.base) + 3 > 24)
+        return fail("'" + spec.base + "' is too long: psxsplash keeps 24 characters of a name and " + spec.base +
+                    "_sw needs " + std::to_string(utf16Units(spec.base) + 3) + ".");
+    if (spec.framesPerDirection < 1 || spec.framesPerDirection > 255) return fail("Frames per direction must be 1 to 255.");
+    if (spec.frameDuration < 1 || spec.frameDuration > 255) return fail("The frame time must be 1 to 255 vsyncs.");
+    if (spec.firstCell < 0) return fail("The first cell must be 0 or more.");
+    for (const std::string& suf : suffixes) {
+        const std::string name = spec.base + "_" + suf;
+        for (const splash::SpriteSheet& s : sheets)
+            for (const splash::SpriteAnim& a : s.anims)
+                if (a.name == name)
+                    return fail("'" + name + "' is already an animation in sheet '" + s.name +
+                                "': Sprite.AnimIndex searches every sheet, so pick another base name.");
+    }
+    if (cells <= 0) return fail("The sheet's cells are unknown: give it a texture that is a whole number of cells first.");
+    const int last = spec.firstCell + n * spec.framesPerDirection - 1;
+    if (last >= cells)
+        return fail(std::to_string(n) + " x " + std::to_string(spec.framesPerDirection) + " frames from cell " +
+                    std::to_string(spec.firstCell) + " end on cell " + std::to_string(last) + ", past the sheet's " +
+                    std::to_string(cells) + " cells (0.." + std::to_string(cells - 1) + ").");
+    size_t total = 0;
+    for (const splash::SpriteSheet& s : sheets) total += s.anims.size();
+    if (total + size_t(n) > size_t(splash::kMaxSpriteAnims))
+        return fail(std::to_string(n) + " more animations would make " + std::to_string(total + size_t(n)) +
+                    ", psxsplash loads at most " + std::to_string(splash::kMaxSpriteAnims) + ".");
+    int at = -1;
+    doc.editSpriteSheets([&](std::vector<splash::SpriteSheet>& all) {
+        auto& anims = all[size_t(sheet)].anims;
+        at = int(anims.size());
+        for (int d = 0; d < n; d++) {
+            splash::SpriteAnim a;
+            a.name = spec.base + "_" + suffixes[size_t(d)];
+            a.firstFrame = spec.firstCell + d * spec.framesPerDirection;
+            a.frameCount = spec.framesPerDirection;
+            a.frameDuration = spec.frameDuration;
+            a.loop = spec.loop;
+            anims.push_back(a);
+        }
+    });
+    if (error) error->clear();
+    return at;
+}
+
 int spriteAnimFrameAt(const splash::SpriteAnim& a, long long vsyncs) {
     if (a.frameCount < 1) return 0;
     const long long dur = std::max(a.frameDuration, 1);

@@ -10938,6 +10938,250 @@ void testSpriteSheets() {
     }
 }
 
+// Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
+// animation facingFromYaw(yaw, n) places after walk_s in the exported table,
+// so a set is n animations named in increasing-yaw order, one after another.
+void testSpriteDirectionSets() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "spritedirs";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "tests" / "sprite", project, fs::copy_options::recursive);
+    splash::Scene scene = splash::loadScene(project / "sprite.scene");
+    for (splash::Object& o : scene.objects)
+        if (o.mesh) {
+            o.mesh->mesh = (src / "examples" / "courtyard" / "meshes" / "crate.mesh").string();
+            for (splash::Material& m : o.mesh->materials) m.texture = (src / "examples" / "courtyard" / "textures" / "crate.png").string();
+        }
+    // hero: walk 0+4, jump 4+4 on 8 cells; fx: spark 2+5 on 8 cells.
+    CHECK(scene.spriteSheets.size() == 2 && scene.spriteSheets[0].anims.size() == 2 && scene.spriteSheets[1].anims.size() == 1);
+
+    // The suffixes, in the order yaw increases from 0.
+    CHECK(splash::spriteDirectionSuffixes(4) == (std::vector<std::string>{"n", "e", "s", "w"}));
+    CHECK(splash::spriteDirectionSuffixes(8) == (std::vector<std::string>{"n", "ne", "e", "se", "s", "sw", "w", "nw"}));
+    CHECK(splash::spriteDirectionSuffixes(6).empty() && splash::spriteDirectionSuffixes(0).empty());
+
+    editor::Document d;
+    d.reset(scene, project);
+    const size_t h0 = d.historySize();
+    std::string err = "stale";
+    // 4 directions of 2 frames on fx: zap_n 0-1, zap_e 2-3, zap_s 4-5, zap_w 6-7, in one step.
+    editor::DirectionSetSpec four;
+    four.base = "zap";
+    four.directions = 4;
+    four.framesPerDirection = 2;
+    four.firstCell = 0;
+    four.frameDuration = 5;
+    four.loop = false;
+    CHECK(editor::addDirectionSet(d, 1, four, 8, &err) == 1 && err.empty());
+    CHECK(d.historySize() == h0 + 1);
+    {
+        const auto& fa = d.scene().spriteSheets[1].anims;
+        const char* names[4] = {"zap_n", "zap_e", "zap_s", "zap_w"};
+        CHECK(fa.size() == 5);
+        for (int k = 0; k < 4 && fa.size() == 5; k++)
+            CHECK(fa[size_t(1 + k)].name == names[k] && fa[size_t(1 + k)].firstFrame == 2 * k && fa[size_t(1 + k)].frameCount == 2 &&
+                  fa[size_t(1 + k)].frameDuration == 5 && !fa[size_t(1 + k)].loop);
+        const std::vector<editor::DirectionSet> sets = editor::directionSets(d.scene().spriteSheets[1]);
+        CHECK(sets.size() == 1 && sets[0].base == "zap" && sets[0].count == 4 && sets[0].first == 1);
+        CHECK(editor::directionSetOf(sets, 0) == nullptr && editor::directionSetOf(sets, 1) && editor::directionSetOf(sets, 4) &&
+              editor::directionSetOf(sets, 5) == nullptr);
+        if (!sets.empty()) CHECK(editor::facingLuaLine(sets[0]) == "Sprite.SetFacingFromYaw(sprite, \"zap_n\", 4, yaw)");
+    }
+    CHECK(d.undo() && d.scene().spriteSheets == scene.spriteSheets);  // one Ctrl+Z takes all four
+    CHECK(d.redo() && d.scene().spriteSheets[1].anims.size() == 5);
+    // 8 directions of 1 frame on hero, after walk and jump.
+    editor::DirectionSetSpec eight;
+    eight.base = "run";
+    eight.framesPerDirection = 1;
+    eight.firstCell = 0;
+    CHECK(eight.directions == 8 && eight.frameDuration == 6 && eight.loop);
+    CHECK(editor::addDirectionSet(d, 0, eight, 8, &err) == 2 && err.empty());
+    {
+        const auto& ha = d.scene().spriteSheets[0].anims;
+        const char* names[8] = {"run_n", "run_ne", "run_e", "run_se", "run_s", "run_sw", "run_w", "run_nw"};
+        CHECK(ha.size() == 10);
+        for (int k = 0; k < 8 && ha.size() == 10; k++)
+            CHECK(ha[size_t(2 + k)].name == names[k] && ha[size_t(2 + k)].firstFrame == k && ha[size_t(2 + k)].frameCount == 1);
+        const std::vector<editor::DirectionSet> sets = editor::directionSets(d.scene().spriteSheets[0]);
+        CHECK(sets.size() == 1 && sets[0].base == "run" && sets[0].count == 8 && sets[0].first == 2);
+    }
+
+    // Each refusal says why and leaves the scene and its history alone.
+    auto refused = [&](int sheet, const editor::DirectionSetSpec& spec, int cells) {
+        const size_t h = d.historySize();
+        const std::vector<splash::SpriteSheet> before = d.scene().spriteSheets;
+        std::string why;
+        const int r = editor::addDirectionSet(d, sheet, spec, cells, &why);
+        CHECK(r == -1 && d.historySize() == h && d.scene().spriteSheets == before);
+        if (why.empty()) std::fprintf(stderr, "direction set refusal without a reason\n");
+        return why;
+    };
+    editor::DirectionSetSpec s4 = four;
+    s4.frameDuration = 6;
+    CHECK(refused(0, s4, 8).find("'zap_n' is already an animation in sheet 'fx'") != std::string::npos);  // any sheet
+    d.editSpriteSheets([](std::vector<splash::SpriteSheet>& sh) { sh[0].anims[0].name = "fly_s"; });
+    s4.base = "fly";
+    CHECK(refused(1, s4, 8).find("'fly_s' is already an animation in sheet 'hero'") != std::string::npos);  // not just _n
+    CHECK(d.undo());
+    s4.base = "hop";
+    s4.firstCell = 1;
+    CHECK(refused(0, s4, 8).find("4 x 2 frames from cell 1 end on cell 8, past the sheet's 8 cells (0..7)") != std::string::npos);
+    s4.firstCell = 0;
+    s4.framesPerDirection = 3;
+    CHECK(refused(0, s4, 8).find("end on cell 11") != std::string::npos);
+    s4.framesPerDirection = 2;
+    CHECK(refused(0, s4, 0).find("cells are unknown") != std::string::npos);
+    editor::DirectionSetSpec bad = s4;
+    bad.directions = 6;
+    CHECK(refused(0, bad, 8).find("4 or 8 directions") != std::string::npos);
+    bad = s4;
+    bad.base.clear();
+    CHECK(refused(0, bad, 8).find("Type a base name") != std::string::npos);
+    bad.base = std::string(22, 'x');  // xxx_ne would be 25
+    CHECK(refused(0, bad, 8).find("too long") != std::string::npos);
+    bad.base = std::string(21, 'x');  // 24 exactly fits
+    CHECK(editor::addDirectionSet(d, 0, bad, 8, &err) >= 0 && d.undo());
+    bad = s4;
+    bad.framesPerDirection = 0;
+    CHECK(refused(0, bad, 8).find("Frames per direction") != std::string::npos);
+    bad = s4;
+    bad.frameDuration = 256;
+    CHECK(refused(0, bad, 8).find("frame time") != std::string::npos);
+    bad = s4;
+    bad.firstCell = -1;
+    CHECK(refused(0, bad, 8).find("first cell") != std::string::npos);
+    CHECK(editor::addDirectionSet(d, 7, s4, 8, &err) == -1 && !err.empty());
+    // psxsplash's 64 animations: 15 now; 45 more make 60, then 4 fit and 8 do not.
+    d.editSpriteSheets([](std::vector<splash::SpriteSheet>& sh) {
+        for (int i = 0; i < 45; i++) {
+            splash::SpriteAnim a;
+            a.name = "pad" + std::to_string(i);
+            sh[1].anims.push_back(a);
+        }
+    });
+    eight.base = "dash";
+    CHECK(refused(0, eight, 8).find("8 more animations would make 68, psxsplash loads at most 64") != std::string::npos);
+    CHECK(editor::addDirectionSet(d, 0, s4, 8, &err) >= 0 && d.undo());  // 64 exactly
+    CHECK(d.undo() && d.scene().spriteSheets[1].anims.size() == 5);
+
+    // The form's defaults: a row of cells per direction, after the sheet's animations when the set fits there.
+    {
+        splash::SpriteSheet s;
+        s.anims.push_back({});  // idle on cell 0
+        editor::DirectionSetSpec def = editor::defaultDirectionSet(s, 4, 8, 8);
+        CHECK(def.base == "walk" && def.directions == 4 && def.framesPerDirection == 8 && def.firstCell == 8);
+        def = editor::defaultDirectionSet(s, 8, 8, 8);
+        CHECK(def.directions == 8 && def.framesPerDirection == 8 && def.firstCell == 0);  // 8 + 64 > 64: from the top
+        def = editor::defaultDirectionSet(s, 8, 0, 0);  // grid unknown
+        CHECK(def.framesPerDirection == 1 && def.firstCell == 1);
+    }
+
+    // Recognised sets: exactly the suffixes in order, one after another.
+    auto sheetOf = [](std::initializer_list<const char*> names) {
+        splash::SpriteSheet s;
+        s.name = "t";
+        for (const char* n : names) {
+            splash::SpriteAnim a;
+            a.name = n;
+            s.anims.push_back(a);
+        }
+        return s;
+    };
+    auto setsOf = [&](std::initializer_list<const char*> names) {
+        std::string o;
+        for (const editor::DirectionSet& ds : editor::directionSets(sheetOf(names)))
+            o += ds.base + ":" + std::to_string(ds.count) + "@" + std::to_string(ds.first) + " ";
+        return o;
+    };
+    CHECK(setsOf({"idle", "walk_n", "walk_e", "walk_s", "walk_w"}) == "walk:4@1 ");
+    CHECK(setsOf({"a_n", "a_ne", "a_e", "a_se", "a_s", "a_sw", "a_w", "a_nw", "b_n", "b_e", "b_s", "b_w"}) == "a:8@0 b:4@8 ");
+    CHECK(setsOf({"my_walk_n", "my_walk_e", "my_walk_s", "my_walk_w"}) == "my_walk:4@0 ");
+    CHECK(setsOf({"walk_n", "walk_s", "walk_e", "walk_w"}).empty());           // out of order
+    CHECK(setsOf({"walk_n", "walk_e", "walk_s"}).empty());                      // missing w
+    CHECK(setsOf({"walk_n", "walk_e", "idle", "walk_s", "walk_w"}).empty());    // not one after another
+    CHECK(setsOf({"walk_n", "walk_ne", "walk_e", "walk_se", "walk_s", "walk_sw", "walk_w"}).empty());  // 7 of 8
+    CHECK(setsOf({"walk_n", "run_e", "run_s", "run_w"}).empty());               // bases differ
+    CHECK(setsOf({"_n", "_e", "_s", "_w"}).empty());                            // no base
+
+    // The Problems warning, from checkSpriteSheets (export and the inspector).
+    auto warned = [&](std::vector<splash::SpriteSheet> sh) {
+        std::vector<std::string> errors, warnings;
+        splash::checkSpriteSheets(
+            sh, [](const splash::SpriteSheet&) -> splash::SpriteTextureSize { return {64, 64, {}}; }, errors, warnings);
+        std::string all;
+        for (const std::string& w : warnings) all += w + "\n";
+        return all;
+    };
+    CHECK(warned({sheetOf({"idle", "walk_n", "walk_e", "walk_s", "walk_w"})}).empty());
+    CHECK(warned({sheetOf({"door_s", "idle"})}).empty());  // one direction-like name is just a name
+    std::string w = warned({sheetOf({"walk_n", "walk_s", "walk_e", "walk_w"})});
+    CHECK(w.find("sprite animations walk_*: listed in the order n s e w") != std::string::npos &&
+          w.find("Sprite.SetFacingFromYaw(sprite, \"walk_n\", 4, yaw) would play the wrong animation: list them n e s w") !=
+              std::string::npos);
+    w = warned({sheetOf({"walk_n", "walk_e", "walk_s"})});
+    CHECK(w.find("no walk_w, so Sprite.SetFacingFromYaw") != std::string::npos);
+    w = warned({sheetOf({"walk_n", "walk_ne", "walk_e", "walk_s", "walk_sw", "walk_w", "walk_nw"})});
+    CHECK(w.find("no walk_se") != std::string::npos && w.find("\", 8, yaw)") != std::string::npos);
+    w = warned({sheetOf({"walk_n", "walk_e", "idle", "walk_s", "walk_w"})});
+    CHECK(w.find("other animations sit between them") != std::string::npos && w.find("wrong animation") != std::string::npos);
+    w = warned({sheetOf({"walk_n", "walk_e", "idle"}), sheetOf({"walk_s", "walk_w"})});
+    CHECK(w.find("other animations sit between them in the table (they are split across sprite sheets)") != std::string::npos);
+    {
+        std::vector<splash::SpriteSheet> two = {sheetOf({"walk_n", "walk_e"}), sheetOf({"walk_s", "walk_w"})};
+        two[1].name = "u";
+        w = warned(two);
+        CHECK(w.find("split across sprite sheets 't' and 'u'") != std::string::npos);
+    }
+    w = warned({sheetOf({"walk_n", "walk_e", "walk_e", "walk_s", "walk_w"})});
+    CHECK(w.find("more than once") != std::string::npos);
+    // What the editor adds never warns.
+    CHECK(warned(d.scene().spriteSheets).empty());
+
+    // Export keeps the editor's order: sheets as listed, each sheet's
+    // animations as listed, so a set stays one after another in the table and
+    // its table index + direction lands on the right name.
+    splash::ExportResult r = splash::exportSplashpack(d.scene(), project, project / "dirs.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "direction set export: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string b = readAll(project / "dirs.splashpack");
+    std::vector<std::pair<int, std::string>> want;  // (sheet, name) in editor order
+    for (size_t i = 0; i < d.scene().spriteSheets.size(); i++)
+        for (const splash::SpriteAnim& a : d.scene().spriteSheets[i].anims) want.push_back({int(i), a.name});
+    CHECK(want.size() == 15);
+    if (r.ok() && b.size() > 136) {
+        const size_t off = size_t(rd32(b, 128));
+        const int sheetsN = rd16(b, 132), animsN = rd16(b, 134);
+        CHECK(sheetsN == 2 && animsN == 15);
+        std::vector<std::pair<int, std::string>> got;
+        std::vector<int> firsts;
+        for (int k = 0; k < animsN && off + 40 + 12 * size_t(k) + 12 <= b.size(); k++) {
+            const size_t rec = off + 20 * size_t(sheetsN) + 12 * size_t(k);
+            const size_t nameAt = size_t(rd32(b, rec));
+            got.push_back({int(uint8_t(b[rec + 4])), nameAt < b.size() ? std::string(b.c_str() + nameAt) : std::string()});
+            firsts.push_back(int(uint8_t(b[rec + 5])));
+        }
+        CHECK(got == want);
+        // The table index SetFacingFromYaw adds the direction to.
+        auto indexOf = [&](const std::string& n) {
+            for (size_t k = 0; k < got.size(); k++)
+                if (got[k].second == n) return int(k);
+            return -1;
+        };
+        const std::vector<std::string>& s8 = splash::spriteDirectionSuffixes(8);
+        const std::vector<std::string>& s4n = splash::spriteDirectionSuffixes(4);
+        const int run = indexOf("run_n"), zap = indexOf("zap_n");
+        CHECK(run == 2 && zap == 11);
+        for (int k = 0; k < 8 && run >= 0 && size_t(run + k) < got.size(); k++)
+            CHECK(got[size_t(run + k)].second == "run_" + s8[size_t(k)] && got[size_t(run + k)].first == 0 &&
+                  firsts[size_t(run + k)] == k);
+        for (int k = 0; k < 4 && zap >= 0 && size_t(zap + k) < got.size(); k++)
+            CHECK(got[size_t(zap + k)].second == "zap_" + s4n[size_t(k)] && got[size_t(zap + k)].first == 1 &&
+                  firsts[size_t(zap + k)] == 2 * k);
+    }
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -11084,6 +11328,7 @@ int main(int argc, char** argv) {
     testUvOffsetSlots();
     testSceneNetworkId();
     testSpriteSheets();
+    testSpriteDirectionSets();
     testUiSprite();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);

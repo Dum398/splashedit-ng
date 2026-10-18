@@ -39,6 +39,40 @@ struct SpriteGrid {
 };
 SpriteGrid spriteGrid(const splash::SpriteSheet& s, int width, int height);
 
+// A direction set: animations base_n, base_e, ... (splash::spriteDirectionSuffixes)
+// one after another, which Sprite.SetFacingFromYaw(sprite, "base_n", count, yaw)
+// picks from by yaw.
+struct DirectionSet {
+    std::string base;
+    int count = 0;  // 4 or 8
+    int first = 0;  // index of base_n in the sheet's animations
+};
+// The sets in `s`, in list order: `count` animations in a row named base_<suffix>
+// with exactly the suffixes in their order.
+std::vector<DirectionSet> directionSets(const splash::SpriteSheet& s);
+// The set animation `anim` of `s` belongs to, or nullptr.
+const DirectionSet* directionSetOf(const std::vector<DirectionSet>& sets, int anim);
+// The Lua line that turns a sprite of the set.
+std::string facingLuaLine(const DirectionSet& set);
+
+struct DirectionSetSpec {
+    std::string base = "walk";
+    int directions = 8;  // 4 or 8
+    int framesPerDirection = 1;
+    int firstCell = 0;  // direction d starts at firstCell + d * framesPerDirection
+    int frameDuration = 6;
+    bool loop = true;
+};
+// What the form starts with for sheet `s` whose grid has `cols` x `rows` cells:
+// a row of cells per direction (frames = cols), from the first row after the
+// sheet's animations, or row 0 when the set would not fit there.
+DirectionSetSpec defaultDirectionSet(const splash::SpriteSheet& s, int directions, int cols, int rows);
+// Appends the set to sheet `sheet` (whose grid has `cells` cells, 0 = unknown) as
+// one undo step. Returns the index of its first animation, or -1 with `error`
+// saying why nothing was added: a name already used in any sheet, cells past
+// the sheet, psxsplash's 64 animations, or a bad field.
+int addDirectionSet(Document& doc, int sheet, const DirectionSetSpec& spec, int cells, std::string* error);
+
 // The frame (index within the animation) psxsplash shows `vsyncs` vsyncs after
 // PlayAnim, stepping as spritemath::advanceAnim does: each frame shows
 // frameDuration vsyncs; a loop wraps, otherwise the last frame holds.

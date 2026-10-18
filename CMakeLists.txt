@@ -199,6 +199,7 @@ add_executable(splashedit
     src/ui/theme.cpp
     src/ui/splash.cpp
     src/ui/widgets.cpp
+    src/ui/texture_image.cpp
     src/viewport/ps1view.cpp
     src/mockup/main_screen.cpp
     src/editor/lua_editor_view.cpp

@@ -280,6 +280,9 @@ jobs:
       - name: UI image texture preview
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/uitexpreviewcheck.py build/splashedit
+      - name: Textures drawn nearest
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/nearestcheck.py build/splashedit
       # One download: the editor with its assets, the example project, the
       # engine and the latest pcsx-redux dev build for this OS.
       - uses: actions/download-artifact@v4

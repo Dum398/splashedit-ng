@@ -12,6 +12,7 @@
 
 #include "editor/document.hh"
 #include "gl.h"
+#include "ui/texture_image.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -103,7 +104,7 @@ float texturePreview(TexturePreviewView& tp, ImDrawList* dl, float x0, float x1,
     auto pane = [&](float px, unsigned tex, const char* badge, ImU32 badgeCol) {
         ImRect box(ImVec2(px, stripY), ImVec2(px + drawW, stripY + drawH));
         dl->AddRectFilled(box.Min - ImVec2(1, 1), box.Max + ImVec2(1, 1), color::field, radius::field);
-        dl->AddImage((ImTextureID)(intptr_t)tex, box.Min, box.Max);
+        ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, box.Min, box.Max);
         dl->AddRect(box.Min, box.Max, color::border, 0);
         if (badge) text(dl, ImVec2(box.Min.x + 3, box.Min.y + 2), f.semibold, type::caption, badgeCol, badge);
         return box;

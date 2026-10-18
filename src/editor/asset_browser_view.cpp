@@ -12,6 +12,7 @@
 #include "editor/project.hh"
 #include "gl.h"
 #include "ui/icons.h"
+#include "ui/texture_image.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -564,7 +565,7 @@ void AssetBrowser::files(ImDrawList* dl, ImRect r, editor::Document& doc) {
             float x = ir.Min.x + space::sm;
             if (tex) {
                 ImRect t(ImVec2(x, ir.Min.y + 3), ImVec2(x + 18, ir.Max.y - 3));
-                dl->AddImage((ImTextureID)(intptr_t)tex, t.Min, t.Max);
+                ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, t.Min, t.Max);
             } else {
                 text(dl, ImVec2(x, centerY(f.medium, type::icon, ir.Min.y, ir.Max.y)), f.medium, type::icon - 1, typeColor(e.type), typeIcon(e.type));
             }
@@ -589,7 +590,7 @@ void AssetBrowser::files(ImDrawList* dl, ImRect r, editor::Document& doc) {
                 const ImVec2 sz(tw * s, th * s);
                 const ImVec2 o = t.GetCenter() - sz * 0.5f;
                 dl->AddRectFilled(o - ImVec2(1, 1), o + sz + ImVec2(1, 1), color::field, 2);
-                dl->AddImage((ImTextureID)(intptr_t)tex, o, o + sz);
+                ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, o, o + sz);
             } else {
                 dl->AddRectFilled(t.Min, t.Max, e.type == AssetType::Folder ? 0 : color::raised, radius::card);
                 ImGui::PushFont(f.medium, 30.0f);

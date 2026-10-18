@@ -4320,6 +4320,11 @@ static const std::vector<std::string>& projectImages(const std::filesystem::path
 // cells), the selected sheet's settings and animations, and a preview playing
 // the selected animation from the converted texture at psxsplash's timing.
 // Every edit is one undo step (editor/sprites.hh).
+// Under a direction set's dial and in its tooltip: what the names mean on
+// psxsplash (measured: at yaw 0 an object faces the way the default camera looks).
+static constexpr const char* kFacingHint =
+    "n: back to the camera, s: facing it; pass the object's yaw minus Camera.GetRotation().y";
+
 template <typename Row, typename Caption>
 static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0, float x1, float& y, float lw, Row& row,
                                 Caption& caption) {
@@ -4588,11 +4593,11 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
             // The set's fields, then Create: nothing changes until then.
             const float top = y;
             y += space::xs;
-            const ImRect bRow = row("ldirbase", "Base name", "The animations are named base_s, base_w and so on (Sprite.PlayAnim).");
+            const ImRect bRow = row("ldirbase", "Base name", "The animations are named base_n, base_e and so on (Sprite.PlayAnim).");
             nameRect("scene.dirsetbase", bRow);
             std::string typedBase;
             if (textField("dirsetbase", bRow, dirSpec.base, &typedBase, "walk", 21)) dirSpec.base = typedBase;
-            const ImRect cRow = row("ldircount", "Directions", "4: s w n e. 8: s sw w nw n ne e se. In the order yaw increases from 0.");
+            const ImRect cRow = row("ldircount", "Directions", "4: n e s w. 8: n ne e se s sw w nw. In the order yaw increases from 0. n: back to the camera, s: facing it.");
             nameRect("scene.dirsetcount", cRow);
             static const char* const counts[2] = {"4 directions", "8 directions"};
             const int cp = dropdownMenu("scene.dirsetcount", cRow, nullptr, counts[dirSpec.directions == 4 ? 0 : 1],
@@ -4608,7 +4613,7 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
             };
             formInt("ldirframes", "Frames", "Cells each direction plays, one after another.", "dirsetframes", dirSpec.framesPerDirection,
                     "each", 1, 255);
-            formInt("ldirfirst", "First cell", "Where the first direction (s) starts; each next one starts where the last ended.",
+            formInt("ldirfirst", "First cell", "Where the first direction (n) starts; each next one starts where the last ended.",
                     "dirsetfirst", dirSpec.firstCell, nullptr, 0, 254);
             formInt("ldirdur", "Frame time", "How long each cell shows, in vsyncs (60 a second).", "dirsetdur", dirSpec.frameDuration,
                     "vsyncs", 1, 255);
@@ -4696,17 +4701,18 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
             if (const editor::DirectionSet* ds = editor::directionSetOf(dirSets, selAnim)) {
                 const int n = ds->count, d = selAnim - ds->first;
                 const std::vector<std::string>& suf = splash::spriteDirectionSuffixes(n);
-                const ImRect fr = row("lanimfacing", "Facing",
-                                      "Sprite.SetFacingFromYaw plays this animation while yaw is in its sector. Yaw is in pi-units "
-                                      "like Entity.SetRotationY: 0.5 is a quarter turn. Click a sector to select its animation.");
+                const std::string facingTip = std::string("Sprite.SetFacingFromYaw plays this animation while yaw is in its sector. ") +
+                                              kFacingHint + ". Yaw is in pi-units like Entity.SetRotationY: 0.5 is a quarter turn. "
+                                              "Click a sector to select its animation.";
+                const ImRect fr = row("lanimfacing", "Facing", facingTip.c_str());
                 const float dial = 112, R = dial * 0.5f - 2, r0 = 16;
                 const ImVec2 c(fr.Min.x + dial * 0.5f, fr.Min.y + dial * 0.5f);
                 const ImRect dialRect(ImVec2(c.x - R, c.y - R), ImVec2(c.x + R, c.y + R));
                 nameRect("scene.dirdial", dialRect);
-                // Sector k is centred on yaw 2k/n; it is drawn with s at the bottom and
-                // the directions going round clockwise, like a compass seen from above.
+                // Sector k is centred on yaw 2k/n; it is drawn with n at the top and the
+                // directions going round clockwise (e right), like a compass seen from above.
                 const float pi = 3.14159265f, span = 2 * pi / n;
-                auto angleOf = [&](int k) { return pi * 0.5f + k * span; };
+                auto angleOf = [&](int k) { return -pi * 0.5f + k * span; };
                 int clickedDir = -1;
                 for (int k = 0; k < n; k++) {
                     const float a0 = angleOf(k) - span * 0.5f, a1 = angleOf(k) + span * 0.5f;
@@ -4749,7 +4755,10 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 std::snprintf(t, sizeof t, "Direction %d of %d: yaw %s (%d\xc2\xb0), from %s to %s.", d + 1, n, yawStr(centre).c_str(),
                               int(std::lround(centre * 180)), yawStr(centre - half).c_str(), yawStr(centre + half).c_str());
                 caption(t, color::textDim);
-                caption("Yaw 0 plays " + ds->base + "_s; as yaw grows it goes round the dial clockwise.", color::textFaint);
+                caption("Yaw 0 plays " + ds->base + "_n; as yaw grows it goes round the dial clockwise.", color::textFaint);
+                // kFacingHint in two lines, the getter kept whole on its own.
+                caption("n: back to the camera, s: facing it.", color::textFaint);
+                caption("Pass the object's yaw minus\nCamera.GetRotation().y.", color::textFaint);
 
                 // The Lua line in a well (wrapped when narrow), Copy beside it.
                 const std::string lua = editor::facingLuaLine(*ds);

@@ -285,9 +285,11 @@ struct SpriteTextureSize {
 void checkSpriteSheets(const std::vector<SpriteSheet>& sheets,
                        const std::function<SpriteTextureSize(const SpriteSheet&)>& sizeOf, std::vector<std::string>& errors,
                        std::vector<std::string>& warnings);
-// Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the animation d
-// places after walk_s in the table for direction d, d = 0 centred on yaw 0 and
-// counting the way yaw increases. A direction set is n = 4 or 8 animations
+// Sprite.SetFacingFromYaw(sprite, "walk_n", n, yaw) plays the animation d
+// places after walk_n in the table for direction d, d = 0 centred on yaw 0 and
+// counting the way yaw increases. Measured on psxsplash with the default camera
+// (looking +Z): at yaw 0 an object's forward (+Z) is the camera's, so n is
+// its back to the camera, s faces it, e faces +X. A direction set is n = 4 or 8 animations
 // named base_<suffix> with these suffixes in this order, one after another in
 // one sheet; empty for any other n.
 const std::vector<std::string>& spriteDirectionSuffixes(int n);

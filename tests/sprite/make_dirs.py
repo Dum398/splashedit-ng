@@ -1,6 +1,6 @@
 # Writes dirs.png (committed; run again only to change it), the direction set
 # checks' sheet: 64x64, 16x16 cells, 4 x 4 grid. Cells 2d and 2d+1 are direction
-# d of an 8-direction set of 2 frames (s sw w nw n ne e se), a square filled with
+# d of an 8-direction set of 2 frames (n ne e se s sw w nw), a square filled with
 # that direction's colour, so a screenshot tells which direction plays; the
 # second frame has a dark bar. 11 colours (4 bpp holds 15 and transparent).
 # usage: python3 make_dirs.py

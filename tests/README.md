@@ -569,12 +569,12 @@ the screenshot of the edited section.
 `sprite/dirs.png` (64x64, 16x16 cells, made by `sprite/make_dirs.py`: cells 2d and 2d+1 filled with
 direction d's colour) added to its textures. The form's Create must refuse the default 8 x 4 frames
 (32 cells on a 16-cell sheet) with a message and add nothing; 8 directions of 2 frames must add
-`walk_s walk_sw walk_w walk_nw walk_n walk_ne walk_e walk_se` on cells 0-1 .. 14-15 (the order
+`walk_n walk_ne walk_e walk_se walk_s walk_sw walk_w walk_nw` on cells 0-1 .. 14-15 (the order
 `Sprite.SetFacingFromYaw` steps through as yaw grows), reported in `scene: sprite dirsets walk:8@1`
-and taken back by one Ctrl+Z; a second set named `walk` is refused; 4 directions must add `s w n e`
-a row each. The facing dial must light the selected direction (`scene: sprite facing walk_w 3/8`
+and taken back by one Ctrl+Z; a second set named `walk` is refused; 4 directions must add `n e s w`
+a row each. The facing dial must light the selected direction (`scene: sprite facing walk_w 7/8`
 after a click on its `w` sector) and Copy must put the `SetFacingFromYaw` line on the clipboard;
-deleting `walk_w` from a set of 4 must raise the `scene: sprite warnings` line and one warning in
+deleting `walk_e` from a set of 4 must raise the `scene: sprite warnings` line and one warning in
 Problems. A second argument saves the dial's screenshot (and the form's as `<name>-form.png`);
 `DIRSET_SCENE=<file>` keeps the 8-direction scene.
 

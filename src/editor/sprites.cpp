@@ -123,7 +123,7 @@ std::vector<DirectionSet> directionSets(const splash::SpriteSheet& s) {
     for (int i = 0; i < n;) {
         const std::string& name = s.anims[size_t(i)].name;
         int found = 0;
-        if (name.size() > 2 && name.compare(name.size() - 2, 2, "_s") == 0) {
+        if (name.size() > 2 && name.compare(name.size() - 2, 2, "_n") == 0) {
             const std::string base = name.substr(0, name.size() - 2);
             for (int count : {8, 4}) {
                 const std::vector<std::string>& suf = splash::spriteDirectionSuffixes(count);
@@ -148,7 +148,7 @@ const DirectionSet* directionSetOf(const std::vector<DirectionSet>& sets, int an
 }
 
 std::string facingLuaLine(const DirectionSet& set) {
-    return "Sprite.SetFacingFromYaw(sprite, \"" + set.base + "_s\", " + std::to_string(set.count) + ", yaw)";
+    return "Sprite.SetFacingFromYaw(sprite, \"" + set.base + "_n\", " + std::to_string(set.count) + ", yaw)";
 }
 
 namespace {
@@ -189,7 +189,7 @@ int addDirectionSet(Document& doc, int sheet, const DirectionSetSpec& spec, int 
     const std::vector<std::string>& suffixes = splash::spriteDirectionSuffixes(spec.directions);
     if (suffixes.empty()) return fail("A direction set has 4 or 8 directions.");
     const int n = spec.directions;
-    if (spec.base.empty()) return fail("Type a base name: the animations are named base_s, base_w and so on.");
+    if (spec.base.empty()) return fail("Type a base name: the animations are named base_n, base_e and so on.");
     if (utf16Units(spec.base) + 3 > 24)
         return fail("'" + spec.base + "' is too long: psxsplash keeps 24 characters of a name and " + spec.base +
                     "_sw needs " + std::to_string(utf16Units(spec.base) + 3) + ".");

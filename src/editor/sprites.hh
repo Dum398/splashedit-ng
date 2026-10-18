@@ -39,13 +39,13 @@ struct SpriteGrid {
 };
 SpriteGrid spriteGrid(const splash::SpriteSheet& s, int width, int height);
 
-// A direction set: animations base_s, base_w, ... (splash::spriteDirectionSuffixes)
-// one after another, which Sprite.SetFacingFromYaw(sprite, "base_s", count, yaw)
+// A direction set: animations base_n, base_e, ... (splash::spriteDirectionSuffixes)
+// one after another, which Sprite.SetFacingFromYaw(sprite, "base_n", count, yaw)
 // picks from by yaw.
 struct DirectionSet {
     std::string base;
     int count = 0;  // 4 or 8
-    int first = 0;  // index of base_s in the sheet's animations
+    int first = 0;  // index of base_n in the sheet's animations
 };
 // The sets in `s`, in list order: `count` animations in a row named base_<suffix>
 // with exactly the suffixes in their order.

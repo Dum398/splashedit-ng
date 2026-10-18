@@ -10958,15 +10958,15 @@ void testSpriteDirectionSets() {
     CHECK(scene.spriteSheets.size() == 2 && scene.spriteSheets[0].anims.size() == 2 && scene.spriteSheets[1].anims.size() == 1);
 
     // The suffixes, in the order yaw increases from 0.
-    CHECK(splash::spriteDirectionSuffixes(4) == (std::vector<std::string>{"s", "w", "n", "e"}));
-    CHECK(splash::spriteDirectionSuffixes(8) == (std::vector<std::string>{"s", "sw", "w", "nw", "n", "ne", "e", "se"}));
+    CHECK(splash::spriteDirectionSuffixes(4) == (std::vector<std::string>{"n", "e", "s", "w"}));
+    CHECK(splash::spriteDirectionSuffixes(8) == (std::vector<std::string>{"n", "ne", "e", "se", "s", "sw", "w", "nw"}));
     CHECK(splash::spriteDirectionSuffixes(6).empty() && splash::spriteDirectionSuffixes(0).empty());
 
     editor::Document d;
     d.reset(scene, project);
     const size_t h0 = d.historySize();
     std::string err = "stale";
-    // 4 directions of 2 frames on fx: zap_s 0-1, zap_w 2-3, zap_n 4-5, zap_e 6-7, in one step.
+    // 4 directions of 2 frames on fx: zap_n 0-1, zap_e 2-3, zap_s 4-5, zap_w 6-7, in one step.
     editor::DirectionSetSpec four;
     four.base = "zap";
     four.directions = 4;
@@ -10978,7 +10978,7 @@ void testSpriteDirectionSets() {
     CHECK(d.historySize() == h0 + 1);
     {
         const auto& fa = d.scene().spriteSheets[1].anims;
-        const char* names[4] = {"zap_s", "zap_w", "zap_n", "zap_e"};
+        const char* names[4] = {"zap_n", "zap_e", "zap_s", "zap_w"};
         CHECK(fa.size() == 5);
         for (int k = 0; k < 4 && fa.size() == 5; k++)
             CHECK(fa[size_t(1 + k)].name == names[k] && fa[size_t(1 + k)].firstFrame == 2 * k && fa[size_t(1 + k)].frameCount == 2 &&
@@ -10987,7 +10987,7 @@ void testSpriteDirectionSets() {
         CHECK(sets.size() == 1 && sets[0].base == "zap" && sets[0].count == 4 && sets[0].first == 1);
         CHECK(editor::directionSetOf(sets, 0) == nullptr && editor::directionSetOf(sets, 1) && editor::directionSetOf(sets, 4) &&
               editor::directionSetOf(sets, 5) == nullptr);
-        if (!sets.empty()) CHECK(editor::facingLuaLine(sets[0]) == "Sprite.SetFacingFromYaw(sprite, \"zap_s\", 4, yaw)");
+        if (!sets.empty()) CHECK(editor::facingLuaLine(sets[0]) == "Sprite.SetFacingFromYaw(sprite, \"zap_n\", 4, yaw)");
     }
     CHECK(d.undo() && d.scene().spriteSheets == scene.spriteSheets);  // one Ctrl+Z takes all four
     CHECK(d.redo() && d.scene().spriteSheets[1].anims.size() == 5);
@@ -11000,7 +11000,7 @@ void testSpriteDirectionSets() {
     CHECK(editor::addDirectionSet(d, 0, eight, 8, &err) == 2 && err.empty());
     {
         const auto& ha = d.scene().spriteSheets[0].anims;
-        const char* names[8] = {"run_s", "run_sw", "run_w", "run_nw", "run_n", "run_ne", "run_e", "run_se"};
+        const char* names[8] = {"run_n", "run_ne", "run_e", "run_se", "run_s", "run_sw", "run_w", "run_nw"};
         CHECK(ha.size() == 10);
         for (int k = 0; k < 8 && ha.size() == 10; k++)
             CHECK(ha[size_t(2 + k)].name == names[k] && ha[size_t(2 + k)].firstFrame == k && ha[size_t(2 + k)].frameCount == 1);
@@ -11020,10 +11020,10 @@ void testSpriteDirectionSets() {
     };
     editor::DirectionSetSpec s4 = four;
     s4.frameDuration = 6;
-    CHECK(refused(0, s4, 8).find("'zap_s' is already an animation in sheet 'fx'") != std::string::npos);  // any sheet
-    d.editSpriteSheets([](std::vector<splash::SpriteSheet>& sh) { sh[0].anims[0].name = "fly_n"; });
+    CHECK(refused(0, s4, 8).find("'zap_n' is already an animation in sheet 'fx'") != std::string::npos);  // any sheet
+    d.editSpriteSheets([](std::vector<splash::SpriteSheet>& sh) { sh[0].anims[0].name = "fly_s"; });
     s4.base = "fly";
-    CHECK(refused(1, s4, 8).find("'fly_n' is already an animation in sheet 'hero'") != std::string::npos);  // not just _s
+    CHECK(refused(1, s4, 8).find("'fly_s' is already an animation in sheet 'hero'") != std::string::npos);  // not just _n
     CHECK(d.undo());
     s4.base = "hop";
     s4.firstCell = 1;
@@ -11039,7 +11039,7 @@ void testSpriteDirectionSets() {
     bad = s4;
     bad.base.clear();
     CHECK(refused(0, bad, 8).find("Type a base name") != std::string::npos);
-    bad.base = std::string(22, 'x');  // xxx_sw would be 25
+    bad.base = std::string(22, 'x');  // xxx_ne would be 25
     CHECK(refused(0, bad, 8).find("too long") != std::string::npos);
     bad.base = std::string(21, 'x');  // 24 exactly fits
     CHECK(editor::addDirectionSet(d, 0, bad, 8, &err) >= 0 && d.undo());
@@ -11095,15 +11095,15 @@ void testSpriteDirectionSets() {
             o += ds.base + ":" + std::to_string(ds.count) + "@" + std::to_string(ds.first) + " ";
         return o;
     };
-    CHECK(setsOf({"idle", "walk_s", "walk_w", "walk_n", "walk_e"}) == "walk:4@1 ");
-    CHECK(setsOf({"a_s", "a_sw", "a_w", "a_nw", "a_n", "a_ne", "a_e", "a_se", "b_s", "b_w", "b_n", "b_e"}) == "a:8@0 b:4@8 ");
-    CHECK(setsOf({"my_walk_s", "my_walk_w", "my_walk_n", "my_walk_e"}) == "my_walk:4@0 ");
-    CHECK(setsOf({"walk_s", "walk_n", "walk_w", "walk_e"}).empty());           // out of order
-    CHECK(setsOf({"walk_s", "walk_w", "walk_n"}).empty());                      // missing e
-    CHECK(setsOf({"walk_s", "walk_w", "idle", "walk_n", "walk_e"}).empty());    // not one after another
-    CHECK(setsOf({"walk_s", "walk_sw", "walk_w", "walk_nw", "walk_n", "walk_ne", "walk_e"}).empty());  // 7 of 8
-    CHECK(setsOf({"walk_s", "run_w", "run_n", "run_e"}).empty());               // bases differ
-    CHECK(setsOf({"_s", "_w", "_n", "_e"}).empty());                            // no base
+    CHECK(setsOf({"idle", "walk_n", "walk_e", "walk_s", "walk_w"}) == "walk:4@1 ");
+    CHECK(setsOf({"a_n", "a_ne", "a_e", "a_se", "a_s", "a_sw", "a_w", "a_nw", "b_n", "b_e", "b_s", "b_w"}) == "a:8@0 b:4@8 ");
+    CHECK(setsOf({"my_walk_n", "my_walk_e", "my_walk_s", "my_walk_w"}) == "my_walk:4@0 ");
+    CHECK(setsOf({"walk_n", "walk_s", "walk_e", "walk_w"}).empty());           // out of order
+    CHECK(setsOf({"walk_n", "walk_e", "walk_s"}).empty());                      // missing w
+    CHECK(setsOf({"walk_n", "walk_e", "idle", "walk_s", "walk_w"}).empty());    // not one after another
+    CHECK(setsOf({"walk_n", "walk_ne", "walk_e", "walk_se", "walk_s", "walk_sw", "walk_w"}).empty());  // 7 of 8
+    CHECK(setsOf({"walk_n", "run_e", "run_s", "run_w"}).empty());               // bases differ
+    CHECK(setsOf({"_n", "_e", "_s", "_w"}).empty());                            // no base
 
     // The Problems warning, from checkSpriteSheets (export and the inspector).
     auto warned = [&](std::vector<splash::SpriteSheet> sh) {
@@ -11114,27 +11114,27 @@ void testSpriteDirectionSets() {
         for (const std::string& w : warnings) all += w + "\n";
         return all;
     };
-    CHECK(warned({sheetOf({"idle", "walk_s", "walk_w", "walk_n", "walk_e"})}).empty());
-    CHECK(warned({sheetOf({"door_n", "idle"})}).empty());  // one direction-like name is just a name
-    std::string w = warned({sheetOf({"walk_s", "walk_n", "walk_w", "walk_e"})});
-    CHECK(w.find("sprite animations walk_*: listed in the order s n w e") != std::string::npos &&
-          w.find("Sprite.SetFacingFromYaw(sprite, \"walk_s\", 4, yaw) would play the wrong animation: list them s w n e") !=
+    CHECK(warned({sheetOf({"idle", "walk_n", "walk_e", "walk_s", "walk_w"})}).empty());
+    CHECK(warned({sheetOf({"door_s", "idle"})}).empty());  // one direction-like name is just a name
+    std::string w = warned({sheetOf({"walk_n", "walk_s", "walk_e", "walk_w"})});
+    CHECK(w.find("sprite animations walk_*: listed in the order n s e w") != std::string::npos &&
+          w.find("Sprite.SetFacingFromYaw(sprite, \"walk_n\", 4, yaw) would play the wrong animation: list them n e s w") !=
               std::string::npos);
-    w = warned({sheetOf({"walk_s", "walk_w", "walk_n"})});
-    CHECK(w.find("no walk_e, so Sprite.SetFacingFromYaw") != std::string::npos);
-    w = warned({sheetOf({"walk_s", "walk_sw", "walk_w", "walk_n", "walk_ne", "walk_e", "walk_se"})});
-    CHECK(w.find("no walk_nw") != std::string::npos && w.find("\", 8, yaw)") != std::string::npos);
-    w = warned({sheetOf({"walk_s", "walk_w", "idle", "walk_n", "walk_e"})});
+    w = warned({sheetOf({"walk_n", "walk_e", "walk_s"})});
+    CHECK(w.find("no walk_w, so Sprite.SetFacingFromYaw") != std::string::npos);
+    w = warned({sheetOf({"walk_n", "walk_ne", "walk_e", "walk_s", "walk_sw", "walk_w", "walk_nw"})});
+    CHECK(w.find("no walk_se") != std::string::npos && w.find("\", 8, yaw)") != std::string::npos);
+    w = warned({sheetOf({"walk_n", "walk_e", "idle", "walk_s", "walk_w"})});
     CHECK(w.find("other animations sit between them") != std::string::npos && w.find("wrong animation") != std::string::npos);
-    w = warned({sheetOf({"walk_s", "walk_w", "idle"}), sheetOf({"walk_n", "walk_e"})});
+    w = warned({sheetOf({"walk_n", "walk_e", "idle"}), sheetOf({"walk_s", "walk_w"})});
     CHECK(w.find("other animations sit between them in the table (they are split across sprite sheets)") != std::string::npos);
     {
-        std::vector<splash::SpriteSheet> two = {sheetOf({"walk_s", "walk_w"}), sheetOf({"walk_n", "walk_e"})};
+        std::vector<splash::SpriteSheet> two = {sheetOf({"walk_n", "walk_e"}), sheetOf({"walk_s", "walk_w"})};
         two[1].name = "u";
         w = warned(two);
         CHECK(w.find("split across sprite sheets 't' and 'u'") != std::string::npos);
     }
-    w = warned({sheetOf({"walk_s", "walk_w", "walk_w", "walk_n", "walk_e"})});
+    w = warned({sheetOf({"walk_n", "walk_e", "walk_e", "walk_s", "walk_w"})});
     CHECK(w.find("more than once") != std::string::npos);
     // What the editor adds never warns.
     CHECK(warned(d.scene().spriteSheets).empty());
@@ -11171,7 +11171,7 @@ void testSpriteDirectionSets() {
         };
         const std::vector<std::string>& s8 = splash::spriteDirectionSuffixes(8);
         const std::vector<std::string>& s4n = splash::spriteDirectionSuffixes(4);
-        const int run = indexOf("run_s"), zap = indexOf("zap_s");
+        const int run = indexOf("run_n"), zap = indexOf("zap_n");
         CHECK(run == 2 && zap == 11);
         for (int k = 0; k < 8 && run >= 0 && size_t(run + k) < got.size(); k++)
             CHECK(got[size_t(run + k)].second == "run_" + s8[size_t(k)] && got[size_t(run + k)].first == 0 &&

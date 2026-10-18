@@ -1619,7 +1619,7 @@ void checkSpriteSheets(const std::vector<SpriteSheet>& sheets,
 
 const std::vector<std::string>& spriteDirectionSuffixes(int n) {
     // Around the circle from yaw 0, the way yaw increases.
-    static const std::vector<std::string> four = {"s", "w", "n", "e"}, eight = {"s", "sw", "w", "nw", "n", "ne", "e", "se"},
+    static const std::vector<std::string> four = {"n", "e", "s", "w"}, eight = {"n", "ne", "e", "se", "s", "sw", "w", "nw"},
                                           none;
     return n == 4 ? four : n == 8 ? eight : none;
 }
@@ -1669,7 +1669,7 @@ void checkSpriteDirectionSets(const std::vector<SpriteSheet>& sheets, std::vecto
             for (const std::string& s : v) o += (o.empty() ? "" : " ") + s;
             return o;
         };
-        const std::string call = "Sprite.SetFacingFromYaw(sprite, \"" + base + "_s\", " + std::to_string(n) + ", yaw)";
+        const std::string call = "Sprite.SetFacingFromYaw(sprite, \"" + base + "_n\", " + std::to_string(n) + ", yaw)";
         const std::string head = "sprite animations " + base + "_*: ";
         if (!missing.empty())
             warnings.push_back(head + "no " + missing + ", so " + call +

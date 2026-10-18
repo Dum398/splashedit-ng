@@ -1,6 +1,6 @@
 # The Sprite sheets section's Add direction set, driven through the GUI on
 # copies of the courtyard example with sprite/dirs.png (64x64, a 4 x 4 grid of
-# 16x16 cells) in its textures: the form's Create adds base_s, base_sw, ... in
+# 16x16 cells) in its textures: the form's Create adds base_n, base_ne, ... in
 # increasing-yaw order on consecutive runs of cells, in the saved scene and in
 # the section's scripted "scene: sprite" lines, as one Ctrl+Z; cells past the
 # sheet and a name already used are refused with a message and add nothing;
@@ -26,8 +26,8 @@ H = 960
 # each change that grows the section.
 SCROLL = ['--wheel', '1420,500,-200', '--wait', '3']
 START = ['--wait', '20', '--wait-export'] + SCROLL
-SUF8 = ['s', 'sw', 'w', 'nw', 'n', 'ne', 'e', 'se']
-SUF4 = ['s', 'w', 'n', 'e']
+SUF8 = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']
+SUF4 = ['n', 'e', 's', 'w']
 mid = None
 
 
@@ -103,7 +103,7 @@ check('Create past the 16 cells adds nothing', anims(s) == [IDLE], f'{anims(s)} 
 check('and says why', last(out, 'scene: sprite dirset message ') ==
       "8 x 4 frames from cell 0 end on cell 31, past the sheet's 16 cells (0..15).", out[-400:])
 
-# 8 directions of 2 frames: s sw w nw n ne e se on cells 0-1, 2-3, ... 14-15.
+# 8 directions of 2 frames: n ne e se s sw w nw on cells 0-1, 2-3, ... 14-15.
 keep = os.environ.get('DIRSET_SCENE')
 s, out = run(CREATE8 + ['--wait', '10'], onscreen=('scene.dirdial', 'scene.dirsetcopy'), keep=keep)
 want8 = [IDLE] + [('walk_' + x, 2 * k, 2, 6, True) for k, x in enumerate(SUF8)]
@@ -112,39 +112,42 @@ check('the section reports them', last(out, 'scene: sprite 0 ') ==
       'dirs texture textures/dirs.png bpp 4 cell 16x16 grid 4x4 anims idle:0+1@6L ' +
       ' '.join(f'walk_{x}:{2 * k}+2@6L' for k, x in enumerate(SUF8)), out[-500:])
 check('and recognise the set', last(out, 'scene: sprite dirsets') == ' walk:8@1', out[-300:])
-check('the new set is selected and the dial shows walk_s', last(out, 'scene: sprite facing ') == 'walk_s 1/8', out[-300:])
+check('the new set is selected and the dial shows walk_n', last(out, 'scene: sprite facing ') == 'walk_n 1/8', out[-300:])
 check('no warnings', last(out, 'scene: sprite warnings ') == 'none', out[-300:])
 
 # The dial: a click on the w sector selects walk_w; Copy puts the Lua line on the clipboard.
 s, out = run(CREATE8 + click('scene.dirdial.w') + click('scene.dirsetcopy') + ['--wait', '5'],
              onscreen=('scene.dirdial.w', 'scene.dirsetlua'), shot=shotOut)
-check('a click on the w sector selects walk_w', last(out, 'scene: sprite facing ') == 'walk_w 3/8', out[-300:])
+check('a click on the w sector selects walk_w', last(out, 'scene: sprite facing ') == 'walk_w 7/8', out[-300:])
 check('Copy puts the SetFacingFromYaw line on the clipboard',
-      last(out, 'scene: sprite copied ') == 'Sprite.SetFacingFromYaw(sprite, "walk_s", 8, yaw)', out[-300:])
+      last(out, 'scene: sprite copied ') == 'Sprite.SetFacingFromYaw(sprite, "walk_n", 8, yaw)', out[-300:])
 
 # One Ctrl+Z takes the whole set back.
 s, out = run(CREATE8 + SAVE_MID + UNDO)
 check('one Ctrl+Z removes all 8', anims(mid) == want8 and anims(s) == [IDLE], f'{anims(mid)} then {anims(s)} | ' + out[-300:])
 
 # A second set with the same base: refused, the first kept.
-s, out = run(CREATE8 + click('scene.spritedirset') + SCROLL + typed('scene.dirsetframes', '2') + click('scene.dirsetcreate'))
+# No scroll after opening the form: it opens under the button, and the bottom of the
+# grown section would leave its fields above the panel.
+s, out = run(CREATE8 + click('scene.spritedirset') + typed('scene.dirsetframes', '2') + click('scene.dirsetcreate'),
+             onscreen=('scene.dirsetframes', 'scene.dirsetcreate'))
 check('a base name already used is refused', anims(s) == want8, f'{anims(s)} | ' + out[-300:])
 check('and says which name clashes', (last(out, 'scene: sprite dirset message ') or '').startswith(
-    "'walk_s' is already an animation in sheet 'dirs'"), out[-400:])
+    "'walk_n' is already an animation in sheet 'dirs'"), out[-400:])
 
-# 4 directions: s w n e, a row (4 cells) each.
+# 4 directions: n e s w, a row (4 cells) each.
 s, out = run(FORM + click('scene.dirsetcount') + click('scene.dirsetcount/4 directions') + click('scene.dirsetcreate') + SCROLL)
 want4 = [IDLE] + [('walk_' + x, 4 * k, 4, 6, True) for k, x in enumerate(SUF4)]
-check('4 directions: s w n e, 4 cells each', anims(s) == want4, f'{anims(s)} | ' + out[-300:])
+check('4 directions: n e s w, 4 cells each', anims(s) == want4, f'{anims(s)} | ' + out[-300:])
 check('recognised as a set of 4', last(out, 'scene: sprite dirsets') == ' walk:4@1', out[-300:])
 check('Problems is clear', last(out, 'problems: ') == 'No problems', out[-300:])
 
-# Deleting walk_w leaves s n e: Problems warns that SetFacingFromYaw would play the wrong animation.
+# Deleting walk_e leaves n s w: Problems warns that SetFacingFromYaw would play the wrong animation.
 s, out = run(FORM + click('scene.dirsetcount') + click('scene.dirsetcount/4 directions') + click('scene.dirsetcreate') + SCROLL +
              click('scene.spriteanim.2.delete') + SCROLL)
-check('walk_w deleted', anims(s) == [IDLE, want4[1], want4[3], want4[4]], f'{anims(s)} | ' + out[-300:])
+check('walk_e deleted', anims(s) == [IDLE, want4[1], want4[3], want4[4]], f'{anims(s)} | ' + out[-300:])
 check('the warning names the missing direction', last(out, 'scene: sprite warnings ') ==
-      'sprite animations walk_*: no walk_w, so Sprite.SetFacingFromYaw(sprite, "walk_s", 4, yaw) would play the wrong '
+      'sprite animations walk_*: no walk_e, so Sprite.SetFacingFromYaw(sprite, "walk_n", 4, yaw) would play the wrong '
       'animation for some directions: add the missing ones', out[-400:])
 check('and the set is no longer recognised', last(out, 'scene: sprite dirsets') == ' none', out[-300:])
 check('Problems counts the warning', last(out, 'problems: ') == '1 warning', out[-300:])

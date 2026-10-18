@@ -4935,6 +4935,156 @@ void testNavWalkoff() {
     CHECK(editor::removeComponent(fresh, editor::ComponentKind::Walkoff) && !fresh.walkoff);
 }
 
+static std::string fileBytes(const std::filesystem::path& p);
+
+// The Agent component (PSXAgent): the 28-byte SPLASHPACKAgentV2 record and
+// waypoints for a known agent, its warnings, the scene file round trip, the
+// catalog, undo, and which objects the export makes agents of.
+void testAgent() {
+    namespace fs = std::filesystem;
+    // (a) Record bytes, worked out by hand from docs/splashpack-format.md 2.7 at gte 100:
+    // speed 3 m/s -> 3/30/100*4096 = 4.096 -> 4; stop 0.75 -> 30.72 -> 31; vision 10 -> 409.6 -> 410;
+    // fov 120 -> cos 60 deg * 4096 = 2048; hearing 2.5 -> 102.4 -> 102; waypoint (1, 2, -3) ->
+    // (40.96, -81.92, -122.88) -> (41, -82, -123), Y negated.
+    splash::AgentComponent a;
+    a.moveSpeed = 3;
+    a.stopDistance = 0.75f;
+    a.visionRange = 10;
+    a.fov = 120;
+    a.hearingRange = 2.5f;
+    a.alertTimeout = 45;
+    a.visionRegionDepth = 4;
+    a.waypoints = {{1, 2, -3}};
+    a.stateClips[1] = 0;  // Patrol
+    a.stateClips[3] = 2;  // Flee
+    a.stateClips[5] = 7;  // Wander: past a 3-clip skin, so none
+    const splash::AgentRecord r = splash::agentRecord(a, 0x1234, 3, 100.f);
+    const std::array<uint8_t, 28> want = {0x34, 0x12, 0x0F, 0x01, 4, 0, 31, 0, 0x9A, 0x01, 0x00, 0x08, 102, 0,
+                                          45,   0,    0xFF, 0x00, 0xFF, 0x02, 0xFF, 0xFF, 0xFF, 0xFF, 4, 0, 0, 0};
+    CHECK(r.bytes == want);
+    CHECK(r.waypoints.size() == 1 && r.waypoints[0] == (std::array<int32_t, 3>{41, -82, -123}));
+    // No skin: every clip none. Vision off, no hearing, no waypoints: only the enabled bit.
+    a.vision = false;
+    a.hearingRange = 0;
+    a.waypoints.clear();
+    const splash::AgentRecord bare = splash::agentRecord(a, 0, 0, 100.f);
+    CHECK(bare.bytes[2] == 0x01 && bare.bytes[3] == 0 && bare.waypoints.empty());
+    CHECK(std::all_of(bare.bytes.begin() + 16, bare.bytes.begin() + 24, [](uint8_t b) { return b == 0xFF; }));
+    // Vision on but range 0 is no vision; disabled at load clears bit 0; fov 360 sees all around.
+    a.vision = true;
+    a.visionRange = 0;
+    a.startEnabled = false;
+    a.fov = 360;
+    const splash::AgentRecord off = splash::agentRecord(a, 0, 0, 100.f);
+    CHECK(off.bytes[2] == 0x00 && off.bytes[10] == 0x00 && off.bytes[11] == 0xF0);  // -4096
+    // Nine waypoints: eight written.
+    a.waypoints.assign(9, {0, 0, 0});
+    const splash::AgentRecord nine = splash::agentRecord(a, 0, 0, 100.f);
+    CHECK(nine.bytes[3] == 8 && nine.waypoints.size() == 8 && (nine.bytes[2] & 0x08));
+    CHECK(splash::agentBytes(a) == 28 + 12 * 8);
+
+    // (b) Warnings.
+    splash::Object o;
+    o.name = "Guard";
+    CHECK(splash::agentWarnings(o).empty());
+    a.stateClips.fill(-1);
+    o.agent = a;  // 9 waypoints, fov 360
+    o.agent->stateClips[0] = 0;
+    std::vector<std::string> w = splash::agentWarnings(o);
+    CHECK(w.size() == 2 && w[0].find("Guard: agent has 9 waypoints") == 0 && w[1].find("state Idle") != std::string::npos &&
+          w[1].find("no skin") != std::string::npos);
+    o.agent->fov = 0;
+    o.skin = splash::SkinComponent{};
+    o.skin->clips = {"a.anim"};
+    o.agent->waypoints.clear();
+    w = splash::agentWarnings(o);
+    CHECK(w.size() == 1 && w[0].find("field of view") != std::string::npos);  // clip 0 of 1 is fine
+    o.agent->stateClips[0] = 1;
+    o.agent->fov = 361;
+    w = splash::agentWarnings(o);
+    CHECK(w.size() == 2 && w[1].find("plays clip 2 of a skin with 1") != std::string::npos);
+
+    // (c) The scene file keeps every field and unknown keys.
+    const fs::path project = g_outDir / "agent";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    splash::Scene s;
+    splash::Object guard;
+    guard.name = "Guard";
+    guard.agent = splash::AgentComponent{};
+    splash::AgentComponent& g = *guard.agent;
+    g.startEnabled = false;
+    g.moveSpeed = 1.25f;
+    g.stopDistance = 0.3f;
+    g.vision = false;
+    g.visionRange = 12.5f;
+    g.fov = 75;
+    g.visionRegionDepth = 5;
+    g.hearingRange = 4;
+    g.alertTimeout = 300;
+    g.waypoints = {{1, 0.5f, -2}, {-4, 0, 3.25f}};
+    g.stateClips[2] = 3;
+    g.stateClips[7] = 0;
+    g.extra.push_back({"note", "\"hi\""});
+    s.objects.push_back(guard);
+    splash::Object plain;
+    plain.name = "Plain";
+    s.objects.push_back(plain);
+    splash::saveScene(s, project / "a.scene");
+    const splash::Scene loaded = splash::loadScene(project / "a.scene");
+    CHECK(loaded.objects.size() == 2 && loaded.objects[0].agent && !loaded.objects[1].agent);
+    if (loaded.objects.size() == 2 && loaded.objects[0].agent) {
+        const splash::AgentComponent& l = *loaded.objects[0].agent;
+        CHECK(!l.startEnabled && l.moveSpeed == 1.25f && l.stopDistance == 0.3f && !l.vision && l.visionRange == 12.5f &&
+              l.fov == 75 && l.visionRegionDepth == 5 && l.hearingRange == 4 && l.alertTimeout == 300);
+        CHECK(l.waypoints == g.waypoints && l.stateClips == g.stateClips);
+        CHECK(l.extra.size() == 1 && l.extra[0].first == "note");
+    }
+    // Saving again writes the same bytes.
+    splash::saveScene(loaded, project / "b.scene");
+    CHECK(fileBytes(project / "a.scene") == fileBytes(project / "b.scene"));
+
+    // (d) Catalog defaults and undo.
+    splash::Object fresh;
+    CHECK(editor::addComponent(fresh, editor::ComponentKind::Agent) && fresh.agent && fresh.agent->startEnabled &&
+          fresh.agent->moveSpeed == 2 && fresh.agent->stopDistance == 0.5f && fresh.agent->vision && fresh.agent->visionRange == 8 &&
+          fresh.agent->fov == 90 && fresh.agent->visionRegionDepth == 2 && fresh.agent->hearingRange == 0 &&
+          fresh.agent->alertTimeout == 90 && fresh.agent->waypoints.empty() && fresh.agent->stateClips[0] == -1);
+    CHECK(editor::hasComponent(fresh, editor::ComponentKind::Agent));
+    CHECK(std::string(editor::info(editor::ComponentKind::Agent).label) == "Agent (NPC)");
+    CHECK(editor::removeComponent(fresh, editor::ComponentKind::Agent) && !fresh.agent);
+    {
+        editor::Document doc;
+        doc.reset(s, project, "a");
+        doc.edit({0}, [](splash::Object& ob) { ob.agent->waypoints.push_back({9, 9, 9}); });
+        CHECK(doc.object({0})->agent->waypoints.size() == 3);
+        CHECK(doc.undo() && doc.object({0})->agent->waypoints.size() == 2);
+        CHECK(doc.redo() && doc.object({0})->agent->waypoints.size() == 3);
+    }
+
+    // (e) Export: active objects only, in scene order, mesh-less agents become game objects.
+    splash::Scene ex;
+    splash::Object ghost = guard, offAgent = guard, keeper;
+    ghost.name = "Ghost";
+    offAgent.name = "Off";
+    offAgent.active = false;
+    keeper.name = "Keeper";
+    keeper.agent = splash::AgentComponent{};
+    ex.objects = {plain, ghost, offAgent, keeper};
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    const splash::ExportResult res = splash::exportSplashpack(ex, project, project / "e.splashpack", dry);
+    CHECK(res.ok() && res.stats.gameObjects == 2 && res.stats.agents.size() == 2);
+    if (res.stats.agents.size() == 2) {
+        CHECK(res.stats.agents[0].object == "Ghost" && res.stats.agents[0].gameObject == 0 && res.stats.agents[0].flatIndex == 1 &&
+              res.stats.agents[0].waypoints == 2 && res.stats.agents[0].bytes == 52);
+        CHECK(res.stats.agents[1].object == "Keeper" && res.stats.agents[1].gameObject == 1 && res.stats.agents[1].bytes == 28);
+    }
+    // No nav regions: warned.
+    CHECK(std::any_of(res.warnings.begin(), res.warnings.end(),
+                      [](const std::string& m) { return m.find("can't move: the scene has no nav regions") != std::string::npos; }));
+}
+
 // What the skin section of the inspector shows (ExportStats::skins): one
 // entry per skinned mesh with its bones, triangles and clips, and byte counts
 // that match the skin table layout psxsplash reads (recomputed here from the
@@ -10207,6 +10357,7 @@ int main(int argc, char** argv) {
     testNavInfo();
     testNavPresets();
     testNavWalkoff();
+    testAgent();
     testSkinInfo();
     testLogViewFilter();
     testLogViewClear();

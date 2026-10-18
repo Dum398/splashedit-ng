@@ -2,6 +2,8 @@
 // writes them (splashpack v25). See docs/splashpack-format.md.
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <array>
 #include <filesystem>
 #include <string>
@@ -162,6 +164,15 @@ struct ExportStats {
         int edges = 0;
     };
     std::vector<WalkoffInfo> walkoffZones;
+    // Agents on active objects, in flatten order (the agent record order).
+    struct AgentInfo {
+        std::string object;   // the object's name
+        int flatIndex = 0;    // its index in flatten(scene)
+        int gameObject = 0;   // its game object index
+        int waypoints = 0;    // waypoints written (at most 8)
+        size_t bytes = 0;     // 28-byte record + 12 per waypoint
+    };
+    std::vector<AgentInfo> agents;
 
     // Skinned meshes, in skin table order. bytes is the skin's 12-byte table
     // entry plus its whole data block (alignment padding included); a clip's
@@ -217,6 +228,15 @@ inline std::string navEmptyWarning() {
            "than the player.";
 }
 
+// The scene has agents but no nav regions: psxsplash ticks agents only with
+// nav regions loaded, so they stand still and sense nothing. `name` is the
+// agent's object when there is one, else empty.
+inline std::string agentNoNavWarning(const std::string& name) {
+    return (name.empty() ? std::string("The agents") : "Agent '" + name + "'") +
+           " can't move: the scene has no nav regions and the game only runs agents on them. Add a Player or Navigation "
+           "component and give the floor a Static collider.";
+}
+
 // Set when the bake ran with bigger cells than the scene asks for.
 inline bool navCoarsened(const ExportStats& s) { return s.navCellSize > s.navCellSizeAsked * 1.001f; }
 
@@ -224,6 +244,24 @@ inline bool navCoarsened(const ExportStats& s) { return s.navCellSize > s.navCel
 // each saying how to fix it, for the inspector to show as they are typed. Only
 // checks an enabled config, and not the icon files (export loads those).
 void checkMemCard(const MemCardSettings& mc, std::vector<std::string>& errors, std::vector<std::string>& warnings);
+
+// One agent as the splashpack stores it: the 28-byte SPLASHPACKAgentV2
+// record and its waypoints (fp12 x, -y, z: Y down like every engine position,
+// which the engine's nav lookups need). `skinClips` is the object's skin clip
+// count (0 without a skin); state clips past it are written as none (0xFF).
+struct AgentRecord {
+    std::array<uint8_t, 28> bytes{};
+    std::vector<std::array<int32_t, 3>> waypoints;
+};
+AgentRecord agentRecord(const AgentComponent& a, uint16_t gameObjectIndex, int skinClips, float gte);
+// What exporting `o`'s agent component warns about, one line each: more than 8
+// waypoints, a field of view outside (0, 360], state clips without a skin or
+// past its clips. Empty without an agent.
+std::vector<std::string> agentWarnings(const Object& o);
+// Bytes the agent takes in the splashpack: 28 + 12 per waypoint written.
+inline size_t agentBytes(const AgentComponent& a) {
+    return 28 + 12 * std::min<size_t>(a.waypoints.size(), size_t(kAgentMaxWaypoints));
+}
 
 // Where a UI position track on `e` starts, in the keys' units (the scene
 // file's): psxsplash's CutscenePlayer starts the track from the element's

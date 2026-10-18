@@ -17,6 +17,8 @@ using json = nlohmann::basic_json<nlohmann::ordered_map, std::vector, std::strin
                                   std::uint64_t, float>;
 namespace fs = std::filesystem;
 
+const char* const kAgentStateNames[kAgentStates] = {"Idle", "Patrol", "Seek", "Flee", "Attack", "Wander", "Investigate", "Custom"};
+
 namespace {
 
 [[noreturn]] void fail(const std::string& what) { throw std::runtime_error(what); }
@@ -219,6 +221,28 @@ json writeInteractable(const InteractableComponent& it) {
     return j;
 }
 
+json writeAgent(const AgentComponent& ag) {
+    json wps = json::array();
+    for (const Vec3& p : ag.waypoints) wps.push_back(vec3(p));
+    json clips = json::object();
+    for (int i = 0; i < kAgentStates; i++)
+        if (ag.stateClips[size_t(i)] >= 0) clips[kAgentStateNames[i]] = ag.stateClips[size_t(i)];
+    json j = {{"type", "agent"},
+              {"startEnabled", ag.startEnabled},
+              {"moveSpeed", ag.moveSpeed},
+              {"stopDistance", ag.stopDistance},
+              {"vision", ag.vision},
+              {"visionRange", ag.visionRange},
+              {"fov", ag.fov},
+              {"visionRegionDepth", ag.visionRegionDepth},
+              {"hearingRange", ag.hearingRange},
+              {"alertTimeout", ag.alertTimeout},
+              {"waypoints", wps},
+              {"stateClips", clips}};
+    putExtras(j, ag.extra);
+    return j;
+}
+
 json writeAudio(const AudioComponent& a) {
     json j = {{"type", "audio"},
               {"clip", a.clip.empty() ? json(nullptr) : json(a.clip)},
@@ -364,6 +388,38 @@ Object readObject(const json& j) {
             a.trimLeadingSilence = c.value("trimLeadingSilence", a.trimLeadingSilence);
             a.extra = extrasOf(c, writeAudio(a));
             o.audio = a;
+        } else if (type == "agent") {
+            AgentComponent ag;
+            const std::string where = "object '" + o.name + "': agent ";
+            ag.startEnabled = c.value("startEnabled", ag.startEnabled);
+            ag.moveSpeed = c.value("moveSpeed", ag.moveSpeed);
+            ag.stopDistance = c.value("stopDistance", ag.stopDistance);
+            ag.vision = c.value("vision", ag.vision);
+            ag.visionRange = c.value("visionRange", ag.visionRange);
+            ag.fov = c.value("fov", ag.fov);
+            ag.visionRegionDepth = c.value("visionRegionDepth", ag.visionRegionDepth);
+            ag.hearingRange = c.value("hearingRange", ag.hearingRange);
+            ag.alertTimeout = c.value("alertTimeout", ag.alertTimeout);
+            if (!(ag.moveSpeed >= 0) || !(ag.stopDistance >= 0) || !(ag.visionRange >= 0) || !(ag.hearingRange >= 0))
+                fail(where + "speeds and ranges must be 0 or more");
+            if (ag.visionRegionDepth < 0 || ag.visionRegionDepth > 8) fail(where + "visionRegionDepth must be 0..8");
+            if (ag.alertTimeout < 0 || ag.alertTimeout > 65535) fail(where + "alertTimeout must be 0..65535");
+            for (const json& wj : c.value("waypoints", json::array())) ag.waypoints.push_back(vec3(wj));
+            if (c.contains("stateClips")) {
+                const json& sc = c["stateClips"];
+                if (!sc.is_object()) fail(where + "stateClips must be an object");
+                for (auto it = sc.begin(); it != sc.end(); ++it) {
+                    int k = -1;
+                    for (int i = 0; i < kAgentStates; i++)
+                        if (it.key() == kAgentStateNames[i]) k = i;
+                    if (k < 0) fail(where + "unknown state '" + it.key() + "' in stateClips");
+                    const int v = it.value().get<int>();
+                    if (v < -1 || v > 15) fail(where + "a state clip must be -1..15");
+                    ag.stateClips[size_t(k)] = v;
+                }
+            }
+            ag.extra = extrasOf(c, writeAgent(ag));
+            o.agent = ag;
         } else if (type == "skin") {
             SkinComponent sk;
             for (const json& cj : c.value("clips", json::array())) sk.clips.push_back(cj.get<std::string>());
@@ -403,6 +459,7 @@ json writeObject(const Object& o) {
     if (o.interactable) comps.push_back(writeInteractable(*o.interactable));
     if (o.audio) comps.push_back(writeAudio(*o.audio));
     if (o.skin) comps.push_back(writeSkin(*o.skin));
+    if (o.agent) comps.push_back(writeAgent(*o.agent));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();

@@ -56,6 +56,8 @@ constexpr ImU32 interact = rgb(0xffb86b);
 constexpr ImU32 room = rgb(0x40e0d0);
 constexpr ImU32 portal = rgb(0xffe14d);
 constexpr ImU32 walkoff = rgb(0xff6a00);
+constexpr ImU32 agent = rgb(0xff5fa0);
+constexpr ImU32 hearing = rgb(0x6ad8ff);
 }  // namespace kind
 
 static void panel(ImDrawList* dl, ImRect r) {
@@ -706,12 +708,14 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Room: return {icon::layoutTemplate, kind::room};
         case K::Portal: return {icon::link, kind::portal};
         case K::Walkoff: return {icon::maximize, kind::walkoff};
+        case K::Agent: return {icon::eye, kind::agent};
     }
     return {icon::box, color::textDim};
 }
 static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     using K = editor::ComponentKind;
     if (o.light) return lookOf(K::Light);
+    if (o.agent) return lookOf(K::Agent);
     if (o.mesh) return lookOf(K::Mesh);
     if (o.script && !o.collider) return {icon::script, kind::script};
     if (o.player) return lookOf(K::Player);
@@ -3674,6 +3678,91 @@ static void navOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec
     }
 }
 
+// The facing psxsplash gives an agent: yaw = atan2(m02, m00) of its rotation
+// matrix (getActorRotation), forward = (sin yaw, cos yaw) on XZ.
+static float agentYaw(splash::Quat q) {
+    const float m00 = 1.f - 2.f * (q.y * q.y + q.z * q.z), m02 = 2.f * (q.x * q.z + q.y * q.w);
+    return std::atan2(m02, m00);
+}
+
+// A selected agent's senses and patrol: the vision cone (its edge follows the
+// square the console measures ranges with: max of |dx| and |dz|), the hearing
+// square, and the waypoints joined in patrol order. Waypoint i's screen
+// position goes to wpOut when given (for dragging).
+static void agentOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::FlatObject& fo,
+                         std::vector<std::pair<ImVec2, bool>>* wpOut) {
+    const splash::AgentComponent& ag = *fo.object->agent;
+    const splash::Vec3 c = fo.localToWorld.position();
+    const float yaw = agentYaw(fo.worldRotation);
+    auto square = [](float a, float range) {
+        const float s = std::sin(a), co = std::cos(a);
+        return range / std::max(std::fabs(s), std::fabs(co));
+    };
+    if (ag.hearingRange > 0) {
+        const float h = ag.hearingRange;
+        const splash::Vec3 k[4] = {{c.x - h, c.y, c.z - h}, {c.x + h, c.y, c.z - h}, {c.x + h, c.y, c.z + h}, {c.x - h, c.y, c.z + h}};
+        ImVec2 p[4];
+        bool ok = true;
+        for (int i = 0; i < 4 && ok; i++) ok = view.project(toGl(k[i]), mn, sz, &p[i]);
+        if (ok) {
+            dl->AddQuadFilled(p[0], p[1], p[2], p[3], overlayCol(kind::hearing, 22));
+            dl->AddPolyline(p, 4, overlayCol(kind::hearing, 220), ImDrawFlags_Closed, 1.6f);
+        }
+    }
+    if (ag.vision && ag.visionRange > 0) {
+        const float fov = splash::clampv(ag.fov, 0.f, 360.f), half = fov * 0.5f * 3.14159265f / 180.f;
+        const bool full = fov >= 359.99f;
+        constexpr int kSeg = 64;
+        std::vector<ImVec2> pts;
+        bool ok = true;
+        ImVec2 cp;
+        ok = view.project(toGl(c), mn, sz, &cp);
+        if (!full) pts.push_back(cp);
+        for (int k = 0; k <= kSeg && ok; k++) {
+            const float a = yaw - half + 2.f * half * float(k) / kSeg;
+            const float r = square(a, ag.visionRange);
+            ImVec2 p;
+            ok = view.project(toGl(c + splash::Vec3{std::sin(a) * r, 0, std::cos(a) * r}), mn, sz, &p);
+            pts.push_back(p);
+        }
+        if (ok && pts.size() >= 3) {
+            // Filled as a fan from the centre (the shape need not be convex).
+            for (size_t i = full ? 0 : 1; i + 1 < pts.size(); i++)
+                dl->AddTriangleFilled(cp, pts[i], pts[i + 1], overlayCol(kind::agent, 30));
+            dl->AddPolyline(pts.data(), int(pts.size()), overlayCol(kind::agent, 235), full ? 0 : ImDrawFlags_Closed, 1.8f);
+        }
+        // Facing arrow.
+        ImVec2 tip;
+        if (view.project(toGl(c + splash::Vec3{std::sin(yaw), 0, std::cos(yaw)} * std::min(1.0f, ag.visionRange)), mn, sz, &tip) &&
+            view.project(toGl(c), mn, sz, &cp))
+            dl->AddLine(cp, tip, overlayCol(kind::agent, 255), 2.4f);
+    }
+    // Waypoints: a numbered dot each, joined in patrol order and back to the
+    // first. Past the 8th they are left out of the export: drawn faint, unjoined.
+    const size_t n = ag.waypoints.size(), kept = std::min<size_t>(n, size_t(splash::kAgentMaxWaypoints));
+    std::vector<ImVec2> sp(n);
+    std::vector<bool> ok(n);
+    for (size_t i = 0; i < n; i++) ok[i] = view.project(toGl(ag.waypoints[i]), mn, sz, &sp[i]);
+    if (wpOut) {
+        wpOut->clear();
+        for (size_t i = 0; i < n; i++) wpOut->push_back({sp[i], bool(ok[i])});
+    }
+    for (size_t i = 0; kept >= 2 && i < kept; i++) {
+        const size_t j = (i + 1) % kept;
+        if (ok[i] && ok[j]) dl->AddLine(sp[i], sp[j], overlayCol(kind::agent, 200), 1.6f);
+    }
+    Fonts& f = fonts();
+    for (size_t i = 0; i < n; i++) {
+        if (!ok[i]) continue;
+        const bool in = i < kept;
+        dl->AddCircleFilled(sp[i], 9, in ? overlayCol(kind::agent, 230) : rgb(0x0e1014, 160), 20);
+        dl->AddCircle(sp[i], 9, rgb(0x0e1014, 220), 20, 1.2f);
+        const std::string t = std::to_string(i + 1);
+        dl->AddText(f.semibold, type::caption, sp[i] - measure(f.semibold, type::caption, t.c_str()) * 0.5f,
+                    in ? rgb(0x0e1014) : color::textFaint, t.c_str());
+    }
+}
+
 static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const std::vector<splash::FlatObject>& flats,
                           const std::vector<splash::FlatObject>& shown, const splash::Object* sel,
                           const std::optional<splash::ExportResult>& res, State& st) {
@@ -3753,6 +3842,8 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
             for (int k = 0; k < kSeg; k++)
                 if (ok[k] && ok[(k + 1) % kSeg]) dl->AddLine(p[k], p[(k + 1) % kSeg], col, hot ? 2.0f : 1.5f);
         }
+        // An agent's senses and patrol only while it is selected (they cover a lot).
+        if (fo.object->agent && hot) agentOverlay(dl, view, mn, sz, fo, nullptr);
     }
 }
 
@@ -3880,6 +3971,57 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 }
                 break;
             }
+    }
+
+    // The selected agent's waypoints drag on the horizontal plane at their
+    // own height (after the tool gizmo, which keeps the mouse when both are under it).
+    if (sel && sel->agent && st.gizmos && !previewing && doc.selection()) {
+        ImGuiContext& g = *GImGui;
+        ImGuiIO& io = ImGui::GetIO();
+        const ImGuiID wid = ImGui::GetID("##agentwp");
+        State::AgentWpDrag& d = st.agentWp;
+        const std::vector<splash::Vec3>& wps = sel->agent->waypoints;
+        const bool active = g.ActiveId == wid && d.index >= 0;
+        if (active) ImGui::KeepAliveID(wid);
+        int hover = -1;
+        if (gizmoMayHover(active, r)) {
+            float best = 10.f;
+            for (size_t i = 0; i < wps.size(); i++) {
+                ImVec2 p;
+                if (!view.project(toGl(wps[i]), mn, sz, &p)) continue;
+                const float dd = length(io.MousePos - p);
+                if (dd < best) best = dd, hover = int(i);
+            }
+        }
+        if (hover >= 0) {
+            ImGui::SetHoveredID(wid);
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(0) && mouseOnPlaneY(view, r, wps[size_t(hover)].y, &d.startHit)) {
+                d.index = hover;
+                d.start = wps[size_t(hover)];
+                ImGui::SetActiveID(wid, g.CurrentWindow);
+                doc.endMerge();
+            }
+        }
+        if (g.ActiveId == wid && d.index >= 0) {
+            if (ImGui::IsMouseDown(0) && size_t(d.index) < wps.size()) {
+                splash::Vec3 hit;
+                if (mouseOnPlaneY(view, r, d.start.y, &hit)) {
+                    splash::Vec3 nw{d.start.x + hit.x - d.startHit.x, d.start.y, d.start.z + hit.z - d.startHit.z};
+                    if (st.snap || io.KeyCtrl) nw.x = std::round(nw.x / 0.25f) * 0.25f, nw.z = std::round(nw.z / 0.25f) * 0.25f;
+                    const int i = d.index;
+                    if (!(nw == wps[size_t(i)]))
+                        doc.edit(*doc.selection(), [i, nw](splash::Object& ob) {
+                            if (ob.agent && size_t(i) < ob.agent->waypoints.size()) ob.agent->waypoints[size_t(i)] = nw;
+                        }, "agent.waypoint");
+                }
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            } else {
+                doc.endMerge();
+                ImGui::ClearActiveID();
+                d.index = -1;
+            }
+        }
     }
 
     // World streaming regions, outlined on the ground while the scene's own
@@ -5633,7 +5775,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     }
 }
 
-static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc) {
+static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
     Fonts& f = fonts();
     panel(dl, r);
     float y = panelHeader(dl, r, "Inspector", nullptr);
@@ -5789,7 +5931,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[static_cast<int>(editor::ComponentKind::Walkoff) + 1] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::Agent) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
@@ -7076,6 +7218,176 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         sectionEnd(top);
     }
 
+    if (o->agent) {
+        // A copy: every edit below goes through doc.edit.
+        const splash::AgentComponent ag = *o->agent;
+        const std::string name = o->name;
+        top = y;
+        compSection("s_agent", editor::ComponentKind::Agent);
+        // Wrapped text across the section from its left edge, named for scripted tests.
+        auto caption = [&](const std::string& id, const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y + space::xs);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str());
+            dl->AddText(f.regular, type::caption, at, col, t.c_str(), nullptr, w);
+            nameRect(id, ImRect(at, at + ts));
+            y += ts.y + space::xs + space::sm;
+        };
+        toggleRow("agenabled", "Start enabled", "On, the agent runs from the moment the scene loads. Off, it waits for Agent.SetEnabled(self, true).",
+                  ag.startEnabled, [](splash::Object& ob) { ob.agent->startEnabled = !ob.agent->startEnabled; });
+        number("agspeed", "Move speed", "How fast it walks, in metres per second (stored per frame at 30 fps).", ag.moveSpeed, "m/s",
+               "agspeed", 0, 100, [](splash::Object& ob, float v) { ob.agent->moveSpeed = v; });
+        number("agstop", "Stop distance", "How close to a waypoint or target counts as arrived.", ag.stopDistance, "m", "agstop", 0, 100,
+               [](splash::Object& ob, float v) { ob.agent->stopDistance = v; });
+        toggleRow("agvision", "Vision", "Sees the player (or its target) inside the cone drawn in the viewport.", ag.vision,
+                  [](splash::Object& ob) { ob.agent->vision = !ob.agent->vision; });
+        const float visTop = y;
+        number("agrange", "Vision range",
+               "How far it sees. The console measures the larger of the X and Z distances, so the range is a square around "
+               "the agent, not a circle: the cone in the viewport is cut by that square. 0 sees nothing.",
+               ag.visionRange, "m", "agrange", 0, 1000, [](splash::Object& ob, float v) { ob.agent->visionRange = v; });
+        number("agfov", "Field of view", "The whole cone, in degrees, centred on the way the object faces (its local +Z). 360 sees all around.",
+               ag.fov, "deg", "agfov", 1, 360, [](splash::Object& ob, float v) { ob.agent->fov = v; });
+        number("agdepth", "Region hops",
+               "How many nav regions away the target may be and still be seen: 0 is the agent's own region only, at most 8.",
+               float(ag.visionRegionDepth), "hops", "agdepth", 0, 8,
+               [](splash::Object& ob, float v) { ob.agent->visionRegionDepth = int(std::lround(v)); }, 0);
+        if (!ag.vision) dimFrom(visTop);
+        number("aghear", "Hearing range",
+               "How far it hears, as a square like the vision range (drawn in blue). 0 hears nothing.", ag.hearingRange, "m",
+               "aghear", 0, 1000, [](splash::Object& ob, float v) { ob.agent->hearingRange = v; });
+        number("agalert", "Alert timeout",
+               "Frames after it last sensed the target before onTargetLost runs. The console runs 60 frames a second (50 on PAL).",
+               float(ag.alertTimeout), "frames", "agalert", 0, 65535,
+               [](splash::Object& ob, float v) { ob.agent->alertTimeout = int(std::lround(v)); }, 0);
+
+        // Waypoints: patrolled in order, then back to the first.
+        {
+            const ImRect hr = row("lagwps", "Waypoints",
+                                  "Patrol points, in world metres. It walks them in order and loops; the PS1 keeps 8. "
+                                  "Drag the numbered markers in the viewport to move them.");
+            const std::string count = std::to_string(ag.waypoints.size()) + " of 8";
+            text(dl, ImVec2(hr.Min.x, centerY(f.regular, type::body, hr.Min.y, hr.Max.y)), f.regular, type::body,
+                 ag.waypoints.size() > 8 ? color::warn : color::textDim, count.c_str());
+            // The object's own world position and the viewport's centre.
+            splash::Vec3 here = o->transform.position;
+            {
+                const splash::Object* self = doc.object(path);
+                for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+                    if (fo.object == self) here = fo.localToWorld.position();
+            }
+            const viewport::Vec3 pv = view.pivot();
+            const splash::Vec3 centre{pv.x, pv.y, -pv.z};
+            float bw = 0;
+            const float bx = hr.Min.x + measure(f.regular, type::body, "8 of 8").x + space::md;
+            const ImVec2 bat(bx, hr.Min.y + (hr.GetHeight() - (size::field + 6)) * 0.5f);
+            if (button("agaddobj", bat, icon::plus, "At object", ButtonKind::Secondary, &bw,
+                       "Adds a waypoint where the object stands."))
+                doc.edit(path, [here](splash::Object& ob) { ob.agent->waypoints.push_back(here); });
+            if (button("agaddview", bat + ImVec2(bw + space::xs, 0), icon::plus, "At view", ButtonKind::Secondary, nullptr,
+                       "Adds a waypoint at the point the viewport camera orbits (the centre of the view)."))
+                doc.edit(path, [centre](splash::Object& ob) { ob.agent->waypoints.push_back(centre); });
+            for (size_t i = 0; i < ag.waypoints.size(); i++) {
+                ImGui::PushID(int(i));
+                const std::string lid = "lagwp" + std::to_string(i), label = std::to_string(i + 1);
+                const ImRect wr = row(lid.c_str(), label.c_str(),
+                                      i < 8 ? "A waypoint's world position, in metres." : "Past the 8th: the export leaves it out.");
+                const float bs = 24, gap = 2;
+                const ImRect fr(wr.Min, ImVec2(wr.Max.x - 3 * (bs + gap), wr.Max.y));
+                const std::string wn = "obj.agwp" + std::to_string(i);
+                nameVec3(wn, fr);
+                const splash::Vec3 p = ag.waypoints[i];
+                float v[3] = {p.x, p.y, p.z};
+                commit(vec3Field("agwp", fr, fmtFixed(p.x).c_str(), fmtFixed(p.y).c_str(), fmtFixed(p.z).c_str(), nullptr, v),
+                       "agwp" + std::to_string(i), [&, i](splash::Object& ob) {
+                           if (i < ob.agent->waypoints.size()) ob.agent->waypoints[i] = {v[0], v[1], v[2]};
+                       });
+                const float cy = wr.GetCenter().y;
+                auto small = [&](int k) {
+                    const float bx0 = fr.Max.x + gap + float(k) * (bs + gap);
+                    return ImRect(ImVec2(bx0, cy - bs * 0.5f), ImVec2(bx0 + bs, cy + bs * 0.5f));
+                };
+                const ImRect ur = small(0), dr = small(1), xr = small(2);
+                nameRect(wn + ".up", ur);
+                nameRect(wn + ".down", dr);
+                nameRect(wn + ".del", xr);
+                if (iconButton("up", ur, icon::arrowUp, false, "Move it earlier in the patrol", color::textDim, i > 0))
+                    doc.edit(path, [i](splash::Object& ob) { std::swap(ob.agent->waypoints[i], ob.agent->waypoints[i - 1]); });
+                if (iconButton("down", dr, icon::arrowDown, false, "Move it later in the patrol", color::textDim, i + 1 < ag.waypoints.size()))
+                    doc.edit(path, [i](splash::Object& ob) { std::swap(ob.agent->waypoints[i], ob.agent->waypoints[i + 1]); });
+                if (iconButton("del", xr, icon::trash, false, "Delete the waypoint", color::textDim, true))
+                    doc.edit(path, [i](splash::Object& ob) { ob.agent->waypoints.erase(ob.agent->waypoints.begin() + long(i)); });
+                ImGui::PopID();
+            }
+        }
+
+        // The clip each state plays, from the object's skin.
+        std::string clipLine;
+        if (!o->skin) {
+            caption("obj.agclips", "State clips: add a Skinned animation component to this object to play a clip per state.",
+                    color::textFaint);
+        } else {
+            const splash::SkinComponent& sk = *o->skin;
+            // Clip names from the last export when it baked this skin, else the file names.
+            std::vector<std::string> names;
+            const std::optional<splash::ExportResult>& lr = st.live.result();
+            if (lr && lr->ok())
+                for (const splash::ExportStats::SkinInfo& k : lr->stats.skins)
+                    if (k.object == name && k.clips.size() == sk.clips.size())
+                        for (const auto& c : k.clips) names.push_back(c.name);
+            if (names.size() != sk.clips.size()) {
+                names.clear();
+                for (const std::string& c : sk.clips) names.push_back(std::filesystem::path(c).stem().string());
+            }
+            std::vector<const char*> items{"None"};
+            for (const std::string& n : names) items.push_back(n.c_str());
+            for (int s = 0; s < splash::kAgentStates; s++) {
+                const int c = ag.stateClips[size_t(s)];
+                const std::string lid = std::string("lagclip") + std::to_string(s), id = "agclip" + std::to_string(s);
+                const ImRect cr = row(lid.c_str(), splash::kAgentStateNames[s], "The skin clip the agent plays when it enters this state.");
+                nameRect("obj." + id, cr);
+                const std::string shown = c < 0 ? std::string("None") : c < int(names.size()) ? names[size_t(c)] : "Clip " + std::to_string(c + 1) + " (missing)";
+                const int pick = dropdownMenu(id.c_str(), cr, nullptr, shown.c_str(), items, c + 1);
+                if (pick >= 0) doc.edit(path, [s, pick](splash::Object& ob) { ob.agent->stateClips[size_t(s)] = pick - 1; });
+            }
+        }
+        for (int s = 0; s < splash::kAgentStates; s++) clipLine += (s ? "," : "") + std::to_string(ag.stateClips[size_t(s)]);
+
+        // What the export will warn about, and the nav bake agents need.
+        std::vector<std::string> warns = splash::agentWarnings(*o);
+        {
+            const std::optional<splash::ExportResult>& lr = st.live.result();
+            if (lr && lr->ok() && lr->stats.navRegions == 0) warns.push_back(splash::agentNoNavWarning(name));
+        }
+        std::string warnText;
+        for (const std::string& wl : warns) {
+            // "<name>: agent has 9 waypoints ..." reads as "Has 9 waypoints ..." here.
+            std::string t = wl.rfind(name + ": agent ", 0) == 0 ? wl.substr(name.size() + 8) : wl;
+            if (!t.empty()) t[0] = char(std::toupper(static_cast<unsigned char>(t[0])));
+            warnText += (warnText.empty() ? "" : "\n") + t + (t.back() == '.' ? "" : ".");
+        }
+        if (!warnText.empty()) caption("obj.agwarn", warnText, color::warn);
+
+        const size_t bytes = splash::agentBytes(ag);
+        {
+            const ImRect cr = row("lagcost", "Export", "What the agent adds to the splashpack: a 28-byte record and 12 bytes per waypoint.");
+            nameRect("obj.agcost", cr);
+            const std::string t = "28 + 12 x " + std::to_string(std::min<size_t>(ag.waypoints.size(), 8)) + " = " + std::to_string(bytes) + " bytes";
+            text(dl, ImVec2(cr.Min.x, centerY(f.regular, type::body, cr.Min.y, cr.Max.y)), f.regular, type::body, color::textDim, t.c_str());
+        }
+        caption("obj.aglua",
+                "Lua drives it with Agent.* on self or Actor.Find(\"" + name +
+                    "\"): Agent.GetState, SetState, MoveTo, Stop, CanSee. Events: onStateEnter, onPatrolPoint, onTargetSeen, onTargetLost.",
+                color::textFaint);
+        report("agent", "agent: " + name + " enabled " + (ag.startEnabled ? "on" : "off") + " speed " + fmtShort(ag.moveSpeed) +
+                            " stop " + fmtShort(ag.stopDistance) + " vision " + (ag.vision ? "on" : "off") + " range " +
+                            fmtShort(ag.visionRange) + " fov " + fmtShort(ag.fov) + " depth " + std::to_string(ag.visionRegionDepth) +
+                            " hearing " + fmtShort(ag.hearingRange) + " alert " + std::to_string(ag.alertTimeout) + " waypoints " +
+                            std::to_string(ag.waypoints.size()) + " clips " + clipLine + " bytes " + std::to_string(bytes) +
+                            " warnings " + std::to_string(warns.size()));
+        sectionEnd(top);
+    }
+
     for (const editor::ComponentInfo& c : editor::components())
         if (removedFlags[static_cast<int>(c.kind)]) toRemove = c.kind;
 
@@ -7861,7 +8173,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     if (std::string why = editor::takeAssetHistoryError(); !why.empty()) notify(st, why, true);
     st.modelField = ImRect();
     st.assetSlots.clear();
-    inspector(st, dl, right, doc);
+    inspector(st, dl, right, doc, view);
     assetDragHint(st, dl, doc);
     if (st.drop.hovering && !st.modelField.Contains(st.drop.pos)) {
         // Anywhere but the Model field, a dropped model becomes a new object:

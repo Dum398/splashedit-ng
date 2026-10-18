@@ -10656,6 +10656,39 @@ void testUiSprite() {
         const auto probs = elementProblems(d, 0, 0, s);
         CHECK(std::any_of(probs.begin(), probs.end(), [](const Problem& p) { return p.title == "No such sprite sheet"; }));
     }
+
+    // Renaming a sheet renames the images that show it, in every canvas, in
+    // the same undo step; undo puts both back. Deleting a sheet leaves them.
+    {
+        editor::Document d;
+        splash::Scene ds = scene;
+        splash::UICanvas second;
+        second.name = "pause";
+        second.elements = {scene.canvases[0].elements[0]};  // hero
+        second.elements[0].name = "icon2";
+        second.elements.push_back(scene.canvases[0].elements[0]);
+        second.elements[1].name = "spark";
+        second.elements[1].sheet = "fx";
+        ds.canvases.push_back(second);
+        d.reset(ds);
+        auto sheetOf = [&](int c, int e) { return d.scene().canvases[size_t(c)].elements[size_t(e)].sheet; };
+        CHECK(editor::editSpriteSheet(d, 0, [](splash::SpriteSheet& s) { s.name = "hero2"; }));
+        CHECK(d.historySize() == 1 && d.scene().spriteSheets[0].name == "hero2");
+        CHECK(sheetOf(0, 0) == "hero2" && sheetOf(1, 0) == "hero2" && sheetOf(1, 1) == "fx" && sheetOf(0, 1).empty());
+        d.undo();
+        CHECK(d.scene().spriteSheets[0].name == "hero" && sheetOf(0, 0) == "hero" && sheetOf(1, 0) == "hero");
+        d.redo();
+        CHECK(sheetOf(0, 0) == "hero2" && sheetOf(1, 0) == "hero2");
+        // Typed a key at a time (one merge key): one step, the images follow each name.
+        CHECK(editor::editSpriteSheet(d, 1, [](splash::SpriteSheet& s) { s.name = "f"; }, "name"));
+        CHECK(editor::editSpriteSheet(d, 1, [](splash::SpriteSheet& s) { s.name = "fire"; }, "name"));
+        d.endMerge();
+        CHECK(sheetOf(1, 1) == "fire" && d.historySize() == 2);
+        d.undo();
+        CHECK(sheetOf(1, 1) == "fx" && d.scene().spriteSheets[1].name == "fx");
+        // Deleting a sheet keeps the images' names.
+        CHECK(editor::deleteSpriteSheet(d, 0) && sheetOf(0, 0) == "hero2" && sheetOf(1, 0) == "hero2");
+    }
 }
 
 void testSpriteSheets() {

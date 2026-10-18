@@ -1,5 +1,7 @@
 #include "editor/document.hh"
 
+#include <optional>
+
 #include <algorithm>
 #include <cmath>
 #include <exception>
@@ -326,20 +328,34 @@ private:
 
 class SpriteSheetsCommand : public Command {
 public:
-    SpriteSheetsCommand(std::vector<splash::SpriteSheet> before, std::vector<splash::SpriteSheet> after, std::string key)
-        : m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)) {}
-    void apply(Document& doc) override { doc.sceneMut().spriteSheets = m_after; }
-    void revert(Document& doc) override { doc.sceneMut().spriteSheets = m_before; }
+    // `canvases`: the UI canvases before and after when a rename carried the
+    // sheet field of the UI images that name the sheet (else not touched).
+    SpriteSheetsCommand(std::vector<splash::SpriteSheet> before, std::vector<splash::SpriteSheet> after, std::string key,
+                        std::optional<std::pair<std::vector<splash::UICanvas>, std::vector<splash::UICanvas>>> canvases)
+        : m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)), m_canvases(std::move(canvases)) {}
+    void apply(Document& doc) override {
+        doc.sceneMut().spriteSheets = m_after;
+        if (m_canvases) doc.sceneMut().canvases = m_canvases->second;
+    }
+    void revert(Document& doc) override {
+        doc.sceneMut().spriteSheets = m_before;
+        if (m_canvases) doc.sceneMut().canvases = m_canvases->first;
+    }
     bool merge(const Command& next) override {
         auto* n = dynamic_cast<const SpriteSheetsCommand*>(&next);
         if (!n || m_key.empty() || n->m_key != m_key) return false;
         m_after = n->m_after;
+        if (n->m_canvases) {
+            if (m_canvases) m_canvases->second = n->m_canvases->second;
+            else m_canvases = n->m_canvases;
+        }
         return true;
     }
 
 private:
     std::vector<splash::SpriteSheet> m_before, m_after;
     std::string m_key;
+    std::optional<std::pair<std::vector<splash::UICanvas>, std::vector<splash::UICanvas>>> m_canvases;
 };
 
 // Inserts (forward) or removes (inverse) one object with its subtree.
@@ -604,7 +620,27 @@ bool Document::editSpriteSheets(const std::function<void(std::vector<splash::Spr
     std::vector<splash::SpriteSheet> after = m_scene.spriteSheets;
     fn(after);
     if (after == m_scene.spriteSheets) return false;
-    execute(std::make_unique<SpriteSheetsCommand>(m_scene.spriteSheets, std::move(after), mergeKey), !mergeKey.empty());
+    // A rename (same sheets, one's name changed) carries the UI images that
+    // show a cell of it, in every canvas, in the same undo step. Deleting a
+    // sheet leaves them naming it: the element's problem marker shows that.
+    std::optional<std::pair<std::vector<splash::UICanvas>, std::vector<splash::UICanvas>>> canvases;
+    if (after.size() == m_scene.spriteSheets.size()) {
+        std::vector<splash::UICanvas> cv = m_scene.canvases;
+        bool changed = false;
+        for (size_t i = 0; i < after.size(); i++) {
+            const std::string& from = m_scene.spriteSheets[i].name;
+            const std::string& to = after[i].name;
+            if (from == to || from.empty()) continue;
+            // Another sheet still has the old name: the images keep pointing at it.
+            if (std::any_of(after.begin(), after.end(), [&](const splash::SpriteSheet& s) { return s.name == from; })) continue;
+            for (splash::UICanvas& c : cv)
+                for (splash::UIElement& e : c.elements)
+                    if (e.type == splash::UIElementType::Image && e.sheet == from) e.sheet = to, changed = true;
+        }
+        if (changed) canvases.emplace(m_scene.canvases, std::move(cv));
+    }
+    execute(std::make_unique<SpriteSheetsCommand>(m_scene.spriteSheets, std::move(after), mergeKey, std::move(canvases)),
+            !mergeKey.empty());
     return true;
 }
 

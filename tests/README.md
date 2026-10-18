@@ -295,6 +295,19 @@ from its name length byte through its last matrix, and a scene without skins pri
 
     python3 skincheck.py <splashpack-cli>
 
+`agentcheck.py` exports `skin/skin.scene` with Agent components on the skinned Arm, on two mesh-less
+objects and on an inactive one, and reads the agent records back the way psxsplash's loader does
+(agentCount at header offset 114, 28-byte records right after the interactables, then the waypoints).
+Every field is compared with the conversions of `docs/splashpack-format.md` 2.7 computed in the check:
+flags, fp12 speed and ranges, the half-cone cosine, state clips (none past the skin's clips or without
+a skin), waypoints capped at 8 with Y negated, and the game object each record names (through the name
+table: mesh-less agents are game objects, the inactive one is left out). It also checks the export's
+warnings (more than 8 waypoints, field of view outside (0, 360], state clips without a skin or past its
+clips, agents without nav regions; none with the courtyard's nav bake), the `--stats` `agent` lines,
+refused bad values and that `resave` keeps the component.
+
+    python3 agentcheck.py <splashpack-cli>
+
 `skin/skin.scene` booted with `boot/boot.sh` (its script loops `bend`) shows the upper box swinging
 about the elbow.
 

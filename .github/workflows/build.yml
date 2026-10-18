@@ -95,6 +95,7 @@ jobs:
           "$py" tests/animcheck.py "$cli"
           "$py" tests/lightcheck.py "$cli"
           "$py" tests/interactcheck.py "$cli"
+          "$py" tests/agentcheck.py "$cli"
           "$py" tests/memcardcheck.py "$cli"
           "$py" tests/importcheck.py "$cli"
           "$py" tests/blendcheck.py "$cli"

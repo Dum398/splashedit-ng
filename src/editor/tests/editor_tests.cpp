@@ -2843,6 +2843,89 @@ void testPlaceModel() {
     CHECK(!p.error.empty() && doc.historySize() == before && !fs::exists(proj / "models" / "junk.glb"));
 }
 
+// The loop an imported clip starts with comes from its name: a word starting
+// with idle, walk, run, ... loops; anything else plays once.
+void testDefaultClipLoop() {
+    for (const char* n : {"Walk", "idle", "IDLE_2", "Run", "Running", "jog", "Loop", "walk_cycle", "WalkCycle", "Patrol", "Swim",
+                          "Flying", "Breathe", "Hover", "Armature|Idle", "mixamo.com|Walk", "attackIdle", "Rune"})
+        if (!splash::defaultClipLoop(n)) {
+            std::fprintf(stderr, "  defaultClipLoop(%s) should loop\n", n);
+            CHECK(false);
+        }
+    for (const char* n : {"Attack", "Death", "Jump", "Wave", "Nod_Big", "Prune", "Overrun", "Open", "", "Armature|mixamo.com|Layer0",
+                          "Hit_Reaction", "Throw"})
+        if (splash::defaultClipLoop(n)) {
+            std::fprintf(stderr, "  defaultClipLoop(%s) should play once\n", n);
+            CHECK(false);
+        }
+}
+
+// tests/skinimport/rig.gltf with its clips renamed Walk and Attack: the
+// import writes Walk.anim looping and Attack.anim playing once. Flipping
+// Attack's loop in the editor rewrites the file as one undo step, keeping the
+// rest of the clip; undo brings the file back byte for byte.
+void testClipLoopImportAndEdit() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "cliploop";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game";
+    fs::create_directories(proj, ec);
+    std::string gltf;
+    {
+        std::ifstream in(fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skinimport" / "rig.gltf", std::ios::binary);
+        gltf.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    auto rename = [&](const std::string& from, const std::string& to) {
+        const size_t at = gltf.find("\"name\": \"" + from + "\"");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) gltf.replace(at, from.size() + 10, "\"name\": \"" + to + "\"");
+    };
+    rename("Wave", "Walk");
+    rename("Nod/Big", "Attack");
+    std::ofstream(dir / "rig.gltf", std::ios::binary) << gltf;
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    editor::PlacedModel p = editor::placeModel(doc, dir / "rig.gltf", std::nullopt, {0}, {0, 0, 0});
+    CHECK(p.error.empty() && p.model.clips.size() == 2);
+    const fs::path walk = proj / "models" / "rig" / "Walk.anim", attack = proj / "models" / "rig" / "Attack.anim";
+    CHECK(fs::exists(walk) && fs::exists(attack));
+    if (!fs::exists(walk) || !fs::exists(attack)) return;
+    CHECK(splash::loadAnim(walk).loop && !splash::loadAnim(attack).loop);
+
+    auto bytes = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string before = bytes(attack);
+    const splash::AnimClip was = splash::loadAnim(attack);
+    const size_t steps = doc.historySize();
+    const unsigned rev = doc.revision();
+    CHECK(editor::setAnimLoop(doc, "models/rig/Attack.anim", true).empty());
+    const splash::AnimClip now = splash::loadAnim(attack);
+    CHECK(now.loop && now.name == was.name && now.length == was.length && now.channels.size() == was.channels.size());
+    bool same = now.channels.size() == was.channels.size();
+    for (size_t i = 0; same && i < now.channels.size(); i++)
+        same = now.channels[i].joint == was.channels[i].joint && now.channels[i].times == was.channels[i].times &&
+               now.channels[i].values == was.channels[i].values;
+    CHECK(same);
+    CHECK(doc.historySize() == steps + 1 && doc.revision() != rev);
+    // Already looping: nothing to do, no step.
+    CHECK(editor::setAnimLoop(doc, "models/rig/Attack.anim", true).empty() && doc.historySize() == steps + 1);
+    CHECK(doc.undo() && !splash::loadAnim(attack).loop && bytes(attack) == before);
+    CHECK(doc.redo() && splash::loadAnim(attack).loop);
+    CHECK(doc.undo() && bytes(attack) == before);
+    CHECK(editor::takeAssetHistoryError().empty());
+    // A file that is not a clip is refused, untouched, with no step.
+    std::ofstream(proj / "bad.anim") << "{";
+    CHECK(!editor::setAnimLoop(doc, "bad.anim", true).empty() && bytes(proj / "bad.anim") == "{" && doc.historySize() == steps + 1);
+    CHECK(!editor::setAnimLoop(doc, "missing.anim", true).empty());
+    // No temporary left beside the clip.
+    int files = 0;
+    for (const auto& e : fs::directory_iterator(proj / "models" / "rig")) files += e.path().extension() == ".anim" ? 0 : e.path().filename().string()[0] == '.';
+    CHECK(files == 0);
+}
+
 // Dropping a skinned model (tests/skinimport/rig.gltf): the object drawing the
 // skinned mesh gets a skin component playing the model's clips, the scene
 // exports with it, and a reimport keeps a clip added by hand.
@@ -10422,6 +10505,8 @@ int main(int argc, char** argv) {
     testSeqRenameBlocks();
     testPlaceModel();
     testPlaceSkinnedModel();
+    testDefaultClipLoop();
+    testClipLoopImportAndEdit();
     testImportSettings();
     testModelImports();
     testModelImportsGaps();

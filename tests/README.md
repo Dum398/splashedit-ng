@@ -700,6 +700,16 @@ The viewport draws the vision cone, hearing square and patrol in pink only with 
 
     python3 agenteditcheck.py <splashedit> [keep.png]
 
+`cliploopcheck.py` opens a copy of `tests/skin` (bend.anim loops, raise.anim plays once) with an Agent
+on Arm whose Patrol plays raise. The Skinned animation section's switch per clip
+(`obj.skinloop.<i>`) rewrites the clip's `.anim` loop as one undo step: the file must say so, the
+export bake raise again as a loop (another frame count, `skin: clip raise frames F bytes N loops`), and
+Ctrl+Z put it all back. The Agent section's "Clip plays once" card (`obj.agonce<i>`, printed as
+`agent: Arm plays once: raise`) shows while a held state plays a one-shot clip and goes once the clip
+loops, by the switch or by the card's fix.
+
+    python3 cliploopcheck.py <splashedit> [shot.png]
+
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the
 ruler, double-clicks a lane, drags a key, deletes a selected key with Delete while an object is

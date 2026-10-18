@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <charconv>
 #include <fstream>
 #include <sstream>
@@ -1222,6 +1223,27 @@ void saveAnim(const AnimClip& c, const fs::path& file) {
                        {"values", ch.values}});
     j["channels"] = chs;
     writeJson(j, file);
+}
+
+bool defaultClipLoop(const std::string& name) {
+    static const char* const kLooping[] = {"idle", "walk", "run", "jog", "loop", "cycle", "patrol", "swim", "fly", "breath", "hover"};
+    auto check = [](const std::string& word) {
+        for (const char* k : kLooping)
+            if (word.rfind(k, 0) == 0) return true;
+        return false;
+    };
+    std::string word;
+    for (size_t i = 0; i <= name.size(); i++) {
+        const unsigned char ch = i < name.size() ? static_cast<unsigned char>(name[i]) : 0;
+        const bool letter = std::isalpha(ch) != 0;
+        const bool camel = letter && std::isupper(ch) && i > 0 && std::islower(static_cast<unsigned char>(name[i - 1]));
+        if (!letter || camel) {
+            if (check(word)) return true;
+            word.clear();
+        }
+        if (letter) word += char(std::tolower(ch));
+    }
+    return false;
 }
 
 VramSettings::Area clampVramArea(VramSettings::Area a) {

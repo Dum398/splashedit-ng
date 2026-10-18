@@ -2521,7 +2521,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                 w.u16(uint16_t(c.frameCount));
                 for (const BoneMatrix& m : c.frames)
                     for (int16_t v : m) w.i16(v);
-                info.clips.push_back({c.name, c.fps, c.frameCount, w.pos() - clipStart});
+                info.clips.push_back({c.name, c.fps, c.frameCount, w.pos() - clipStart, c.loop});
             }
             // v26: bind joint positions, then joint names.
             if (w.pos() & 1) w.u8(0);

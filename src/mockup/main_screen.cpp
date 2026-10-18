@@ -5784,6 +5784,43 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     }
 }
 
+// Whether the clip file `file` loops, read again only when its time or size
+// changes; nullopt when it does not read.
+static std::optional<bool> clipLoops(const std::filesystem::path& file) {
+    struct Seen {
+        std::filesystem::file_time_type time;
+        uintmax_t size = 0;
+        std::optional<bool> loop;
+    };
+    static std::map<std::filesystem::path, Seen> cache;
+    std::error_code ec;
+    const auto time = std::filesystem::last_write_time(file, ec);
+    if (ec) return std::nullopt;
+    const uintmax_t size = std::filesystem::file_size(file, ec);
+    if (ec) return std::nullopt;
+    auto it = cache.find(file);
+    if (it != cache.end() && it->second.time == time && it->second.size == size) return it->second.loop;
+    Seen s{time, size, std::nullopt};
+    try {
+        s.loop = splash::loadAnim(file).loop;
+    } catch (const std::exception&) {
+    }
+    cache[file] = s;
+    return s.loop;
+}
+
+// `t` cut with "..." to fit `w` at the label size.
+static std::string fitWidth(const std::string& t, float w) {
+    Fonts& f = fonts();
+    if (measure(f.regular, type::label, t.c_str()).x <= w) return t;
+    std::string s = t;
+    while (!s.empty() && measure(f.regular, type::label, (s + "...").c_str()).x > w) {
+        while (!s.empty() && (static_cast<unsigned char>(s.back()) & 0xc0) == 0x80) s.pop_back();  // a whole UTF-8 character
+        if (!s.empty()) s.pop_back();
+    }
+    return s + "...";
+}
+
 static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
     Fonts& f = fonts();
     panel(dl, r);
@@ -7180,6 +7217,31 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (slotField(st, static_cast<int>(AssetSlot::SkinClips), path, "clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
                        icon::play, kind::camera, clips.c_str(), nullptr))
             pickAsset(AssetSlot::SkinClips, path);
+        // Each clip's loop flag, kept in its .anim file: a row per clip,
+        // named obj.skinloop.<i>. A flip rewrites the file as one undo step.
+        static const char* const kLoopTip = "Looping clips start over when they end. A clip that plays once holds its last frame "
+                                            "when it ends. Kept in the clip's .anim file.";
+        for (size_t i = 0; i < sk.clips.size(); i++) {
+            ImGui::PushID(int(i));
+            const std::string label = fitWidth(std::filesystem::path(sk.clips[i]).stem().string(), lw - space::sm);
+            const ImRect lr = row("lskinloop", label.c_str(), kLoopTip);
+            const std::optional<bool> loops = clipLoops(doc.projectRoot() / std::filesystem::path(sk.clips[i]));
+            const float cy = lr.GetCenter().y;
+            if (loops) {
+                const ImRect sw(ImVec2(lr.Min.x, cy - 8), ImVec2(lr.Min.x + 30, cy + 8));
+                nameRect("obj.skinloop." + std::to_string(i), sw);
+                const bool flip = toggle("skinloop", sw, *loops);
+                tooltip(kLoopTip);
+                text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::body, lr.Min.y, lr.Max.y)), f.regular, type::body,
+                     color::textDim, *loops ? "Loops" : "Plays once");
+                if (flip)
+                    if (std::string why = editor::setAnimLoop(doc, sk.clips[i], !*loops); !why.empty()) notify(st, "Can't change the clip: " + why, true);
+            } else {
+                text(dl, ImVec2(lr.Min.x, centerY(f.regular, type::body, lr.Min.y, lr.Max.y)), f.regular, type::body, color::textFaint,
+                     "Clip file not readable");
+            }
+            ImGui::PopID();
+        }
         number("sfps", "Bake rate", "Frames per second the clips are sampled at.", static_cast<float>(sk.fps), "fps", "sfps", 1, 30,
                [](splash::Object& ob, float v) { ob.skin->fps = static_cast<int>(std::lround(v)); });
         // What the last live export baked for this object, matched by name.
@@ -7209,9 +7271,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                            std::to_string(si->clips.size()) + " bytes " + std::to_string(si->bytes);
                 for (size_t i = 0; i < si->clips.size(); i++) {
                     const splash::ExportStats::SkinClipInfo& c = si->clips[i];
-                    line(i + 1, c.name + "  " + std::to_string(c.frames) + " frames @ " + std::to_string(c.fps) + " fps, " +
-                                    fmtKB(int(c.bytes)));
-                    skinLine += "\nskin: clip " + c.name + " frames " + std::to_string(c.frames) + " bytes " + std::to_string(c.bytes);
+                    // The rate is the Bake rate's, above: the loop takes its place.
+                    line(i + 1, c.name + "  " + std::to_string(c.frames) + " frames, " + fmtKB(int(c.bytes)) + (c.loop ? ", loops" : ", once"));
+                    skinLine += "\nskin: clip " + c.name + " frames " + std::to_string(c.frames) + " bytes " + std::to_string(c.bytes) +
+                                (c.loop ? " loops" : " once");
                 }
                 line(lines - 1, "Skin data " + fmtKB(int(si->bytes)));
                 // A clip this long is most of the skin's RAM; usually the rate
@@ -7335,7 +7398,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         }
 
         // The clip each state plays, from the object's skin.
-        std::string clipLine;
+        std::string clipLine, clipOnce;
         if (!o->skin) {
             caption("obj.agclips", "State clips: add a Skinned animation component to this object to play a clip per state.",
                     color::textFaint);
@@ -7352,19 +7415,50 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 names.clear();
                 for (const std::string& c : sk.clips) names.push_back(std::filesystem::path(c).stem().string());
             }
+            // Whether each clip loops, from its file: a state's clip takes
+            // its loop from there on the console.
+            std::vector<std::optional<bool>> loops;
+            for (const std::string& c : sk.clips) loops.push_back(clipLoops(doc.projectRoot() / std::filesystem::path(c)));
+            auto withLoop = [&](size_t c) {
+                return names[c] + (!loops[c] ? std::string() : *loops[c] ? " (loops)" : " (plays once)");
+            };
+            std::vector<std::string> labels;
+            for (size_t c = 0; c < names.size(); c++) labels.push_back(withLoop(c));
             std::vector<const char*> items{"None"};
-            for (const std::string& n : names) items.push_back(n.c_str());
+            for (const std::string& n : labels) items.push_back(n.c_str());
             for (int s = 0; s < splash::kAgentStates; s++) {
                 const int c = ag.stateClips[size_t(s)];
                 const std::string lid = std::string("lagclip") + std::to_string(s), id = "agclip" + std::to_string(s);
                 const ImRect cr = row(lid.c_str(), splash::kAgentStateNames[s], "The skin clip the agent plays when it enters this state.");
                 nameRect("obj." + id, cr);
-                const std::string shown = c < 0 ? std::string("None") : c < int(names.size()) ? names[size_t(c)] : "Clip " + std::to_string(c + 1) + " (missing)";
+                const std::string shown = c < 0 ? std::string("None") : c < int(names.size()) ? labels[size_t(c)] : "Clip " + std::to_string(c + 1) + " (missing)";
                 const int pick = dropdownMenu(id.c_str(), cr, nullptr, shown.c_str(), items, c + 1);
                 if (pick >= 0) doc.edit(path, [s, pick](splash::Object& ob) { ob.agent->stateClips[size_t(s)] = pick - 1; });
             }
+            // A state it stays in for a while (Idle, Patrol, Seek, Flee,
+            // Wander) on a clip that plays once freezes on its last frame.
+            // One card per clip, naming the states; its fix makes it loop.
+            static const int kHeld[] = {0, 1, 2, 3, 5};
+            for (size_t c = 0; c < names.size(); c++) {
+                if (!loops[c] || *loops[c]) continue;
+                std::vector<std::string> states;
+                for (int s : kHeld)
+                    if (ag.stateClips[size_t(s)] == int(c)) states.push_back(splash::kAgentStateNames[s]);
+                if (states.empty()) continue;
+                std::string who = states[0];
+                for (size_t k = 1; k < states.size(); k++) who += (k + 1 == states.size() ? " and " : ", ") + states[k];
+                const std::string body = who + (states.size() > 1 ? " use '" : " uses '") + names[c] +
+                                         "', which plays once: it will hold its last frame. Make the clip loop (Skinned animation) "
+                                         "or pick another.";
+                const std::string id = "agonce" + std::to_string(c);
+                if (card(id.c_str(), "Clip plays once", body, "Make it loop"))
+                    if (std::string why = editor::setAnimLoop(doc, sk.clips[c], true); !why.empty()) notify(st, "Can't change the clip: " + why, true);
+                clipOnce += (clipOnce.empty() ? "" : ",") + names[c];
+            }
         }
         for (int s = 0; s < splash::kAgentStates; s++) clipLine += (s ? "," : "") + std::to_string(ag.stateClips[size_t(s)]);
+        // The clips held states play once, as the cards above warn.
+        report("agentonce", o->skin ? "agent: " + name + " plays once: " + (clipOnce.empty() ? std::string("none") : clipOnce) : std::string());
 
         // What the export will warn about, and the nav bake agents need.
         std::vector<std::string> warns = splash::agentWarnings(*o);

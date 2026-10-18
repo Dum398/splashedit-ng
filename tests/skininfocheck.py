@@ -1,12 +1,12 @@
 # What the object inspector says about a skinned mesh, driven through the GUI.
 # Under the Bake rate the Skinned animation section shows a Baked row
 # (obj.skininfo): the bones and triangles, one line per clip with its frames,
-# bake rate and size, and the whole skin's size, all from the last live
+# size and whether it loops, and the whole skin's size, all from the last live
 # export. The row's height is fixed by the clip list from the first frame, so
 # nothing below it moves when the export lands. A clip that bakes more than
 # 1000 frames adds a "Long clip" card (obj.skinlong). Under scripted runs the
 # editor prints "skin: <object> bones <b> clips <c> bytes <n>" and
-# "skin: clip <name> frames <f> bytes <n>" per clip as they change.
+# "skin: clip <name> frames <f> bytes <n> loops|once" per clip as they change.
 # usage: python3 skininfocheck.py <splashedit> [shot.png]   (needs a display: xvfb-run -a)
 import json, os, re, shutil, subprocess, sys, tempfile
 
@@ -63,16 +63,22 @@ def inside(rects, name):
     return r is not None and p is not None and p[0] <= r[0] and r[2] <= p[2] and p[1] <= r[1] and r[3] <= p[3]
 
 
+loops = {}  # clip: loops or once, from the last parse
+
+
 def parse(lines):
     """The last skin block printed: (bones, bytes, {clip: (frames, bytes)})."""
     head, clips = None, {}
+    loops.clear()
     for l in lines:
         m = re.match(r'skin: Arm bones (\d+) clips (\d+) bytes (\d+)$', l)
         if m:
             head, clips = (int(m.group(1)), int(m.group(3))), {}
             continue
-        m = re.match(r'skin: clip (\S+) frames (\d+) bytes (\d+)$', l)
-        if m: clips[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+        m = re.match(r'skin: clip (\S+) frames (\d+) bytes (\d+) (loops|once)$', l)
+        if m:
+            clips[m.group(1)] = (int(m.group(2)), int(m.group(3)))
+            loops[m.group(1)] = m.group(4)
     return head, clips
 
 
@@ -85,6 +91,7 @@ head, clips = parse(lines)
 check('Arm prints its skin: 2 bones, 2 clips', head is not None and head[0] == 2 and len(lines) == 3 and
       lines[0].startswith('skin: Arm bones 2 clips 2 bytes '), lines)
 check('each clip prints frames and bytes', sorted(clips) == ['bend', 'raise'] and all(f > 0 and b > 0 for f, b in clips.values()), clips)
+check('and whether it loops, as its file says', loops == {'bend': 'loops', 'raise': 'once'}, loops)
 check('the clips fit in the skin', head is not None and len(clips) == 2 and sum(b for _, b in clips.values()) < head[1], (head, clips))
 check('the Baked row lies in the inspector panel, under Bake rate', inside(rects, 'obj.skininfo') and
       rects['obj.skininfo'][1] >= rects.get('s_skin', (0, 0, 0, 1 << 30))[3] + 64, (rects.get('s_skin'), rects.get('obj.skininfo'), rects.get('obj.panel')))

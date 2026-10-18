@@ -195,6 +195,12 @@ AssetOp applyAssetPlan(Document& doc, const AssetIndex& index, const std::string
 // and every reference follows (see applyAssetPlan). Undo brings the blocks
 // back byte for byte. Refused, untouched, when the blocks have an error.
 AssetOp convertBlocksToLua(Document& doc, const AssetIndex& index, const std::string& openScene, const std::string& blocksPath);
+// Sets the loop flag of the clip file `animPath` (project-relative) as one
+// undo step of `doc`: the file is read, its loop set and written back, and
+// undo puts the old bytes back. Every edit bumps the revision, so the live
+// export bakes the clip again. Empty on success (or when it already was so),
+// else why not; the file is untouched then.
+std::string setAnimLoop(Document& doc, const std::string& animPath, bool loop);
 // A problem moving files back or forth on an undo or redo of an applied
 // plan, cleared on read; empty when there was none.
 std::string takeAssetHistoryError();

@@ -683,6 +683,8 @@ std::vector<AnimClip> buildRig(ImportedModel& out, Sink& baked, std::vector<Node
         AnimClip c;
         c.name = cs.name;
         c.length = std::max(0.0f, cs.length);
+        // Cycles by name (Walk, Idle, ...) loop; the inspector flips it.
+        c.loop = defaultClipLoop(cs.name);
         for (const ChannelSource& src : cs.channels) {
             if (src.node < 0 || size_t(src.node) >= nodes.size() || jointOf[size_t(src.node)] < 0 || src.channel.times.empty()) continue;
             const size_t j = size_t(jointOf[size_t(src.node)]);

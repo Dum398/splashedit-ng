@@ -348,7 +348,21 @@ sheet). With `--stats`:
     sprite sheet bpp=4|8|16 cell=WxH grid=CxR anims=K <sheet>
 
 `B` is the table from its first sheet record through the last name's NUL (20 N + 12 M + names);
-`grid` is the texture's columns x rows of cells. A scene without sheets prints neither.
+`grid` is the texture's columns x rows of cells. A scene without sheets prints neither. Each UI
+image (not the loading canvas's) prints, in canvas order:
+
+    ui image sheet=<sheet>|- cell=N <canvas>/<element>
+
+`uispritecheck.py` exports the same scene with a canvas of HUD sprites (UI images backed by a cell
+of a sheet: hero cell 6, fx cell 5) and a plain image, and reads each image's 16 type-data bytes
+back the way `uisystem.cpp` does: page, CLUT and bit depth must be the sheet's, cellW/cellH/cols
+and baseU/baseV the sheet record's grid and u0/v0, u0..u1/v0..v1 the authored cell (inclusive last
+texel), the cell recovered from them as the loader does (UI.GetFrame), and the texels the GPU
+fetches there through the `.vram` file that cell of the PNG, also after UI.SetFrame's arithmetic for
+another cell. Each sheet texture is in VRAM once; the plain image keeps bytes 11..15 zero; colour
+0.5 is 128. Export refuses a sheet the scene does not have and a cell past the sheet's last.
+
+    python3 uispritecheck.py <splashpack-cli>
 
     python3 spritecheck.py <splashpack-cli>
 
@@ -411,6 +425,17 @@ status bar shows it); one that makes exactly 255 goes through. `editor_tests` co
 the model (`testUiMultiSelect`).
 
     python3 uicanvascheck.py <splashedit>
+
+`uispriteguicheck.py` drives the Image inspector's Sheet row on a project holding `sprite/`'s two
+sheets and a canvas with one plain image: selected on the canvas, its Sheet menu (`ui.sheet`, items
+`ui.sheet/None`, `ui.sheet/<sheet>`) picks `hero`, the cell picker drawn over the sheet's texture
+(each cell a named control `ui.sheetcell/<n>`) takes cell 6 and Snap size (`ui.snapsize`) makes it
+16x16. With `--ui` the editor prints `uicanvas: image sheet <sheet> cell <n> of <cells> grid <c>x<r>
+size <w>x<h>` (or `none`) when that changes. The saved scene must have `sheet`/`cell` and the rect,
+the canvas at 100% must show hero's cell 6 there, one Ctrl+Z takes back Snap size and another the
+cell, and None saves a plain image without the keys.
+
+    python3 uispriteguicheck.py <splashedit>
 
 `uifontscheck.py` drives the canvas inspector's Scene fonts section on the same copy of
 `ui/ui.scene`. With `--ui` the editor prints each font as `uicanvas: fonts: <i> <name> ttf <source>

@@ -515,6 +515,9 @@ int main(int argc, char** argv) {
                     std::printf("sprite sheet bpp=%d cell=%dx%d grid=%dx%d anims=%d %s\n", s.bitDepth, s.cellW, s.cellH, s.cols,
                                 s.rows, s.anims, s.name.c_str());
             }
+            for (const auto& im : st.uiImages)
+                std::printf("ui image sheet=%s cell=%d %s/%s\n", im.sheet.empty() ? "-" : im.sheet.c_str(), im.cell,
+                            im.canvas.c_str(), im.element.c_str());
             if (st.streamRegions)
                 std::printf("stream regions=%d objects=%d split=%d slots=%d (wanted %d) slot_bytes=%u pool=%zu "
                             "streamed_tri_bytes=%zu table=%zu geo=%zu ram_saved=%lld load_radius=%d region_size=%lld\n",

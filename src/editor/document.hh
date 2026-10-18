@@ -149,6 +149,10 @@ public:
     int replaceTrees(std::vector<std::pair<ObjectPath, splash::Object>> trees);
     // Same for the scene's own settings (fog, render buffers, ...).
     void editSettings(const std::function<void(splash::SceneSettings&)>& fn, const std::string& mergeKey = {});
+    // Runs `fn` on a copy of the scene's sprite sheets and applies the result
+    // as one undo step (none when nothing changed); merges like editSettings.
+    // Returns whether anything changed.
+    bool editSpriteSheets(const std::function<void(std::vector<splash::SpriteSheet>&)>& fn, const std::string& mergeKey = {});
     // Closes the open merge, so the next edit starts a new undo step.
     void endMerge() { m_mergeOpen = false; }
     // Inserts `obj` so that it ends up at `path`, and selects it.

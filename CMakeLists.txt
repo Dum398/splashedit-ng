@@ -95,6 +95,7 @@ add_library(splasheditdoc STATIC
     src/editor/model_import.cpp
     src/editor/project.cpp
     src/editor/serial.cpp
+    src/editor/sprites.cpp
     src/editor/timeline.cpp
     src/editor/hardware.cpp
     src/editor/log_view.cpp

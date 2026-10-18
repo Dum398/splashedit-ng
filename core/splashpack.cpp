@@ -1477,7 +1477,137 @@ void checkMemCard(const MemCardSettings& mc, std::vector<std::string>& errors, s
         warnings.push_back("Memory card saves have no icon, so the BIOS shows a blank square: add a 16x16 image");
 }
 
+// ---- sprite sheets (v22; psxsplash spritesystem.cpp SPLASHPACKSpriteSheet/Anim)
+
+void checkSpriteSheets(const std::vector<SpriteSheet>& sheets,
+                       const std::function<SpriteTextureSize(const SpriteSheet&)>& sizeOf, std::vector<std::string>& errors,
+                       std::vector<std::string>& warnings) {
+    if (sheets.size() > size_t(kMaxSpriteSheets))
+        errors.push_back(std::to_string(sheets.size()) + " sprite sheets, psxsplash loads at most " +
+                         std::to_string(kMaxSpriteSheets) + ": delete some or merge them into one texture");
+    size_t anims = 0;
+    for (const SpriteSheet& s : sheets) anims += s.anims.size();
+    if (anims > size_t(kMaxSpriteAnims))
+        errors.push_back(std::to_string(anims) + " sprite animations, psxsplash loads at most " +
+                         std::to_string(kMaxSpriteAnims) + ": delete some");
+    std::vector<std::string> sheetNames;
+    std::map<std::string, std::string> animSheet;  // stored animation name -> the sheet it was first seen in
+    for (size_t i = 0; i < sheets.size(); i++) {
+        const SpriteSheet& s = sheets[i];
+        const std::string where = s.name.empty() ? "sprite sheet " + std::to_string(i + 1) : "sprite sheet '" + s.name + "'";
+        const std::string stored = truncateUtf16(s.name, 24);
+        if (s.name.empty()) errors.push_back(where + " has no name: Lua finds sheets by name (Sprite.SheetIndex)");
+        else if (stored != s.name) warnings.push_back(where + ": the name is cut to 24 characters, '" + stored + "'");
+        if (!s.name.empty()) {
+            if (std::find(sheetNames.begin(), sheetNames.end(), stored) != sheetNames.end())
+                errors.push_back("two sprite sheets are named '" + stored + "': rename one");
+            sheetNames.push_back(stored);
+        }
+        const bool cellOk = s.cellW >= 1 && s.cellW <= 255 && s.cellH >= 1 && s.cellH <= 255;
+        if (!cellOk)
+            errors.push_back(where + ": the cell is " + std::to_string(s.cellW) + "x" + std::to_string(s.cellH) +
+                             ", each side must be 1..255 pixels");
+        int cells = -1;
+        if (s.texture.empty()) {
+            errors.push_back(where + " has no texture: pick an image");
+        } else if (SpriteTextureSize sz = sizeOf(s); !sz.error.empty()) {
+            errors.push_back(where + ": " + sz.error);
+        } else if (cellOk) {
+            if (sz.width % s.cellW || sz.height % s.cellH) {
+                errors.push_back(where + ": the texture is " + std::to_string(sz.width) + "x" + std::to_string(sz.height) +
+                                 ", not a whole number of " + std::to_string(s.cellW) + "x" + std::to_string(s.cellH) +
+                                 " cells: change the cell size or the image");
+            } else {
+                const int cols = sz.width / s.cellW, rows = sz.height / s.cellH;
+                cells = cols * rows;
+                if (cells > 255)
+                    errors.push_back(where + ": " + std::to_string(cols) + "x" + std::to_string(rows) + " = " +
+                                     std::to_string(cells) + " cells, psxsplash numbers at most 255: use bigger cells");
+            }
+        }
+        for (size_t k = 0; k < s.anims.size(); k++) {
+            const SpriteAnim& a = s.anims[k];
+            const std::string at = where + ", animation " + (a.name.empty() ? std::to_string(k + 1) : "'" + a.name + "'");
+            const std::string an = truncateUtf16(a.name, 24);
+            if (a.name.empty()) errors.push_back(at + " has no name: Lua plays animations by name (Sprite.AnimIndex)");
+            else if (an != a.name) warnings.push_back(at + ": the name is cut to 24 characters, '" + an + "'");
+            if (!a.name.empty()) {
+                auto [it, fresh] = animSheet.emplace(an, s.name);
+                if (!fresh)
+                    errors.push_back("two sprite animations are named '" + an + "' (sheets '" + it->second + "' and '" + s.name +
+                                     "'): Sprite.AnimIndex searches every sheet, so names must differ across the scene");
+            }
+            if (a.frameCount < 1) errors.push_back(at + ": " + std::to_string(a.frameCount) + " frames, it needs at least 1");
+            if (a.frameDuration < 1 || a.frameDuration > 255)
+                errors.push_back(at + ": each frame lasts " + std::to_string(a.frameDuration) + " vsyncs, it must be 1..255");
+            if (a.firstFrame < 0 || (cells >= 0 && a.frameCount >= 1 && a.firstFrame + a.frameCount > cells))
+                errors.push_back(at + ": cells " + std::to_string(a.firstFrame) + ".." +
+                                 std::to_string(a.firstFrame + std::max(a.frameCount, 1) - 1) + " are outside the sheet" +
+                                 (cells >= 0 ? "'s " + std::to_string(cells) + " cells (0.." + std::to_string(cells - 1) + ")" : ""));
+        }
+    }
+}
+
+std::string spriteSheetPageError(const std::string& name, int u0, int v0, int width, int height) {
+    if (u0 >= 0 && v0 >= 0 && u0 + width <= 256 && v0 + height <= 256) return {};
+    return "sprite sheet '" + name + "': packed at " + std::to_string(u0) + "," + std::to_string(v0) +
+           " in its texture page, its " + std::to_string(width) + "x" + std::to_string(height) +
+           " texels run past the page's 256x256: use a smaller image or a lower bit depth";
+}
+
 namespace {
+
+// The sprite table: `count` 20-byte sheet records, then 12-byte animation
+// records, then their NUL-terminated names (absolute offsets). Each sheet's
+// texture is placed already. Returns the table's size from its start.
+size_t writeSpriteTable(BinWriter& w, size_t tableOffsetPos, const std::vector<SpriteSheet>& sheets,
+                        const std::vector<PsxTexture*>& textures) {
+    w.align4();
+    const size_t start = w.pos();
+    w.patchU32(tableOffsetPos, uint32_t(start));
+    std::vector<size_t> namePos;
+    std::vector<std::string> names;
+    for (size_t i = 0; i < sheets.size(); i++) {
+        const SpriteSheet& s = sheets[i];
+        const PsxTexture& t = *textures[i];
+        const int u0 = t.packingX * (16 / int(t.bitDepth)), v0 = t.packingY;
+        namePos.push_back(w.pos());
+        names.push_back(truncateUtf16(s.name, 24));
+        w.u32(0);
+        w.u8(t.texpageX);
+        w.u8(t.texpageY);
+        w.u8(uint8_t(u0));
+        w.u8(uint8_t(v0));
+        w.u16(t.clutPackingX);
+        w.u16(t.clutPackingY);
+        w.u8(uint8_t(s.cellW));
+        w.u8(uint8_t(s.cellH));
+        w.u8(uint8_t(t.width / s.cellW));
+        w.u8(uint8_t(t.height / s.cellH));
+        w.u8(t.bitDepth == BitDepth::Bpp4 ? 0 : t.bitDepth == BitDepth::Bpp8 ? 1 : 2);
+        w.u8(0);
+        w.u16(0);
+    }
+    for (size_t i = 0; i < sheets.size(); i++)
+        for (const SpriteAnim& a : sheets[i].anims) {
+            namePos.push_back(w.pos());
+            names.push_back(truncateUtf16(a.name, 24));
+            w.u32(0);
+            w.u8(uint8_t(i));
+            w.u8(uint8_t(a.firstFrame));
+            w.u8(uint8_t(a.frameCount));
+            w.u8(uint8_t(a.frameDuration));
+            w.u8(a.loop ? 1 : 0);
+            w.u8(0);
+            w.u16(0);
+        }
+    for (size_t i = 0; i < names.size(); i++) {
+        w.patchU32(namePos[i], uint32_t(w.pos()));
+        w.bytes(names[i].data(), names[i].size());
+        w.u8(0);
+    }
+    return w.pos() - start;
+}
 
 // The 464-byte SPLASHPACKMemcard record: region[2], product[10], title[32]
 // (zero padded), u8 frameCount, u8 0, u16 0, u16 clut[16], u8 pixels[3][128]
@@ -1770,6 +1900,34 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     std::vector<std::array<int, 2>> fontVram;
     std::map<std::string, int> fontIndex;  // name -> 1-based index (0 = system font)
     prepareUi(scene, canvases, root, options.vram, imageFor, textureStore, uiTextures, fontSheets, fontVram, fontIndex, res);
+
+    // Sprite sheets: checked, then each texture converted with cutout on (the
+    // engine draws them as sprites over the scene), packed after the UI's.
+    std::vector<PsxTexture*> spriteTextures(scene.spriteSheets.size(), nullptr);
+    {
+        auto sizeOf = [&](const SpriteSheet& s) -> SpriteTextureSize {
+            try {
+                const Image& img = imageFor(s.texture);
+                return {img.width, img.height, {}};
+            } catch (const std::exception& ex) {
+                return {0, 0, ex.what()};
+            }
+        };
+        const size_t before = res.errors.size();
+        checkSpriteSheets(scene.spriteSheets, sizeOf, res.errors, res.warnings);
+        if (res.errors.size() == before)
+            for (size_t i = 0; i < scene.spriteSheets.size(); i++) {
+                const SpriteSheet& s = scene.spriteSheets[i];
+                try {
+                    textureStore.push_back(convertTexture(imageFor(s.texture), s.bitDepth, true));
+                } catch (const std::exception& ex) {
+                    res.errors.push_back("sprite sheet '" + s.name + "': " + ex.what());
+                    continue;
+                }
+                textureStore.back().source = s.texture;
+                spriteTextures[i] = &textureStore.back();
+            }
+    }
     if (!res.ok()) return res;
 
     // VRAM packing over every object's texture list in object order.
@@ -1778,7 +1936,17 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (auto& cv : uiTextures)
         for (PsxTexture* t : cv)
             if (t) all.push_back(t);
+    for (PsxTexture* t : spriteTextures) all.push_back(t);
     VramLayout vram = packVram(all, options.vram, res.errors);
+    // psxsplash steps through a sheet's cells with 8-bit texture coordinates
+    // from its top-left corner, so the whole grid must sit in one 256x256 page.
+    const bool packed = res.ok();  // a texture that did not fit keeps 0,0: no page to check
+    for (size_t i = 0; packed && i < spriteTextures.size(); i++) {
+        const PsxTexture& t = *spriteTextures[i];
+        const std::string e = spriteSheetPageError(scene.spriteSheets[i].name, t.packingX * (16 / int(t.bitDepth)),
+                                                   t.packingY, t.width, t.height);
+        if (!e.empty()) res.errors.push_back(e);
+    }
     {
         using K = ExportStats::VramKind;
         auto& map = res.stats.vramMap;
@@ -2202,9 +2370,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u32(0);
     size_t streamTableOffsetPos = w.pos();
     w.u32(0);
-    w.u32(0);  // sprite table offset
-    w.u16(0);  // sprite sheets
-    w.u16(0);  // sprite anims
+    const size_t spriteTableOffsetPos = w.pos();
+    w.u32(0);  // sprite table offset, patched when the scene has sheets
+    size_t spriteAnimCount = 0;
+    for (const SpriteSheet& s : scene.spriteSheets) spriteAnimCount += s.anims.size();
+    w.u16(uint16_t(scene.spriteSheets.size()));
+    w.u16(uint16_t(spriteAnimCount));
     w.u32(hashSceneId(scene.settings.networkId));
     w.u32(0);  // tilemap table offset
     size_t lightTableOffsetPos = w.pos();
@@ -2549,6 +2720,18 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     if (!canvases.empty() || !fontSheets.empty())
         writeUi(w, uiTableOffsetPos, canvases, uiTextures, fontSheets, fontVram, fontIndex, options.vram);
+
+    // ---- sprite sheets and animations (v22)
+    if (!scene.spriteSheets.empty()) {
+        res.stats.spriteTableBytes = writeSpriteTable(w, spriteTableOffsetPos, scene.spriteSheets, spriteTextures);
+        res.stats.spriteAnims = int(spriteAnimCount);
+        for (size_t i = 0; i < scene.spriteSheets.size(); i++) {
+            const SpriteSheet& s = scene.spriteSheets[i];
+            const PsxTexture& t = *spriteTextures[i];
+            res.stats.spriteSheets.push_back(
+                {s.name, int(s.bitDepth), s.cellW, s.cellH, t.width / s.cellW, t.height / s.cellH, int(s.anims.size())});
+        }
+    }
 
     // ---- point lights (v24): {u16 count, u16 0}, 28-byte records, then names
     if (hasLights) {

@@ -102,6 +102,33 @@ check('an empty skinEvents list is not written', rc == 0 and 'skinEvents' not in
 rc, err = resave(dict(an, animations=[dict(an['animations'][0], skinEvents=[{'frame': -1}])]), '.scene')
 check('skin event frame -1 refused', rc != 0, err)
 
+# Sprite sheets: written as given, defaults filled in, unknown keys kept; no
+# sheets writes no spriteSheets key.
+base = {k: x for k, x in scene.items() if k not in ('objects',)}
+rc, out = resave(base, '.scene')
+check('no sprite sheets: no spriteSheets key', rc == 0 and 'spriteSheets' not in out, out)
+sheets = [{'name': 'hero', 'texture': 'hero.png', 'bitDepth': 8, 'cellWidth': 24, 'cellHeight': 32, 'futureSheet': 1,
+           'anims': [{'name': 'walk', 'firstFrame': 2, 'frameCount': 3, 'frameDuration': 5, 'loop': False, 'futureAnim': 2},
+                     {}]},
+          {'name': 'fx', 'texture': 'fx.png'}]
+rc, out = resave(dict(base, spriteSheets=sheets), '.scene')
+check('sprite sheets load', rc == 0, out)
+if rc == 0:
+    s = out.get('spriteSheets', [])
+    check('sprite sheet values kept', len(s) == 2 and s[0]['name'] == 'hero' and s[0]['texture'] == 'hero.png' and
+          s[0]['bitDepth'] == 8 and s[0]['cellWidth'] == 24 and s[0]['cellHeight'] == 32, s)
+    check('sprite animation values kept', s and s[0]['anims'][0] == {'name': 'walk', 'firstFrame': 2, 'frameCount': 3,
+                                                                      'frameDuration': 5, 'loop': False, 'futureAnim': 2}, s)
+    check('sprite animation defaults', s and s[0]['anims'][1] == {'name': 'idle', 'firstFrame': 0, 'frameCount': 1,
+                                                                  'frameDuration': 6, 'loop': True}, s)
+    check('sprite sheet defaults', len(s) == 2 and s[1] == {'name': 'fx', 'texture': 'fx.png', 'bitDepth': 4, 'cellWidth': 16,
+                                                            'cellHeight': 16, 'anims': []}, s)
+    check('unknown sprite sheet key', s and s[0].get('futureSheet') == 1, s)
+    rc2, out2 = resave(out, '.scene')
+    check('sprite sheets: second save is identical', rc2 == 0 and out2 == out)
+rc, err = resave(dict(base, spriteSheets=[{'name': 'x', 'bitDepth': 5}]), '.scene')
+check('sprite sheet bitDepth 5 refused', rc != 0 and 'bitDepth' in str(err), err)
+
 mesh = {'format': 'splashedit-ng/mesh', 'version': 1, 'positions': [0, 0, 0, 1, 0, 0, 0, 1, 0],
         'colors': [1, 1, 1, 1] * 3, 'submeshes': [[0, 1, 2]]}
 rc, out = resave(mesh, '.mesh')

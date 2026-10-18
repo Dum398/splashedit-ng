@@ -508,6 +508,13 @@ int main(int argc, char** argv) {
                                     c.loop ? 1 : 0, s.object.c_str(), c.name.c_str());
                 }
             }
+            if (!st.spriteSheets.empty()) {
+                std::printf("sprites sheets=%zu anims=%d bytes=%zu\n", st.spriteSheets.size(), st.spriteAnims,
+                            st.spriteTableBytes);
+                for (const auto& s : st.spriteSheets)
+                    std::printf("sprite sheet bpp=%d cell=%dx%d grid=%dx%d anims=%d %s\n", s.bitDepth, s.cellW, s.cellH, s.cols,
+                                s.rows, s.anims, s.name.c_str());
+            }
             if (st.streamRegions)
                 std::printf("stream regions=%d objects=%d split=%d slots=%d (wanted %d) slot_bytes=%u pool=%zu "
                             "streamed_tri_bytes=%zu table=%zu geo=%zu ram_saved=%lld load_radius=%d region_size=%lld\n",

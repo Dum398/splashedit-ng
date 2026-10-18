@@ -601,6 +601,56 @@ UIFont readFont(const json& j) {
     return fo;
 }
 
+json writeSpriteAnim(const SpriteAnim& a) {
+    json j = {{"name", a.name},
+              {"firstFrame", a.firstFrame},
+              {"frameCount", a.frameCount},
+              {"frameDuration", a.frameDuration},
+              {"loop", a.loop}};
+    putExtras(j, a.extra);
+    return j;
+}
+
+SpriteAnim readSpriteAnim(const json& j) {
+    SpriteAnim a;
+    a.name = j.value("name", a.name);
+    a.firstFrame = j.value("firstFrame", a.firstFrame);
+    a.frameCount = j.value("frameCount", a.frameCount);
+    a.frameDuration = j.value("frameDuration", a.frameDuration);
+    a.loop = j.value("loop", a.loop);
+    a.extra = extrasOf(j, writeSpriteAnim(a));
+    return a;
+}
+
+// Sheets read as written: out-of-range cells and frames load and are
+// reported by the export, so the editor can show and fix them.
+json writeSpriteSheet(const SpriteSheet& s) {
+    json anims = json::array();
+    for (const SpriteAnim& a : s.anims) anims.push_back(writeSpriteAnim(a));
+    json j = {{"name", s.name},
+              {"texture", s.texture},
+              {"bitDepth", int(s.bitDepth)},
+              {"cellWidth", s.cellW},
+              {"cellHeight", s.cellH},
+              {"anims", anims}};
+    putExtras(j, s.extra);
+    return j;
+}
+
+SpriteSheet readSpriteSheet(const json& j) {
+    SpriteSheet s;
+    s.name = j.value("name", "");
+    s.texture = j.value("texture", "");
+    int bd = j.value("bitDepth", int(s.bitDepth));
+    if (bd != 4 && bd != 8 && bd != 16) fail("sprite sheet '" + s.name + "': bitDepth must be 4, 8 or 16");
+    s.bitDepth = BitDepth(bd);
+    s.cellW = j.value("cellWidth", s.cellW);
+    s.cellH = j.value("cellHeight", s.cellH);
+    for (const json& aj : j.value("anims", json::array())) s.anims.push_back(readSpriteAnim(aj));
+    s.extra = extrasOf(j, writeSpriteSheet(s));
+    return s;
+}
+
 json writeElement(const UIElement& e) {
     if (!e.unknown.empty()) return json::parse(e.unknown);
     json j = {{"type", enumTo(e.type, kUITypes)}, {"name", e.name}, {"visible", e.visible}};
@@ -936,11 +986,12 @@ Scene loadScene(const fs::path& file) {
     }
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));
     for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));
+    for (const json& sj : j.value("spriteSheets", json::array())) s.spriteSheets.push_back(readSpriteSheet(sj));
     for (const json& cj : j.value("canvases", json::array())) s.canvases.push_back(readCanvas(cj));
     for (const json& cj : j.value("cutscenes", json::array())) s.cutscenes.push_back(readCutscene(cj));
     for (const json& aj : j.value("animations", json::array())) s.animations.push_back(readAnimation(aj));
     s.extra = extrasOf(j, json{{"format", 0}, {"version", 0}, {"settings", 0}, {"objects", 0}, {"fonts", 0},
-                               {"canvases", 0}, {"cutscenes", 0}, {"animations", 0}});
+                               {"spriteSheets", 0}, {"canvases", 0}, {"cutscenes", 0}, {"animations", 0}});
     return s;
 }
 
@@ -956,6 +1007,11 @@ void saveScene(const Scene& s, const fs::path& file) {
         json fonts = json::array();
         for (const UIFont& fo : s.fonts) fonts.push_back(writeFont(fo));
         j["fonts"] = fonts;
+    }
+    if (!s.spriteSheets.empty()) {
+        json sheets = json::array();
+        for (const SpriteSheet& sh : s.spriteSheets) sheets.push_back(writeSpriteSheet(sh));
+        j["spriteSheets"] = sheets;
     }
     if (!s.canvases.empty()) {
         json cvs = json::array();

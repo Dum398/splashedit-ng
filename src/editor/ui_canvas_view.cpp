@@ -19,6 +19,7 @@
 #include "font.hh"
 #include "gl.h"
 #include "ui/icons.h"
+#include "ui/texture_image.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
 
@@ -653,7 +654,7 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
         for (int cx = (cy & 1); cx * cell < size.x; cx += 2)
             dl->AddRectFilled(ImVec2(o.x + cx * cell, o.y + cy * cell),
                               ImVec2(std::min(end.x, o.x + (cx + 1) * cell), std::min(end.y, o.y + (cy + 1) * cell)), rgb(0x16181d));
-    dl->AddImage((ImTextureID)(intptr_t)m_tex, o, end);
+    ui::addTextureImage(dl, (ImTextureID)(intptr_t)m_tex, o, end);
     dl->AddRect(o - ImVec2(1, 1), end + ImVec2(1, 1), color::borderStrong);
     // Centre marks.
     dl->AddLine(ImVec2(o.x + size.x * 0.5f, o.y - 6), ImVec2(o.x + size.x * 0.5f, o.y - 1), color::textFaint);
@@ -1432,7 +1433,7 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                             dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + sq, cy + sq),
                                               (int((cx - sr.Min.x) / sq) + int((cy - sr.Min.y) / sq)) % 2 ? rgb(0x2a2f39) : rgb(0x1f232b));
                     dl->PopClipRect();
-                    dl->AddImage((ImTextureID)(intptr_t)m_sheetTex, sr.Min, sr.Max);
+                    ui::addTextureImage(dl, (ImTextureID)(intptr_t)m_sheetTex, sr.Min, sr.Max);
                     for (int k = 1; k < cols; k++)
                         dl->AddLine(ImVec2(sr.Min.x + k * cw * z, sr.Min.y), ImVec2(sr.Min.x + k * cw * z, sr.Max.y), rgb(0xffffff, 70));
                     for (int k = 1; k < rows_; k++)
@@ -1871,7 +1872,7 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             const float scale = (smp.h * 2 <= room && smp.w * 2 <= wide) ? 2.0f : 1.0f;
             const ImVec2 o(std::floor(pf.Min.x + space::sm), std::floor(pf.GetCenter().y - smp.h * scale * 0.5f));
             ImGui::PushClipRect(pf.Min + ImVec2(1, 1), pf.Max - ImVec2(1, 1), true);
-            dl->AddImage((ImTextureID)(intptr_t)smp.tex, o, o + ImVec2(smp.w * scale, smp.h * scale));
+            ui::addTextureImage(dl, (ImTextureID)(intptr_t)smp.tex, o, o + ImVec2(smp.w * scale, smp.h * scale));
             ImGui::PopClipRect();
         } else {
             textCentered(dl, pf, f.regular, type::caption, color::textFaint, "No sample: the font cannot be built.");

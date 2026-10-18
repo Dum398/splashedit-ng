@@ -37,6 +37,7 @@
 #include "gl.h"
 #include "ui/brand.h"
 #include "ui/icons.h"
+#include "ui/texture_image.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
 
@@ -3538,7 +3539,7 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     ImVec2 c = r.GetCenter();
     ImRect g(c - ImVec2(gw / 2, gh / 2), c + ImVec2(gw / 2, gh / 2));
     if (unsigned tex = p.game.texture())
-        dl->AddImage((ImTextureID)(intptr_t)tex, g.Min, g.Max);
+        ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.Min, g.Max);
     else
         textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
     // The keyboard is the controller only while the Game view has focus; a gamepad always is.
@@ -3890,7 +3891,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     if (st.play.game.attached()) r = splitViewport(st, dl, r);
     view.clean = st.viewMode == 1;
     unsigned tex = view.render((int)r.GetWidth(), (int)r.GetHeight(), 240);
-    dl->AddImageRounded((ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
+    ui::addTextureImageRounded(dl, (ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
     ImVec2 mn = r.Min, sz = r.GetSize();
     nameRect("vp.view", r);
@@ -4672,7 +4673,7 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 const ImVec2 so(box.Min.x + pad, box.Min.y + pad + (cellArea - pv->height * z) * 0.5f);
                 const ImRect sr(so, so + ImVec2(pv->width * z, pv->height * z));
                 checker(sr, 6);
-                dl->AddImage((ImTextureID)(intptr_t)tex, sr.Min, sr.Max);
+                ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, sr.Min, sr.Max);
                 for (int c = 1; c < g.cols; c++)
                     dl->AddLine(ImVec2(sr.Min.x + c * cur.cellW * z, sr.Min.y), ImVec2(sr.Min.x + c * cur.cellW * z, sr.Max.y), rgb(0xffffff, 40));
                 for (int rI = 1; rI < g.rows; rI++)
@@ -4697,7 +4698,7 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 checker(cr, 8);
                 const ImVec2 uv0(float(now.Min.x - sr.Min.x) / (pv->width * z), float(now.Min.y - sr.Min.y) / (pv->height * z));
                 const ImVec2 uv1(uv0.x + float(cur.cellW) / pv->width, uv0.y + float(cur.cellH) / pv->height);
-                dl->AddImage((ImTextureID)(intptr_t)tex, cr.Min, cr.Max, uv0, uv1);
+                ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, cr.Min, cr.Max, uv0, uv1);
                 char t[64];
                 std::snprintf(t, sizeof t, "cell %d  (%d/%d)", cell, frame + 1, a.frameCount);
                 const ImVec2 ts = measure(f.regular, type::caption, t);

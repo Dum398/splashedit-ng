@@ -37,6 +37,7 @@
     X(PFNGLRENDERBUFFERSTORAGEPROC, glRenderbufferStorage)                   \
     X(PFNGLFRAMEBUFFERRENDERBUFFERPROC, glFramebufferRenderbuffer)           \
     X(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap)                             \
+    X(PFNGLBINDSAMPLERPROC, glBindSampler)                                   \
     X(PFNGLACTIVETEXTUREPROC, glActiveTexture_)
 
 namespace gl {

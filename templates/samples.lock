@@ -2,4 +2,4 @@
 # repositories and are not part of this tree: tools/fetch-samples.sh copies
 # each one's project/ folder into templates/<id>/ at the commit pinned here.
 # <id> <repository> <commit>
-lamplighter https://github.com/psxsplash/lamplighter 5cbd5a46b511722e293d5450c0000d25a4e04b32
+lamplighter https://github.com/psxsplash/lamplighter bd26ccfedec088734710229e2827e11eb50081b7

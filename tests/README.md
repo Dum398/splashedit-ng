@@ -522,6 +522,19 @@ sections above and clicks the controls by name (`--click @s_render`, `@scene.mce
 
     python3 memcardeditcheck.py <splashedit>
 
+`spritesheetcheck.py` drives the scene inspector's Sprite sheets section (its last) on copies of the
+courtyard example with `sprite/hero.png` added to its textures: Add sheet picks the image and makes
+sheet `hero` (4 bpp, 16x16 cells, one `idle` animation); a typed cell width, an added animation and
+its typed frames and frame time land in the saved scene's `spriteSheets` and in the section's
+`scene: sprite <i> <name> texture ... cell WxH grid CxR anims <name>:<first>+<count>@<vsyncs>[L]`
+line. Each of those edits goes back in one Ctrl+Z (Add sheet's too, leaving no `spriteSheets` key).
+The preview's `scene: sprite preview <sheet>/<anim> cell N` lines must step through cells 1, 2, 3 and
+wrap; a 24 px cell on the 64 px texture must show in `scene: sprite problems` and fail the live
+export; the sheet's trash deletes it. Controls are checked to be on screen. A second argument saves
+the screenshot of the edited section.
+
+    python3 spritesheetcheck.py <splashedit> [shot.png]
+
 `scenefogcheck.py` drives the scene inspector's Rendering section on copies of the courtyard example:
 the Fog switch, Density typed (and clamped to 10), GTE scaling typed, Scene type picked from its
 menu (`@scenetype/Interior`), then Ctrl+S, reading `settings.fog`, `gteScaling` and `sceneType` back

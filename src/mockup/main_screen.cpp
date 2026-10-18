@@ -27,6 +27,9 @@
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
 #include "editor/memcard.hh"
+#include "editor/sprites.hh"
+#include "editor/texture_preview.hh"
+#include "texture.hh"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
 
@@ -4250,6 +4253,476 @@ static std::string kb(size_t bytes);
 // With nothing selected (or the scene row picked) the inspector shows the
 // scene's own settings. For now: psxsplash's render buffers, sized by the
 // exporter unless overridden.
+// The project's images (project-relative, sorted), read again now and then so
+// files added outside show up.
+static const std::vector<std::string>& projectImages(const std::filesystem::path& root) {
+    namespace fs = std::filesystem;
+    static fs::path cachedRoot;
+    static std::vector<std::string> list;
+    static double readAt = -1;
+    const double now = ImGui::GetTime();
+    if (root == cachedRoot && now - readAt < 2.0) return list;
+    cachedRoot = root;
+    readAt = now;
+    list.clear();
+    std::error_code ec;
+    if (root.empty()) return list;
+    for (fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const std::string name = utf8(it->path().filename());
+        if (it->is_directory(ec)) {
+            if (!name.empty() && name[0] == '.') it.disable_recursion_pending();
+            continue;
+        }
+        std::string ext = utf8(it->path().extension());
+        for (char& c : ext) c = char(std::tolower((unsigned char)c));
+        if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga" || ext == ".gif")
+            list.push_back(utf8(it->path().lexically_relative(root).generic_u8string()));
+        if (list.size() >= 400) break;
+    }
+    std::sort(list.begin(), list.end());
+    return list;
+}
+
+// The scene inspector's Sprite sheets section: the sheets (textures cut into
+// cells), the selected sheet's settings and animations, and a preview playing
+// the selected animation from the converted texture at psxsplash's timing.
+// Every edit is one undo step (editor/sprites.hh).
+template <typename Row, typename Caption>
+static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0, float x1, float& y, float lw, Row& row,
+                                Caption& caption) {
+    namespace fs = std::filesystem;
+    Fonts& f = fonts();
+    const std::vector<splash::SpriteSheet>& sheets = doc.scene().spriteSheets;
+    const float stop = y;
+    const bool open = section("s_sprites", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::image, color::textDim, "Sprite sheets",
+                              true, true, false);
+    if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+    y += 34 + space::xs;
+
+    // What is selected: UI state, not part of the scene or its undo.
+    static int sel = 0, selAnim = 0;
+    static unsigned seenLoad = ~0u;
+    if (seenLoad != doc.loadId()) {
+        seenLoad = doc.loadId();
+        sel = selAnim = 0;
+    }
+    sel = sheets.empty() ? -1 : std::clamp(sel, 0, int(sheets.size()) - 1);
+
+    // Texture sizes, read once per file (again after an asset refresh).
+    static std::map<std::string, splash::SpriteTextureSize> sizes;
+    static unsigned sizesAssets = ~0u;
+    static fs::path sizesRoot;
+    if (sizesAssets != doc.assetsId() || sizesRoot != doc.projectRoot()) {
+        sizes.clear();
+        sizesAssets = doc.assetsId();
+        sizesRoot = doc.projectRoot();
+    }
+    auto sizeOf = [&](const splash::SpriteSheet& s) -> splash::SpriteTextureSize {
+        if (s.texture.empty()) return {0, 0, "no texture"};
+        auto it = sizes.find(s.texture);
+        if (it == sizes.end()) {
+            splash::SpriteTextureSize sz;
+            try {
+                const splash::Image img = splash::loadImage(doc.projectRoot() / fromUtf8(s.texture));
+                sz.width = img.width;
+                sz.height = img.height;
+            } catch (const std::exception&) {
+                sz.error = "cannot load " + s.texture + ": pick an image that exists";
+            }
+            it = sizes.emplace(s.texture, sz).first;
+        }
+        return it->second;
+    };
+    auto cellsOf = [&](const splash::SpriteSheet& s) {
+        const splash::SpriteTextureSize sz = sizeOf(s);
+        return sz.error.empty() ? editor::spriteGrid(s, sz.width, sz.height) : editor::SpriteGrid{};
+    };
+
+    // The sheet list: a row each, click to select, trash to delete.
+    const float rowH2 = 30;
+    int removeSheet = -1;
+    for (int i = 0; i < int(sheets.size()); i++) {
+        const splash::SpriteSheet& s = sheets[size_t(i)];
+        ImGui::PushID(i);
+        const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH2));
+        const ImRect del(ImVec2(rr.Max.x - 26, rr.Min.y + 4), ImVec2(rr.Max.x - 4, rr.Max.y - 4));
+        const ImRect body(rr.Min, ImVec2(del.Min.x - 2, rr.Max.y));
+        Hit h = interact("spriterow", body);
+        nameRect("scene.sprite." + std::to_string(i), body);
+        if (i == sel) {
+            dl->AddRectFilled(rr.Min, rr.Max, color::accentSoft, radius::field);
+            dl->AddRectFilled(rr.Min + ImVec2(0, 6), ImVec2(rr.Min.x + 2, rr.Max.y - 6), color::accent, 1);
+        } else if (h.hover > 0) {
+            dl->AddRectFilled(rr.Min, rr.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, h.hover), radius::field);
+        }
+        const editor::SpriteGrid g = cellsOf(s);
+        char meta[96];
+        if (g.whole)
+            std::snprintf(meta, sizeof meta, "%d x %d cells, %zu %s", g.cols, g.rows, s.anims.size(), s.anims.size() == 1 ? "anim" : "anims");
+        else
+            std::snprintf(meta, sizeof meta, "%zu %s", s.anims.size(), s.anims.size() == 1 ? "anim" : "anims");
+        const ImVec2 ms = measure(f.regular, type::caption, meta);
+        const float ty = centerY(f.medium, type::body, rr.Min.y, rr.Max.y);
+        ImGui::PushClipRect(rr.Min, ImVec2(del.Min.x - ms.x - space::md, rr.Max.y), true);
+        text(dl, ImVec2(rr.Min.x + space::sm + 4, ty), f.medium, type::body, i == sel ? color::text : color::textDim,
+             s.name.empty() ? "(no name)" : s.name.c_str());
+        ImGui::PopClipRect();
+        text(dl, ImVec2(del.Min.x - ms.x - space::sm, centerY(f.regular, type::caption, rr.Min.y, rr.Max.y)), f.regular, type::caption,
+             g.whole || s.texture.empty() ? color::textFaint : color::warn, meta);
+        nameRect("scene.sprite." + std::to_string(i) + ".delete", del);
+        if (iconButton("spritedel", del, icon::trash, false, "Delete this sheet and its animations")) removeSheet = i;
+        else if (h.clicked && sel != i) {
+            sel = i;
+            selAnim = 0;
+        }
+        ImGui::PopID();
+        y += rowH2 + 2;
+    }
+    if (removeSheet >= 0) {
+        editor::deleteSpriteSheet(doc, removeSheet);
+        if (sel >= removeSheet && sel > 0) sel--;
+    }
+
+    // Add: a sheet from one of the project's images.
+    {
+        const std::vector<std::string>& images = projectImages(doc.projectRoot());
+        std::vector<const char*> items;
+        for (const std::string& p : images) items.push_back(p.c_str());
+        const bool full = int(sheets.size()) >= splash::kMaxSpriteSheets;
+        const ImRect addRow(ImVec2(x0 + space::sm, y + space::xs), ImVec2(x0 + space::sm + 220, y + space::xs + size::field));
+        nameRect("scene.spriteadd", addRow);
+        const char* label = full ? "16 sheets: psxsplash's most" : images.empty() ? "No images in the project" : "Add sheet";
+        const int pick = dropdownMenu("scene.spriteadd", addRow, icon::plus, label, full ? std::vector<const char*>{} : items, -1);
+        tooltip("Pick a project image to cut into cells. It is named after the file; Lua finds it with Sprite.SheetIndex.");
+        if (pick >= 0 && size_t(pick) < images.size()) {
+            const int at = editor::addSpriteSheet(doc, images[size_t(pick)]);
+            if (at >= 0) {
+                sel = at;
+                selAnim = 0;
+            }
+        }
+        y += size::field + space::xs + space::sm;
+    }
+    if (sheets.empty())
+        caption("A texture cut into equal cells. Lua makes sprites from it (Sprite.Create) and plays its animations by name.",
+                color::textFaint);
+
+    // The selected sheet.
+    std::string previewLine = "none";
+    if (sel >= 0 && sel < int(sheets.size())) {
+        const splash::SpriteSheet& s = sheets[size_t(sel)];
+        const editor::SpriteGrid g = cellsOf(s);
+        const splash::SpriteTextureSize sz = sizeOf(s);
+        auto edit = [&](const std::function<void(splash::SpriteSheet&)>& fn, const std::string& key = {}) {
+            editor::editSpriteSheet(doc, sel, fn, key);
+        };
+        y += space::xs;
+        dl->AddLine(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y), rgb(0xffffff, 14));
+        y += space::sm;
+
+        std::string typed;
+        const ImRect nameRow = row("lspritename", "Name", "Lua finds the sheet by this name: Sprite.SheetIndex(\"name\") or Sprite.Create(\"name\").");
+        nameRect("scene.spritename", nameRow);
+        if (textField("spritename", nameRow, s.name, &typed, "Sheet name", 24)) edit([&](splash::SpriteSheet& e) { e.name = typed; });
+
+        const std::vector<std::string>& images = projectImages(doc.projectRoot());
+        std::vector<const char*> items;
+        int curTex = -1;
+        for (size_t k = 0; k < images.size(); k++) {
+            if (images[k] == s.texture) curTex = int(k);
+            items.push_back(images[k].c_str());
+        }
+        const ImRect texRow = row("lspritetex", "Texture", "The image cut into cells, row by row from the top left. Transparent below half alpha.");
+        nameRect("scene.spritetex", texRow);
+        const int tp = dropdownMenu("scene.spritetex", texRow, icon::image, s.texture.empty() ? "None" : s.texture.c_str(), items, curTex);
+        if (tp >= 0 && size_t(tp) < images.size()) {
+            const std::string picked = images[size_t(tp)];
+            edit([&](splash::SpriteSheet& e) { e.texture = picked; });
+        }
+
+        static const char* const depthNames[3] = {"4 bpp, 16 colours", "8 bpp, 256 colours", "16 bpp, direct colour"};
+        const int curDepth = s.bitDepth == splash::BitDepth::Bpp4 ? 0 : s.bitDepth == splash::BitDepth::Bpp8 ? 1 : 2;
+        const ImRect bppRow = row("lspritebpp", "Bit depth", "Colours the sheet keeps in VRAM. 4 bpp costs a quarter of 16 bpp; one of its colours is transparent.");
+        nameRect("scene.spritebpp", bppRow);
+        const int bp = dropdownMenu("scene.spritebpp", bppRow, nullptr, depthNames[curDepth], {depthNames[0], depthNames[1], depthNames[2]}, curDepth);
+        if (bp >= 0 && bp != curDepth) {
+            const splash::BitDepth d = bp == 0 ? splash::BitDepth::Bpp4 : bp == 1 ? splash::BitDepth::Bpp8 : splash::BitDepth::Bpp16;
+            edit([d](splash::SpriteSheet& e) { e.bitDepth = d; });
+        }
+
+        const ImRect cellRow = row("lspritecell", "Cell", "Width and height of one cell in pixels, 1 to 255. The texture must be a whole number of cells.");
+        const float half = (cellRow.GetWidth() - space::sm) * 0.5f;
+        const ImRect cw(cellRow.Min, ImVec2(cellRow.Min.x + half, cellRow.Max.y));
+        const ImRect ch(ImVec2(cw.Max.x + space::sm, cellRow.Min.y), cellRow.Max);
+        nameRect("scene.spritecellw", cw);
+        nameRect("scene.spritecellh", ch);
+        float wv = float(s.cellW), hv = float(s.cellH);
+        FieldEdit fw = numberField("spritecellw", cw, std::to_string(s.cellW).c_str(), "px", color::textFaint, "W", &wv);
+        if (fw.changed) {
+            const int v = std::clamp(int(std::lround(wv)), 1, 255);
+            edit([v](splash::SpriteSheet& e) { e.cellW = v; }, "spritecellw");
+        }
+        if (fw.done) doc.endMerge();
+        FieldEdit fh = numberField("spritecellh", ch, std::to_string(s.cellH).c_str(), "px", color::textFaint, "H", &hv);
+        if (fh.changed) {
+            const int v = std::clamp(int(std::lround(hv)), 1, 255);
+            edit([v](splash::SpriteSheet& e) { e.cellH = v; }, "spritecellh");
+        }
+        if (fh.done) doc.endMerge();
+        {
+            const float top = y;
+            if (s.texture.empty()) caption("No texture: pick an image above.", color::warn);
+            else if (!sz.error.empty()) caption(sz.error, color::bad);
+            else if (!g.whole)
+                caption(std::to_string(sz.width) + " x " + std::to_string(sz.height) + " px is not a whole number of " +
+                            std::to_string(s.cellW) + " x " + std::to_string(s.cellH) + " cells.",
+                        color::warn);
+            else
+                caption(std::to_string(g.cols) + " x " + std::to_string(g.rows) + " cells, " + std::to_string(sz.width) + " x " +
+                            std::to_string(sz.height) + " px" + (g.cells() > 255 ? ": more than 255 cells, use bigger ones." : ""),
+                        g.cells() > 255 ? color::warn : color::textFaint);
+            nameRect("scene.spritegrid", ImRect(ImVec2(x0 + space::sm + lw, top - 2), ImVec2(x1 - space::sm, y)));
+        }
+
+        // Animations: a row each, then the selected one's fields.
+        y += space::xs;
+        text(dl, ImVec2(x0 + space::sm, y), f.medium, type::label, color::textDim, "Animations");
+        y += 22;
+        selAnim = s.anims.empty() ? -1 : std::clamp(selAnim, 0, int(s.anims.size()) - 1);
+        int removeAnim = -1;
+        for (int k = 0; k < int(s.anims.size()); k++) {
+            const splash::SpriteAnim& a = s.anims[size_t(k)];
+            ImGui::PushID(1000 + k);
+            const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 26));
+            const ImRect del(ImVec2(rr.Max.x - 24, rr.Min.y + 3), ImVec2(rr.Max.x - 4, rr.Max.y - 3));
+            const ImRect body(rr.Min, ImVec2(del.Min.x - 2, rr.Max.y));
+            Hit h = interact("animrow", body);
+            nameRect("scene.spriteanim." + std::to_string(k), body);
+            if (k == selAnim) dl->AddRectFilled(rr.Min, rr.Max, rgb(0xffffff, 14), radius::field);
+            else if (h.hover > 0) dl->AddRectFilled(rr.Min, rr.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, h.hover), radius::field);
+            char meta[96];
+            if (a.frameCount > 1)
+                std::snprintf(meta, sizeof meta, "cells %d-%d, %d vsyncs%s", a.firstFrame, a.firstFrame + a.frameCount - 1,
+                              a.frameDuration, a.loop ? ", loop" : "");
+            else
+                std::snprintf(meta, sizeof meta, "cell %d, %d vsyncs%s", a.firstFrame, a.frameDuration, a.loop ? ", loop" : "");
+            const ImVec2 ms = measure(f.regular, type::caption, meta);
+            ImGui::PushClipRect(rr.Min, ImVec2(del.Min.x - ms.x - space::md, rr.Max.y), true);
+            text(dl, ImVec2(rr.Min.x + space::sm + 4, centerY(f.regular, type::body, rr.Min.y, rr.Max.y)), f.regular, type::body,
+                 k == selAnim ? color::text : color::textDim, a.name.empty() ? "(no name)" : a.name.c_str());
+            ImGui::PopClipRect();
+            text(dl, ImVec2(del.Min.x - ms.x - space::sm, centerY(f.regular, type::caption, rr.Min.y, rr.Max.y)), f.regular,
+                 type::caption, color::textFaint, meta);
+            nameRect("scene.spriteanim." + std::to_string(k) + ".delete", del);
+            if (iconButton("animdel", del, icon::trash, false, "Delete this animation")) removeAnim = k;
+            else if (h.clicked) selAnim = k;
+            ImGui::PopID();
+            y += 28;
+        }
+        if (removeAnim >= 0) {
+            editor::deleteSpriteAnim(doc, sel, removeAnim);
+            if (selAnim >= removeAnim && selAnim > 0) selAnim--;
+        }
+        {
+            float bw = 0;
+            if (button("scene.spriteanimadd", ImVec2(x0 + space::sm, y + 2), icon::plus, "Add animation", ButtonKind::Secondary, &bw,
+                       "A run of cells Lua plays with Sprite.PlayAnim(sprite, \"name\"). Names are shared by every sheet.")) {
+                const int at = editor::addSpriteAnim(doc, sel, g.cells());
+                if (at >= 0) selAnim = at;
+            }
+            y += size::field + 6 + space::sm;
+        }
+
+        const splash::SpriteSheet& cur = doc.scene().spriteSheets[size_t(sel)];
+        if (selAnim >= 0 && selAnim < int(cur.anims.size())) {
+            const splash::SpriteAnim& a = cur.anims[size_t(selAnim)];
+            auto editAnim = [&](const std::function<void(splash::SpriteAnim&)>& fn, const std::string& key = {}) {
+                const int k = selAnim;
+                edit([&](splash::SpriteSheet& e) { fn(e.anims[size_t(k)]); }, key);
+            };
+            const ImRect anRow = row("lanimname", "Name", "Sprite.AnimIndex and Sprite.PlayAnim look it up in every sheet, so it must be unique in the scene.");
+            nameRect("scene.animname", anRow);
+            if (textField("animname", anRow, a.name, &typed, "Animation name", 24)) editAnim([&](splash::SpriteAnim& e) { e.name = typed; });
+            auto intRow = [&](const char* lid, const char* label, const char* tip, const char* id, int value, const char* unit, int lo,
+                              int hi, const std::function<void(splash::SpriteAnim&, int)>& set) {
+                const ImRect rr = row(lid, label, tip);
+                nameRect(std::string("scene.") + id, rr);
+                float v = float(value);
+                FieldEdit fe = numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v);
+                if (fe.changed) {
+                    const int n = std::clamp(int(std::lround(v)), lo, hi);
+                    editAnim([&](splash::SpriteAnim& e) { set(e, n); }, id);
+                }
+                if (fe.done) doc.endMerge();
+            };
+            const int maxCell = std::max(0, std::min(g.whole ? g.cells() : 255, 255) - 1);
+            intRow("lanimfirst", "First cell", "The cell it starts on, counted row by row from 0 at the top left.", "animfirst",
+                   a.firstFrame, nullptr, 0, maxCell, [](splash::SpriteAnim& e, int n) { e.firstFrame = n; });
+            intRow("lanimcount", "Frames", "How many cells it plays, one after another.", "animcount", a.frameCount, nullptr, 1, 255,
+                   [](splash::SpriteAnim& e, int n) { e.frameCount = n; });
+            intRow("lanimdur", "Frame time",
+                   "How long each cell shows, in vsyncs: psxsplash counts 60 a second from real time, whatever frame rate the "
+                   "scene runs at.",
+                   "animdur", a.frameDuration, "vsyncs", 1, 255, [](splash::SpriteAnim& e, int n) { e.frameDuration = n; });
+            {
+                char t[160];
+                const double ms = a.frameDuration * 1000.0 / 60.0;
+                if (a.frameCount <= 1)
+                    std::snprintf(t, sizeof t, "%.0f ms a cell. One cell: it holds still.", ms);
+                else
+                    std::snprintf(t, sizeof t, "%.0f ms a cell; the %d cells take %.0f ms, then %s.", ms, a.frameCount,
+                                  ms * a.frameCount, a.loop ? "start again" : "stop on the last");
+                caption(t, color::textFaint);
+            }
+            const ImRect lr = row("lanimloop", "Loop", "On: back to the first cell after the last. Off: it stops on the last cell.");
+            const ImRect sw(ImVec2(lr.Min.x, lr.GetCenter().y - 8), ImVec2(lr.Min.x + 30, lr.GetCenter().y + 8));
+            nameRect("scene.animloop", sw);
+            if (toggle("animloop", sw, a.loop)) editAnim([](splash::SpriteAnim& e) { e.loop = !e.loop; });
+
+            // Preview: the sheet with its grid and this animation's cells, and
+            // the cell psxsplash would show now, from the converted texture.
+            // Never destroyed: its worker thread is left to the process exit.
+            static editor::TexturePreviewer& previewer = *new editor::TexturePreviewer;
+            static unsigned tex = 0, texGen = ~0u;
+            static std::string timingKey;
+            static double startAt = 0;
+            const editor::TexturePreviewKey key{doc.projectRoot() / fromUtf8(cur.texture), cur.bitDepth, true};
+            std::shared_ptr<const editor::TexturePreview> pv;
+            if (!cur.texture.empty() && sz.error.empty()) {
+                previewer.request(key);
+                pv = previewer.latest();
+                if (pv && (pv->key != key || !pv->error.empty())) pv.reset();
+            }
+            if (pv && previewer.generation() != texGen) {
+                texGen = previewer.generation();
+                if (!tex) glGenTextures(1, &tex);
+                glBindTexture(GL_TEXTURE_2D, tex);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, pv->width, pv->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pv->ps1.data());
+                glBindTexture(GL_TEXTURE_2D, 0);
+            }
+            // The clock restarts whenever what plays changes, as PlayAnim does.
+            const std::string nowKey = std::to_string(sel) + "/" + std::to_string(selAnim) + "/" + std::to_string(a.firstFrame) + "/" +
+                                       std::to_string(a.frameCount) + "/" + std::to_string(a.frameDuration) + "/" + (a.loop ? "1" : "0");
+            if (nowKey != timingKey) {
+                timingKey = nowKey;
+                startAt = ImGui::GetTime();
+            }
+            const long long vsyncs = (long long)((ImGui::GetTime() - startAt) * 60.0);
+            const int frame = editor::spriteAnimFrameAt(a, vsyncs);
+            const int cell = a.firstFrame + frame;
+            const bool drawable = pv && g.whole && cell >= 0 && cell < g.cells();
+            y += space::xs;
+            const float boxH = 136;
+            const ImRect box(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + boxH));
+            nameRect("scene.spritepreview", box);
+            dl->AddRectFilled(box.Min, box.Max, rgb(0x14171c), radius::field);
+            dl->AddRect(box.Min, box.Max, color::border, radius::field);
+            auto checker = [&](ImRect rr, float sq) {
+                dl->PushClipRect(rr.Min, rr.Max, true);
+                for (float cy = rr.Min.y; cy < rr.Max.y; cy += sq)
+                    for (float cx = rr.Min.x; cx < rr.Max.x; cx += sq)
+                        dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + sq, cy + sq),
+                                          (int((cx - rr.Min.x) / sq) + int((cy - rr.Min.y) / sq)) % 2 ? rgb(0x2a2f39) : rgb(0x1f232b));
+                dl->PopClipRect();
+            };
+            if (drawable) {
+                // Left: the whole sheet, integer zoom, grid and the animation's cells.
+                const float pad = space::sm, cellArea = boxH - 2 * pad;
+                const float sheetW = (box.GetWidth() - 3 * pad) * 0.55f;
+                // Whole texels when it fits at 1:1 or more, else shrunk to fit.
+                const float fit = std::min(sheetW / pv->width, cellArea / pv->height);
+                const float z = fit >= 1 ? std::floor(fit) : fit;
+                const ImVec2 so(box.Min.x + pad, box.Min.y + pad + (cellArea - pv->height * z) * 0.5f);
+                const ImRect sr(so, so + ImVec2(pv->width * z, pv->height * z));
+                checker(sr, 6);
+                dl->AddImage((ImTextureID)(intptr_t)tex, sr.Min, sr.Max);
+                for (int c = 1; c < g.cols; c++)
+                    dl->AddLine(ImVec2(sr.Min.x + c * cur.cellW * z, sr.Min.y), ImVec2(sr.Min.x + c * cur.cellW * z, sr.Max.y), rgb(0xffffff, 40));
+                for (int rI = 1; rI < g.rows; rI++)
+                    dl->AddLine(ImVec2(sr.Min.x, sr.Min.y + rI * cur.cellH * z), ImVec2(sr.Max.x, sr.Min.y + rI * cur.cellH * z), rgb(0xffffff, 40));
+                auto cellRect = [&](int c) {
+                    const ImVec2 m(sr.Min.x + (c % g.cols) * cur.cellW * z, sr.Min.y + (c / g.cols) * cur.cellH * z);
+                    return ImRect(m, m + ImVec2(cur.cellW * z, cur.cellH * z));
+                };
+                for (int k = 0; k < a.frameCount; k++) {
+                    const int c = a.firstFrame + k;
+                    if (c < 0 || c >= g.cells()) continue;
+                    const ImRect cr = cellRect(c);
+                    dl->AddRect(cr.Min, cr.Max, (color::accent & 0x00ffffffu) | (110u << IM_COL32_A_SHIFT));
+                }
+                const ImRect now = cellRect(cell);
+                dl->AddRect(now.Min - ImVec2(1, 1), now.Max + ImVec2(1, 1), color::accentHover, 0.0f, 0, 2.0f);
+                // Right: the current cell, as large as fits.
+                const float rx0 = sr.Max.x + 2 * pad, rw = box.Max.x - pad - rx0;
+                const float cz = std::max(1.0f, std::floor(std::min(rw / cur.cellW, (cellArea - 18) / cur.cellH)));
+                const ImVec2 co(rx0 + (rw - cur.cellW * cz) * 0.5f, box.Min.y + pad);
+                const ImRect cr(co, co + ImVec2(cur.cellW * cz, cur.cellH * cz));
+                checker(cr, 8);
+                const ImVec2 uv0(float(now.Min.x - sr.Min.x) / (pv->width * z), float(now.Min.y - sr.Min.y) / (pv->height * z));
+                const ImVec2 uv1(uv0.x + float(cur.cellW) / pv->width, uv0.y + float(cur.cellH) / pv->height);
+                dl->AddImage((ImTextureID)(intptr_t)tex, cr.Min, cr.Max, uv0, uv1);
+                char t[64];
+                std::snprintf(t, sizeof t, "cell %d  (%d/%d)", cell, frame + 1, a.frameCount);
+                const ImVec2 ts = measure(f.regular, type::caption, t);
+                text(dl, ImVec2(rx0 + (rw - ts.x) * 0.5f, box.Max.y - pad - ts.y), f.regular, type::caption, color::textDim, t);
+                previewLine = (cur.name + "/" + a.name + " cell " + std::to_string(cell));
+            } else {
+                const char* why = cur.texture.empty() || !sz.error.empty() ? "No texture to show"
+                                  : !g.whole                               ? "The texture is not a whole number of cells"
+                                  : !pv                                    ? "Converting..."
+                                                                           : "The animation runs past the sheet's cells";
+                textCentered(dl, box, f.regular, type::caption, color::textFaint, why);
+                previewLine = std::string("off ") + (pv ? "cells" : "texture");
+            }
+            y += boxH + space::xs;
+            caption("PS1 colours at the sheet's bit depth, at psxsplash's timing.", color::textFaint);
+        }
+    }
+
+    // What export would refuse, as it is typed.
+    std::vector<std::string> errors, warnings;
+    splash::checkSpriteSheets(sheets, sizeOf, errors, warnings);
+    for (size_t i = 0; i < errors.size() && i < 8; i++) caption(errors[i], color::bad);
+    for (size_t i = 0; i < warnings.size() && i < 4; i++) caption(warnings[i], color::warn);
+
+    if (namedRectsOn()) {
+        // Scripted tests: the sheets, the selection, the problems and the preview's cell when they change.
+        scriptLine("sprites", "scene: sprites " + std::to_string(sheets.size()) + " selected " + std::to_string(sel) + " anim " +
+                                  std::to_string(selAnim));
+        for (size_t i = 0; i < sheets.size(); i++) {
+            const splash::SpriteSheet& s = sheets[i];
+            const editor::SpriteGrid g = cellsOf(s);
+            std::string line = "scene: sprite " + std::to_string(i) + " " + s.name + " texture " + (s.texture.empty() ? "-" : s.texture) +
+                               " bpp " + std::to_string(int(s.bitDepth)) + " cell " + std::to_string(s.cellW) + "x" +
+                               std::to_string(s.cellH) + " grid " + (g.whole ? std::to_string(g.cols) + "x" + std::to_string(g.rows) : "-") +
+                               " anims";
+            for (const splash::SpriteAnim& a : s.anims)
+                line += " " + a.name + ":" + std::to_string(a.firstFrame) + "+" + std::to_string(a.frameCount) + "@" +
+                        std::to_string(a.frameDuration) + (a.loop ? "L" : "");
+            if (s.anims.empty()) line += " none";
+            scriptLine(("sprite" + std::to_string(i)).c_str(), line);
+        }
+        std::string probs;
+        for (const std::string& e : errors) probs += (probs.empty() ? "" : " | ") + e;
+        scriptLine("spriteproblems", "scene: sprite problems " + (probs.empty() ? std::string("none") : probs));
+        scriptLine("spritepreview", "scene: sprite preview " + previewLine);
+    }
+
+    if (!open) {
+        ImGui::PopClipRect();
+        y = stop + 34 + space::md;
+    } else {
+        dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+        y += space::sm + space::md;
+    }
+}
+
 static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
@@ -5765,6 +6238,8 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             y += space::sm + space::md;
         }
     }
+
+    spriteSheetsSection(dl, doc, x0, x1, y, lw, row, caption);
 
     const char* hint = "Pick an object in the Scene panel to edit it.";
     ImVec2 hs = measure(f.regular, type::label, hint);

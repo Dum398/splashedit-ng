@@ -121,7 +121,10 @@ check('export', r.returncode == 0, r.stderr)
 version, agents, names, end = decode(d)
 check('three agents (the inactive one left out)', len(agents) == 3, len(agents))
 by = {names[a['go']] if a['go'] < len(names) else '?': a for a in agents}
-check('records name Arm, Ghost and Stray in scene order', [names[a['go']] for a in agents] == ['Arm', 'Ghost', 'Stray'],
+for k in ('Arm', 'Ghost', 'Stray'):  # a missing record fails its checks below instead of stopping the run
+    by.setdefault(k, {'nwp': None, 'wps': [(None,) * 3] * 2, 'clips': [None] * 8, 'vcos': None, 'flags': None})
+check('records name Arm, Ghost and Stray in scene order',
+      [names[a['go']] if a['go'] < len(names) else '?' for a in agents] == ['Arm', 'Ghost', 'Stray'],
       [a['go'] for a in agents])
 check('the mesh-less agents are game objects, the empty Spacer is not', 'Ghost' in names and 'Stray' in names and
       'Spacer' not in names, names)

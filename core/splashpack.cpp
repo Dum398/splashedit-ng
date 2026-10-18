@@ -799,6 +799,7 @@ void stripUnknownElements(std::vector<UICanvas>& canvases, ExportResult& res) {
 template <typename ImageFor>
 void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const fs::path& root, const VramSettings& vs, ImageFor& imageFor,
                std::deque<PsxTexture>& store, std::vector<std::vector<PsxTexture*>>& uiTextures,
+               std::vector<std::vector<int>>& uiSheets, bool shareSheets,
                std::vector<FontSheet>& sheets, std::vector<std::array<int, 2>>& fontVram,
                std::map<std::string, int>& fontIndex, ExportResult& res) {
     if (canvases.size() > size_t(kUiMaxCanvases))
@@ -860,6 +861,7 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
                                  " elements, the format stores at most 255");
         total += int(cv.elements.size());
         uiTextures[ci].assign(cv.elements.size(), nullptr);
+        uiSheets[ci].assign(cv.elements.size(), -1);
         if (!cv.defaultFont.empty() && !fontIndex.count(cv.defaultFont))
             res.errors.push_back("canvas '" + cv.name + "': no UI font named '" + cv.defaultFont + "' (its default font)");
         for (size_t ei = 0; ei < cv.elements.size(); ei++) {
@@ -875,6 +877,48 @@ void prepareUi(const Scene& scene, const std::vector<UICanvas>& canvases, const 
                         res.warnings.push_back(where + ": psxsplash draws only ASCII 0x20-0x7E, other bytes as '?'");
                         break;
                     }
+            }
+            if (e.type == UIElementType::Image && !e.sheet.empty()) {
+                // Sheet-backed: one cell of a scene sprite sheet. In a
+                // splashpack it shares the sheet's texture (packed once, for the
+                // sprite table); a loader pack has no sprite table, so there it
+                // gets a copy of the sheet's texture of its own.
+                const auto& ss = scene.spriteSheets;
+                const auto it = std::find_if(ss.begin(), ss.end(), [&](const SpriteSheet& s) { return s.name == e.sheet; });
+                if (it == ss.end()) {
+                    res.errors.push_back(where + ": no sprite sheet named '" + e.sheet + "'");
+                    continue;
+                }
+                const SpriteSheet& sh = *it;
+                const Image* img = nullptr;
+                try {
+                    img = &imageFor(sh.texture);
+                } catch (const std::exception& ex) {
+                    // The sprite sheet check reports a splashpack's sheet textures.
+                    if (!shareSheets) res.errors.push_back(where + ": sprite sheet '" + sh.name + "': " + ex.what());
+                    continue;
+                }
+                if (sh.cellW > 0 && sh.cellH > 0) {
+                    const int cols = img->width / sh.cellW, rows = img->height / sh.cellH;
+                    if (e.cell < 0 || e.cell >= cols * rows) {
+                        res.errors.push_back(where + ": cell " + std::to_string(e.cell) + " is outside sprite sheet '" + sh.name +
+                                             "', which has " + std::to_string(cols * rows) + " cells (0.." +
+                                             std::to_string(cols * rows - 1) + ")");
+                        continue;
+                    }
+                }
+                uiSheets[ci][ei] = int(it - ss.begin());
+                if (!shareSheets) {
+                    try {
+                        store.push_back(convertTexture(*img, sh.bitDepth, true));
+                    } catch (const std::exception& ex) {
+                        res.errors.push_back(where + ": sprite sheet '" + sh.name + "': " + ex.what());
+                        continue;
+                    }
+                    store.back().source = sh.texture;
+                    uiTextures[ci][ei] = &store.back();
+                }
+                continue;
             }
             if (e.type == UIElementType::Image) {
                 if (e.texture.empty()) {
@@ -925,7 +969,8 @@ BakedAxis bakeAxis(float amin, float amax, int pos, int size, int res) {
 void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& canvases,
              const std::vector<std::vector<PsxTexture*>>& uiTextures, const std::vector<FontSheet>& sheets,
              const std::vector<std::array<int, 2>>& fontVram, const std::map<std::string, int>& fontIndex,
-             const VramSettings& vs, const std::vector<uint32_t>* fontDataOffsets = nullptr) {
+             const VramSettings& vs, const std::vector<std::vector<int>>& uiSheets, const std::vector<SpriteSheet>& spriteSheets,
+             const std::vector<PsxTexture*>& spriteTextures, const std::vector<uint32_t>* fontDataOffsets = nullptr) {
     w.align4();
     w.patchU32(tableOffsetPos, uint32_t(w.pos()));
     // Font descriptors (112 bytes). In a splashpack the pixels are in the
@@ -994,21 +1039,44 @@ void writeUi(BinWriter& w, size_t tableOffsetPos, const std::vector<UICanvas>& c
             w.u8(0);
             size_t typeStart = w.pos();
             switch (e.type) {
-            case UIElementType::Image:
-                if (const PsxTexture* t = uiTextures[ci][ei]) {
+            case UIElementType::Image: {
+                const int si = uiSheets[ci][ei];
+                const PsxTexture* t = uiTextures[ci][ei];
+                if (!t && si >= 0 && size_t(si) < spriteTextures.size()) t = spriteTextures[size_t(si)];
+                if (t) {
                     int expander = 16 / int(t->bitDepth);
-                    int u0 = t->packingX * expander, v0 = t->packingY;
+                    const int baseU = t->packingX * expander, baseV = t->packingY;
+                    int u0 = baseU, v0 = baseV, u1 = baseU + t->width - 1, v1 = baseV + t->height - 1;
+                    const SpriteSheet* sh = si >= 0 ? &spriteSheets[size_t(si)] : nullptr;
+                    const int cols = sh ? t->width / sh->cellW : 0;
+                    if (sh) {
+                        // One cell of the sheet, its last texel inclusive; the grid
+                        // after it lets UI.SetFrame/GetFrame step through the cells
+                        // (uisystem.cpp recovers the cell from u0/v0).
+                        u0 = baseU + (e.cell % cols) * sh->cellW;
+                        v0 = baseV + (e.cell / cols) * sh->cellH;
+                        u1 = u0 + sh->cellW - 1;
+                        v1 = v0 + sh->cellH - 1;
+                    }
                     w.u8(t->texpageX);
                     w.u8(t->texpageY);
                     w.u16(t->clutPackingX);
                     w.u16(t->clutPackingY);
                     w.u8(uint8_t(u0));
                     w.u8(uint8_t(v0));
-                    w.u8(uint8_t(u0 + t->width - 1));
-                    w.u8(uint8_t(v0 + t->height - 1));
+                    w.u8(uint8_t(u1));
+                    w.u8(uint8_t(v1));
                     w.u8(t->bitDepth == BitDepth::Bpp4 ? 0 : t->bitDepth == BitDepth::Bpp8 ? 1 : 2);
+                    if (sh) {
+                        w.u8(uint8_t(sh->cellW));
+                        w.u8(uint8_t(sh->cellH));
+                        w.u8(uint8_t(cols));
+                        w.u8(uint8_t(baseU));
+                        w.u8(uint8_t(baseV));
+                    }
                 }
                 break;
+            }
             case UIElementType::Progress:
                 for (float c : e.background) w.u8(rgbByte(c));
                 w.u8(uint8_t(e.value));
@@ -1896,10 +1964,15 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     stripUnknownElements(canvases, res);
     std::vector<std::vector<PsxTexture*>> uiTextures(canvases.size());
+    std::vector<std::vector<int>> uiSheets(canvases.size());  // sheet-backed images: the sprite sheet's index, else -1
     std::vector<FontSheet> fontSheets;
     std::vector<std::array<int, 2>> fontVram;
     std::map<std::string, int> fontIndex;  // name -> 1-based index (0 = system font)
-    prepareUi(scene, canvases, root, options.vram, imageFor, textureStore, uiTextures, fontSheets, fontVram, fontIndex, res);
+    prepareUi(scene, canvases, root, options.vram, imageFor, textureStore, uiTextures, uiSheets, true, fontSheets, fontVram,
+              fontIndex, res);
+    for (size_t ci = 0; ci < canvases.size(); ci++)
+        for (const UIElement& e : canvases[ci].elements)
+            if (e.type == UIElementType::Image) res.stats.uiImages.push_back({canvases[ci].name, e.name, e.sheet, e.cell});
 
     // Sprite sheets: checked, then each texture converted with cutout on (the
     // engine draws them as sprites over the scene), packed after the UI's.
@@ -2719,7 +2792,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
     }
     if (!canvases.empty() || !fontSheets.empty())
-        writeUi(w, uiTableOffsetPos, canvases, uiTextures, fontSheets, fontVram, fontIndex, options.vram);
+        writeUi(w, uiTableOffsetPos, canvases, uiTextures, fontSheets, fontVram, fontIndex, options.vram, uiSheets,
+                scene.spriteSheets, spriteTextures);
 
     // ---- sprite sheets and animations (v22)
     if (!scene.spriteSheets.empty()) {
@@ -2932,6 +3006,7 @@ ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs
 
     // Only the fonts this canvas uses, in scene order.
     Scene fontScene;
+    fontScene.spriteSheets = scene.spriteSheets;  // for sheet-backed images
     for (const UIFont& f : scene.fonts)
         for (const UIElement& e : canvases[0].elements)
             if (e.type == UIElementType::Text && effectiveFont(canvases[0], e) == f.name) {
@@ -2947,15 +3022,26 @@ ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs
     };
     std::deque<PsxTexture> store;
     std::vector<std::vector<PsxTexture*>> uiTextures(1);
+    std::vector<std::vector<int>> uiSheets(1);
     std::vector<FontSheet> sheets;
     std::vector<std::array<int, 2>> fontVram;
     std::map<std::string, int> fontIndex;
-    prepareUi(fontScene, canvases, root, options.vram, imageFor, store, uiTextures, sheets, fontVram, fontIndex, res);
+    prepareUi(fontScene, canvases, root, options.vram, imageFor, store, uiTextures, uiSheets, false, sheets, fontVram, fontIndex,
+              res);
     if (!res.ok()) return res;
     std::vector<PsxTexture*> all;
     for (PsxTexture* t : uiTextures[0])
         if (t) all.push_back(t);
     VramLayout vram = packVram(all, options.vram, res.errors);
+    if (!res.ok()) return res;
+    // A sheet-backed image steps through its cells with 8-bit texture
+    // coordinates, as a sprite does: its copy of the sheet must sit in one page.
+    for (size_t ei = 0; ei < uiTextures[0].size(); ei++)
+        if (const PsxTexture* t = uiTextures[0][ei]; t && uiSheets[0][ei] >= 0) {
+            const std::string e = spriteSheetPageError(fontScene.spriteSheets[size_t(uiSheets[0][ei])].name,
+                                                       t->packingX * (16 / int(t->bitDepth)), t->packingY, t->width, t->height);
+            if (!e.empty()) res.errors.push_back("loading screen: " + e);
+        }
     if (!res.ok()) return res;
     std::vector<const PsxTexture*> cluts;
     for (const Atlas& a : vram.atlases)
@@ -3014,7 +3100,8 @@ ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs
         std::vector<uint8_t> px = sh.packed4bpp();
         w.bytes(px.data(), px.size());
     }
-    writeUi(w, tableOffsetPos, canvases, uiTextures, sheets, fontVram, fontIndex, options.vram, &fontOffsets);
+    writeUi(w, tableOffsetPos, canvases, uiTextures, sheets, fontVram, fontIndex, options.vram, uiSheets, fontScene.spriteSheets, {},
+            &fontOffsets);
     // The pack sits in RAM next to the old scene until it is drawn.
     if (w.pos() > 128 * 1024)
         res.warnings.push_back("loading screen '" + lc + "' is " + std::to_string(w.pos() / 1024) +

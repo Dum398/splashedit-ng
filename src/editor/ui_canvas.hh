@@ -117,6 +117,17 @@ bool editElement(Document& doc, int c, int e, const std::function<void(splash::U
 // Runs `fn` on each element of `idx` (and its place in `idx`) as ONE edit.
 bool editElements(Document& doc, int c, const std::vector<int>& idx,
                   const std::function<void(splash::UIElement&, size_t)>& fn, const std::string& mergeKey = {});
+// ---- Sheet-backed images: a UI Image showing one cell of a scene sprite sheet.
+// The sheet an Image names, or nullptr (a plain image, or no sheet of that name).
+const splash::SpriteSheet* imageSheet(const splash::Scene& scene, const splash::UIElement& e);
+// Image `e` of canvas `c` shows sheet `sheet` ("" = a plain image again), from
+// cell 0 when the sheet changes. One undo step; false when nothing changed.
+bool setImageSheet(Document& doc, int c, int e, const std::string& sheet);
+// The cell a sheet-backed image shows (0..255; the export checks it against the sheet).
+bool setImageCell(Document& doc, int c, int e, int cell);
+// Sets a sheet-backed image's size to one cell of its sheet, keeping its top-left.
+bool snapImageToCell(Document& doc, int c, int e, Screen s);
+
 // Renaming the scene's loading canvas (SceneSettings::loadingCanvas) renames
 // that setting too, in the same undo step; deleting it leaves the name.
 bool editCanvas(Document& doc, int c, const std::function<void(splash::UICanvas&)>& fn, const std::string& mergeKey = {});

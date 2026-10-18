@@ -355,6 +355,12 @@ struct UIElement {
     std::string texture;  // project-relative image
     BitDepth bitDepth = BitDepth::Bpp8;
     bool cutout = true;
+    // Sheet-backed: the name of a scene sprite sheet (empty = a plain image)
+    // and the cell of it shown, numbered as the sheet's. The sheet's texture,
+    // bit depth and cutout then stand in for texture/bitDepth/cutout, and Lua's
+    // UI.SetFrame steps through its cells.
+    std::string sheet;
+    int cell = 0;
     // An element of a type this build does not know, as JSON text: kept on
     // save, skipped on export.
     std::string unknown;

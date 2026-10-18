@@ -10435,6 +10435,262 @@ void testMeshAlpha() {
 // Sprite sheets: the scene JSON round trip, the exact sprite table of the
 // tests/sprite fixture (2 sheets, 3 animations), each error export refuses
 // with, and the inspector's edits as undo steps.
+// A HUD sprite: a UI Image backed by a cell of a scene sprite sheet. JSON keys
+// "sheet"/"cell" (only on a sheet-backed image), the exact 16 type-data bytes
+// psxsplash's uisystem.cpp reads (texture page, CLUT, the cell's UVs and the
+// grid UI.SetFrame steps through), one VRAM copy of the sheet, the export's
+// two errors, the --stats list, the canvas preview's cell and the edits.
+void testUiSprite() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "uisprite";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "tests" / "sprite", project, fs::copy_options::recursive);
+    fs::copy(src / "examples" / "courtyard" / "textures" / "crate.png", project / "crate.png");
+    splash::Scene scene = splash::loadScene(project / "sprite.scene");
+    for (splash::Object& o : scene.objects)
+        if (o.mesh) {
+            o.mesh->mesh = (src / "examples" / "courtyard" / "meshes" / "crate.mesh").string();
+            for (splash::Material& m : o.mesh->materials) m.texture = (src / "examples" / "courtyard" / "textures" / "crate.png").string();
+        }
+    splash::UICanvas hud;
+    hud.name = "hud";
+    splash::UIElement icon;
+    icon.type = splash::UIElementType::Image;
+    icon.name = "icon";
+    icon.rect = {10, 20, 16, 16};
+    icon.color = {0.5f, 0.5f, 0.5f};
+    icon.sheet = "hero";
+    icon.cell = 6;  // column 2, row 1 of hero's 4 x 2
+    splash::UIElement plain = icon;
+    plain.name = "plain";
+    plain.sheet.clear();
+    plain.cell = 0;
+    plain.texture = "crate.png";
+    plain.bitDepth = splash::BitDepth::Bpp8;
+    plain.rect = {100, 20, 32, 32};
+    hud.elements = {icon, plain};
+    scene.canvases.push_back(hud);
+
+    // JSON: sheet and cell come back; a plain image writes neither key; a
+    // second save is byte for byte the first.
+    splash::saveScene(scene, project / "rt1.scene");
+    {
+        const splash::Scene back = splash::loadScene(project / "rt1.scene");
+        CHECK(back.canvases.size() == 1 && back.canvases[0].elements.size() == 2);
+        if (back.canvases.size() == 1 && back.canvases[0].elements.size() == 2) {
+            const auto& a = back.canvases[0].elements[0];
+            const auto& b = back.canvases[0].elements[1];
+            CHECK(a.sheet == "hero" && a.cell == 6 && b.sheet.empty() && b.cell == 0 && b.texture == "crate.png");
+            CHECK(a.extra.empty() && b.extra.empty());
+        }
+        splash::saveScene(back, project / "rt2.scene");
+        CHECK(readAll(project / "rt1.scene") == readAll(project / "rt2.scene"));
+        const std::string text = readAll(project / "rt1.scene");
+        size_t n = 0;
+        for (size_t at = text.find("\"sheet\""); at != std::string::npos; at = text.find("\"sheet\"", at + 1)) n++;
+        CHECK(n == 1 && text.find("\"cell\": 6") != std::string::npos);
+    }
+
+    // The type-data bytes.
+    splash::ExportResult r = splash::exportSplashpack(scene, project, project / "u.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "uisprite export: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string b = readAll(project / "u.splashpack");
+    if (r.ok() && b.size() > 100) {
+        CHECK(rd16(b, 92) == 1 && uint8_t(b[94]) == 0);
+        const size_t table = rd32(b, 96);
+        const size_t data = rd32(b, table);
+        CHECK(uint8_t(b[table + 6]) == 2);  // element count
+        int heroCopies = 0;
+        splash::ExportStats::TexturePlacement hero, crate;
+        for (const auto& t : r.stats.textures) {
+            if (fs::path(t.source).filename() == "hero.png") hero = t, heroCopies++;
+            if (fs::path(t.source).filename() == "crate.png" && t.bitDepth == 8) crate = t;
+        }
+        CHECK(heroCopies == 1);  // the image shares the sprite table's texture
+        CHECK(crate.width > 0 && crate.height > 0);
+        std::string want;
+        auto u8 = [&](int v) { want += char(uint8_t(v)); };
+        auto u16 = [&](int v) { u8(v & 255), u8((v >> 8) & 255); };
+        const int baseU = (hero.x % 64) * 4, baseV = hero.y % 256;
+        const int u0 = baseU + 2 * 16, v0 = baseV + 1 * 16;
+        u8(hero.x / 64), u8(hero.y / 256), u16(hero.clutX / 16), u16(hero.clutY), u8(u0), u8(v0), u8(u0 + 15), u8(v0 + 15), u8(0),
+            u8(16), u8(16), u8(4), u8(baseU), u8(baseV);
+        const std::string got = b.substr(data + 24, 16);
+        CHECK(got == want);
+        if (got != want)
+            for (size_t i = 0; i < 16; i++) std::fprintf(stderr, "  icon byte %zu: got %d want %d\n", i, uint8_t(got[i]), uint8_t(want[i]));
+        // Colour 0.5 (#808080) is the texture as drawn: 128.
+        CHECK(uint8_t(b[data + 20]) == 128 && uint8_t(b[data + 21]) == 128 && uint8_t(b[data + 22]) == 128);
+        // The plain image: its own texture, the whole of it, bytes 11..15 zero.
+        want.clear();
+        const int pu = (crate.x % 64) * 2, pv = crate.y % 256;
+        u8(crate.x / 64), u8(crate.y / 256), u16(crate.clutX / 16), u16(crate.clutY), u8(pu), u8(pv), u8(pu + crate.width - 1),
+            u8(pv + crate.height - 1), u8(1), u8(0), u8(0), u8(0), u8(0), u8(0);
+        const std::string pgot = b.substr(data + 48 + 24, 16);
+        CHECK(pgot == want);
+        if (pgot != want)
+            for (size_t i = 0; i < 16; i++) std::fprintf(stderr, "  plain byte %zu: got %d want %d\n", i, uint8_t(pgot[i]), uint8_t(want[i]));
+        CHECK(pgot.substr(11) == std::string(5, '\0'));
+        CHECK(uint8_t(b[data + 48 + 20]) == 128);
+        // --stats: both images, in canvas order.
+        CHECK(r.stats.uiImages.size() == 2);
+        if (r.stats.uiImages.size() == 2) {
+            const auto& i0 = r.stats.uiImages[0];
+            const auto& i1 = r.stats.uiImages[1];
+            CHECK(i0.canvas == "hud" && i0.element == "icon" && i0.sheet == "hero" && i0.cell == 6);
+            CHECK(i1.element == "plain" && i1.sheet.empty() && i1.cell == 0);
+        }
+        // A sheet used only by images is still in the sprite table (and its 16-sheet limit).
+        CHECK(rd16(b, 132) == 2);
+    }
+
+    // The errors: no such sheet, a cell past the sheet's 8; the last cell exports.
+    auto errorsWith = [&](const std::string& sheet, int cell) {
+        splash::Scene s = scene;
+        s.canvases[0].elements[0].sheet = sheet;
+        s.canvases[0].elements[0].cell = cell;
+        return splash::exportSplashpack(s, project, project / "e.splashpack").errors;
+    };
+    auto has = [](const std::vector<std::string>& es, const std::string& what) {
+        return std::any_of(es.begin(), es.end(), [&](const std::string& e) { return e.find(what) != std::string::npos; });
+    };
+    const std::vector<std::string> noSheet = errorsWith("nope", 0);
+    CHECK(has(noSheet, "canvas 'hud', element 'icon': no sprite sheet named 'nope'"));
+    const std::vector<std::string> pastEnd = errorsWith("hero", 8);
+    CHECK(has(pastEnd, "canvas 'hud', element 'icon': cell 8 is outside sprite sheet 'hero', which has 8 cells"));
+    CHECK(errorsWith("hero", 7).empty());
+    CHECK(errorsWith("fx", 7).empty() && has(errorsWith("fx", 8), "outside sprite sheet 'fx'"));  // fx: 48x16 in 12x8 cells, 4 x 2
+    {
+        // A bad cell in the scene file is refused on load.
+        std::string text = readAll(project / "rt1.scene");
+        const size_t at = text.find("\"cell\": 6");
+        text.replace(at, 9, "\"cell\": 300");
+        std::ofstream(project / "bad.scene", std::ios::binary) << text;
+        bool threw = false;
+        try {
+            splash::loadScene(project / "bad.scene");
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+
+    // On the loading screen (a loader pack has no sprite table) the image gets
+    // its own copy of the sheet's texture, with the grid based at that copy.
+    {
+        splash::Scene ls = scene;
+        ls.settings.loadingCanvas = "hud";
+        ls.canvases[0].elements.pop_back();  // just the sheet-backed image
+        splash::ExportResult lr = splash::exportLoaderPack(ls, project, project / "u.loading");
+        for (const std::string& e : lr.errors) std::fprintf(stderr, "uisprite loader: %s\n", e.c_str());
+        CHECK(lr.ok());
+        const std::string lb = readAll(project / "u.loading");
+        if (lr.ok() && lb.size() > 16) {
+            CHECK(lb[0] == 'L' && lb[1] == 'P' && uint8_t(lb[4]) == 0 && uint8_t(lb[5]) == 1 && uint8_t(lb[10]) == 1);
+            const size_t ltable = rd32(lb, 12), ldata = rd32(lb, ltable);
+            const std::string td = lb.substr(ldata + 24, 16);
+            auto at = [&](int i) { return int(uint8_t(td[size_t(i)])); };
+            CHECK(at(10) == 0 && at(11) == 16 && at(12) == 16 && at(13) == 4);
+            CHECK(at(6) == at(14) + 32 && at(7) == at(15) + 16 && at(8) == at(6) + 15 && at(9) == at(7) + 15);
+            const int lx = rd16(lb, 16 + 8), ly = rd16(lb, 16 + 10);  // the one atlas: the sheet's copy
+            CHECK(at(0) == lx / 64 && at(1) == ly / 256 && at(14) == (lx % 64) * 4 && at(15) == ly % 256);
+        }
+        ls.canvases[0].elements[0].sheet = "nope";
+        CHECK(has(splash::exportLoaderPack(ls, project, project / "u2.loading").errors, "no sprite sheet named 'nope'"));
+    }
+
+    // The canvas preview draws only that cell (tint 128: the texels as they are).
+    {
+        editor::uic::Assets assets;
+        assets.refresh(project, 1);
+        const editor::uic::Screen s;
+        splash::Scene only = scene;
+        only.canvases[0].elements[1].visible = false;
+        const std::vector<uint32_t> px = editor::uic::render(only, {true}, s, assets, 0);
+        const auto& t = assets.texture("hero.png", splash::BitDepth::Bpp4, true);
+        CHECK(t.error.empty() && t.width == 64 && t.height == 32);
+        int bad = 0, drawn = 0;
+        auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
+        for (int y = 0; y < 16 && t.error.empty(); y++)
+            for (int x = 0; x < 16; x++) {
+                const uint16_t w = t.words[size_t(16 + y * 15 / 16) * 64 + size_t(32 + x * 15 / 16)];
+                const uint32_t want = w ? 0xff000000u | (ex((w >> 10) & 31) << 16) | (ex((w >> 5) & 31) << 8) | ex(w & 31) : 0u;
+                const uint32_t got = px[size_t(20 + y) * size_t(s.w) + size_t(10 + x)];
+                bad += got != want;
+                drawn += got != 0;
+            }
+        CHECK(bad == 0 && drawn > 0);
+    }
+
+    // The edits: each one undo step; a new sheet starts at cell 0; Snap size
+    // sets the rect to one cell; None makes it a plain image again.
+    {
+        using namespace editor::uic;
+        const Screen s;
+        editor::Document d;
+        splash::Scene ds = scene;
+        ds.canvases[0].elements[0].sheet.clear();
+        ds.canvases[0].elements[0].cell = 0;
+        ds.canvases[0].elements[0].rect = {10, 20, 40, 30};
+        d.reset(ds);
+        auto el = [&]() -> const splash::UIElement& { return d.scene().canvases[0].elements[0]; };
+        CHECK(setImageSheet(d, 0, 0, "hero") && el().sheet == "hero" && el().cell == 0 && d.historySize() == 1);
+        CHECK(!setImageSheet(d, 0, 0, "hero") && d.historySize() == 1);
+        CHECK(setImageCell(d, 0, 0, 5) && el().cell == 5 && d.historySize() == 2);
+        CHECK(!setImageCell(d, 0, 0, -1) && !setImageCell(d, 0, 0, 256) && !setImageCell(d, 0, 1, 2));  // plain image: no cell
+        CHECK(imageSheet(d.scene(), el()) == &d.scene().spriteSheets[0]);
+        CHECK(snapImageToCell(d, 0, 0, s) && el().rect == (std::array<int, 4>{10, 20, 16, 16}) && d.historySize() == 3);
+        CHECK(!snapImageToCell(d, 0, 0, s));
+        CHECK(setImageSheet(d, 0, 0, "fx") && el().cell == 0);
+        CHECK(setImageSheet(d, 0, 0, "") && el().sheet.empty() && imageSheet(d.scene(), el()) == nullptr);
+        d.undo();
+        d.undo();
+        CHECK(el().sheet == "hero" && el().cell == 5);
+        d.undo();
+        CHECK(el().rect == (std::array<int, 4>{10, 20, 40, 30}));
+        // A missing sheet is a problem on the element.
+        CHECK(setImageSheet(d, 0, 0, "gone"));
+        const auto probs = elementProblems(d, 0, 0, s);
+        CHECK(std::any_of(probs.begin(), probs.end(), [](const Problem& p) { return p.title == "No such sprite sheet"; }));
+    }
+
+    // Renaming a sheet renames the images that show it, in every canvas, in
+    // the same undo step; undo puts both back. Deleting a sheet leaves them.
+    {
+        editor::Document d;
+        splash::Scene ds = scene;
+        splash::UICanvas second;
+        second.name = "pause";
+        second.elements = {scene.canvases[0].elements[0]};  // hero
+        second.elements[0].name = "icon2";
+        second.elements.push_back(scene.canvases[0].elements[0]);
+        second.elements[1].name = "spark";
+        second.elements[1].sheet = "fx";
+        ds.canvases.push_back(second);
+        d.reset(ds);
+        auto sheetOf = [&](int c, int e) { return d.scene().canvases[size_t(c)].elements[size_t(e)].sheet; };
+        CHECK(editor::editSpriteSheet(d, 0, [](splash::SpriteSheet& s) { s.name = "hero2"; }));
+        CHECK(d.historySize() == 1 && d.scene().spriteSheets[0].name == "hero2");
+        CHECK(sheetOf(0, 0) == "hero2" && sheetOf(1, 0) == "hero2" && sheetOf(1, 1) == "fx" && sheetOf(0, 1).empty());
+        d.undo();
+        CHECK(d.scene().spriteSheets[0].name == "hero" && sheetOf(0, 0) == "hero" && sheetOf(1, 0) == "hero");
+        d.redo();
+        CHECK(sheetOf(0, 0) == "hero2" && sheetOf(1, 0) == "hero2");
+        // Typed a key at a time (one merge key): one step, the images follow each name.
+        CHECK(editor::editSpriteSheet(d, 1, [](splash::SpriteSheet& s) { s.name = "f"; }, "name"));
+        CHECK(editor::editSpriteSheet(d, 1, [](splash::SpriteSheet& s) { s.name = "fire"; }, "name"));
+        d.endMerge();
+        CHECK(sheetOf(1, 1) == "fire" && d.historySize() == 2);
+        d.undo();
+        CHECK(sheetOf(1, 1) == "fx" && d.scene().spriteSheets[1].name == "fx");
+        // Deleting a sheet keeps the images' names.
+        CHECK(editor::deleteSpriteSheet(d, 0) && sheetOf(0, 0) == "hero2" && sheetOf(1, 0) == "hero2");
+    }
+}
+
 void testSpriteSheets() {
     using namespace roomtest;
     const fs::path src = SPLASHEDIT_SOURCE_DIR;
@@ -10793,6 +11049,7 @@ int main(int argc, char** argv) {
     testUvOffsetSlots();
     testSceneNetworkId();
     testSpriteSheets();
+    testUiSprite();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

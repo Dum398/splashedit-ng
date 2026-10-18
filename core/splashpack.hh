@@ -218,6 +218,14 @@ struct ExportStats {
     int spriteAnims = 0;
     // The sprite table from its first sheet record through the last name's NUL.
     size_t spriteTableBytes = 0;
+    // UI Image elements in canvas order (the loading canvas is not listed):
+    // the sprite sheet a sheet-backed one shows a cell of (empty = a plain
+    // image) and that cell.
+    struct UiImageInfo {
+        std::string canvas, element, sheet;
+        int cell = 0;
+    };
+    std::vector<UiImageInfo> uiImages;
 
     size_t streamPoolBytes() const { return size_t(streamSlots) * streamSlotBytes; }
     // Negative when streaming costs more RAM than it frees.

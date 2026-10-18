@@ -171,7 +171,10 @@ size; with them apart the element stretches, x/y are the left/top insets and the
 is the `anchorMax` point plus x + w (or y + h). Per type: `text` has `text` (ASCII; at most 63 bytes
 are kept) and `font` (a font name, `null` for the system font); `progress` has `background` and
 `value` (0..100); `line` has `from` and `to` in screen pixels instead of `rect` and anchors;
-`image` has `texture`, `bitDepth` (4, 8, 16) and `cutout` [true].
+`image` has `texture`, `bitDepth` (4, 8, 16) and `cutout` [true], and, only when it shows a cell of
+a sprite sheet (a HUD sprite), `sheet` (a `spriteSheets` name) and `cell` (0..255, numbered as the
+sheet's): the sheet's texture, bit depth and cutout then stand in for the image's own, and export
+refuses a sheet the scene does not have or a cell past the sheet's last.
 
 ### Sprite sheets: `spriteSheets`
 

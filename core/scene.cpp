@@ -676,6 +676,10 @@ json writeElement(const UIElement& e) {
         j["texture"] = e.texture.empty() ? json(nullptr) : json(e.texture);
         j["bitDepth"] = int(e.bitDepth);
         j["cutout"] = e.cutout;
+        if (!e.sheet.empty()) {
+            j["sheet"] = e.sheet;
+            j["cell"] = e.cell;
+        }
         break;
     default:
         break;
@@ -716,6 +720,11 @@ UIElement readElement(const json& j, const std::string& canvas) {
     if (bd != 4 && bd != 8 && bd != 16) fail("canvas '" + canvas + "', element '" + e.name + "': bitDepth must be 4, 8 or 16");
     e.bitDepth = BitDepth(bd);
     e.cutout = j.value("cutout", e.cutout);
+    if (e.type == UIElementType::Image && j.contains("sheet") && !j["sheet"].is_null()) {
+        e.sheet = j["sheet"].get<std::string>();
+        e.cell = j.value("cell", 0);
+        if (e.cell < 0 || e.cell > 255) fail("canvas '" + canvas + "', element '" + e.name + "': cell must be 0..255");
+    }
     e.extra = extrasOf(j, writeElement(e));
     return e;
 }

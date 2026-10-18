@@ -325,6 +325,13 @@ This exporter (`core/splashpack.cpp`, `writeUi`) writes the same records with th
 - Line endpoints are written as i16 in both the layout and the type data.
 - More than 24 canvases, 256 elements, 255 elements in one canvas or 3 fonts fails the export; the
   loader would drop the rest.
+- A sheet-backed image (scene `sheet`/`cell`, psxsplash PSXUISprite) shares its sprite sheet's
+  texture, packed once for the sprite table (2.19): texpage and CLUT are the sheet's, baseU/baseV
+  are the sheet record's u0/v0, u0 = baseU + (cell % cols) * cellW, v0 = baseV + (cell / cols) *
+  cellH, u1/v1 = u0 + cellW - 1 / v0 + cellH - 1, then cellW, cellH, cols, baseU, baseV. The loader
+  recovers the cell from u0/v0 and UI.SetFrame/GetFrame step through the grid; a plain image leaves
+  those five bytes 0 (not sheet-backed). A loader pack (no sprite table) gets its own copy of the
+  sheet's texture, with the grid based at that copy.
 
 ### 2.19 Sprite sheets + sprite anims (header spriteTableOffset; only if >=1 sheet) - `AlignToFourBytes` first
 `spriteSheetCount` x 20 B `{u32 nameOffset; u8 texpageX, texpageY, u0, v0; u16 clutX, clutY; u8 cellW, cellH, cols, rows, bitDepthIndex, pad0; u16 pad1}` then `spriteAnimCount` x 12 B `{u32 nameOffset; u8 sheet, firstFrame, frameCount, frameDuration, loop, pad0; u16 pad1}`, then NUL-terminated names (<=24 chars) of all sheets then all anims. Reader: `SPLASHPACKSpriteSheet` 20 B / `SPLASHPACKSpriteAnim` 12 B (R:spritesystem.cpp), limits 16 sheets / 64 anims (asserts).

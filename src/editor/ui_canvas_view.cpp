@@ -215,6 +215,7 @@ float stepZoom(float scale, int dir) {
 CanvasView::CanvasView() = default;
 CanvasView::~CanvasView() {
     if (m_tex) glDeleteTextures(1, &m_tex);
+    if (m_sheetTex) glDeleteTextures(1, &m_sheetTex);
     for (FontSample& s : m_samples)
         if (s.tex) glDeleteTextures(1, &s.tex);
 }
@@ -1353,58 +1354,174 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
             rows.y += 16;
         }
         if (e.type == UIElementType::Image) {
-            ImRect pf = rows.row("ltex", "Texture", "A project-relative image file. Browse copies one from outside into textures/.");
-            std::string p;
-            ImRect tfield(pf.Min, ImVec2(pf.Max.x - size::field - space::xs, pf.Max.y));
-            if (textField("tex", tfield, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
-            if (iconButton("texbrowse", ImRect(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max), icon::folderOpen, false, "Pick an image")) {
-                {
-                    std::lock_guard<std::mutex> lock(g_texMutex);
-                    g_texCanvas = c, g_texElement = ei;
+            // Sheet: a scene sprite sheet this image shows one cell of (its
+            // texture, bit depth and cutout then stand in for the image's own).
+            const auto& sheets = doc.scene().spriteSheets;
+            ImRect shf = rows.row("lsheet", "Sheet",
+                                  "None, or a scene sprite sheet: the image then shows one of its cells, from the sheet's "
+                                  "texture (packed once for both). Lua's UI.SetFrame steps through the cells while playing.");
+            nameRect("ui.sheet", shf);
+            {
+                std::vector<const char*> items{"None"};
+                int cur = 0;
+                for (size_t k = 0; k < sheets.size(); k++) {
+                    items.push_back(sheets[k].name.c_str());
+                    if (sheets[k].name == e.sheet) cur = int(k) + 1;
                 }
-                static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
-                SDL_ShowOpenFileDialog(onTexturePicked, nullptr, nullptr, images, 1, nullptr, false);
+                const std::string shown = e.sheet.empty() ? std::string("None") : cur ? e.sheet : e.sheet + " (missing)";
+                const int picked = dropdownMenu("ui.sheet", shf, icon::image, shown.c_str(), items, e.sheet.empty() ? 0 : cur);
+                if (picked == 0) uic::setImageSheet(doc, c, ei, "");
+                else if (picked > 0) uic::setImageSheet(doc, c, ei, sheets[size_t(picked - 1)].name);
             }
-            if (!e.texture.empty()) {
-                const uic::Assets::Texture& t = m_assets.texture(e.texture, e.bitDepth, e.cutout);
-                if (t.error.empty() && t.width > 0) {
-                    char info[64];
-                    std::snprintf(info, sizeof info, "%d x %d texels", t.width, t.height);
-                    text(dl, ImVec2(x0 + space::sm + rows.lw, rows.y - 4), f.regular, type::caption, color::textFaint, info);
-                    const uic::Rect lr = uic::layout(e, s);
-                    if ((lr.w != t.width || lr.h != t.height) &&
-                        button("native", ImVec2(x1 - space::sm - 120, rows.y - 8), nullptr, "Native size", ButtonKind::Ghost, nullptr,
-                               "Sets the size to the texture's, one texel per screen pixel."))
-                        uic::editElement(doc, c, ei, [&](UIElement& el) {
-                            uic::Rect q = uic::layout(el, m_screen);
-                            q.w = t.width;
-                            q.h = t.height;
-                            uic::place(el, q, m_screen);
-                        });
-                    rows.y += 22;
+            const splash::SpriteSheet* sheet = uic::imageSheet(doc.scene(), e);
+            std::string sheetLine = "none";
+            if (!e.sheet.empty() && sheet) {
+                static const uic::Assets::Texture none;
+                const uic::Assets::Texture& t = sheet->texture.empty() ? none : m_assets.texture(sheet->texture, sheet->bitDepth, true);
+                const int cw = std::max(1, sheet->cellW), ch = std::max(1, sheet->cellH);
+                const int cols = t.width / cw, rows_ = t.height / ch, cells = cols * rows_;
+                const uic::Rect lr = uic::layout(e, s);
+                rows.y += 4;
+                char info[128];
+                if (t.error.empty() && cells > 0)
+                    std::snprintf(info, sizeof info, "cell %d of %d, %d x %d texels%s", e.cell, cells, cw, ch,
+                                  e.cell >= cells ? ": outside the sheet" : "");
+                else
+                    std::snprintf(info, sizeof info, "%s", sheet->texture.empty() ? "The sheet has no texture" : "The sheet's texture cannot be read");
+                text(dl, ImVec2(x0 + space::sm + rows.lw, rows.y - 4), f.regular, type::caption, e.cell >= cells ? color::bad : color::textFaint, info);
+                if (button("ui.snapsize", ImVec2(x1 - space::sm - 100, rows.y - 8), nullptr, "Snap size", ButtonKind::Ghost, nullptr,
+                           "Sets the size to one cell of the sheet, one texel per screen pixel."))
+                    uic::snapImageToCell(doc, c, ei, m_screen);
+                rows.y += 26;
+                sheetLine = e.sheet + " cell " + std::to_string(e.cell) + " of " + std::to_string(cells) + " grid " + std::to_string(cols) +
+                            "x" + std::to_string(rows_) + " size " + std::to_string(lr.w) + "x" + std::to_string(lr.h);
+                if (t.error.empty() && cells > 0) {
+                    // The cell picker: the whole sheet as the PS1 shows it, the
+                    // grid over it and the image's cell outlined. Click a cell.
+                    if (m_sheetKey != sheet->texture + "|" + std::to_string(int(sheet->bitDepth)) + "|" + std::to_string(doc.assetsId()) || !m_sheetTex) {
+                        m_sheetKey = sheet->texture + "|" + std::to_string(int(sheet->bitDepth)) + "|" + std::to_string(doc.assetsId());
+                        std::vector<uint32_t> px(size_t(t.width) * size_t(t.height), 0);
+                        auto ex = [](int c5) { return uint32_t((c5 << 3) | (c5 >> 2)); };
+                        for (size_t k = 0; k < px.size(); k++)
+                            if (const uint16_t w = t.words[k])
+                                px[k] = 0xff000000u | (ex((w >> 10) & 31) << 16) | (ex((w >> 5) & 31) << 8) | ex(w & 31);
+                        if (!m_sheetTex) glGenTextures(1, &m_sheetTex);
+                        glBindTexture(GL_TEXTURE_2D, m_sheetTex);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+                        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, t.width, t.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                        glBindTexture(GL_TEXTURE_2D, 0);
+                    }
+                    const float pad = space::sm, availW = x1 - x0 - 2 * space::sm - 2 * pad, maxH = 240;
+                    const float fit = std::min(availW / t.width, maxH / t.height);
+                    const float z = fit >= 1 ? std::floor(fit) : fit;
+                    const ImVec2 box0(x0 + space::sm, rows.y);
+                    const ImRect box(box0, ImVec2(x1 - space::sm, rows.y + t.height * z + 2 * pad));
+                    dl->AddRectFilled(box.Min, box.Max, rgb(0x14171c), radius::field);
+                    dl->AddRect(box.Min, box.Max, color::border, radius::field);
+                    const ImVec2 so(std::floor(box.GetCenter().x - t.width * z * 0.5f), box.Min.y + pad);
+                    const ImRect sr(so, so + ImVec2(t.width * z, t.height * z));
+                    nameRect("ui.sheetcells", sr);
+                    dl->PushClipRect(sr.Min, sr.Max, true);
+                    const float sq = std::max(4.0f, std::min(8.0f, cw * z / 2));
+                    for (float cy = sr.Min.y; cy < sr.Max.y; cy += sq)
+                        for (float cx = sr.Min.x; cx < sr.Max.x; cx += sq)
+                            dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + sq, cy + sq),
+                                              (int((cx - sr.Min.x) / sq) + int((cy - sr.Min.y) / sq)) % 2 ? rgb(0x2a2f39) : rgb(0x1f232b));
+                    dl->PopClipRect();
+                    dl->AddImage((ImTextureID)(intptr_t)m_sheetTex, sr.Min, sr.Max);
+                    for (int k = 1; k < cols; k++)
+                        dl->AddLine(ImVec2(sr.Min.x + k * cw * z, sr.Min.y), ImVec2(sr.Min.x + k * cw * z, sr.Max.y), rgb(0xffffff, 70));
+                    for (int k = 1; k < rows_; k++)
+                        dl->AddLine(ImVec2(sr.Min.x, sr.Min.y + k * ch * z), ImVec2(sr.Max.x, sr.Min.y + k * ch * z), rgb(0xffffff, 70));
+                    auto cellRect = [&](int k) {
+                        const ImVec2 m(sr.Min.x + (k % cols) * cw * z, sr.Min.y + (k / cols) * ch * z);
+                        return ImRect(m, m + ImVec2(cw * z, ch * z));
+                    };
+                    for (int k = 0; k < cells && k < 256; k++) nameRect("ui.sheetcell/" + std::to_string(k), cellRect(k));
+                    const Hit h = interact("ui.sheetcells", sr);
+                    if (h.hovered) {
+                        const ImVec2 m = ImGui::GetIO().MousePos;
+                        const int hc = std::clamp(int((m.x - sr.Min.x) / (cw * z)), 0, cols - 1) +
+                                       std::clamp(int((m.y - sr.Min.y) / (ch * z)), 0, rows_ - 1) * cols;
+                        const ImRect hr = cellRect(hc);
+                        dl->AddRectFilled(hr.Min, hr.Max, rgb(0xffffff, 28));
+                        if (h.clicked && hc != e.cell && hc < 256) uic::setImageCell(doc, c, ei, hc);
+                    }
+                    if (e.cell >= 0 && e.cell < cells) {
+                        const ImRect now = cellRect(e.cell);
+                        dl->AddRect(now.Min - ImVec2(1, 1), now.Max + ImVec2(1, 1), color::accentHover, 0.0f, 0, 2.0f);
+                    }
+                    rows.y = box.Max.y + space::xs;
+                    text(dl, ImVec2(x0 + space::sm, rows.y), f.regular, type::caption, color::textFaint,
+                         "PS1 colours at the sheet's bit depth. Click a cell to show it.");
+                    rows.y += 18 + space::sm;
                 }
+            } else if (!e.sheet.empty()) {
+                sheetLine = e.sheet + " missing";
             }
-            ImRect bf = rows.row("lbpp", "Bit depth", "4 and 8 bpp use a palette (16 and 256 colours) and less VRAM.");
-            const int cur = e.bitDepth == splash::BitDepth::Bpp4 ? 0 : e.bitDepth == splash::BitDepth::Bpp8 ? 1 : 2;
-            const int picked = dropdownMenu("bpp", bf, nullptr, cur == 0 ? "4 bpp" : cur == 1 ? "8 bpp" : "16 bpp", {"4 bpp", "8 bpp", "16 bpp"}, cur);
-            if (picked >= 0 && picked != cur)
-                uic::editElement(doc, c, ei, [&](UIElement& el) {
-                    el.bitDepth = picked == 0 ? splash::BitDepth::Bpp4 : picked == 1 ? splash::BitDepth::Bpp8 : splash::BitDepth::Bpp16;
-                });
-            ImRect cf = rows.row("lcut", "Cutout", "Transparent texels (alpha under half) are left out instead of drawn black.");
-            if (toggle("cut", ImRect(ImVec2(cf.Min.x, cf.GetCenter().y - 8), ImVec2(cf.Min.x + 30, cf.GetCenter().y + 8)), e.cutout))
-                uic::editElement(doc, c, ei, [](UIElement& el) { el.cutout = !el.cutout; });
-            if (!e.texture.empty()) {
-                // What the console will show, next to the source, at the bit depth
-                // and cutout above: like the mesh inspector, after its settings.
-                rows.y += texturePreview(m_texPreview, dl, x0 + space::sm, x1 - space::sm, rows.y, doc, e.texture, e.bitDepth, e.cutout) +
-                          space::sm;
-                if (reportLayout && m_texPreview.shown != m_texPreviewReported) {
-                    // Scripted tests: what the preview shows when that changes.
-                    m_texPreviewReported = m_texPreview.shown;
-                    if (!m_texPreview.shown.empty()) {
-                        std::printf("uicanvas: texpreview %s\n", m_texPreview.shown.c_str());
-                        std::fflush(stdout);
+            if (reportLayout && m_sheetReported != sheetLine) {
+                // Scripted tests: what the Sheet row and the cell picker show.
+                std::printf("uicanvas: image sheet %s\n", (m_sheetReported = sheetLine).c_str());
+                std::fflush(stdout);
+            }
+            if (e.sheet.empty()) {
+                ImRect pf = rows.row("ltex", "Texture", "A project-relative image file. Browse copies one from outside into textures/.");
+                std::string p;
+                ImRect tfield(pf.Min, ImVec2(pf.Max.x - size::field - space::xs, pf.Max.y));
+                if (textField("tex", tfield, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
+                if (iconButton("texbrowse", ImRect(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max), icon::folderOpen, false, "Pick an image")) {
+                    {
+                        std::lock_guard<std::mutex> lock(g_texMutex);
+                        g_texCanvas = c, g_texElement = ei;
+                    }
+                    static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
+                    SDL_ShowOpenFileDialog(onTexturePicked, nullptr, nullptr, images, 1, nullptr, false);
+                }
+                if (!e.texture.empty()) {
+                    const uic::Assets::Texture& t = m_assets.texture(e.texture, e.bitDepth, e.cutout);
+                    if (t.error.empty() && t.width > 0) {
+                        char info[64];
+                        std::snprintf(info, sizeof info, "%d x %d texels", t.width, t.height);
+                        text(dl, ImVec2(x0 + space::sm + rows.lw, rows.y - 4), f.regular, type::caption, color::textFaint, info);
+                        const uic::Rect lr = uic::layout(e, s);
+                        if ((lr.w != t.width || lr.h != t.height) &&
+                            button("native", ImVec2(x1 - space::sm - 120, rows.y - 8), nullptr, "Native size", ButtonKind::Ghost, nullptr,
+                                   "Sets the size to the texture's, one texel per screen pixel."))
+                            uic::editElement(doc, c, ei, [&](UIElement& el) {
+                                uic::Rect q = uic::layout(el, m_screen);
+                                q.w = t.width;
+                                q.h = t.height;
+                                uic::place(el, q, m_screen);
+                            });
+                        rows.y += 22;
+                    }
+                }
+                ImRect bf = rows.row("lbpp", "Bit depth", "4 and 8 bpp use a palette (16 and 256 colours) and less VRAM.");
+                const int cur = e.bitDepth == splash::BitDepth::Bpp4 ? 0 : e.bitDepth == splash::BitDepth::Bpp8 ? 1 : 2;
+                const int picked = dropdownMenu("bpp", bf, nullptr, cur == 0 ? "4 bpp" : cur == 1 ? "8 bpp" : "16 bpp", {"4 bpp", "8 bpp", "16 bpp"}, cur);
+                if (picked >= 0 && picked != cur)
+                    uic::editElement(doc, c, ei, [&](UIElement& el) {
+                        el.bitDepth = picked == 0 ? splash::BitDepth::Bpp4 : picked == 1 ? splash::BitDepth::Bpp8 : splash::BitDepth::Bpp16;
+                    });
+                ImRect cf = rows.row("lcut", "Cutout", "Transparent texels (alpha under half) are left out instead of drawn black.");
+                if (toggle("cut", ImRect(ImVec2(cf.Min.x, cf.GetCenter().y - 8), ImVec2(cf.Min.x + 30, cf.GetCenter().y + 8)), e.cutout))
+                    uic::editElement(doc, c, ei, [](UIElement& el) { el.cutout = !el.cutout; });
+                if (!e.texture.empty()) {
+                    // What the console will show, next to the source, at the bit depth
+                    // and cutout above: like the mesh inspector, after its settings.
+                    rows.y += texturePreview(m_texPreview, dl, x0 + space::sm, x1 - space::sm, rows.y, doc, e.texture, e.bitDepth, e.cutout) +
+                              space::sm;
+                    if (reportLayout && m_texPreview.shown != m_texPreviewReported) {
+                        // Scripted tests: what the preview shows when that changes.
+                        m_texPreviewReported = m_texPreview.shown;
+                        if (!m_texPreview.shown.empty()) {
+                            std::printf("uicanvas: texpreview %s\n", m_texPreview.shown.c_str());
+                            std::fflush(stdout);
+                        }
                     }
                 }
             }

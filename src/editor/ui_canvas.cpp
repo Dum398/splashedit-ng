@@ -57,7 +57,7 @@ bool sameElement(const UIElement& a, const UIElement& b) {
     return a.type == b.type && a.name == b.name && a.visible == b.visible && a.rect == b.rect && a.anchorMin == b.anchorMin &&
            a.anchorMax == b.anchorMax && a.color == b.color && a.text == b.text && a.font == b.font && a.from == b.from &&
            a.to == b.to && a.background == b.background && a.value == b.value && a.texture == b.texture &&
-           a.bitDepth == b.bitDepth && a.cutout == b.cutout && a.unknown == b.unknown;
+           a.bitDepth == b.bitDepth && a.cutout == b.cutout && a.sheet == b.sheet && a.cell == b.cell && a.unknown == b.unknown;
 }
 
 bool sameCanvas(const UICanvas& a, const UICanvas& b) {
@@ -420,6 +420,41 @@ bool editElement(Document& doc, int c, int e, const std::function<void(UIElement
     if (sameElement(el, doc.scene().canvases[size_t(c)].elements[size_t(e)])) return false;
     commit(doc, std::move(after), doc.uiSelection(), mergeKey);
     return true;
+}
+
+const splash::SpriteSheet* imageSheet(const splash::Scene& scene, const UIElement& e) {
+    if (e.type != UIElementType::Image || e.sheet.empty()) return nullptr;
+    for (const splash::SpriteSheet& s : scene.spriteSheets)
+        if (s.name == e.sheet) return &s;
+    return nullptr;
+}
+
+bool setImageSheet(Document& doc, int c, int e, const std::string& sheet) {
+    if (!validElement(doc, c, e) || doc.scene().canvases[size_t(c)].elements[size_t(e)].type != UIElementType::Image) return false;
+    return editElement(doc, c, e, [&](UIElement& el) {
+        if (el.sheet != sheet) el.cell = 0;
+        el.sheet = sheet;
+    });
+}
+
+bool setImageCell(Document& doc, int c, int e, int cell) {
+    if (!validElement(doc, c, e) || cell < 0 || cell > 255) return false;
+    const UIElement& cur = doc.scene().canvases[size_t(c)].elements[size_t(e)];
+    if (cur.type != UIElementType::Image || cur.sheet.empty()) return false;
+    return editElement(doc, c, e, [&](UIElement& el) { el.cell = cell; });
+}
+
+bool snapImageToCell(Document& doc, int c, int e, Screen s) {
+    if (!validElement(doc, c, e)) return false;
+    const splash::SpriteSheet* sh = imageSheet(doc.scene(), doc.scene().canvases[size_t(c)].elements[size_t(e)]);
+    if (!sh || sh->cellW <= 0 || sh->cellH <= 0) return false;
+    const int w = sh->cellW, h = sh->cellH;
+    return editElement(doc, c, e, [&](UIElement& el) {
+        Rect q = layout(el, s);
+        q.w = w;
+        q.h = h;
+        place(el, q, s);
+    });
 }
 
 bool editElements(Document& doc, int c, const std::vector<int>& idx, const std::function<void(UIElement&, size_t)>& fn,
@@ -1000,7 +1035,11 @@ std::vector<Problem> elementProblems(const Document& doc, int c, int ei, Screen 
         }
     }
     if (e.type == UIElementType::Image) {
-        if (e.texture.empty()) {
+        if (!e.sheet.empty()) {
+            if (!imageSheet(doc.scene(), e))
+                out.push_back({"No such sprite sheet", "The scene has no sprite sheet named '" + e.sheet +
+                                                           "', so the export refuses it. Pick one of the scene's sheets, or None."});
+        } else if (e.texture.empty()) {
             out.push_back({"No texture", "Pick a texture; without one the export leaves the image out."});
         } else {
             std::error_code ec;
@@ -1331,14 +1370,28 @@ std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>
                     drawLine(f, int16_t(e.from[0]), int16_t(e.from[1]), int16_t(e.to[0]), int16_t(e.to[1]), flat(e.color));
                     break;
                 case UIElementType::Image: {
-                    if (e.texture.empty()) break;
-                    const Assets::Texture& t = assets.texture(e.texture, e.bitDepth, e.cutout);
+                    // A sheet-backed image shows one cell of its sheet's texture
+                    // (at the sheet's bit depth, cutout on, as the export packs it).
+                    const splash::SpriteSheet* sh = imageSheet(scene, e);
+                    if (!e.sheet.empty() && (!sh || sh->texture.empty() || sh->cellW <= 0 || sh->cellH <= 0)) break;
+                    if (e.sheet.empty() && e.texture.empty()) break;
+                    const Assets::Texture& t = sh ? assets.texture(sh->texture, sh->bitDepth, true)
+                                                  : assets.texture(e.texture, e.bitDepth, e.cutout);
                     if (!t.error.empty() || t.width <= 0 || t.height <= 0) break;
+                    int u0 = 0, v0 = 0, tw = t.width, th = t.height;
+                    if (sh) {
+                        const int cols = t.width / sh->cellW, rows = t.height / sh->cellH;
+                        if (e.cell < 0 || e.cell >= cols * rows) break;
+                        u0 = (e.cell % cols) * sh->cellW;
+                        v0 = (e.cell / cols) * sh->cellH;
+                        tw = sh->cellW;
+                        th = sh->cellH;
+                    }
                     // UVs run 0..size-1 across the rect, as the export writes them;
                     // the rasteriser leaves out the last column and row.
                     for (int y = 0; y < r.h; y++)
                         for (int x = 0; x < r.w; x++) {
-                            const int u = int(int64_t(x) * (t.width - 1) / r.w), v = int(int64_t(y) * (t.height - 1) / r.h);
+                            const int u = u0 + int(int64_t(x) * (tw - 1) / r.w), v = v0 + int(int64_t(y) * (th - 1) / r.h);
                             const uint16_t w = t.words[size_t(v) * size_t(t.width) + size_t(u)];
                             if (w) f.put(r.x + x, r.y + y, tint(w, e.color));
                         }

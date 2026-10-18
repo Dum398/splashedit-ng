@@ -28,7 +28,10 @@ def components(objects):
         yield from components(o.get('children', []))
 
 
-ids = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+# Sample games fetched into the tree (templates/samples.lock) are samplecheck.py's.
+samples = [l.split()[0] for l in open(os.path.join(root, 'samples.lock'), encoding='utf-8')
+           if l.strip() and not l.lstrip().startswith('#')]
+ids = sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)) and d not in samples)
 check('the shipped templates are first-person and third-person', ids == ['first-person', 'third-person'], ids)
 for tid in ids:
     folder = os.path.join(root, tid)

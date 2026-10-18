@@ -8,13 +8,30 @@
 # Cancel closes the modal, a folder that already holds a scene prints
 # "newproject: failed ..." and keeps the modal open, and with unsaved changes
 # the Save changes prompt comes first. Controls are clicked by name.
-# usage: python3 newprojectcheck.py <splashedit> [screenshot.png]
-#   the optional screenshot is the modal with Third person picked, before Create
+# The Lamplighter sample (templates/lamplighter, fetched by
+# tools/fetch-samples.sh) has a card too; a project made from it prints
+# "newproject: created lamplighter title.scene", carries its four scenes,
+# and each exports with the splashpack-cli beside the editor (cli/). Without
+# the sample fetched that fails, unless --allow-missing is given.
+# usage: python3 newprojectcheck.py <splashedit> [screenshot.png] [--allow-missing] [--sample-shots <dir>]
+#   the optional screenshot is the modal with Third person picked, before Create;
+#   --sample-shots writes newproject-lamplighter.png (the modal, Lamplighter
+#   picked) and lamplighter-created.png (the project it made, open) into <dir>
 import os, shutil, subprocess, sys, tempfile
 
-editor = os.path.abspath(sys.argv[1])
-shot = os.path.abspath(sys.argv[2]) if len(sys.argv) > 2 else None
+argv = sys.argv[1:]
+allow_missing = '--allow-missing' in argv
+argv = [a for a in argv if a != '--allow-missing']
+sample_shots = None
+if '--sample-shots' in argv:
+    i = argv.index('--sample-shots')
+    sample_shots = os.path.abspath(argv[i + 1])
+    del argv[i:i + 2]
+editor = os.path.abspath(argv[0])
+shot = os.path.abspath(argv[1]) if len(argv) > 1 else None
 here = os.path.dirname(os.path.abspath(__file__))
+sample = os.path.join(here, '..', 'templates', 'lamplighter')
+cli = os.path.join(os.path.dirname(editor), 'cli', 'splashpack-cli')
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
@@ -26,13 +43,13 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-def run(args):
+def run(args, final=None):
     """Runs the editor on a fresh courtyard copy, then `args`; returns the output lines."""
     work = tempfile.mkdtemp()
     project = os.path.join(work, 'courtyard')
     shutil.copytree(example, project)
     cmd = [editor, '--size', '1600x960', '--project', project, '--select', 'Crate', '--wait', '5'] + args + [
-        '--wait', '5', '--screenshot', os.path.join(work, 'shot.png')]
+        '--wait', '5', '--screenshot', final or os.path.join(work, 'shot.png')]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=180)
     lines = (r.stdout + r.stderr).strip().splitlines()
     # A control the script named and the editor never drew is a broken check, not a pass.
@@ -67,6 +84,9 @@ have = controls(lines)
 check('the modal shows a card per template', CARDS <= have, sorted(c for c in have if c.startswith('newproj')))
 check('the modal shows name, location, browse, create, cancel', FIELDS <= have,
       sorted(c for c in have if c.startswith('newproj')))
+if os.path.isdir(sample):
+    check('the modal shows the Lamplighter card', 'newproj.tmpl.lamplighter' in have,
+          sorted(c for c in have if c.startswith('newproj.tmpl')))
 check('Create without a name creates nothing', created(lines) == [], created(lines))
 check('and the modal stays open', 'popups open: yes' in lines, [l for l in lines if l.startswith('popups')])
 
@@ -97,6 +117,51 @@ for tid, name in [('empty', 'Plain Game'), ('first-person', 'fp_game'), ('third-
         check(tid + ': template.json stays behind', not os.path.exists(os.path.join(proj, 'template.json')))
     if shot and tid == 'third-person':
         check('the modal screenshot was written', os.path.isfile(shot) and os.path.getsize(shot) > 0, shot)
+
+# The Lamplighter sample: its card, and a project made from it opens on its
+# title scene (the first in its scenes.list), not the alphabetically first.
+SAMPLE_SCENES = ['title.scene', 'valley.scene', 'keep.scene', 'lighthouse.scene']
+if not os.path.isdir(sample):
+    if allow_missing:
+        print('skip lamplighter: templates/lamplighter is not fetched (--allow-missing)')
+    else:
+        check('templates/lamplighter is fetched (run tools/fetch-samples.sh templates, or pass --allow-missing)', False,
+              'no ' + sample)
+else:
+    where = tempfile.mkdtemp()
+    args = OPEN + click('newproj.tmpl.lamplighter') + typed('newproj.name', 'my_lamp') + typed('newproj.location', where)
+    final = None
+    if sample_shots:
+        os.makedirs(sample_shots, exist_ok=True)
+        modal = os.path.join(sample_shots, 'newproject-lamplighter.png')
+        final = os.path.join(sample_shots, 'lamplighter-created.png')
+        for f in (modal, final):
+            if os.path.exists(f):
+                os.remove(f)
+        args += ['--shot', modal, '--wait', '2']
+    lines = run(args + click('newproj.create') + ['--wait', '10'], final)
+    check('lamplighter: prints the created line on its title scene',
+          created(lines) == ['newproject: created lamplighter title.scene'], created(lines))
+    proj = os.path.join(where, 'my_lamp')
+    on_disk = sorted(f for f in os.listdir(proj) if f.endswith('.scene')) if os.path.isdir(proj) else None
+    check('lamplighter: its four scenes are on disk', on_disk == sorted(SAMPLE_SCENES), on_disk)
+    check('lamplighter: scenes.list and disc.json came along, template.json stayed behind',
+          os.path.isfile(os.path.join(proj, 'scenes.list')) and os.path.isfile(os.path.join(proj, 'disc.json')) and
+          not os.path.exists(os.path.join(proj, 'template.json')))
+    check('lamplighter: the modal closed and the project opened',
+          'popups open: no' in lines and any(l.startswith('status: Created project my_lamp from the Lamplighter') for l in lines),
+          [l for l in lines if l.startswith(('popups', 'status'))])
+    if sample_shots:
+        check('lamplighter: both screenshots were written',
+              all(os.path.isfile(f) and os.path.getsize(f) > 0 for f in (modal, final)), (modal, final))
+    check('lamplighter: splashpack-cli beside the editor', os.path.isfile(cli), cli)
+    if os.path.isfile(cli) and on_disk:
+        for sc in SAMPLE_SCENES:
+            out = os.path.join(where, sc.replace('.scene', '.splashpack'))
+            r = subprocess.run([cli, 'export', os.path.join(proj, sc), '-o', out], capture_output=True, text=True)
+            check('lamplighter: the created ' + sc + ' exports',
+                  r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0,
+                  'exit %d: %s' % (r.returncode, (r.stderr or r.stdout).strip()[-400:]))
 
 # A folder that already holds a scene: refused, the modal stays open with the reason.
 where = tempfile.mkdtemp()

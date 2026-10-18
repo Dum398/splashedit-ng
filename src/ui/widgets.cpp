@@ -308,7 +308,7 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicke
     ImU32 dimmed = faint ? color::textFaint : color::text;
     if (row.hasChildren)
         text(dl, ImVec2(x, centerY(f.medium, type::label, r.Min.y, r.Max.y)), f.medium, type::label, color::textFaint,
-             row.expanded ? icon::chevronDown : icon::chevronRight);
+             row.expanded ? icon::chevronDown : row.opensUp ? icon::chevronUp : icon::chevronRight);
     x += 16;
     if (row.icon) {
         text(dl, ImVec2(x, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1,

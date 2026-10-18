@@ -2528,7 +2528,10 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     dl->AddLine(ImVec2(foot.Min.x + 1, foot.Min.y), ImVec2(foot.Max.x - 1, foot.Min.y), color::border);
     std::string files = std::to_string(doc.projectFileCount()) + (doc.projectFileCount() == 1 ? " file" : " files");
     TreeRow assets{0, st.assets.open ? icon::folderOpen : icon::folder, kind::folder, "Assets", files.c_str(), true, st.assets.open};
-    if (treeRow("assets", ImRect(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7)), assets).clicked)
+    assets.opensUp = true;  // the Project panel rises from the bottom of the window
+    const ImRect assetsRow(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7));
+    nameRect("scene.assets", assetsRow);
+    if (treeRow("assets", assetsRow, assets).clicked)
         toggleProjectTab(st);
 }
 

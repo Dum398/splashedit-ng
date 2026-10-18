@@ -321,8 +321,11 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
 
     // Right: collapse, view mode, type filter, search.
     float x = h.Max.x - space::xs;
+    // The chevron points the way the panel goes: down to fold it, up (where
+    // it opens, from the bottom of the window) to show it.
     ImRect cb(ImVec2(x - 26, h.Min.y + 4), ImVec2(x, h.Max.y - 4));
-    if (iconButton("collapse", cb, open ? icon::chevronDown : icon::chevronRight, false, open ? "Hide the Project panel" : "Show the Project panel"))
+    nameRect("project.collapse", cb);
+    if (iconButton("collapse", cb, open ? icon::chevronDown : icon::chevronUp, false, open ? "Hide the Project panel" : "Show the Project panel"))
         open = !open;
     x = cb.Min.x - space::xs;
     if (!open) return;

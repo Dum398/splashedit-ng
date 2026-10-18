@@ -16,6 +16,7 @@ inline constexpr const char* volume = "\xee\x86\xab";          // e1ab
 inline constexpr const char* script = "\xee\x91\x9f";          // e45f
 inline constexpr const char* chevronRight = "\xee\x81\xaf";    // e06f
 inline constexpr const char* chevronDown = "\xee\x81\xad";     // e06d
+inline constexpr const char* chevronUp = "\xee\x81\xb0";       // e070
 inline constexpr const char* eye = "\xee\x82\xba";             // e0ba
 inline constexpr const char* eyeOff = "\xee\x82\xbb";          // e0bb
 inline constexpr const char* lock = "\xee\x84\x8b";            // e10b

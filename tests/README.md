@@ -857,7 +857,8 @@ a root file dragged onto the `textures` folder tile of the grid moves into it, t
 reference along. Delete is refused on a used file and moves an unused one into the project's
 `.trash/1/` after the prompt; Ctrl+Z brings it back. Opening a project empties a `.trash/<n>/`
 older than 30 days (and keeps a newer one), saying so in the status bar. The chevron folds the
-panel and View > Project opens it again. The Timeline tab is clicked low in the dock's tab strip,
+panel and View > Project opens it again; it points up while the panel is folded (the panel opens
+upward) and down while it is open, and so does the scene panel's Assets row (read off the screenshot). The Timeline tab is clicked low in the dock's tab strip,
 which is 46 px high (the Timeline's header) with Project in front too. Needs a display (CI runs it
 under `xvfb-run` on Linux).
 

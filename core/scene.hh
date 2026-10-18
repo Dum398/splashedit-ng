@@ -607,5 +607,11 @@ struct AnimClip {
 
 AnimClip loadAnim(const std::filesystem::path& file);
 void saveAnim(const AnimClip& clip, const std::filesystem::path& file);
+// The loop flag an imported clip starts with, from its name: true when a
+// word of it (split at non-letters and lower-to-upper case changes, any case)
+// starts with idle, walk, run, jog, loop, cycle, patrol, swim, fly, breath or
+// hover, so "Walk", "IdleLong", "walk_cycle" and "Running" loop and "Attack",
+// "Death" and "Prune" play once.
+bool defaultClipLoop(const std::string& name);
 
 }  // namespace splash

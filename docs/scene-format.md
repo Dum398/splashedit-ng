@@ -280,6 +280,16 @@ follows the joint with its largest weight. psxsplash draws at most 64 joints.
 `interpolation` is `linear` (rotations slerp) or `step`. Joints without a channel hold their rest
 pose. `name` is what Lua plays and is 1..24 characters; names are unique per object.
 
+`loop` [false] says what happens when the clip ends: a looping clip starts over, one that plays once
+holds its last frame until something plays another clip. An Agent state's clip takes its loop from
+here too, so a one-shot clip on Idle, Patrol, Seek, Flee or Wander freezes the agent's pose (the
+editor warns). Model import sets it from the clip's name: it loops when a word of the name (split at
+non-letters and at a lower-to-upper case change, any case) starts with `idle`, `walk`, `run`, `jog`,
+`loop`, `cycle`, `patrol`, `swim`, `fly`, `breath` or `hover`, so `Walk`, `IdleLong`,
+`Armature|Running` and `walk_cycle` loop and `Attack`, `Death` and `Prune` play once (a name like
+`Rune` loops too). The Skinned animation section of the inspector shows and flips it per clip,
+rewriting the file as an undoable edit.
+
 Export samples each clip at the skin's `fps`. A looping clip stores `round(length * fps)` frames over
 `[0, length)`: the engine wraps from the last frame to the first and blends between them, so the end
 pose is not stored a second time (2.4.0 stored it, which held the loop seam for one frame). A one-shot

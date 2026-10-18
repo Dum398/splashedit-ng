@@ -182,6 +182,7 @@ struct ExportStats {
         int fps = 0;
         int frames = 0;
         size_t bytes = 0;
+        bool loop = false;  // starts over when it ends; else holds its last frame
     };
     struct SkinInfo {
         std::string object;

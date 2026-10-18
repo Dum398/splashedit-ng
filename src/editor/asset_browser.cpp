@@ -846,6 +846,33 @@ AssetOp convertBlocksToLua(Document& doc, const AssetIndex& index, const std::st
     return r;
 }
 
+std::string setAnimLoop(Document& doc, const std::string& animPath, bool loop) {
+    const fs::path root = doc.projectRoot(), file = root / fromUtf8(animPath);
+    AssetFilesCommand::Swap swap;
+    swap.path = normal(animPath);
+    if (!readFile(file, &swap.before)) return "could not read " + animPath;
+    // Through loadAnim/saveAnim, so only the loop changes in what it says.
+    const fs::path tmp = file.parent_path() / fromUtf8("." + utf8(file.filename()) + ".loop");
+    try {
+        splash::AnimClip c = splash::loadAnim(file);
+        if (c.loop == loop) return {};
+        c.loop = loop;
+        splash::saveAnim(c, tmp);
+    } catch (const std::exception& ex) {
+        return std::string("could not change ") + animPath + ": " + ex.what();
+    }
+    const bool read = readFile(tmp, &swap.after);
+    std::error_code ec;
+    fs::remove(tmp, ec);
+    if (!read) return "could not change " + animPath;
+    if (!writeFile(file, swap.after)) return "could not write " + animPath;
+    auto cmd = std::make_unique<AssetFilesCommand>();
+    cmd->root = root;
+    cmd->swap = std::move(swap);
+    doc.execute(std::move(cmd));
+    return {};
+}
+
 std::string takeAssetHistoryError() {
     std::string e;
     e.swap(g_historyError);

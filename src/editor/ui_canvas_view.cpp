@@ -18,6 +18,7 @@
 #include "editor/project.hh"
 #include "font.hh"
 #include "gl.h"
+#include "ui/file_dialog.h"
 #include "ui/icons.h"
 #include "ui/texture_image.h"
 #include "ui/theme.h"
@@ -1488,14 +1489,17 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                 ImRect pf = rows.row("ltex", "Texture", "A project-relative image file. Browse copies one from outside into textures/.");
                 std::string p;
                 ImRect tfield(pf.Min, ImVec2(pf.Max.x - size::field - space::xs, pf.Max.y));
+                const ImRect browse(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max);
+                nameRect("ui.tex", tfield);  // scripted tests
+                nameRect("ui.texbrowse", browse);
                 if (textField("tex", tfield, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
-                if (iconButton("texbrowse", ImRect(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max), icon::folderOpen, false, "Pick an image")) {
+                if (iconButton("texbrowse", browse, icon::folderOpen, false, "Pick an image")) {
                     {
                         std::lock_guard<std::mutex> lock(g_texMutex);
                         g_texCanvas = c, g_texElement = ei;
                     }
                     static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
-                    SDL_ShowOpenFileDialog(onTexturePicked, nullptr, nullptr, images, 1, nullptr, false);
+                    ui::showOpenFileDialog("ui-texture", onTexturePicked, nullptr, images, 1, nullptr, false);
                 }
                 if (!e.texture.empty()) {
                     const uic::Assets::Texture& t = m_assets.texture(e.texture, e.bitDepth, e.cutout);

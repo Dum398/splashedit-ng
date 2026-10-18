@@ -435,8 +435,12 @@ picker `ui.colpick`) opened on the grey `crate` and dragged to red stays where i
 the Tint row: the "Tinted" card it brings shows only once the picker closes (it used to push the
 inspector and the open picker down mid-drag). Tab from a number being typed into (Position X,
 double-clicked) puts the next field in typing too, so `40`, Tab, `50`, Enter sets X and Y; Shift+Tab
-goes back the same way, and Tab runs on past the row labels into Size W. Needs a display (CI runs it
-under `xvfb-run` on Linux).
+goes back the same way, and Tab runs on past the row labels into Size W. File dialogs are modal: with
+`SPLASHEDIT_FILE_DIALOG=hold` no dialog shows, the editor prints `file dialog: <kind> in <folder>`
+and acts as if it stayed open; then a click on another list row selects nothing, a second Browse
+(`ui.texbrowse`) opens no second dialog and Delete changes nothing (`editor_tests`'
+`testDialogGate` checks the one-at-a-time gate). Needs a display (CI runs it under `xvfb-run` on
+Linux).
 
     python3 uiinspectorcheck.py <splashedit>
 

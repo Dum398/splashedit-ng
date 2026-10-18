@@ -52,6 +52,7 @@
 #include "blocks.hh"
 #include "luacompile.hh"
 #include "editor/ui_canvas.hh"
+#include "ui/dialog_gate.hh"
 #include "ui/scrub.hh"
 #include "budget.hh"
 #include "disc.hh"
@@ -11213,6 +11214,27 @@ void testNumberScrub() {
     CHECK(std::fabs(drag(2.0f, {1}, false, false) - 2.02f) < 1e-4f);
 }
 
+// One native file dialog at a time (#159): a second is refused while one is
+// open, and the gate opens again once it answers.
+void testDialogGate() {
+    ui::DialogGate gate;
+    CHECK(!gate.open());
+    CHECK(gate.enter());
+    CHECK(gate.open());
+    CHECK(!gate.enter());  // a second dialog while the first is up
+    CHECK(gate.open());
+    gate.leave();
+    CHECK(!gate.open());
+    CHECK(gate.enter());
+    // The answer comes on SDL's thread: two takers racing, one wins.
+    gate.leave();
+    std::atomic<int> won{0};
+    std::thread a([&] { won += gate.enter(); }), b([&] { won += gate.enter(); });
+    a.join();
+    b.join();
+    CHECK(won == 1);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -11362,6 +11384,7 @@ int main(int argc, char** argv) {
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();
+    testDialogGate();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

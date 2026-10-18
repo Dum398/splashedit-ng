@@ -36,6 +36,7 @@
 
 #include "gl.h"
 #include "ui/brand.h"
+#include "ui/file_dialog.h"
 #include "ui/icons.h"
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
@@ -460,8 +461,8 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         if (button("locate", ImVec2(o.x + inner - bw - space::sm, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Locate",
                    ButtonKind::Secondary)) {
             const SDL_DialogFileFilter* flt = i == 1 || i == 3 ? exeFilter : i == 2 ? biosFilter : nullptr;
-            SDL_ShowOpenFileDialog(onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), nullptr, flt, flt ? 1 : 0,
-                                   nullptr, false);
+            ui::showOpenFileDialog("tool", onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), flt, flt ? 1 : 0, nullptr,
+                                   false);
         }
         ImGui::PopID();
         y += rowH + space::sm;
@@ -1048,7 +1049,7 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
                                          : slot == AssetSlot::Clip    ? wav
                                          : slot == AssetSlot::SkinClips ? anim
                                                                         : lua;
-    SDL_ShowOpenFileDialog(onAssetPicked, nullptr, nullptr, filter, 1, nullptr,
+    ui::showOpenFileDialog("asset", onAssetPicked, nullptr, filter, 1, nullptr,
                            slot == AssetSlot::SkinClips || (slot == AssetSlot::MemCardIcon && index < 0));
 }
 
@@ -1424,8 +1425,8 @@ static void startExport(State& st, const editor::Document& doc) {
         return;
     }
     const std::string loc = utf8(doc.projectRoot() / (doc.sceneStem() + ".bin"));
-    SDL_ShowSaveFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportDisc)), nullptr, kDiscFilter,
-                           1, loc.c_str());
+    ui::showSaveFileDialog("export", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportDisc)), kDiscFilter, 1,
+                           loc.c_str());
 }
 
 // Opens the folder holding `file` in the system file manager.
@@ -1493,7 +1494,7 @@ static bool saveDoc(State& st, editor::Document& doc) {
 
 static void saveDocAs(editor::Document& doc) {
     const std::string loc = utf8(doc.projectRoot() / doc.scenePath().filename());
-    SDL_ShowSaveFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::SaveAs)), nullptr, kSceneFilter, 1,
+    ui::showSaveFileDialog("save-as", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::SaveAs)), kSceneFilter, 1,
                            doc.projectRoot().empty() ? nullptr : loc.c_str());
 }
 
@@ -1518,7 +1519,7 @@ static void perform(State& st, editor::Document& doc, State::Pending what, const
         }
         case State::Pending::Open: {
             const std::string loc = utf8(doc.projectRoot());
-            SDL_ShowOpenFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::Open)), nullptr, kSceneFilter, 1,
+            ui::showOpenFileDialog("open", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::Open)), kSceneFilter, 1,
                                    loc.empty() ? nullptr : loc.c_str(), false);
             break;
         }
@@ -1744,7 +1745,7 @@ static void newProjectModal(State& st, editor::Document& doc, ImVec2 size) {
     if (button("newproj.browse", ImVec2(o.x + inner - bw, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Choose folder...",
                ButtonKind::Secondary)) {
         const std::string loc = np.location;
-        SDL_ShowOpenFolderDialog(onNewProjectFolder, nullptr, nullptr, loc.empty() ? nullptr : loc.c_str(), false);
+        ui::showOpenFolderDialog("new-project-folder", onNewProjectFolder, nullptr, loc.empty() ? nullptr : loc.c_str(), false);
     }
     y += rowH + space::sm;
 
@@ -5746,7 +5747,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             }
         } else if (pick == 2) {
             const std::string loc = utf8(root);
-            SDL_ShowOpenFileDialog(onLicencePicked, nullptr, nullptr, kLicenceFilter, 2, root.empty() ? nullptr : loc.c_str(), false);
+            ui::showOpenFileDialog("licence", onLicencePicked, nullptr, kLicenceFilter, 2, root.empty() ? nullptr : loc.c_str(), false);
         }
         // One dim line, then room for the error, there from the first frame
         // so nothing below moves when one shows.
@@ -5903,8 +5904,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             save(std::move(next));
         } else if (addPick == int(audioFiles.size())) {
             const std::string loc = utf8(root);
-            SDL_ShowOpenFileDialog(onTrackPicked, nullptr, nullptr, kAudioFilter, 1, root.empty() ? nullptr : loc.c_str(),
-                                   false);
+            ui::showOpenFileDialog("track", onTrackPicked, nullptr, kAudioFilter, 1, root.empty() ? nullptr : loc.c_str(), false);
         }
         y += size::field + space::xs + space::sm;
         caption("Music plays from a disc image only (Build > Disc image), as tracks 2 and up: Audio.PlayCDDA(2) is the first.",
@@ -6943,7 +6943,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 g_modelTarget = path;
             }
             static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj;blend"}};
-            SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
+            ui::showOpenFileDialog("model", onModelPicked, nullptr, modelFilter, 1, nullptr, false);
         }
         // An untextured material's tint, from a colour well and its picker
         // (named obj.matcol.<i> and obj.matcolpick.<i>); a drag is one undo step.

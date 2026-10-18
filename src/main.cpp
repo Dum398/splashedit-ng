@@ -28,6 +28,7 @@
 #include "gl.h"
 #include "mockup/main_screen.h"
 #include "ui/brand.h"
+#include "ui/file_dialog.h"
 #include "ui/splash.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
@@ -560,6 +561,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     SDL_SetWindowHitTest(window, hitTest, nullptr);
+    ui::setFileDialogWindow(window);  // file dialogs are modal to it
     const std::string assetDir = resourceDir("assets", SPLASHEDIT_ASSET_DIR);
     brand::setWindowIcon(window, assetDir.c_str());
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
@@ -678,7 +680,7 @@ int main(int argc, char** argv) {
             // Files dragged in from the desktop: hover feedback, then import where released.
             if (e.type == SDL_EVENT_DROP_BEGIN) state.drop.hovering = true;
             if (e.type == SDL_EVENT_DROP_POSITION) state.drop.pos = ImVec2(e.drop.x, e.drop.y);
-            if (e.type == SDL_EVENT_DROP_FILE && e.drop.data)
+            if (e.type == SDL_EVENT_DROP_FILE && e.drop.data && !ui::fileDialogOpen())
                 state.drop.files.push_back({e.drop.data, ImVec2(e.drop.x, e.drop.y)});
             if (e.type == SDL_EVENT_DROP_COMPLETE) state.drop.hovering = false;
         }
@@ -751,12 +753,22 @@ int main(int argc, char** argv) {
             io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         else
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        // A file dialog is open: it is modal, so the editor takes none of its
+        // own input (real or scripted) until it answers (#159).
+        if (ui::fileDialogOpen()) {
+            io.ClearEventsQueue();
+            io.ClearInputMouse();
+            io.ClearInputKeys();
+            state.drop.files.clear();
+            state.drop.hovering = false;
+        }
         ImGui::NewFrame();
         ui::interactiveRects().clear();
         ui::namedRects().clear();
         // The splash hides the editor until it starts fading out.
         g_hit.titleBar = splash::covering() ? ImRect() : mockup::drawMainScreen(state, doc, view, io.DisplaySize);
         splash::draw(io.DisplaySize, args.screenshot ? frame * 1000.0 / 60.0 : double(SDL_GetTicks()));
+        ui::drawFileDialogShade();
         g_hit.controls.clear();
         for (const ImRect& r : ui::interactiveRects())
             if (r.Overlaps(g_hit.titleBar)) g_hit.controls.push_back(r);

@@ -2,7 +2,8 @@
 # Size W) moves it one per pixel, not by a percentage of the value; the Tint
 # picker stays where it opened while the colour it sets brings the "Tinted"
 # warning (the warning shows once it closes); Tab and Shift+Tab onto a number
-# field put it in typing, so what is typed next replaces its value.
+# field put it in typing, so what is typed next replaces its value; while a
+# file dialog is open the editor takes no input and opens no second one.
 # Opens a copy of tests/ui/ui.scene with --ui, selects elements by their
 # list rows, drives the inspector's named fields and reads the saved scene and
 # the editor's scripted lines. Needs a display (xvfb-run -a).
@@ -126,6 +127,20 @@ check('typing after Shift+Tab from Position Y sets X, and Y keeps what it was gi
 cv, out, _ = run(row('title') + ['--dblclick', '@ui.posa', '--wait', '3', '--text', '12', '--key', 'tab', '--wait', '3',
                                  '--text', '7', '--key', 'tab', '--wait', '3', '--text', '200', '--key', 'enter', '--wait', '3'])
 check('Tab runs on through Size W', elements(cv)['title']['rect'][:3] == [12, 7, 200], elements(cv)['title']['rect'])
+
+# ---- #159: the file dialog is modal. With SPLASHEDIT_FILE_DIALOG=hold no
+# dialog shows and the editor acts as if one stayed open, printing
+# "file dialog: <kind> in <folder>". While it is open the editor takes no input:
+# a click on another row does not select it, a second Browse opens nothing.
+HOLD = {'SPLASHEDIT_FILE_DIALOG': 'hold'}
+cv, out, _ = run(row('crate') + ['--click', '@ui.texbrowse', '--wait', '3'], save=False, env=HOLD)
+check("the Texture's Browse opens a file dialog", out.count('file dialog: ui-texture in') == 1, out[-300:])
+cv, out, _ = run(row('crate') + ['--click', '@ui.texbrowse', '--wait', '3'] + row('hp') +
+                 ['--click', '@ui.texbrowse', '--wait', '3', '--key', 'delete', '--wait', '3'], save=False, env=HOLD)
+check('while it is open a click on another row selects nothing', 'uicanvas: inspector element hp' not in out and
+      'uicanvas: inspector element crate' in out, out[-300:])
+check('and a second Browse opens no second dialog', out.count('file dialog: ui-texture') == 1, out[-300:])
+check('and Delete deletes nothing (the scene is unchanged)', 'unsaved changes: no' in out, out[-300:])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

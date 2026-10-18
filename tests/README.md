@@ -430,8 +430,10 @@ the model (`testUiMultiSelect`).
 `--ui`, elements selected by their list rows, fields by their named controls `ui.posa`, `ui.sizea`,
 ...). A drag on a pixel field moves it one per pixel at any value: 60 px on the Size W of the 300 px
 wide `title` adds at most 60 (the drag threshold takes the first few), where it used to add about 3
-per pixel. `editor_tests` checks the rate itself (`testNumberScrub`). Needs a display (CI runs it
-under `xvfb-run` on Linux).
+per pixel. `editor_tests` checks the rate itself (`testNumberScrub`). The Tint picker (well `ui.col`,
+picker `ui.colpick`) opened on the grey `crate` and dragged to red stays where it opened, and so does
+the Tint row: the "Tinted" card it brings shows only once the picker closes (it used to push the
+inspector and the open picker down mid-drag). Needs a display (CI runs it under `xvfb-run` on Linux).
 
     python3 uiinspectorcheck.py <splashedit>
 

@@ -1190,22 +1190,28 @@ bool textField(const char* id, ImRect field, const std::string& value, const cha
 }
 
 // A colour well with a picker under it. Edits merge under `key` until the picker lets go.
-void colourRow(editor::Document& doc, Rows& rows, const char* id, const char* label, const char* tip, std::array<float, 3> value,
+// Returns whether the picker is open. Scripted tests: the well is ui.<id>, the picker ui.<id>pick.
+bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* label, const char* tip, std::array<float, 3> value,
                const std::function<void(UIElement&, const std::array<float, 3>&)>& set, int c, int e) {
     ImRect field = rows.row((std::string("l") + id).c_str(), label, tip);
+    nameRect(std::string("ui.") + id, field);
     std::string popup = std::string("##pick") + id;
     if (colorField(id, field, toColor(value), toHex(value).c_str())) ImGui::OpenPopup(popup.c_str());
     ImGui::SetNextWindowPos(ImVec2(field.Max.x, field.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
     pushMenuStyle();
+    bool open = false;
     if (ImGui::BeginPopup(popup.c_str())) {
+        open = true;
         float v[3] = {value[0], value[1], value[2]};
         ImGui::SetNextItemWidth(220);
         if (ImGui::ColorPicker3("##wheel", v, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoAlpha))
             uic::editElement(doc, c, e, [&](UIElement& el) { set(el, {v[0], v[1], v[2]}); }, std::string("uicol") + id);
         if (ImGui::IsItemDeactivated()) doc.endMerge();
+        nameRect(std::string("ui.") + id + "pick", ImGui::GetCurrentWindow()->Rect());
         ImGui::EndPopup();
     }
     popMenuStyle();
+    return open;
 }
 
 }  // namespace
@@ -1237,8 +1243,16 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
     tooltip("Visible when the scene starts. Lua's UI.SetVisible and cutscene tracks switch it while playing.");
     rows.y += 40 + space::lg;
 
-    // Problems first, each with what to do.
-    const std::vector<uic::Problem> problems = uic::elementProblems(doc, c, ei, s);
+    // Problems first, each with what to do. While a colour picker is open they
+    // stay as they were when it opened: a Tinted warning showing or going as
+    // the colour passes #808080 would move the picker under the pointer
+    // (#157). They catch up when it closes.
+    std::vector<uic::Problem> problems = uic::elementProblems(doc, c, ei, s);
+    if (m_colourOpen && m_heldProblems.canvas == c && m_heldProblems.element == ei)
+        problems = m_heldProblems.problems;
+    else
+        m_heldProblems = {c, ei, problems};
+    m_colourOpen = false;
     for (size_t i = 0; i < problems.size(); i++) {
         bool fixed = false;
         ImGui::PushID(int(i));
@@ -1531,13 +1545,13 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
         if (e.type == UIElementType::Progress) {
             ImRect vf = rows.row("lval", "Value", "How full the bar is, 0 to 100. Lua's UI.SetProgress changes it while playing.");
             number("val", vf, e.value, "%", 0, nullptr, [](UIElement& el, int v) { el.value = v; });
-            colourRow(doc, rows, "bg", "Background", "The empty part of the bar.", e.background,
-                      [](UIElement& el, const std::array<float, 3>& v) { el.background = v; }, c, ei);
+            m_colourOpen |= colourRow(doc, rows, "bg", "Background", "The empty part of the bar.", e.background,
+                                      [](UIElement& el, const std::array<float, 3>& v) { el.background = v; }, c, ei);
         }
-        colourRow(doc, rows, "col", e.type == UIElementType::Image ? "Tint" : e.type == UIElementType::Progress ? "Fill" : "Colour",
-                  e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
-                                                 : "Cut to 15-bit colour on the PS1, as the preview shows.",
-                  e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, ei);
+        m_colourOpen |= colourRow(doc, rows, "col", e.type == UIElementType::Image ? "Tint" : e.type == UIElementType::Progress ? "Fill" : "Colour",
+                                  e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
+                                                                 : "Cut to 15-bit colour on the PS1, as the preview shows.",
+                                  e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, ei);
         rows.gap();
     }
 }

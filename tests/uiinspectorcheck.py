@@ -1,5 +1,7 @@
 # The UI tab's element inspector, by hand: a drag on a pixel field (a text's
-# Size W) moves it one per pixel, not by a percentage of the value.
+# Size W) moves it one per pixel, not by a percentage of the value; the Tint
+# picker stays where it opened while the colour it sets brings the "Tinted"
+# warning (the warning shows once it closes).
 # Opens a copy of tests/ui/ui.scene with --ui, selects elements by their
 # list rows, drives the inspector's named fields and reads the saved scene and
 # the editor's scripted lines. Needs a display (xvfb-run -a).
@@ -86,6 +88,29 @@ check('a 60 px drag on Size W of a %d px text adds one per pixel' % w0, w0 + 45 
 cv, out, _ = run(row('title') + ['--drag', '@ui.posa,0,0,-30,0', '--wait', '3'])
 x = elements(cv)['title']['rect'][0]
 check('a 30 px drag left on Position X takes off one per pixel', 8 - 30 <= x <= 8 - 20, x)
+
+# ---- #157: the Tint picker does not move while it is open. 'crate' is tinted
+# #808080; a drag in the picker's colour square makes it red, which brings the
+# "Tinted" card above the fields. While the picker is open the cards stay as
+# they were (nothing moves under the pointer); once it closes the card shows.
+cv, out, _ = run(row('crate'), save=False)
+base = control(out, 'ui.col')
+cv, out, _ = run(row('crate') + ['--click', '@ui.col', '--wait', '3'], save=False)
+pick = control(out, 'ui.colpick')
+check('clicking the Tint well opens its picker under it', base and pick and pick[1] >= base[3] and 'popups open: yes' in out,
+      (base, pick, out[-200:]))
+if base and pick:
+    square = ['--drag', '%d,%d,%d,%d,0' % (pick[0] + 160, pick[1] + 24, pick[0] + 180, pick[1] + 44), '--wait', '3']
+    cv, out, d = run(row('crate') + ['--click', '@ui.col', '--wait', '3'] + square, save=False)
+    check('while the picker is open the Tint row stays put', control(out, 'ui.col') == base, (base, control(out, 'ui.col')))
+    check('and so does the picker', control(out, 'ui.colpick') == pick and 'popups open: yes' in out,
+          (pick, control(out, 'ui.colpick')))
+    # Closed by a click on the inspector's title: the card shows, the row moves down.
+    cv, out, d = run(row('crate') + ['--click', '@ui.col', '--wait', '3'] + square + ['--click', '1282,61,0', '--wait', '3'])
+    tint = elements(cv)['crate']['color']
+    after = control(out, 'ui.col')
+    check('the drag in the picker tinted the crate', abs(tint[0] - 0.5) > 0.1 or abs(tint[1] - 0.5) > 0.1, tint)
+    check('once the picker closes the Tinted card shows above it', after and after[1] > base[1] + 40, (base, after))
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

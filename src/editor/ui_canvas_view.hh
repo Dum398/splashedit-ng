@@ -108,6 +108,14 @@ private:
         std::vector<int> base;
     } m_band;
     int m_anchor = -1;       // the row a Shift+click range starts from
+    // The element inspector's problem cards as they were when a colour picker
+    // opened: they stay so while it is open (it was last frame), so a Tinted
+    // warning coming or going does not move the picker under the pointer.
+    struct HeldProblems {
+        int canvas = -1, element = -1;
+        std::vector<editor::uic::Problem> problems;
+    } m_heldProblems;
+    bool m_colourOpen = false;
     bool m_renaming = false, m_renameStart = false;
     // Where a right click on the canvas opened the element menu (canvas pixels), for Paste.
     bool m_menuAtCanvas = false;

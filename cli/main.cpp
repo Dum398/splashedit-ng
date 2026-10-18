@@ -474,8 +474,16 @@ int main(int argc, char** argv) {
                 std::printf("walkoff zones=%zu mask_edges=%d\n", st.walkoffZones.size(), maskEdges);
                 for (const auto& z : st.walkoffZones) std::printf("walkoff edges=%d %s\n", z.edges, z.object.c_str());
             }
-            for (const auto& a : st.agents)
-                std::printf("agent object=%d waypoints=%d bytes=%zu %s\n", a.gameObject, a.waypoints, a.bytes, a.object.c_str());
+            for (const auto& a : st.agents) {
+                // clips=State:index,... for each state with a clip written, or - for none.
+                std::string clips;
+                for (int s = 0; s < splash::kAgentStates; s++)
+                    if (a.clips[size_t(s)] != 0xFF)
+                        clips += (clips.empty() ? "" : ",") + std::string(splash::kAgentStateNames[s]) + ":" +
+                                 std::to_string(a.clips[size_t(s)]);
+                std::printf("agent object=%d waypoints=%d bytes=%zu clips=%s %s\n", a.gameObject, a.waypoints, a.bytes,
+                            clips.empty() ? "-" : clips.c_str(), a.object.c_str());
+            }
             {
                 int leaves = 0;
                 for (const auto& b : st.bvhBoxes) leaves += b.leaf ? 1 : 0;
@@ -496,8 +504,8 @@ int main(int argc, char** argv) {
                     std::printf("skin bones=%d triangles=%zu clips=%zu bytes=%zu %s\n", s.bones, s.triangles,
                                 s.clips.size(), s.bytes, s.object.c_str());
                     for (const auto& c : s.clips)
-                        std::printf("skin clip fps=%d frames=%d bytes=%zu %s/%s\n", c.fps, c.frames, c.bytes,
-                                    s.object.c_str(), c.name.c_str());
+                        std::printf("skin clip fps=%d frames=%d bytes=%zu loop=%d %s/%s\n", c.fps, c.frames, c.bytes,
+                                    c.loop ? 1 : 0, s.object.c_str(), c.name.c_str());
                 }
             }
             if (st.streamRegions)

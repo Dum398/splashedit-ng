@@ -238,9 +238,9 @@ for sk in skins:
         check('skin bytes cover the entry and its data block', 12 + block <= b <= 12 + block + 3, (b, 12 + block))
         total += b
     for c in sk['clips']:
-        want_clip.append('skin clip fps=%d frames=%d bytes=%d %s/%s' % (c['fps'], len(c['frames']), c['span'],
-                                                                         sk['name'], c['name']))
-check('one clip line per baked clip, with fps, frames and bytes', clip_lines == want_clip, (clip_lines, want_clip))
+        want_clip.append('skin clip fps=%d frames=%d bytes=%d loop=%d %s/%s' % (c['fps'], len(c['frames']), c['span'],
+                                                                                 c['loop'], sk['name'], c['name']))
+check('one clip line per baked clip, with fps, frames, bytes and the loop flag', clip_lines == want_clip, (clip_lines, want_clip))
 check('skins total line', ('skins=%d bytes=%d' % (len(skins), total)) in lines, [l for l in lines if l.startswith('skins=')])
 r, d = export(lambda s: s['objects'][0]['components'].pop(1), stats=True)
 check('a scene without skins prints no skin lines', r.returncode == 0 and

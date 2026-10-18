@@ -7438,12 +7438,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             // A state it stays in for a while (Idle, Patrol, Seek, Flee,
             // Wander) on a clip that plays once freezes on its last frame.
             // One card per clip, naming the states; its fix makes it loop.
-            static const int kHeld[] = {0, 1, 2, 3, 5};
             for (size_t c = 0; c < names.size(); c++) {
                 if (!loops[c] || *loops[c]) continue;
                 std::vector<std::string> states;
-                for (int s : kHeld)
-                    if (ag.stateClips[size_t(s)] == int(c)) states.push_back(splash::kAgentStateNames[s]);
+                for (int s = 0; s < splash::kAgentStates; s++)
+                    if (splash::agentStateHolds(s) && ag.stateClips[size_t(s)] == int(c)) states.push_back(splash::kAgentStateNames[s]);
                 if (states.empty()) continue;
                 std::string who = states[0];
                 for (size_t k = 1; k < states.size(); k++) who += (k + 1 == states.size() ? " and " : ", ") + states[k];

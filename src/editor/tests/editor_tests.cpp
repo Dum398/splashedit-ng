@@ -10578,6 +10578,30 @@ void testUiSprite() {
         CHECK(threw);
     }
 
+    // On the loading screen (a loader pack has no sprite table) the image gets
+    // its own copy of the sheet's texture, with the grid based at that copy.
+    {
+        splash::Scene ls = scene;
+        ls.settings.loadingCanvas = "hud";
+        ls.canvases[0].elements.pop_back();  // just the sheet-backed image
+        splash::ExportResult lr = splash::exportLoaderPack(ls, project, project / "u.loading");
+        for (const std::string& e : lr.errors) std::fprintf(stderr, "uisprite loader: %s\n", e.c_str());
+        CHECK(lr.ok());
+        const std::string lb = readAll(project / "u.loading");
+        if (lr.ok() && lb.size() > 16) {
+            CHECK(lb[0] == 'L' && lb[1] == 'P' && uint8_t(lb[4]) == 0 && uint8_t(lb[5]) == 1 && uint8_t(lb[10]) == 1);
+            const size_t ltable = rd32(lb, 12), ldata = rd32(lb, ltable);
+            const std::string td = lb.substr(ldata + 24, 16);
+            auto at = [&](int i) { return int(uint8_t(td[size_t(i)])); };
+            CHECK(at(10) == 0 && at(11) == 16 && at(12) == 16 && at(13) == 4);
+            CHECK(at(6) == at(14) + 32 && at(7) == at(15) + 16 && at(8) == at(6) + 15 && at(9) == at(7) + 15);
+            const int lx = rd16(lb, 16 + 8), ly = rd16(lb, 16 + 10);  // the one atlas: the sheet's copy
+            CHECK(at(0) == lx / 64 && at(1) == ly / 256 && at(14) == (lx % 64) * 4 && at(15) == ly % 256);
+        }
+        ls.canvases[0].elements[0].sheet = "nope";
+        CHECK(has(splash::exportLoaderPack(ls, project, project / "u2.loading").errors, "no sprite sheet named 'nope'"));
+    }
+
     // The canvas preview draws only that cell (tint 128: the texels as they are).
     {
         editor::uic::Assets assets;

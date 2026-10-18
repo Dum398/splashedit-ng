@@ -3687,10 +3687,8 @@ static float agentYaw(splash::Quat q) {
 
 // A selected agent's senses and patrol: the vision cone (its edge follows the
 // square the console measures ranges with: max of |dx| and |dz|), the hearing
-// square, and the waypoints joined in patrol order. Waypoint i's screen
-// position goes to wpOut when given (for dragging).
-static void agentOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::FlatObject& fo,
-                         std::vector<std::pair<ImVec2, bool>>* wpOut) {
+// square, and the waypoints joined in patrol order (the dots: agentMarkers).
+static void agentOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::FlatObject& fo) {
     const splash::AgentComponent& ag = *fo.object->agent;
     const splash::Vec3 c = fo.localToWorld.position();
     const float yaw = agentYaw(fo.worldRotation);
@@ -3737,28 +3735,34 @@ static void agentOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImV
             view.project(toGl(c), mn, sz, &cp))
             dl->AddLine(cp, tip, overlayCol(kind::agent, 255), 2.4f);
     }
-    // Waypoints: a numbered dot each, joined in patrol order and back to the
-    // first. Past the 8th they are left out of the export: drawn faint, unjoined.
+    // Waypoints joined in patrol order and back to the first; past the 8th
+    // they are left out of the export, so unjoined.
     const size_t n = ag.waypoints.size(), kept = std::min<size_t>(n, size_t(splash::kAgentMaxWaypoints));
     std::vector<ImVec2> sp(n);
     std::vector<bool> ok(n);
     for (size_t i = 0; i < n; i++) ok[i] = view.project(toGl(ag.waypoints[i]), mn, sz, &sp[i]);
-    if (wpOut) {
-        wpOut->clear();
-        for (size_t i = 0; i < n; i++) wpOut->push_back({sp[i], bool(ok[i])});
-    }
     for (size_t i = 0; kept >= 2 && i < kept; i++) {
         const size_t j = (i + 1) % kept;
         if (ok[i] && ok[j]) dl->AddLine(sp[i], sp[j], overlayCol(kind::agent, 200), 1.6f);
     }
+}
+
+// The numbered waypoint dots of a selected agent, drawn over the tool gizmo
+// (a waypoint at the object's own position would hide under it). Past the
+// 8th they are left out of the export and drawn faint. `hot` is the one the
+// mouse is over or drags.
+static void agentMarkers(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::AgentComponent& ag, int hot) {
     Fonts& f = fonts();
-    for (size_t i = 0; i < n; i++) {
-        if (!ok[i]) continue;
-        const bool in = i < kept;
-        dl->AddCircleFilled(sp[i], 9, in ? overlayCol(kind::agent, 230) : rgb(0x0e1014, 160), 20);
-        dl->AddCircle(sp[i], 9, rgb(0x0e1014, 220), 20, 1.2f);
+    for (size_t i = 0; i < ag.waypoints.size(); i++) {
+        ImVec2 p;
+        if (!view.project(toGl(ag.waypoints[i]), mn, sz, &p)) continue;
+        const bool in = i < size_t(splash::kAgentMaxWaypoints);
+        const float rad = int(i) == hot ? 11.f : 9.f;
+        nameRect("vp.agwp" + std::to_string(i), ImRect(p - ImVec2(9, 9), p + ImVec2(9, 9)));
+        dl->AddCircleFilled(p, rad, in ? overlayCol(kind::agent, 235) : rgb(0x0e1014, 160), 20);
+        dl->AddCircle(p, rad, int(i) == hot ? rgb(0xffffff) : rgb(0x0e1014, 220), 20, int(i) == hot ? 2.f : 1.2f);
         const std::string t = std::to_string(i + 1);
-        dl->AddText(f.semibold, type::caption, sp[i] - measure(f.semibold, type::caption, t.c_str()) * 0.5f,
+        dl->AddText(f.semibold, type::caption, p - measure(f.semibold, type::caption, t.c_str()) * 0.5f,
                     in ? rgb(0x0e1014) : color::textFaint, t.c_str());
     }
 }
@@ -3843,7 +3847,7 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
                 if (ok[k] && ok[(k + 1) % kSeg]) dl->AddLine(p[k], p[(k + 1) % kSeg], col, hot ? 2.0f : 1.5f);
         }
         // An agent's senses and patrol only while it is selected (they cover a lot).
-        if (fo.object->agent && hot) agentOverlay(dl, view, mn, sz, fo, nullptr);
+        if (fo.object->agent && hot) agentOverlay(dl, view, mn, sz, fo);
     }
 }
 
@@ -3933,6 +3937,61 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         st.gizmo.handle = -1;
     }
 
+    // The selected agent's waypoints drag on the horizontal plane at their
+    // own height. Submitted before the tool gizmo, so a dot over the gizmo's
+    // centre takes the mouse (its arrows and plane still move the object).
+    if (sel && sel->agent && st.gizmos && !previewing && doc.selection()) {
+        ImGuiContext& g = *GImGui;
+        ImGuiIO& io = ImGui::GetIO();
+        const ImGuiID wid = ImGui::GetID("##agentwp");
+        State::AgentWpDrag& d = st.agentWp;
+        const std::vector<splash::Vec3>& wps = sel->agent->waypoints;
+        const bool active = g.ActiveId == wid && d.index >= 0;
+        if (active) ImGui::KeepAliveID(wid);
+        int hover = -1;
+        st.agentWpHot = -1;
+        if (gizmoMayHover(active, r)) {
+            float best = 10.f;
+            for (size_t i = 0; i < wps.size(); i++) {
+                ImVec2 p;
+                if (!view.project(toGl(wps[i]), mn, sz, &p)) continue;
+                const float dd = length(io.MousePos - p);
+                if (dd < best) best = dd, hover = int(i);
+            }
+        }
+        if (hover >= 0) {
+            st.agentWpHot = hover;
+            ImGui::SetHoveredID(wid);
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(0) && mouseOnPlaneY(view, r, wps[size_t(hover)].y, &d.startHit)) {
+                d.index = hover;
+                d.start = wps[size_t(hover)];
+                ImGui::SetActiveID(wid, g.CurrentWindow);
+                doc.endMerge();
+            }
+        }
+        if (g.ActiveId == wid && d.index >= 0) {
+            st.agentWpHot = d.index;
+            if (ImGui::IsMouseDown(0) && size_t(d.index) < wps.size()) {
+                splash::Vec3 hit;
+                if (mouseOnPlaneY(view, r, d.start.y, &hit)) {
+                    splash::Vec3 nw{d.start.x + hit.x - d.startHit.x, d.start.y, d.start.z + hit.z - d.startHit.z};
+                    if (st.snap || io.KeyCtrl) nw.x = std::round(nw.x / 0.25f) * 0.25f, nw.z = std::round(nw.z / 0.25f) * 0.25f;
+                    const int i = d.index;
+                    if (!(nw == wps[size_t(i)]))
+                        doc.edit(*doc.selection(), [i, nw](splash::Object& ob) {
+                            if (ob.agent && size_t(i) < ob.agent->waypoints.size()) ob.agent->waypoints[size_t(i)] = nw;
+                        }, "agent.waypoint");
+                }
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            } else {
+                doc.endMerge();
+                ImGui::ClearActiveID();
+                d.index = -1;
+            }
+        }
+    }
+
     // Selection outline and the tool's gizmo follow the selected object.
     if (sel) {
         for (size_t si = 0; si < flats.size(); ++si)
@@ -3969,59 +4028,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                     if (st.tool == 2) rotateGizmo(st, dl, view, r, doc, fo, parentToWorld);
                     if (st.tool == 3) scaleGizmo(st, dl, view, r, doc, fo);
                 }
+                if (fo.object->agent && st.gizmos) agentMarkers(dl, view, mn, sz, *drawnFo.object->agent, st.agentWpHot);
                 break;
             }
-    }
-
-    // The selected agent's waypoints drag on the horizontal plane at their
-    // own height (after the tool gizmo, which keeps the mouse when both are under it).
-    if (sel && sel->agent && st.gizmos && !previewing && doc.selection()) {
-        ImGuiContext& g = *GImGui;
-        ImGuiIO& io = ImGui::GetIO();
-        const ImGuiID wid = ImGui::GetID("##agentwp");
-        State::AgentWpDrag& d = st.agentWp;
-        const std::vector<splash::Vec3>& wps = sel->agent->waypoints;
-        const bool active = g.ActiveId == wid && d.index >= 0;
-        if (active) ImGui::KeepAliveID(wid);
-        int hover = -1;
-        if (gizmoMayHover(active, r)) {
-            float best = 10.f;
-            for (size_t i = 0; i < wps.size(); i++) {
-                ImVec2 p;
-                if (!view.project(toGl(wps[i]), mn, sz, &p)) continue;
-                const float dd = length(io.MousePos - p);
-                if (dd < best) best = dd, hover = int(i);
-            }
-        }
-        if (hover >= 0) {
-            ImGui::SetHoveredID(wid);
-            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-            if (ImGui::IsMouseClicked(0) && mouseOnPlaneY(view, r, wps[size_t(hover)].y, &d.startHit)) {
-                d.index = hover;
-                d.start = wps[size_t(hover)];
-                ImGui::SetActiveID(wid, g.CurrentWindow);
-                doc.endMerge();
-            }
-        }
-        if (g.ActiveId == wid && d.index >= 0) {
-            if (ImGui::IsMouseDown(0) && size_t(d.index) < wps.size()) {
-                splash::Vec3 hit;
-                if (mouseOnPlaneY(view, r, d.start.y, &hit)) {
-                    splash::Vec3 nw{d.start.x + hit.x - d.startHit.x, d.start.y, d.start.z + hit.z - d.startHit.z};
-                    if (st.snap || io.KeyCtrl) nw.x = std::round(nw.x / 0.25f) * 0.25f, nw.z = std::round(nw.z / 0.25f) * 0.25f;
-                    const int i = d.index;
-                    if (!(nw == wps[size_t(i)]))
-                        doc.edit(*doc.selection(), [i, nw](splash::Object& ob) {
-                            if (ob.agent && size_t(i) < ob.agent->waypoints.size()) ob.agent->waypoints[size_t(i)] = nw;
-                        }, "agent.waypoint");
-                }
-                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
-            } else {
-                doc.endMerge();
-                ImGui::ClearActiveID();
-                d.index = -1;
-            }
-        }
     }
 
     // World streaming regions, outlined on the ground while the scene's own
@@ -7277,7 +7286,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     if (fo.object == self) here = fo.localToWorld.position();
             }
             const viewport::Vec3 pv = view.pivot();
-            const splash::Vec3 centre{pv.x, pv.y, -pv.z};
+            // On the object's own height: the camera's pivot is often up in the air.
+            const splash::Vec3 centre{pv.x, here.y, -pv.z};
             for (size_t i = 0; i < ag.waypoints.size(); i++) {
                 ImGui::PushID(int(i));
                 const std::string lid = "lagwp" + std::to_string(i), label = std::to_string(i + 1);
@@ -7319,7 +7329,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                        "Adds a waypoint where the object stands."))
                 doc.edit(path, [here](splash::Object& ob) { ob.agent->waypoints.push_back(here); });
             if (button("agaddview", bat + ImVec2(bw + space::sm, 0), icon::plus, "At view centre", ButtonKind::Secondary, nullptr,
-                       "Adds a waypoint at the point the viewport camera orbits (the centre of the view)."))
+                       "Adds a waypoint under the point the viewport camera orbits (the centre of the view), at the object's height."))
                 doc.edit(path, [centre](splash::Object& ob) { ob.agent->waypoints.push_back(centre); });
             y += size::field + 6 + space::xs + space::sm;
         }

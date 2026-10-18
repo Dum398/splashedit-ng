@@ -273,6 +273,7 @@ struct State {
         int index = -1;
         splash::Vec3 start, startHit;
     } agentWp;
+    int agentWpHot = -1;  // the waypoint dot under the mouse or being dragged
 
     // Lua files open in the script editor, as tabs beside the Scene and UI.
     ui::ScriptTabs scripts;

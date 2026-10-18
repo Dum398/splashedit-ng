@@ -79,7 +79,9 @@ std::vector<TemplateInfo> listTemplates(const std::filesystem::path& templatesDi
 // With a template that has a folder, createProject copies its tree into `dir`
 // instead of writing an empty scene, all but template.json; when the
 // template has exactly one .scene at its top it is named after the folder
-// like the empty one. Nothing is copied when any file would land on an
+// like the empty one. With several, the project opens on the first entry of
+// the template's scenes.list that is one of them, or, when it has no
+// scenes.list or none of its entries is, the alphabetically first. Nothing is copied when any file would land on an
 // existing one, and the error names that file, as it names a file that
 // cannot be copied. meshes/, textures/ and scripts/ are made either way.
 struct NewProject {

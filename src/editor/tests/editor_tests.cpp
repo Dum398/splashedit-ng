@@ -1553,6 +1553,16 @@ void testProjectTemplates() {
     // The shipped templates: empty, first person, third person.
     const fs::path shipped = fs::path(SPLASHEDIT_SOURCE_DIR) / "templates";
     std::vector<editor::TemplateInfo> real = editor::listTemplates(shipped);
+    // Samples fetched into the tree (templates/samples.lock) are not part of it.
+    {
+        std::vector<std::string> samples;
+        std::ifstream lock(shipped / "samples.lock", std::ios::binary);
+        for (std::string line; std::getline(lock, line);)
+            if (!line.empty() && line[0] != '#') samples.push_back(line.substr(0, line.find(' ')));
+        std::erase_if(real, [&](const editor::TemplateInfo& t) {
+            return std::find(samples.begin(), samples.end(), t.id) != samples.end();
+        });
+    }
     ids.clear();
     for (const editor::TemplateInfo& t : real) ids.push_back(t.id);
     CHECK((ids == std::vector<std::string>{"empty", "first-person", "third-person"}));
@@ -1585,6 +1595,33 @@ void testProjectTemplates() {
         editor::NewProject made = editor::createProject(proj, &real[0]);
         CHECK(made.error.empty() && made.scene == fs::path("Plain.scene") && fs::is_regular_file(proj / made.scene));
         CHECK(fs::is_directory(proj / "scripts") && fs::is_empty(proj / "scripts"));
+    }
+
+    // Several top scenes: the template's scenes.list names the one that
+    // opens; without it the alphabetically first does.
+    {
+        write(lib / "multi" / "template.json", R"({"name": "Multi"})");
+        write(lib / "multi" / "b.scene", "{}");
+        write(lib / "multi" / "a.scene", "{}");
+        write(lib / "multi" / "scenes.list", "gone.scene\nb.scene\na.scene\n");
+        write(lib / "plain" / "template.json", R"({"name": "Plain"})");
+        write(lib / "plain" / "b.scene", "{}");
+        write(lib / "plain" / "a.scene", "{}");
+        std::vector<editor::TemplateInfo> got = editor::listTemplates(lib);
+        auto find = [&](const char* id) {
+            for (const editor::TemplateInfo& t : got)
+                if (t.id == id) return t;
+            return editor::TemplateInfo{};
+        };
+        const editor::TemplateInfo multi = find("multi"), plain = find("plain");
+        CHECK(!multi.dir.empty() && !plain.dir.empty());
+        editor::NewProject listed = editor::createProject(root / "Listed", &multi);
+        CHECK(listed.error.empty() && listed.scene == fs::path("b.scene"));
+        CHECK(fs::is_regular_file(root / "Listed" / "a.scene") && fs::is_regular_file(root / "Listed" / "scenes.list"));
+        editor::NewProject unlisted = editor::createProject(root / "Unlisted", &plain);
+        CHECK(unlisted.error.empty() && unlisted.scene == fs::path("a.scene"));
+        fs::remove_all(lib / "multi", ec);
+        fs::remove_all(lib / "plain", ec);
     }
 
     // A file that would land on an existing one: nothing copied, the error names it.

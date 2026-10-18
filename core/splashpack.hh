@@ -171,6 +171,8 @@ struct ExportStats {
         int gameObject = 0;   // its game object index
         int waypoints = 0;    // waypoints written (at most 8)
         size_t bytes = 0;     // 28-byte record + 12 per waypoint
+        // The skin clip index written per state (kAgentStateNames order), 0xFF = none.
+        std::array<uint8_t, kAgentStates> clips{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     };
     std::vector<AgentInfo> agents;
 
@@ -255,10 +257,20 @@ struct AgentRecord {
     std::vector<std::array<int32_t, 3>> waypoints;
 };
 AgentRecord agentRecord(const AgentComponent& a, uint16_t gameObjectIndex, int skinClips, float gte);
+// The agent states it stays in for a while (Idle, Patrol, Seek, Flee, Wander):
+// a clip that plays once there stops on its last frame.
+inline bool agentStateHolds(int s) { return s == 0 || s == 1 || s == 2 || s == 3 || s == 5; }
+// A skin clip as loaded from its .anim: its name and whether it loops.
+struct AgentClipLoop {
+    std::string name;
+    bool loop = false;
+};
 // What exporting `o`'s agent component warns about, one line each: more than 8
 // waypoints, a field of view outside (0, 360], state clips without a skin or
-// past its clips. Empty without an agent.
-std::vector<std::string> agentWarnings(const Object& o);
+// past its clips, and, given the skin's clips as loaded (`clips`, in skin
+// order; empty skips it), a held state (agentStateHolds) on a clip that plays
+// once. Empty without an agent.
+std::vector<std::string> agentWarnings(const Object& o, const std::vector<AgentClipLoop>& clips = {});
 // Bytes the agent takes in the splashpack: 28 + 12 per waypoint written.
 inline size_t agentBytes(const AgentComponent& a) {
     return 28 + 12 * std::min<size_t>(a.waypoints.size(), size_t(kAgentMaxWaypoints));

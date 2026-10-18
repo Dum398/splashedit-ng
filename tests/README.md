@@ -290,8 +290,9 @@ for every frame, a child joint under a moving parent and a non-uniformly scaled 
 checks frame counts, the skinned flag, the bone per triangle vertex, and that a missing skeleton,
 an unknown joint, no clips, a repeated or too-long clip name and fps 31 fail the export.
 With `--stats` the `skins=N bytes=B`, `skin bones=... <object>` and `skin clip fps=F frames=K bytes=Y
-<object>/<clip>` lines must match that table: bone, triangle, clip and frame counts, each clip's bytes
-from its name length byte through its last matrix, and a scene without skins prints none.
+loop=0|1 <object>/<clip>` lines must match that table: bone, triangle, clip and frame counts, each clip's
+bytes from its name length byte through its last matrix, its loop flag, and a scene without skins prints
+none.
 
     python3 skincheck.py <splashpack-cli>
 
@@ -303,7 +304,9 @@ flags, fp12 speed and ranges, the half-cone cosine, state clips (none past the s
 a skin), waypoints capped at 8 with Y negated, and the game object each record names (through the name
 table: mesh-less agents are game objects, the inactive one is left out). It also checks the export's
 warnings (more than 8 waypoints, field of view outside (0, 360], state clips without a skin or past its
-clips, agents without nav regions; none with the courtyard's nav bake), the `--stats` `agent` lines,
+clips, a held state (Idle, Patrol, Seek, Flee, Wander) on a clip that plays once, agents without nav
+regions; none with the courtyard's nav bake), the `--stats` `agent object=G waypoints=N bytes=B
+clips=State:index,...|- <object>` lines (the clip written per state, `-` for none),
 refused bad values and that `resave` keeps the component.
 
     python3 agentcheck.py <splashpack-cli>

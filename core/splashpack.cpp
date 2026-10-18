@@ -64,7 +64,7 @@ AgentRecord agentRecord(const AgentComponent& a, uint16_t gameObjectIndex, int s
     return r;
 }
 
-std::vector<std::string> agentWarnings(const Object& o) {
+std::vector<std::string> agentWarnings(const Object& o, const std::vector<AgentClipLoop>& loaded) {
     std::vector<std::string> out;
     if (!o.agent) return out;
     const AgentComponent& a = *o.agent;
@@ -83,6 +83,9 @@ std::vector<std::string> agentWarnings(const Object& o) {
         else if (c >= clips)
             out.push_back(where + "state " + kAgentStateNames[s] + " plays clip " + std::to_string(c + 1) + " of a skin with " +
                           std::to_string(clips) + "; it plays nothing");
+        else if (agentStateHolds(s) && c < int(loaded.size()) && !loaded[size_t(c)].loop)
+            out.push_back(where + "state " + kAgentStateNames[s] + " plays clip " + loaded[size_t(c)].name +
+                          ", which plays once; it stops on its last frame");
     }
     return out;
 }
@@ -1850,7 +1853,12 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         if (fo.object->interactable) interactables.push_back(&fo);
         if (fo.object->agent) {
             agents.push_back(&fo);
-            for (std::string& wmsg : agentWarnings(*fo.object)) res.warnings.push_back(std::move(wmsg));
+            // The skin's clips as baked above, for the plays-once warning.
+            std::vector<AgentClipLoop> loaded;
+            for (const SkinOut& so : skins)
+                if (exporters[so.exporter].obj == fo.object)
+                    for (const BakedClip& c : so.clips) loaded.push_back({c.name, c.loop});
+            for (std::string& wmsg : agentWarnings(*fo.object, loaded)) res.warnings.push_back(std::move(wmsg));
         }
         if (fo.object->audio) audioSources.push_back(&fo);
     }
@@ -2320,6 +2328,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             w.bytes(recs.back().bytes.data(), recs.back().bytes.size());
             st.agents.push_back({fo->object->name, int(fo - flat.data()), int(go), int(recs.back().waypoints.size()),
                                  agentBytes(*fo->object->agent)});
+            std::copy_n(recs.back().bytes.begin() + 16, kAgentStates, st.agents.back().clips.begin());
         }
         for (const AgentRecord& r : recs)
             for (const auto& p : r.waypoints)

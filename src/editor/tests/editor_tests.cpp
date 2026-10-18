@@ -5086,6 +5086,30 @@ void testAgent() {
     o.agent->fov = 361;
     w = splash::agentWarnings(o);
     CHECK(w.size() == 2 && w[1].find("plays clip 2 of a skin with 1") != std::string::npos);
+    // A held state (Patrol) on a clip that plays once is warned about, given the
+    // loaded clips; a looping clip, or a state that ends (Attack), is not.
+    o.agent->fov = 90;
+    o.agent->stateClips.fill(-1);
+    o.agent->stateClips[1] = 0;  // Patrol
+    o.skin->clips = {"swing.anim", "walk.anim"};
+    std::vector<splash::AgentClipLoop> clipsIn{{"Swing", false}, {"Walk", true}};
+    CHECK(splash::agentWarnings(o).empty());  // without the loaded clips the loop flag is unknown
+    w = splash::agentWarnings(o, clipsIn);
+    CHECK(w.size() == 1 &&
+          w[0] == "Guard: agent state Patrol plays clip Swing, which plays once; it stops on its last frame");
+    clipsIn[0].loop = true;
+    CHECK(splash::agentWarnings(o, clipsIn).empty());
+    clipsIn[0].loop = false;
+    o.agent->stateClips[1] = 1;  // Patrol on Walk, which loops
+    CHECK(splash::agentWarnings(o, clipsIn).empty());
+    o.agent->stateClips.fill(-1);
+    o.agent->stateClips[4] = 0;  // Attack on Swing, which plays once
+    CHECK(splash::agentWarnings(o, clipsIn).empty());
+    for (int s = 0; s < splash::kAgentStates; s++) {  // the held set is the inspector card's
+        o.agent->stateClips.fill(-1);
+        o.agent->stateClips[size_t(s)] = 0;
+        CHECK(splash::agentWarnings(o, clipsIn).size() == ((s <= 3 || s == 5) ? 1u : 0u));
+    }
 
     // (c) The scene file keeps every field and unknown keys.
     const fs::path project = g_outDir / "agent";

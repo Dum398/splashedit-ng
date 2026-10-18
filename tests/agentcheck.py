@@ -6,7 +6,8 @@
 # conversions in docs/splashpack-format.md 2.7, computed here on their own;
 # waypoint Y is negated like every other engine position. Also: the warnings
 # (more than 8 waypoints, field of view outside (0, 360], state clips without a
-# skin or past its clips, no nav regions), the game object each record names
+# skin or past its clips, a held state on a clip that plays once, no nav
+# regions), the `--stats` agent lines with the clips written, the game object each record names
 # (through the object name table), and resave keeping the component.
 # usage: python3 agentcheck.py <splashpack-cli>
 import json, math, os, shutil, struct, subprocess, sys, tempfile
@@ -147,12 +148,16 @@ check('warns: Ghost has 10 waypoints', "Ghost: agent has 10 waypoints" in err, e
 check('warns: Stray field of view', "Stray: agent field of view" in err, err)
 check('warns: Stray plays a clip without a skin', "Stray: agent plays a clip in state Flee but the object has no skin" in err, err)
 check('warns: Arm Attack clip past the skin', "Arm: agent state Attack plays clip 6 of a skin with 2" in err, err)
+check('warns: Arm Idle plays raise, which plays once',
+      "Arm: agent state Idle plays clip raise, which plays once; it stops on its last frame" in err, err)
+check('no plays-once warning for Patrol on bend (it loops) or Attack (past the skin)',
+      err.count('which plays once') == 1, err)
 check('warns: agents without nav regions', "The agents can't move: the scene has no nav regions" in err, err)
 check('the inactive agent is not warned about', 'Off:' not in err, err)
 stats = [l for l in r.stdout.splitlines() if l.startswith('agent ')]
-check('--stats lists each agent with its bytes',
-      stats == ['agent object=0 waypoints=3 bytes=64 Arm', 'agent object=1 waypoints=8 bytes=124 Ghost',
-                'agent object=2 waypoints=0 bytes=28 Stray'], stats)
+check('--stats lists each agent with its bytes and the clips written (Attack past the skin, Stray without one: none)',
+      stats == ['agent object=0 waypoints=3 bytes=64 clips=Idle:1,Patrol:0 Arm',
+                'agent object=1 waypoints=8 bytes=124 clips=- Ghost', 'agent object=2 waypoints=0 bytes=28 clips=- Stray'], stats)
 
 # No agents: the count is 0 and nothing is warned.
 s0 = scene()

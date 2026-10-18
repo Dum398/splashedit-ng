@@ -173,6 +173,37 @@ are kept) and `font` (a font name, `null` for the system font); `progress` has `
 `value` (0..100); `line` has `from` and `to` in screen pixels instead of `rect` and anchors;
 `image` has `texture`, `bitDepth` (4, 8, 16) and `cutout` [true].
 
+### Sprite sheets: `spriteSheets`
+
+```json
+"spriteSheets": [
+  { "name": "hero", "texture": "textures/hero.png", "bitDepth": 4, "cellWidth": 16, "cellHeight": 16,
+    "anims": [{ "name": "walk", "firstFrame": 0, "frameCount": 4, "frameDuration": 8, "loop": true }] }
+]
+```
+
+A sheet is a texture cut into `cellWidth` x `cellHeight` cells [16 x 16], numbered row by row from 0
+at the top left; `bitDepth` is 4 [default], 8 or 16, and the texture is packed with cutout on (texels
+under half alpha are transparent). Each animation plays `frameCount` [1] cells from `firstFrame` [0],
+each for `frameDuration` [6] vsyncs (psxsplash counts 60 a second from real time), and `loop` [true]
+starts it again after the last cell, else it stops there. Missing keys read as the defaults in
+brackets (an animation's `name` is `idle`); a scene without sheets has no `spriteSheets` key.
+
+The splashpack carries the sheets and animations only (psxsplash's sprite table, v22); sprites are
+made from Lua with `Sprite.Create("sheet")` and played with `Sprite.PlayAnim(id, "anim")`.
+`Sprite.AnimIndex` searches every sheet for the first animation of that name, so animation names
+must be unique across the scene. Export refuses more than 16 sheets or 64 animations, an empty or
+repeated sheet name, an empty animation name, a missing texture, a texture that is not a whole number
+of cells, a cell side outside 1..255, more than 255 cells, an animation outside its sheet's cells,
+fewer than 1 frame, a frame time outside 1..255 and a sheet whose grid would leave its 256 x 256
+texture page once packed. Names are stored cut to 24 characters (a warning says so).
+
+In the editor, the scene inspector (nothing selected) has a Sprite sheets section: Add sheet picks a
+project image and names the sheet after it; the selected sheet's name, texture, bit depth and cell
+size, and its animations (name, first cell, frames, frame time, loop) are edited there, each change
+one undo step, with a preview playing the selected animation from the converted texture at
+psxsplash's timing.
+
 ### Cutscenes: `cutscenes`
 
 An optional top-level array, played from Lua with `Cutscene.Play(name)`.

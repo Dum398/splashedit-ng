@@ -31,6 +31,62 @@ namespace splash {
 
 namespace fs = std::filesystem;
 
+AgentRecord agentRecord(const AgentComponent& a, uint16_t gameObjectIndex, int skinClips, float gte) {
+    AgentRecord r;
+    uint8_t* b = r.bytes.data();
+    auto u16 = [&](size_t at, int v) {
+        b[at] = uint8_t(v & 0xff);
+        b[at + 1] = uint8_t((v >> 8) & 0xff);
+    };
+    auto fpU16 = [&](float units) { return clampv(roundToInt(units / gte * 4096.f), 0, 65535); };
+    const size_t n = std::min<size_t>(a.waypoints.size(), size_t(kAgentMaxWaypoints));
+    u16(0, gameObjectIndex);
+    b[2] = uint8_t((a.startEnabled ? 0x01 : 0) | (a.vision && a.visionRange > 0 ? 0x02 : 0) | (a.hearingRange > 0 ? 0x04 : 0) |
+                   (n > 0 ? 0x08 : 0));
+    b[3] = uint8_t(n);
+    u16(4, clampv(roundToInt(a.moveSpeed / 30.f / gte * 4096.f), 0, 65535));
+    u16(6, fpU16(a.stopDistance));
+    u16(8, fpU16(a.visionRange));
+    // Half the cone, as a cosine: the engine compares cos(angle to target) with it.
+    const float half = clampv(a.fov, 0.f, 360.f) * 0.5f * 3.14159265358979f / 180.f;
+    u16(10, clampv(roundToInt(std::cos(half) * 4096.f), -4096, 4096));
+    u16(12, fpU16(a.hearingRange));
+    u16(14, clampv(a.alertTimeout, 0, 65535));
+    for (int s = 0; s < kAgentStates; s++) {
+        const int c = a.stateClips[size_t(s)];
+        b[16 + s] = c >= 0 && c < skinClips ? uint8_t(c) : 0xFF;
+    }
+    b[24] = uint8_t(clampv(a.visionRegionDepth, 0, 8));
+    for (size_t i = 0; i < n; i++) {
+        const Vec3& p = a.waypoints[i];
+        r.waypoints.push_back({toWorldFixed12(p.x / gte), toWorldFixed12(-p.y / gte), toWorldFixed12(p.z / gte)});
+    }
+    return r;
+}
+
+std::vector<std::string> agentWarnings(const Object& o) {
+    std::vector<std::string> out;
+    if (!o.agent) return out;
+    const AgentComponent& a = *o.agent;
+    const std::string where = o.name + ": agent ";
+    if (a.waypoints.size() > size_t(kAgentMaxWaypoints))
+        out.push_back(where + "has " + std::to_string(a.waypoints.size()) + " waypoints and the PS1 keeps 8; the rest are left out");
+    if (!(a.fov > 0 && a.fov <= 360))
+        out.push_back(where + "field of view must be more than 0 and at most 360 degrees; it is written as " +
+                      std::to_string(int(std::lround(clampv(a.fov, 0.f, 360.f)))));
+    const int clips = o.skin ? int(o.skin->clips.size()) : 0;
+    for (int s = 0; s < kAgentStates; s++) {
+        const int c = a.stateClips[size_t(s)];
+        if (c < 0) continue;
+        if (!o.skin)
+            out.push_back(where + "plays a clip in state " + kAgentStateNames[s] + " but the object has no skin; it plays nothing");
+        else if (c >= clips)
+            out.push_back(where + "state " + kAgentStateNames[s] + " plays clip " + std::to_string(c + 1) + " of a skin with " +
+                          std::to_string(clips) + "; it plays nothing");
+    }
+    return out;
+}
+
 uint32_t hashSceneId(const std::string& id) {
     if (id.empty()) return 0;
     uint32_t h = 2166136261u;
@@ -552,7 +608,7 @@ void planStreaming(const Scene& scene, std::vector<ExpObject>& exporters, std::v
     std::vector<std::vector<float>> triLowY;  // per candidate, per tri: lowest world Y (scene view overlay)
     for (size_t i = 0; i < exporters.size(); i++) {
         const ExpObject& e = exporters[i];
-        if (e.tris.empty() || e.obj->script || e.obj->skin) continue;
+        if (e.tris.empty() || e.obj->script || e.obj->skin || e.obj->agent) continue;
         if (e.obj->collider && e.obj->collider->kind == ColliderKind::Dynamic) continue;
         if (std::any_of(interactables.begin(), interactables.end(), [&](const FlatObject* fo) { return fo->object == e.obj; }))
             continue;
@@ -582,7 +638,7 @@ void planStreaming(const Scene& scene, std::vector<ExpObject>& exporters, std::v
     };
     if (cands.empty()) {
         warn(StreamProblem::NothingStreams, "Nothing can stream",
-             "Objects with a script, a skin, an interaction, a dynamic collider or an animation track stay loaded, and so "
+             "Objects with a script, a skin, an interaction, an agent, a dynamic collider or an animation track stay loaded, and so "
              "do objects a script names. Take the script off scenery that does not need one, or turn streaming off.");
         return;
     }
@@ -1539,9 +1595,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         if (fo.object->skin && !fo.object->mesh)
             res.errors.push_back(fo.object->name + ": a skin component needs a mesh component");
         if (!fo.object->mesh) {
-            // A script needs a game object to run on. Without a mesh it ships as
+            // A script needs a game object to run on, and an agent is one (its
+            // actor id is its game object index + 1). Without a mesh it ships as
             // one with no triangles, which the engine draws as nothing.
-            if (fo.object->script) {
+            if (fo.object->script || fo.object->agent) {
                 static const MeshComponent noMeshComponent = [] {
                     MeshComponent mc;
                     mc.dynamicLighting = DynamicLighting::Off;
@@ -1786,11 +1843,15 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     };
     // Trigger boxes and interactables: active objects only (FindObjectsByType
     // skips inactive ones), in canonical order.
-    std::vector<const FlatObject*> triggers, interactables, audioSources;
+    std::vector<const FlatObject*> triggers, interactables, audioSources, agents;
     for (const FlatObject& fo : flat) {
         if (!fo.activeInHierarchy || !fo.object->active) continue;
         if (fo.object->trigger) triggers.push_back(&fo);
         if (fo.object->interactable) interactables.push_back(&fo);
+        if (fo.object->agent) {
+            agents.push_back(&fo);
+            for (std::string& wmsg : agentWarnings(*fo.object)) res.warnings.push_back(std::move(wmsg));
+        }
         if (fo.object->audio) audioSources.push_back(&fo);
     }
     // Audio clips: SPU-ADPCM as `psxavenc -t spu -f <rate> [-L]` writes it.
@@ -2041,6 +2102,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     st.navIslands = roomBoxes(roomObjs).empty();
     if (st.navWanted && nav.regions.empty())
         res.warnings.push_back(navEmptyWarning());
+    if (!agents.empty() && nav.regions.empty())
+        res.warnings.push_back(agentNoNavWarning(agents.size() == 1 ? agents[0]->object->name : std::string()));
 
     BinWriter w;
     st.bumpAllocatorNeed = bumpAllocatorNeed(scene, exporters, streamed, st.streamDrawTris, canvases);
@@ -2124,7 +2187,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     size_t animationTableOffsetPos = w.pos();
     w.u32(0);
     w.u16(uint16_t(skins.size()));
-    w.u16(0);  // agents
+    w.u16(uint16_t(agents.size()));
     size_t skinTableOffsetPos = w.pos();
     w.u32(0);
     size_t memcardTableOffsetPos = w.pos();
@@ -2243,6 +2306,24 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         float facing = clampv(it.facingAngle, 0.0f, 180.0f) * 3.14159265358979f / 180.0f;
         w.i16(int16_t(roundToInt(std::cos(facing) * 4096.0f)));
         w.u16(0);
+    }
+
+    // ---- agents (28 bytes each, right after the interactables), then every
+    // agent's waypoints in the same order
+    {
+        std::vector<AgentRecord> recs;
+        for (const FlatObject* fo : agents) {
+            auto ex = std::find_if(exporters.begin(), exporters.end(), [&](const ExpObject& e) { return e.obj == fo->object; });
+            const uint16_t go = uint16_t(ex - exporters.begin());
+            const int clips = fo->object->skin ? int(fo->object->skin->clips.size()) : 0;
+            recs.push_back(agentRecord(*fo->object->agent, go, clips, gte));
+            w.bytes(recs.back().bytes.data(), recs.back().bytes.size());
+            st.agents.push_back({fo->object->name, int(fo - flat.data()), int(go), int(recs.back().waypoints.size()),
+                                 agentBytes(*fo->object->agent)});
+        }
+        for (const AgentRecord& r : recs)
+            for (const auto& p : r.waypoints)
+                for (int32_t v : p) w.i32(v);
     }
 
     // ---- nav regions

@@ -187,6 +187,27 @@ struct InteractableComponent {
     ExtraKeys extra;
 };
 
+// PSXAgent: an NPC psxsplash moves along the nav regions (Agent.* in Lua).
+// Waypoints are world positions; stateClips index the object's skin clips
+// per AgentState (-1 = none).
+constexpr int kAgentStates = 8;
+constexpr int kAgentMaxWaypoints = 8;
+extern const char* const kAgentStateNames[kAgentStates];  // Idle, Patrol, Seek, Flee, Attack, Wander, Investigate, Custom
+struct AgentComponent {
+    bool startEnabled = true;
+    float moveSpeed = 2.0f;     // units per second
+    float stopDistance = 0.5f;  // units
+    bool vision = true;
+    float visionRange = 8.0f;   // units, 0 = blind
+    float fov = 90.0f;          // whole cone, degrees, (0, 360]
+    int visionRegionDepth = 2;  // nav region hops, 0..8
+    float hearingRange = 0.0f;  // units, 0 = deaf
+    int alertTimeout = 90;      // frames, 0..65535
+    std::vector<Vec3> waypoints;
+    std::array<int, kAgentStates> stateClips{-1, -1, -1, -1, -1, -1, -1, -1};
+    ExtraKeys extra;
+};
+
 struct Transform {
     Vec3 position;
     Quat rotation;
@@ -211,6 +232,7 @@ struct Object {
     std::optional<InteractableComponent> interactable;
     std::optional<AudioComponent> audio;
     std::optional<SkinComponent> skin;
+    std::optional<AgentComponent> agent;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;

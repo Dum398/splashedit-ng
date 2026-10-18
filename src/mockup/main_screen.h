@@ -268,6 +268,12 @@ struct State {
         float handlePx = 1;
         float shown = 0;  // the value the drag label shows (degrees or factor)
     } gizmo;
+    // A waypoint of the selected agent being dragged in the viewport (-1 = none).
+    struct AgentWpDrag {
+        int index = -1;
+        splash::Vec3 start, startHit;
+    } agentWp;
+    int agentWpHot = -1;  // the waypoint dot under the mouse or being dragged
 
     // Lua files open in the script editor, as tabs beside the Scene and UI.
     ui::ScriptTabs scripts;

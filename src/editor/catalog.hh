@@ -10,7 +10,7 @@
 
 namespace editor {
 
-enum class ComponentKind { Mesh, Collider, Script, Light, Player, Navigation, Trigger, Interactable, Audio, Skin, Room, Portal, Walkoff };
+enum class ComponentKind { Mesh, Collider, Script, Light, Player, Navigation, Trigger, Interactable, Audio, Skin, Room, Portal, Walkoff, Agent };
 
 struct ComponentInfo {
     ComponentKind kind;

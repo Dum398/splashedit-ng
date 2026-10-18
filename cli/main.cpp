@@ -474,6 +474,8 @@ int main(int argc, char** argv) {
                 std::printf("walkoff zones=%zu mask_edges=%d\n", st.walkoffZones.size(), maskEdges);
                 for (const auto& z : st.walkoffZones) std::printf("walkoff edges=%d %s\n", z.edges, z.object.c_str());
             }
+            for (const auto& a : st.agents)
+                std::printf("agent object=%d waypoints=%d bytes=%zu %s\n", a.gameObject, a.waypoints, a.bytes, a.object.c_str());
             {
                 int leaves = 0;
                 for (const auto& b : st.bvhBoxes) leaves += b.leaf ? 1 : 0;

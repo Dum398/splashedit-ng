@@ -295,6 +295,19 @@ from its name length byte through its last matrix, and a scene without skins pri
 
     python3 skincheck.py <splashpack-cli>
 
+`agentcheck.py` exports `skin/skin.scene` with Agent components on the skinned Arm, on two mesh-less
+objects and on an inactive one, and reads the agent records back the way psxsplash's loader does
+(agentCount at header offset 114, 28-byte records right after the interactables, then the waypoints).
+Every field is compared with the conversions of `docs/splashpack-format.md` 2.7 computed in the check:
+flags, fp12 speed and ranges, the half-cone cosine, state clips (none past the skin's clips or without
+a skin), waypoints capped at 8 with Y negated, and the game object each record names (through the name
+table: mesh-less agents are game objects, the inactive one is left out). It also checks the export's
+warnings (more than 8 waypoints, field of view outside (0, 360], state clips without a skin or past its
+clips, agents without nav regions; none with the courtyard's nav bake), the `--stats` `agent` lines,
+refused bad values and that `resave` keeps the component.
+
+    python3 agentcheck.py <splashpack-cli>
+
 `skin/skin.scene` booted with `boot/boot.sh` (its script loops `bend`) shows the upper box swinging
 about the elbow.
 
@@ -675,6 +688,17 @@ each zone's edges and the walk-off bits in the written nav regions (`mask_edges`
 exactly the edges the inspector reported.
 
     python3 walkoffcheck.py <splashedit> [keep.png]
+
+`agenteditcheck.py` adds an Agent from the Add component picker to an empty object (Guard, turned 45
+degrees) on a copy of the courtyard example, types Move speed (`obj.agspeed`), adds waypoints with
+`agaddobj` (the object's world position) and `agaddview` (under the view centre, at the object's
+height), types `obj.agwp1.x`, then reorders (`obj.agwp1.up`), deletes (`obj.agwp0.del`) and undoes.
+The editor prints `agent: <name> enabled on speed ... waypoints N clips ... bytes B warnings K`; the
+saved scene must hold each edit. Dragging the waypoint dots in the viewport (`vp.agwp<i>`) moves them on
+their own height, the first one even where it sits on the move gizmo's centre (the Guard stays put).
+The viewport draws the vision cone, hearing square and patrol in pink only with `vp.gizmos` on.
+
+    python3 agenteditcheck.py <splashedit> [keep.png]
 
 `timelinecheck.py` adds a cutscene to a copy of the courtyard example and opens it in the Timeline
 panel (`--timeline intro`, and once through the scene inspector's Edit in timeline). It scrubs the

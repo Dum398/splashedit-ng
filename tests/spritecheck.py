@@ -144,7 +144,7 @@ check('header: 2 sheets, 3 animations', (ns, na) == (2, 3), (ns, na))
 check('sheets in scene order with their names', [s['name'] for s in sheets] == ['hero', 'fx'], sheets)
 check('hero: 4 bpp, 16x16 cells, 4x2 grid', [(s['bpp'], s['cw'], s['ch'], s['cols'], s['rows']) for s in sheets][0] == (0, 16, 16, 4, 2),
       sheets[0])
-check('fx: 8 bpp, 8x8 cells, 4x2 grid', [(s['bpp'], s['cw'], s['ch'], s['cols'], s['rows']) for s in sheets][1] == (1, 8, 8, 4, 2),
+check('fx: 8 bpp, 12x8 cells, 4x2 grid', [(s['bpp'], s['cw'], s['ch'], s['cols'], s['rows']) for s in sheets][1] == (1, 12, 8, 4, 2),
       sheets[1])
 check('sheet padding is zero', all(s['pad'] == (0, 0) for s in sheets))
 check('animations: names, sheet, first cell, count, vsyncs, loop',
@@ -202,7 +202,7 @@ stat = [l for l in out.splitlines() if l.startswith('sprite')]
 check('--stats: sprites line with the table bytes (records + names)',
       'sprites sheets=2 anims=3 bytes=%d' % (20 * 2 + 12 * 3 + 24) in stat, stat)
 check('--stats: one line per sheet', 'sprite sheet bpp=4 cell=16x16 grid=4x2 anims=2 hero' in stat and
-      'sprite sheet bpp=8 cell=8x8 grid=4x2 anims=1 fx' in stat, stat)
+      'sprite sheet bpp=8 cell=12x8 grid=4x2 anims=1 fx' in stat, stat)
 
 # Without sheets: the header words stay zero and --stats prints no sprite lines.
 rc, out0, pack0, _ = export(lambda s: s.pop('spriteSheets'), 'none')

@@ -1,7 +1,8 @@
 # Writes the sprite fixture's two sheets (committed; run again only to change them):
 #   hero.png  64x32, 16x16 cells, 4 x 2 grid: a body whose bar walks right one
 #             cell to the next, row 2 a jump (the body rises)
-#   fx.png    32x16, 8x8 cells, 4 x 2 grid: a spark that grows cell by cell
+#   fx.png    48x16, 12x8 cells (not square, so a swapped width and height
+#             shows), 4 x 2 grid: a spark that grows cell by cell
 # Few colours (4 bpp holds 15 and transparent), transparent outside the shapes.
 # usage: python3 make_sheets.py
 import os, struct, zlib
@@ -36,13 +37,13 @@ def hero(x, y):
 
 
 def fx(x, y):
-    cell, cx, cy = (y // 8) * 4 + x // 8, x % 8, y % 8
+    cell, cx, cy = (y // 8) * 4 + x // 12, x % 12, y % 8
     r = 1 + cell // 2  # grows every other cell
-    if abs(cx - 3.5) <= r / 2 + 0.5 and abs(cy - 3.5) <= r / 2 + 0.5:
+    if abs(cx - 5.5) <= r / 2 + 1.5 and abs(cy - 3.5) <= r / 2 + 0.5:
         return (255, 80, 200, 255) if (cx + cy) % 2 else (255, 255, 120, 255)
     return CLEAR
 
 
 png(os.path.join(here, 'hero.png'), 64, 32, hero)
-png(os.path.join(here, 'fx.png'), 32, 16, fx)
+png(os.path.join(here, 'fx.png'), 48, 16, fx)
 print('wrote hero.png fx.png')

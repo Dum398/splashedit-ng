@@ -332,7 +332,7 @@ a 32x32 icon, a missing icon) and that `resave` keeps the fields and leaves defa
 ## Sprite sheets
 
 `spritecheck.py` exports `sprite/sprite.scene` (two sheets made by `sprite/make_sheets.py`: `hero`
-at 4 bpp in 16x16 cells, `fx` at 8 bpp in 8x8 cells; three animations) and reads the sprite table
+at 4 bpp in 16x16 cells, `fx` at 8 bpp in 12x8 cells; three animations) and reads the sprite table
 back the way psxsplash's `SpriteSystem` does: the header words at 128 (offset, 4-aligned), 132
 (sheets) and 134 (animations), the 20-byte sheet and 12-byte animation records in scene order and
 the NUL-terminated names after them. Each sheet's texture page, u0/v0 and CLUT must match its

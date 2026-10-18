@@ -10491,7 +10491,7 @@ void testSpriteSheets() {
         u32(names), u8(hero.x / 64), u8(hero.y / 256), u8((hero.x % 64) * 4), u8(hero.y % 256), u16(hero.clutX / 16),
             u16(hero.clutY), u8(16), u8(16), u8(4), u8(2), u8(0), u8(0), u16(0);
         u32(names + 5), u8(fx.x / 64), u8(fx.y / 256), u8((fx.x % 64) * 2), u8(fx.y % 256), u16(fx.clutX / 16), u16(fx.clutY),
-            u8(8), u8(8), u8(4), u8(2), u8(1), u8(0), u16(0);
+            u8(12), u8(8), u8(4), u8(2), u8(1), u8(0), u16(0);
         // name offset, sheet, first cell, frames, vsyncs, loop, pads
         u32(names + 8), u8(0), u8(0), u8(4), u8(8), u8(1), u8(0), u16(0);
         u32(names + 13), u8(0), u8(4), u8(4), u8(4), u8(0), u8(0), u16(0);
@@ -10523,7 +10523,7 @@ void testSpriteSheets() {
             sh,
             [](const splash::SpriteSheet& s) -> splash::SpriteTextureSize {
                 if (s.texture == "hero.png") return {64, 32, {}};
-                if (s.texture == "fx.png") return {32, 16, {}};
+                if (s.texture == "fx.png") return {48, 16, {}};
                 return {0, 0, "cannot load image " + s.texture};
             },
             errors, warnings);

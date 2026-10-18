@@ -16,7 +16,7 @@
       {"name": "walk", "firstFrame": 0, "frameCount": 4, "frameDuration": 8, "loop": true},
       {"name": "jump", "firstFrame": 4, "frameCount": 4, "frameDuration": 4, "loop": false}
     ]},
-    {"name": "fx", "texture": "fx.png", "bitDepth": 8, "cellWidth": 8, "cellHeight": 8, "anims": [
+    {"name": "fx", "texture": "fx.png", "bitDepth": 8, "cellWidth": 12, "cellHeight": 8, "anims": [
       {"name": "spark", "firstFrame": 2, "frameCount": 5, "frameDuration": 3, "loop": true}
     ]}
   ]

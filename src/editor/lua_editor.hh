@@ -32,6 +32,25 @@ const std::vector<ApiSymbol>& api();
 const ApiSymbol* findApi(std::string_view table, std::string_view name);
 bool isApiTable(std::string_view name);
 
+// --- External editors (lua-language-server) --------------------------------
+
+// psxsplash.d.lua, the definitions tools/gen_lua_api.py writes from the same
+// rows as api(), embedded in the editor at configure time.
+std::string_view luaDefinitions();
+// The .luarc.json "Set up external editor" writes: Lua 5.2 (psxlua) with the
+// libraries psxlua's linit does not open (math, io, os, package, ...) off.
+std::string_view luarcJson();
+
+struct ExternalEditorSetup {
+    bool wroteLuarc = false;  // .luarc.json is only written when absent
+    std::string error;        // empty on success
+};
+// Writes <project>/psxsplash.d.lua and, when there is none, <project>/.luarc.json.
+ExternalEditorSetup setUpExternalEditor(const std::filesystem::path& project);
+// For a project being opened: rewrites <project>/psxsplash.d.lua when it
+// exists and differs from luaDefinitions(). True when it was rewritten.
+bool refreshLuaDefinitions(const std::filesystem::path& project, std::string* error = nullptr);
+
 // --- Text -------------------------------------------------------------------
 
 // Line and byte column, both from 0.

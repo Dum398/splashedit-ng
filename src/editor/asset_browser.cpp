@@ -78,6 +78,9 @@ AssetType classifyAsset(const fs::path& file, bool directory) {
     if (splash::canImportModel(file)) return AssetType::Model;
     if (e == ".mesh") return AssetType::Mesh;
     if (e == ".png" || e == ".jpg" || e == ".jpeg" || e == ".bmp" || e == ".tga" || e == ".gif") return AssetType::Texture;
+    // psxsplash.d.lua is lua-language-server definitions, no script to run.
+    const std::string n = lower(utf8(file.filename()));
+    if (e == ".lua" && n.size() > 6 && n.compare(n.size() - 6, 6, ".d.lua") == 0) return AssetType::Other;
     if (e == ".lua" || e == ".blocks") return AssetType::Script;
     if (splash::isAudioFile(file)) return AssetType::Audio;
     if (e == ".anim") return AssetType::Animation;

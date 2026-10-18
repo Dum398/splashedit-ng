@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Regenerates src/editor/lua_api.inc, the Lua API table the script editor
-completes and documents from.
+completes and documents from, and src/editor/psxsplash.d.lua, the same rows
+as a lua-language-server definitions file for external editors (VS Code).
 
 Names come from LuaAPI::RegisterAll in psxsplash's src/luaapi.cpp (what the
 engine really registers). Signatures and docs come from the comments above
 each function in src/luaapi.hh and from psxsplash-docs' lua/api-reference.md
-and lua/events.md when those are found.
+and lua/events.md when those are found. FixedPoint's members come from
+psyqo-lua's src/lua.cpp (the nugget submodule of psxsplash by default).
 
     python3 tools/gen_lua_api.py --psxsplash ../psxsplash [--docs ../psxsplash-docs]
+        [--psyqo-lua DIR] [-o lua_api.inc] [--defs-out psxsplash.d.lua]
 """
 
 import argparse
@@ -15,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 
 # psxlua's linit.c opens base, coroutine, table, string, bit32 and debug.
 # No math, io or os on the PS1: PSXMath stands in for math.
@@ -233,6 +237,210 @@ def event_entries(md):
     return out
 
 
+LUA_KEYWORDS = {
+    "and", "break", "do", "else", "elseif", "end", "false", "for", "function",
+    "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then",
+    "true", "until", "while",
+}
+
+# Docs prose may carry typographic punctuation; the .d.lua stays ASCII.
+ASCII_FOR = {
+    "—": "-", "–": "-", "‘": "'", "’": "'", "“": '"',
+    "”": '"', "…": "...", " ": " ", "×": "x", "→": "->",
+}
+
+
+def ascii_text(s):
+    s = "".join(ASCII_FOR.get(c, c) for c in s)
+    bad = sorted({c for c in s if ord(c) > 127})
+    if bad:
+        sys.exit("gen_lua_api: no ASCII spelling for %s" % ", ".join("U+%04X" % ord(c) for c in bad))
+    return s
+
+
+def paren_group(s, i):
+    """(inside, end) of the balanced group opening at s[i] == "("."""
+    depth = 0
+    for j in range(i, len(s)):
+        if s[j] in "({":
+            depth += 1
+        elif s[j] in ")}":
+            depth -= 1
+            if depth == 0:
+                return s[i + 1:j], j + 1
+    return s[i + 1:], len(s)
+
+
+def lua_params(inside):
+    """[(name, optional)] from the text between a signature's parentheses:
+    [x] is optional, a|b takes a, {..} is a table, words join into one name."""
+    tokens = []
+    cur, cur_opt, depth, brackets = "", None, 0, 0
+    for c in inside + ",":
+        if c in "({":
+            depth += 1
+        elif c in ")}":
+            depth -= 1
+        if depth == 0 and c in "[]":
+            brackets += 1 if c == "[" else -1
+            continue
+        if depth == 0 and c == ",":
+            if cur.strip():
+                tokens.append((cur.strip(), cur_opt))
+            cur, cur_opt = "", None
+            continue
+        if cur_opt is None and not c.isspace():
+            cur_opt = brackets > 0
+        cur += c
+    out, used = [], set()
+    for i, (tok, opt) in enumerate(tokens):
+        if tok.endswith("..."):
+            out.append(("...", False))
+            break
+        if tok.startswith("{"):
+            name = "tbl"
+        else:
+            name = "_".join(re.findall(r"[A-Za-z_]\w*", tok.split("|")[0])) or "arg%d" % (i + 1)
+        if name in LUA_KEYWORDS:
+            name += "_"
+        base, n = name, 2
+        while name in used:
+            name, n = "%s%d" % (base, n), n + 1
+        used.add(name)
+        out.append((name, opt))
+    return out
+
+
+def parse_signature(sig, qualified):
+    """(params, overloads, returns) of "T.F(a, [b]) -> x" or "T.F(a) or
+    T.F(a, b)". params is None when the signature has no parentheses;
+    returns is the text after ->."""
+    rest = sig[len(qualified):] if sig.startswith(qualified) else ""
+    groups = []
+    while rest.startswith("("):
+        inside, end = paren_group(rest, 0)
+        groups.append(lua_params(inside))
+        rest = rest[end:]
+        m = re.match(r"\s+or\s+(%s)?(?=\()" % re.escape(qualified), rest)
+        if not m:
+            break
+        rest = rest[m.end():]
+    m = re.search(r"->\s*(.*)$", rest)
+    returns = m.group(1).strip() if m else ""
+    if not groups:
+        return None, [], returns
+    return groups[0], groups[1:], returns
+
+
+def doc_lines(text, width=96):
+    return ["--- " + l for l in textwrap.wrap(text, width, break_long_words=False, break_on_hyphens=False)]
+
+
+def function_stub(qualified, sig, doc, callback=False):
+    out = doc_lines(doc)
+    if out:
+        out.append("---")
+    out.append("--- `%s`" % sig)
+    params, overloads, returns = parse_signature(sig[len("function "):] if callback else sig, qualified)
+    if params is None:
+        params = [("...", False)]
+    for name, opt in params:
+        out.append("---@param %s%s any" % (name, "?" if opt else ""))
+    for alt in overloads:
+        out.append("---@overload fun(%s): any" % ", ".join("%s%s: any" % (n, "?" if o else "") for n, o in alt))
+    if not callback:
+        out.append("---@return any" + (" # " + returns if returns else ""))
+    out.append("function %s(%s) end" % (qualified, ", ".join(n for n, _ in params)))
+    return out
+
+
+def write_defs(path, rows, rev):
+    """psxsplash.d.lua: the psxsplash rows of lua_api.inc as lua-language-server
+    annotations. The Lua standard library is left to lua-ls's own copy.
+    Callbacks are plain function stubs: measured with lua-ls 3.19, a script's
+    own function onCreate(self) then gives no redefinition diagnostic."""
+    order, tables = [], {}
+    for table, name, kind, sig, doc in rows:
+        if table in STDLIB_TABLES or (table == "" and kind != "Callback"):
+            continue
+        if table not in tables:
+            order.append(table)
+            tables[table] = []
+        if kind != "Table":
+            tables[table].append((name, kind, sig, doc))
+    out = [
+        "---@meta psxsplash",
+        "",
+        "-- Generated by tools/gen_lua_api.py from psxsplash %s. Do not edit." % rev,
+        "-- lua-language-server definitions of the psxsplash Lua API (psxlua is Lua 5.2).",
+        "",
+    ]
+    for table in order:
+        members = tables[table]
+        if table == "":
+            out += ["-- Event callbacks: define these in a script and the engine calls them.", ""]
+            for name, kind, sig, doc in members:
+                out += function_stub(name, sig, doc, callback=True) + [""]
+            continue
+        out.append("---@class %s" % table)
+        for name, kind, sig, doc in members:
+            if kind == "Constant":
+                out.append("---@field %s integer%s" % (name, (" # " + doc) if doc else ""))
+        out += ["%s = {}" % table, ""]
+        for name, kind, sig, doc in members:
+            if kind == "Function":
+                out += function_stub(table + "." + name, sig, doc) + [""]
+    text = ascii_text("\n".join(out).rstrip("\n") + "\n")
+    with open(path, "w", encoding="ascii", newline="\n") as f:
+        f.write(text)
+
+
+def fixedpoint_entries(cpp):
+    """{("FixedPoint", name): (signature, doc)} from the Lua script psyqo-lua's
+    src/lua.cpp embeds to build FixedPoint; metamethods are left out and a
+    method (FixedPoint:raw) is written with an explicit self."""
+    m = re.search(r'fixedPointScript\[\] = R"lua\((.*?)\)lua"', cpp, re.S)
+    if not m:
+        return {}
+    lines = m.group(1).splitlines()
+    locals_ = {}
+    out = {}
+
+    def comment_above(i):
+        j, text = i - 1, []
+        while j >= 0 and lines[j].strip().startswith("--"):
+            text.insert(0, lines[j].strip()[2:].strip())
+            j -= 1
+        return " ".join(text)
+
+    for i, line in enumerate(lines):
+        s = line.strip()
+        lm = re.match(r"local (\w+) = function\(([^)]*)\)", s)
+        if lm:
+            locals_[lm.group(1)] = (lm.group(2), comment_above(i))
+            continue
+        am = re.match(r"FixedPoint\.(\w+) = (\w+)$", s)
+        if am and am.group(2) in locals_:
+            args, doc = locals_[am.group(2)]
+            out[("FixedPoint", am.group(1))] = ("FixedPoint.%s(%s)" % (am.group(1), args), doc)
+            continue
+        fm = re.match(r"function FixedPoint([.:])(\w+)\(([^)]*)\)", s)
+        if fm and not fm.group(2).startswith("__"):
+            args, doc = fm.group(3), comment_above(i)
+            # An argument the body defaults ("if fraction == nil then") is optional.
+            names = [x.strip() for x in args.split(",") if x.strip()]
+            body = "\n".join(lines[i + 1:i + 4])
+            k = len(names)
+            while k > 0 and re.search(r"if %s == nil then" % re.escape(names[k - 1]), body):
+                k -= 1
+            args = ", ".join(names[:k]) + "".join(" [, %s]" % n for n in names[k:])
+            if fm.group(1) == ":":
+                args = "self" + (", " + args if args.strip() else "")
+                doc = (doc + ". A method: call it as fp:%s()." % fm.group(2)).lstrip(". ")
+            out[("FixedPoint", fm.group(2))] = ("FixedPoint.%s(%s)" % (fm.group(2), args), doc)
+    return out
+
+
 def c_str(s):
     s = s.replace("\\", "\\\\").replace('"', '\\"')
     return '"%s"' % s
@@ -243,7 +451,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--psxsplash", default=os.path.join(here, "..", "..", "psxsplash"))
     ap.add_argument("--docs", default=os.path.join(here, "..", "..", "psxsplash-docs"))
+    ap.add_argument("--psyqo-lua", default=None,
+                    help="psyqo-lua checkout (default: the psxsplash nugget submodule's)")
     ap.add_argument("-o", "--out", default=os.path.join(here, "..", "src", "editor", "lua_api.inc"))
+    ap.add_argument("--defs-out", default=os.path.join(here, "..", "src", "editor", "psxsplash.d.lua"),
+                    help="lua-language-server definitions written from the same rows")
     a = ap.parse_args()
 
     cpp = read(os.path.join(a.psxsplash, "src", "luaapi.cpp"))
@@ -259,6 +471,13 @@ def main():
     ev = os.path.join(a.docs, "docs", "lua", "events.md")
     if os.path.exists(ev):
         events = event_entries(read(ev))
+    fixed = {}
+    psyqo_lua = a.psyqo_lua or os.path.join(a.psxsplash, "third_party", "nugget", "psyqo-lua")
+    fp = os.path.join(psyqo_lua, "src", "lua.cpp")
+    if os.path.exists(fp):
+        fixed = fixedpoint_entries(read(fp))
+    else:
+        print("gen_lua_api: no %s, FixedPoint gets only what the docs list" % fp, file=sys.stderr)
 
     rows = []
     tables = set()
@@ -279,8 +498,16 @@ def main():
         doc = ddoc or hdoc
         rows.append((table, name, "Function" if kind == "function" else "Constant", sig, doc))
     # Documented tables the engine gets from elsewhere (FixedPoint is psyqo-lua's).
+    # psyqo-lua's own signature wins, the docs' prose wins.
     for (table, name), (sig, doc) in sorted(docs.items()):
         if table in tables:
+            continue
+        if not any(r[0] == table and r[1] == "" for r in rows):
+            rows.append((table, "", "Table", table, "psxsplash API table."))
+        csig, cdoc = fixed.get((table, name), ("", ""))
+        rows.append((table, name, "Function", csig or sig, doc or cdoc))
+    for (table, name), (sig, doc) in fixed.items():
+        if (table, name) in docs:
             continue
         if not any(r[0] == table and r[1] == "" for r in rows):
             rows.append((table, "", "Table", table, "psxsplash API table."))
@@ -306,7 +533,8 @@ def main():
         f.write("// {table, name, kind, signature, doc}; name is empty for the table itself.\n")
         for table, name, kind, sig, doc in rows:
             f.write("{%s, %s, ApiKind::%s, %s, %s},\n" % (c_str(table), c_str(name), kind, c_str(sig), c_str(doc)))
-    print("gen_lua_api: %d symbols -> %s" % (len(rows), os.path.relpath(a.out)))
+    write_defs(a.defs_out, rows, rev)
+    print("gen_lua_api: %d symbols -> %s, %s" % (len(rows), os.path.relpath(a.out), os.path.relpath(a.defs_out)))
 
 
 if __name__ == "__main__":

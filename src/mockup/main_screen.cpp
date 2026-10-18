@@ -26,6 +26,7 @@
 #include "editor/catalog.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
+#include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/sprites.hh"
 #include "editor/texture_preview.hh"
@@ -958,6 +959,33 @@ static void notify(State& st, std::string msg, bool bad) {
 static void openScript(State& st, const editor::Document& doc, const std::string& projectPath) {
     std::string err;
     if (projectPath.empty() || !st.scripts.open(doc.resolve(projectPath), &err)) notify(st, "Cannot open " + projectPath + ": " + err, true);
+}
+
+// View > Set up external editor (VS Code): the lua-language-server
+// definitions and, when the project has none, a .luarc.json.
+static void setUpExternalEditor(State& st, const editor::Document& doc) {
+    const editor::lua::ExternalEditorSetup r = editor::lua::setUpExternalEditor(doc.projectRoot());
+    if (!r.error.empty()) {
+        notify(st, "External editor setup failed: " + r.error, true);
+        scriptLine(nullptr, "luadefs: setup failed: " + r.error);
+        return;
+    }
+    notify(st, r.wroteLuarc ? "Wrote psxsplash.d.lua and .luarc.json: open the project folder in VS Code with the Lua extension"
+                            : "Wrote psxsplash.d.lua; kept the project's .luarc.json",
+           false);
+    scriptLine(nullptr, std::string("luadefs: wrote psxsplash.d.lua, .luarc.json ") + (r.wroteLuarc ? "written" : "kept"));
+}
+
+// A project opened with a psxsplash.d.lua older than this editor's gets the
+// current one, without asking.
+static void refreshLuaDefinitions(const editor::Document& doc) {
+    static unsigned seenLoad = ~0u;
+    if (seenLoad == doc.loadId()) return;
+    seenLoad = doc.loadId();
+    if (doc.projectRoot().empty()) return;
+    std::string err;
+    if (editor::lua::refreshLuaDefinitions(doc.projectRoot(), &err)) scriptLine(nullptr, "luadefs: rewrote stale psxsplash.d.lua");
+    else if (!err.empty()) scriptLine(nullptr, "luadefs: rewrite failed: " + err);
 }
 
 // Copy, Cut and Paste of objects through the system clipboard, as the text
@@ -1932,6 +1960,9 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 m.push_back(heading("Scripts"));
                 if (luas.empty()) m.push_back(item("No scripts in this scene", "", false, nullptr));
                 for (const std::string& p : luas) m.push_back(item(p, "", true, [&st, &doc, p] { openScript(st, doc, p); }));
+                m.push_back(separator());  // an action, not one more script
+                m.push_back(item("Set up external editor (VS Code)", "", !doc.projectRoot().empty(),
+                                 [&st, &doc] { setUpExternalEditor(st, doc); }));
             }
             m.push_back(separator());
             m.push_back(heading("Panels"));
@@ -8782,6 +8813,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     assetRequests(st, doc, view);
     statusBar(dl, size, doc, st);
     playSetup(st, doc, size);
+    refreshLuaDefinitions(doc);
     menus(st, doc, view);
     if (st.quitRequested) {
         st.quitRequested = false;

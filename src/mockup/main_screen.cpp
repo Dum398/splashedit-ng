@@ -7278,20 +7278,14 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             }
             const viewport::Vec3 pv = view.pivot();
             const splash::Vec3 centre{pv.x, pv.y, -pv.z};
-            float bw = 0;
-            const float bx = hr.Min.x + measure(f.regular, type::body, "8 of 8").x + space::md;
-            const ImVec2 bat(bx, hr.Min.y + (hr.GetHeight() - (size::field + 6)) * 0.5f);
-            if (button("agaddobj", bat, icon::plus, "At object", ButtonKind::Secondary, &bw,
-                       "Adds a waypoint where the object stands."))
-                doc.edit(path, [here](splash::Object& ob) { ob.agent->waypoints.push_back(here); });
-            if (button("agaddview", bat + ImVec2(bw + space::xs, 0), icon::plus, "At view", ButtonKind::Secondary, nullptr,
-                       "Adds a waypoint at the point the viewport camera orbits (the centre of the view)."))
-                doc.edit(path, [centre](splash::Object& ob) { ob.agent->waypoints.push_back(centre); });
             for (size_t i = 0; i < ag.waypoints.size(); i++) {
                 ImGui::PushID(int(i));
                 const std::string lid = "lagwp" + std::to_string(i), label = std::to_string(i + 1);
-                const ImRect wr = row(lid.c_str(), label.c_str(),
-                                      i < 8 ? "A waypoint's world position, in metres." : "Past the 8th: the export leaves it out.");
+                // A narrow label (the number), so the three fields keep their width.
+                const ImRect wrow(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
+                y += rowH;
+                const ImRect wr = property(lid.c_str(), wrow, 22, label.c_str(),
+                                           i < 8 ? "A waypoint's world position, in metres." : "Past the 8th: the export leaves it out.");
                 const float bs = 24, gap = 2;
                 const ImRect fr(wr.Min, ImVec2(wr.Max.x - 3 * (bs + gap), wr.Max.y));
                 const std::string wn = "obj.agwp" + std::to_string(i);
@@ -7319,6 +7313,15 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     doc.edit(path, [i](splash::Object& ob) { ob.agent->waypoints.erase(ob.agent->waypoints.begin() + long(i)); });
                 ImGui::PopID();
             }
+            float bw = 0;
+            const ImVec2 bat(x0 + space::sm, y + space::xs);
+            if (button("agaddobj", bat, icon::plus, "At object", ButtonKind::Secondary, &bw,
+                       "Adds a waypoint where the object stands."))
+                doc.edit(path, [here](splash::Object& ob) { ob.agent->waypoints.push_back(here); });
+            if (button("agaddview", bat + ImVec2(bw + space::sm, 0), icon::plus, "At view centre", ButtonKind::Secondary, nullptr,
+                       "Adds a waypoint at the point the viewport camera orbits (the centre of the view)."))
+                doc.edit(path, [centre](splash::Object& ob) { ob.agent->waypoints.push_back(centre); });
+            y += size::field + 6 + space::xs + space::sm;
         }
 
         // The clip each state plays, from the object's skin.

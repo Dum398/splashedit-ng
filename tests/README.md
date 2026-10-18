@@ -433,7 +433,10 @@ wide `title` adds at most 60 (the drag threshold takes the first few), where it 
 per pixel. `editor_tests` checks the rate itself (`testNumberScrub`). The Tint picker (well `ui.col`,
 picker `ui.colpick`) opened on the grey `crate` and dragged to red stays where it opened, and so does
 the Tint row: the "Tinted" card it brings shows only once the picker closes (it used to push the
-inspector and the open picker down mid-drag). Needs a display (CI runs it under `xvfb-run` on Linux).
+inspector and the open picker down mid-drag). Tab from a number being typed into (Position X,
+double-clicked) puts the next field in typing too, so `40`, Tab, `50`, Enter sets X and Y; Shift+Tab
+goes back the same way, and Tab runs on past the row labels into Size W. Needs a display (CI runs it
+under `xvfb-run` on Linux).
 
     python3 uiinspectorcheck.py <splashedit>
 

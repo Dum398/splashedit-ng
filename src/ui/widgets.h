@@ -34,7 +34,8 @@ struct Hit {
 };
 
 // Registers an interactive rectangle at an absolute screen position.
-Hit interact(const char* id, ImRect r);
+// `itemFlags` go to ImGui::ItemAdd (ImGuiItemFlags_Inputable: a field typed into).
+Hit interact(const char* id, ImRect r, int itemFlags = 0);
 
 // Every rectangle interact() registered since the last clear. The window hit test
 // uses it to keep clicks on title bar controls away from window dragging.

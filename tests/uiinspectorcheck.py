@@ -1,7 +1,8 @@
 # The UI tab's element inspector, by hand: a drag on a pixel field (a text's
 # Size W) moves it one per pixel, not by a percentage of the value; the Tint
 # picker stays where it opened while the colour it sets brings the "Tinted"
-# warning (the warning shows once it closes).
+# warning (the warning shows once it closes); Tab and Shift+Tab onto a number
+# field put it in typing, so what is typed next replaces its value.
 # Opens a copy of tests/ui/ui.scene with --ui, selects elements by their
 # list rows, drives the inspector's named fields and reads the saved scene and
 # the editor's scripted lines. Needs a display (xvfb-run -a).
@@ -111,6 +112,20 @@ if base and pick:
     after = control(out, 'ui.col')
     check('the drag in the picker tinted the crate', abs(tint[0] - 0.5) > 0.1 or abs(tint[1] - 0.5) > 0.1, tint)
     check('once the picker closes the Tinted card shows above it', after and after[1] > base[1] + 40, (base, after))
+
+# ---- #158: Tab onto a number field types into it. Position X typed, Tab, and
+# what is typed next goes into Y; Shift+Tab goes back the same way. 'title'
+# sits at 8, 8.
+cv, out, _ = run(row('title') + ['--dblclick', '@ui.posa', '--wait', '3', '--text', '40', '--key', 'tab', '--wait', '3',
+                                 '--text', '50', '--key', 'enter', '--wait', '3'])
+check('typing after Tab from Position X sets Y', elements(cv)['title']['rect'][:2] == [40, 50], elements(cv)['title']['rect'])
+cv, out, _ = run(row('title') + ['--dblclick', '@ui.posb', '--wait', '3', '--text', '60', '--key', 'shift+tab', '--wait', '3',
+                                 '--text', '30', '--key', 'enter', '--wait', '3'])
+check('typing after Shift+Tab from Position Y sets X, and Y keeps what it was given',
+      elements(cv)['title']['rect'][:2] == [30, 60], elements(cv)['title']['rect'])
+cv, out, _ = run(row('title') + ['--dblclick', '@ui.posa', '--wait', '3', '--text', '12', '--key', 'tab', '--wait', '3',
+                                 '--text', '7', '--key', 'tab', '--wait', '3', '--text', '200', '--key', 'enter', '--wait', '3'])
+check('Tab runs on through Size W', elements(cv)['title']['rect'][:3] == [12, 7, 200], elements(cv)['title']['rect'])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

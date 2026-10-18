@@ -1021,7 +1021,8 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // opened for. A file outside the project is copied into it first.
 // SceneLua and MemCardIcon: no target object. MemCardIcon replaces icon frame
 // `index`, or with index -1 adds the picked files as new frames.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon };
+// UiTexture: a UI image's Texture; the target is {canvas, element}.
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 static int g_assetIndex = 0;
@@ -1060,9 +1061,9 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
 // Texture, the material to set (-1 is the first), the list grown to reach it.
 static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, const editor::ObjectPath& target,
                             const std::vector<std::string>& files, bool append = false, int index = -1) {
-    const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon;
+    const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
-    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? "textures"
+    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
                                                         : "scripts";
@@ -1083,6 +1084,12 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
     const std::string& first = paths.front();
     if (slot == AssetSlot::SceneLua) {
         doc.editSettings([&](splash::SceneSettings& s) { s.script = first; });
+        doc.refreshAssets(paths);
+        return;
+    }
+    if (slot == AssetSlot::UiTexture) {
+        if (target.size() == 2)
+            editor::uic::editElement(doc, target[0], target[1], [&](splash::UIElement& el) { el.texture = first; });
         doc.refreshAssets(paths);
         return;
     }
@@ -1131,6 +1138,7 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                 break;
             case AssetSlot::SceneLua:
             case AssetSlot::MemCardIcon:
+            case AssetSlot::UiTexture:
                 break;
         }
     });
@@ -1166,7 +1174,8 @@ static bool slotTakes(int slot, editor::AssetType t) {
         case AssetSlot::SceneLua: return t == T::Script;
         case AssetSlot::Clip: return t == T::Audio;
         case AssetSlot::SkinClips: return t == T::Animation;
-        case AssetSlot::MemCardIcon: return t == T::Texture;
+        case AssetSlot::MemCardIcon:
+        case AssetSlot::UiTexture: return t == T::Texture;
     }
     return false;
 }
@@ -1174,19 +1183,23 @@ static bool slotTakes(int slot, editor::AssetType t) {
 // An inspector asset field that also takes a file dragged from the Project
 // panel: a drop target where it shows (not in a folded section), outlined
 // while a file it takes is dragged, strongly under the pointer.
+static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRect r, ImRect shown, int index = -1) {
+    if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return;
+    st.assetSlots.push_back({shown, slot, path, index});
+    if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
+        const bool over = shown.Contains(ImGui::GetIO().MousePos);
+        ImGui::GetWindowDrawList()->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft,
+                                            radius::field + 1, 0, over ? 2.0f : 1.5f);
+    }
+}
+
 static bool slotField(State& st, int slot, const editor::ObjectPath& path, const char* id, ImRect r, const char* ic, ImU32 iconColor,
                       const char* name, const char* meta, int index = -1) {
     const bool clicked = assetField(id, r, ic, iconColor, name, meta);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect shown = r;
     shown.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
-    if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return clicked;
-    st.assetSlots.push_back({shown, slot, path, index});
-    if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
-        const bool over = shown.Contains(ImGui::GetIO().MousePos);
-        dl->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft, radius::field + 1, 0,
-                    over ? 2.0f : 1.5f);
-    }
+    slotTarget(st, slot, path, r, shown, index);
     return clicked;
 }
 
@@ -6534,6 +6547,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // The UI tab inspects its canvas and elements.
     if (st.scripts.uiShown()) {
         st.canvasView.inspector(dl, r, y, doc);
+        // A UI image's Texture takes a texture dragged from the Project panel,
+        // as the scene inspector's asset fields do (#160).
+        const ui::CanvasView::TextureField& tf = st.canvasView.textureField;
+        if (tf.canvas >= 0)
+            slotTarget(st, static_cast<int>(AssetSlot::UiTexture), {tf.canvas, tf.element}, tf.rect, tf.rect);
         return;
     }
     // The lock pins what the inspector shows; selecting other objects leaves it there.
@@ -8873,6 +8891,8 @@ static void updateImports(State& st, editor::Document& doc, const viewport::Ps1V
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     st.importPanel.shown.clear();
+    // A file dialog whose caller names no folder opens in the project, not Documents (#160).
+    ui::setFileDialogFolder(utf8(doc.projectRoot()));
     filesPending(st, doc);
     // Whatever opened the timeline (the View menu, Edit in timeline) brings
     // its tab to the front; closing it shows the Project tab again.

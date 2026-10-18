@@ -1135,6 +1135,7 @@ void CanvasView::inspector(ImDrawList* dl, ImRect r, float y, editor::Document& 
             std::fflush(stdout);
         }
     }
+    textureField = {};
     ImGui::PushID("uicanvasinspector");
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
     if (sel.canvas >= 0 && uic::selectedElements(doc).size() > 1) multiInspector(dl, r, y, doc);
@@ -1491,6 +1492,9 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                 ImRect tfield(pf.Min, ImVec2(pf.Max.x - size::field - space::xs, pf.Max.y));
                 const ImRect browse(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max);
                 nameRect("ui.tex", tfield);  // scripted tests
+                textureField.rect = tfield;
+                textureField.rect.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
+                textureField.canvas = c, textureField.element = ei;
                 nameRect("ui.texbrowse", browse);
                 if (textField("tex", tfield, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
                 if (iconButton("texbrowse", browse, icon::folderOpen, false, "Pick an image")) {
@@ -1499,7 +1503,10 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                         g_texCanvas = c, g_texElement = ei;
                     }
                     static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
-                    ui::showOpenFileDialog("ui-texture", onTexturePicked, nullptr, images, 1, nullptr, false);
+                    // It opens in the project, where the textures are (#160).
+                    const std::u8string root8 = doc.projectRoot().u8string();
+                    const std::string root(root8.begin(), root8.end());
+                    ui::showOpenFileDialog("ui-texture", onTexturePicked, nullptr, images, 1, root.empty() ? nullptr : root.c_str(), false);
                 }
                 if (!e.texture.empty()) {
                     const uic::Assets::Texture& t = m_assets.texture(e.texture, e.bitDepth, e.cutout);

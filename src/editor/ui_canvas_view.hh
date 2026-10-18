@@ -54,6 +54,14 @@ public:
     void duplicate(editor::Document& doc);
     void remove(editor::Document& doc);
 
+    // The selected image's Texture field as the inspector drew it this frame
+    // (clipped to what shows; empty when it is not drawn): main_screen makes it
+    // a drop target for a texture dragged from the Project panel.
+    struct TextureField {
+        ImRect rect;
+        int canvas = -1, element = -1;
+    } textureField;
+
     // A refusal the app shows in the status bar (main_screen takes and clears it).
     std::string status;
     bool statusBad = false;

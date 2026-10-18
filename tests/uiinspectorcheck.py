@@ -3,7 +3,9 @@
 # picker stays where it opened while the colour it sets brings the "Tinted"
 # warning (the warning shows once it closes); Tab and Shift+Tab onto a number
 # field put it in typing, so what is typed next replaces its value; while a
-# file dialog is open the editor takes no input and opens no second one.
+# file dialog is open the editor takes no input and opens no second one; the
+# Texture field takes an image dragged from the Project panel and its Browse
+# opens in the project folder.
 # Opens a copy of tests/ui/ui.scene with --ui, selects elements by their
 # list rows, drives the inspector's named fields and reads the saved scene and
 # the editor's scripted lines. Needs a display (xvfb-run -a).
@@ -24,7 +26,7 @@ def check(name, ok, detail=''):
 
 def project():
     """tests/ui/ui.scene as a project of its own, its fonts and texture
-    copied in."""
+    copied in, and a second texture textures/other.png (the crate's)."""
     d = os.path.join(tempfile.mkdtemp(), 'ui')
     os.makedirs(os.path.join(d, 'fonts'))
     os.makedirs(os.path.join(d, 'textures'))
@@ -36,6 +38,7 @@ def project():
         if 'texture' in e:
             shutil.copy(os.path.join(here, 'ui', e['texture']), os.path.join(d, 'textures'))
             e['texture'] = 'textures/' + os.path.basename(e['texture'])
+    shutil.copy(os.path.join(d, 'textures', 'crate.png'), os.path.join(d, 'textures', 'other.png'))
     json.dump(s, open(os.path.join(d, 'ui.scene'), 'w'), indent=1)
     return d
 
@@ -141,6 +144,27 @@ check('while it is open a click on another row selects nothing', 'uicanvas: insp
       'uicanvas: inspector element crate' in out, out[-300:])
 check('and a second Browse opens no second dialog', out.count('file dialog: ui-texture') == 1, out[-300:])
 check('and Delete deletes nothing (the scene is unchanged)', 'unsaved changes: no' in out, out[-300:])
+
+# ---- #160: the Texture field takes an image dragged from the Project panel, as
+# a Script's File takes a .lua; its Browse opens in the project folder.
+SEARCH = '880,731'  # the Project panel's search field, under the UI tab at 1600x960
+TILE = '530,812'    # the first file the search shows
+cv, out, _ = run(row('crate'), save=False)
+tex = control(out, 'ui.tex')
+check('the Texture field is drawn', tex is not None, out[-200:])
+if tex:
+    at = '%d,%d' % ((tex[0] + tex[2]) // 2, (tex[1] + tex[3]) // 2)
+    cv, out, d = run(row('crate') + ['--click', SEARCH + ',0', '--text', 'other', '--wait', '5', '--drag', TILE + ',' + at + ',0',
+                                     '--wait', '10'])
+    check('an image dragged from the Project panel onto Texture is set', elements(cv)['crate'].get('texture') == 'textures/other.png',
+          (elements(cv)['crate'].get('texture'), out[-300:]))
+    cv, out, d = run(row('crate') + ['--click', SEARCH + ',0', '--text', 'ui.scene', '--wait', '5', '--drag', TILE + ',' + at + ',0',
+                                     '--wait', '10'])
+    check('a scene dropped there is refused and leaves it', elements(cv)['crate'].get('texture') == 'textures/crate.png' and
+          'That field does not take' in out, (elements(cv)['crate'].get('texture'), out[-300:]))
+cv, out, d = run(row('crate') + ['--click', '@ui.texbrowse', '--wait', '3'], save=False, env=HOLD)
+check("the Texture's Browse opens in the project folder", 'file dialog: ui-texture in ' + d in out.splitlines(),
+      [l for l in out.splitlines() if 'file dialog' in l])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

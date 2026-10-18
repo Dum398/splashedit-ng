@@ -439,8 +439,10 @@ goes back the same way, and Tab runs on past the row labels into Size W. File di
 `SPLASHEDIT_FILE_DIALOG=hold` no dialog shows, the editor prints `file dialog: <kind> in <folder>`
 and acts as if it stayed open; then a click on another list row selects nothing, a second Browse
 (`ui.texbrowse`) opens no second dialog and Delete changes nothing (`editor_tests`'
-`testDialogGate` checks the one-at-a-time gate). Needs a display (CI runs it under `xvfb-run` on
-Linux).
+`testDialogGate` checks the one-at-a-time gate). An image's Texture field (`ui.tex`) takes a texture
+dragged from the Project panel (`textures/other.png`, found by searching), as a Script's File takes a
+.lua, and refuses a scene with a status message; its Browse opens in the project folder (any dialog
+whose caller names no folder does). Needs a display (CI runs it under `xvfb-run` on Linux).
 
     python3 uiinspectorcheck.py <splashedit>
 

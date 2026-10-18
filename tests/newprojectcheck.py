@@ -159,7 +159,9 @@ else:
             if os.path.exists(f):
                 os.remove(f)
         args += ['--shot', modal, '--wait', '2']
-    lines = run(args + click('newproj.create') + ['--wait', '10'], final)
+    # The final shot waits for the live export of the new scene, so the
+    # status bar's meters are its, not the courtyard's.
+    lines = run(args + click('newproj.create') + ['--wait', '3', '--wait-export', '--wait', '5'], final)
     check('lamplighter: prints the created line on its title scene',
           created(lines) == ['newproject: created lamplighter title.scene'], created(lines))
     proj = os.path.join(where, 'my_lamp')
@@ -178,7 +180,13 @@ else:
     if os.path.isfile(cli) and on_disk:
         for sc in SAMPLE_SCENES:
             out = os.path.join(where, sc.replace('.scene', '.splashpack'))
-            r = subprocess.run([cli, 'export', os.path.join(proj, sc), '-o', out], capture_output=True, text=True)
+            r = subprocess.run([cli, 'export', os.path.join(proj, sc), '-o', out, '--stats'], capture_output=True, text=True)
+            if sc == 'title.scene':
+                cli_tris = [w.split('=')[1] for l in r.stdout.splitlines() for w in l.split() if w.startswith('triangles=')]
+                bar = [l.split()[2].split('/')[0] for l in lines if l.startswith('statusbar: tris ')]
+                check('lamplighter: the status bar counts the title scene\'s triangles after its export',
+                      len(cli_tris) == 1 and len(bar) >= 2 and bar[-1] == cli_tris[0] and bar[0] != bar[-1],
+                      ('status bar', bar, 'cli', cli_tris))
             check('lamplighter: the created ' + sc + ' exports',
                   r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0,
                   'exit %d: %s' % (r.returncode, (r.stderr or r.stdout).strip()[-400:]))

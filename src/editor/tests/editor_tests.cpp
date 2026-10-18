@@ -2547,6 +2547,38 @@ void testNewScript() {
     CHECK(std::string((std::istreambuf_iterator<char>(iin)), {}) == inter);
 }
 
+// View > Set up external editor (VS Code): the embedded psxsplash.d.lua is
+// the committed one; .luarc.json is written once and then left alone; a
+// stale psxsplash.d.lua is rewritten when the project opens.
+void testExternalEditorSetup() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), {});
+    };
+    const std::string committed = slurp(fs::path(SPLASHEDIT_SOURCE_DIR) / "src" / "editor" / "psxsplash.d.lua");
+    CHECK(!committed.empty() && editor::lua::luaDefinitions() == committed);
+    CHECK(editor::lua::luarcJson().find("\"runtime.version\": \"Lua 5.2\"") != std::string_view::npos);
+
+    fs::path proj = g_outDir / "luadefs";
+    fs::remove_all(proj, ec);
+    fs::create_directories(proj, ec);
+    CHECK(!editor::lua::refreshLuaDefinitions(proj));  // none there: nothing written
+    CHECK(!fs::exists(proj / "psxsplash.d.lua"));
+    editor::lua::ExternalEditorSetup r = editor::lua::setUpExternalEditor(proj);
+    CHECK(r.error.empty() && r.wroteLuarc);
+    CHECK(slurp(proj / "psxsplash.d.lua") == committed && slurp(proj / ".luarc.json") == editor::lua::luarcJson());
+    { std::ofstream(proj / ".luarc.json", std::ios::binary) << "{\"mine\": true}"; }
+    { std::ofstream(proj / "psxsplash.d.lua", std::ios::binary) << "---@meta old"; }
+    r = editor::lua::setUpExternalEditor(proj);
+    CHECK(r.error.empty() && !r.wroteLuarc && slurp(proj / ".luarc.json") == "{\"mine\": true}");
+    CHECK(slurp(proj / "psxsplash.d.lua") == committed);
+    { std::ofstream(proj / "psxsplash.d.lua", std::ios::binary) << "---@meta old"; }
+    CHECK(editor::lua::refreshLuaDefinitions(proj) && slurp(proj / "psxsplash.d.lua") == committed);
+    CHECK(!editor::lua::refreshLuaDefinitions(proj));  // current: left alone
+}
+
 // The Interactable section's Event row: does the script define the callback,
 // and Add onInteract's edit of a Lua or block script.
 void testScriptDefinesCallback() {
@@ -8354,6 +8386,8 @@ void testAssetBrowser() {
     CHECK(type("music.wav") == T::Audio && type("game.scene") == T::Scene && type("models/robot.gltf") == T::Model);
     CHECK(type("models/robot/walk.anim") == T::Animation && type("notes.txt") == T::Other);
     CHECK(editor::classifyAsset("A.PNG") == T::Texture && editor::classifyAsset("x.GLB") == T::Model);
+    // Set up external editor's lua-language-server definitions are no script.
+    CHECK(editor::classifyAsset("psxsplash.d.lua") == T::Other && editor::classifyAsset("d.lua") == T::Script);
     // The model's outputs know it; a model without a sidecar has none.
     CHECK(index.find("models/robot.mesh") && index.find("models/robot.mesh")->madeBy == "models/robot.gltf");
     CHECK(index.find("models/robot_0.png")->madeBy == "models/robot.gltf");
@@ -10988,6 +11022,7 @@ int main(int argc, char** argv) {
     testProjectTemplates();
     testAdoptAsset();
     testNewScript();
+    testExternalEditorSetup();
     testNewBlocksScript();
     testScriptDefinesCallback();
     testBlockHelp();

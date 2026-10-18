@@ -104,6 +104,18 @@ add_library(splasheditdoc STATIC
     src/editor/unirom.cpp
     src/editor/ui_canvas.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
+# src/editor/psxsplash.d.lua (tools/gen_lua_api.py) goes into the editor as
+# bytes for "Set up external editor (VS Code)"; a change to it reconfigures.
+set(LUADEFS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/src/editor/psxsplash.d.lua)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${LUADEFS_SRC})
+file(READ ${LUADEFS_SRC} LUADEFS_HEX HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," LUADEFS_BYTES "${LUADEFS_HEX}")
+string(REGEX REPLACE "((0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,)(0x..,))" "\\1\n"
+       LUADEFS_BYTES "${LUADEFS_BYTES}")
+file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/generated/psxsplash_d_lua.inc.new "${LUADEFS_BYTES}\n")
+configure_file(${CMAKE_CURRENT_BINARY_DIR}/generated/psxsplash_d_lua.inc.new
+               ${CMAKE_CURRENT_BINARY_DIR}/generated/psxsplash_d_lua.inc COPYONLY)
+target_include_directories(splasheditdoc PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 find_package(Threads REQUIRED)
 target_link_libraries(splasheditdoc PUBLIC splashcore Threads::Threads)
 if(WIN32)

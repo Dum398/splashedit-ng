@@ -1960,6 +1960,7 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 m.push_back(heading("Scripts"));
                 if (luas.empty()) m.push_back(item("No scripts in this scene", "", false, nullptr));
                 for (const std::string& p : luas) m.push_back(item(p, "", true, [&st, &doc, p] { openScript(st, doc, p); }));
+                m.push_back(separator());  // an action, not one more script
                 m.push_back(item("Set up external editor (VS Code)", "", !doc.projectRoot().empty(),
                                  [&st, &doc] { setUpExternalEditor(st, doc); }));
             }

@@ -1614,6 +1614,80 @@ void checkSpriteSheets(const std::vector<SpriteSheet>& sheets,
                                  (cells >= 0 ? "'s " + std::to_string(cells) + " cells (0.." + std::to_string(cells - 1) + ")" : ""));
         }
     }
+    checkSpriteDirectionSets(sheets, warnings);
+}
+
+const std::vector<std::string>& spriteDirectionSuffixes(int n) {
+    // Around the circle from yaw 0, the way yaw increases.
+    static const std::vector<std::string> four = {"s", "w", "n", "e"}, eight = {"s", "sw", "w", "nw", "n", "ne", "e", "se"},
+                                          none;
+    return n == 4 ? four : n == 8 ? eight : none;
+}
+
+void checkSpriteDirectionSets(const std::vector<SpriteSheet>& sheets, std::vector<std::string>& warnings) {
+    // The table psxsplash loads: every sheet's animations, sheet by sheet.
+    struct Entry {
+        size_t sheet;
+        std::string suffix;
+    };
+    std::vector<std::string> bases;                         // in order of first appearance
+    std::map<std::string, std::vector<std::pair<size_t, Entry>>> byBase;  // base -> (table index, entry)
+    const std::vector<std::string>& eight = spriteDirectionSuffixes(8);
+    size_t index = 0;
+    for (size_t i = 0; i < sheets.size(); i++)
+        for (const SpriteAnim& a : sheets[i].anims) {
+            const size_t us = a.name.rfind('_');
+            if (us != std::string::npos && us > 0) {
+                const std::string base = a.name.substr(0, us), suffix = a.name.substr(us + 1);
+                if (std::find(eight.begin(), eight.end(), suffix) != eight.end()) {
+                    if (!byBase.count(base)) bases.push_back(base);
+                    byBase[base].push_back({index, {i, suffix}});
+                }
+            }
+            index++;
+        }
+    for (const std::string& base : bases) {
+        const auto& got = byBase[base];
+        if (got.size() < 2) continue;  // one walk_n alone is just a name
+        bool eightWay = false;
+        for (const auto& g : got)
+            if (g.second.suffix.size() == 2) eightWay = true;
+        const int n = eightWay ? 8 : 4;
+        const std::vector<std::string>& want = spriteDirectionSuffixes(n);
+        std::vector<std::string> order;
+        bool consecutive = true, oneSheet = true;
+        for (size_t k = 0; k < got.size(); k++) {
+            order.push_back(got[k].second.suffix);
+            if (k && got[k].first != got[k - 1].first + 1) consecutive = false;
+            if (got[k].second.sheet != got[0].second.sheet) oneSheet = false;
+        }
+        std::string missing;
+        for (const std::string& s : want)
+            if (std::find(order.begin(), order.end(), s) == order.end()) missing += (missing.empty() ? "" : ", ") + base + "_" + s;
+        auto join = [&](const std::vector<std::string>& v) {
+            std::string o;
+            for (const std::string& s : v) o += (o.empty() ? "" : " ") + s;
+            return o;
+        };
+        const std::string call = "Sprite.SetFacingFromYaw(sprite, \"" + base + "_s\", " + std::to_string(n) + ", yaw)";
+        const std::string head = "sprite animations " + base + "_*: ";
+        if (!missing.empty())
+            warnings.push_back(head + "no " + missing + ", so " + call +
+                               " would play the wrong animation for some directions: add the missing ones");
+        else if (order.size() != want.size())
+            warnings.push_back(head + "a direction appears more than once, so " + call + " would play the wrong animation");
+        else if (order != want)
+            warnings.push_back(head + "listed in the order " + join(order) + ", so " + call +
+                               " would play the wrong animation: list them " + join(want));
+        else if (!consecutive)
+            warnings.push_back(head + "other animations sit between them in the table" +
+                               (oneSheet ? "" : " (they are split across sprite sheets)") + ", so " + call +
+                               " would play the wrong animation: keep them one after another in one sheet");
+        else if (!oneSheet)
+            warnings.push_back(head + "split across sprite sheets '" + sheets[got.front().second.sheet].name + "' and '" +
+                               sheets[got.back().second.sheet].name + "'. " + call +
+                               " works only while nothing is added between them: keep a set in one sheet");
+    }
 }
 
 std::string spriteSheetPageError(const std::string& name, int u0, int v0, int width, int height) {

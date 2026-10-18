@@ -285,6 +285,16 @@ struct SpriteTextureSize {
 void checkSpriteSheets(const std::vector<SpriteSheet>& sheets,
                        const std::function<SpriteTextureSize(const SpriteSheet&)>& sizeOf, std::vector<std::string>& errors,
                        std::vector<std::string>& warnings);
+// Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the animation d
+// places after walk_s in the table for direction d, d = 0 centred on yaw 0 and
+// counting the way yaw increases. A direction set is n = 4 or 8 animations
+// named base_<suffix> with these suffixes in this order, one after another in
+// one sheet; empty for any other n.
+const std::vector<std::string>& spriteDirectionSuffixes(int n);
+// Warnings (one line each, also part of checkSpriteSheets) for animations
+// named base_<suffix> with those suffixes that are not such a set: missing a
+// direction, out of order, or not one after another in the table.
+void checkSpriteDirectionSets(const std::vector<SpriteSheet>& sheets, std::vector<std::string>& warnings);
 // The check export runs once a sheet's texture is packed at texel u0, v0 of
 // its texture page: psxsplash steps through the cells with 8-bit texture
 // coordinates from there, so the whole width x height grid must lie inside the

@@ -4335,9 +4335,20 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
     // What is selected: UI state, not part of the scene or its undo.
     static int sel = 0, selAnim = 0;
     static unsigned seenLoad = ~0u;
+    // The Add direction set form: open or not, its fields, why Create refused.
+    static bool dirForm = false;
+    static editor::DirectionSetSpec dirSpec;
+    static std::string dirMsg;
+    static int dirFormSheet = -1;
     if (seenLoad != doc.loadId()) {
         seenLoad = doc.loadId();
         sel = selAnim = 0;
+        dirForm = false;
+    }
+    if (dirFormSheet != sel) {
+        dirFormSheet = sel;
+        dirForm = false;
+        dirMsg.clear();
     }
     sel = sheets.empty() ? -1 : std::clamp(sel, 0, int(sheets.size()) - 1);
 
@@ -4563,7 +4574,75 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 const int at = editor::addSpriteAnim(doc, sel, g.cells());
                 if (at >= 0) selAnim = at;
             }
+            float dw = 0;
+            if (button("scene.spritedirset", ImVec2(x0 + space::sm + bw + space::sm, y + 2), icon::plus, "Add direction set",
+                       dirForm ? ButtonKind::Primary : ButtonKind::Secondary, &dw,
+                       "4 or 8 animations, one per direction, for Sprite.SetFacingFromYaw to pick from by yaw.")) {
+                dirForm = !dirForm;
+                dirMsg.clear();
+                if (dirForm) dirSpec = editor::defaultDirectionSet(s, 8, g.whole ? g.cols : 0, g.whole ? g.rows : 0);
+            }
             y += size::field + 6 + space::sm;
+        }
+        if (dirForm) {
+            // The set's fields, then Create: nothing changes until then.
+            const float top = y;
+            y += space::xs;
+            const ImRect bRow = row("ldirbase", "Base name", "The animations are named base_s, base_w and so on (Sprite.PlayAnim).");
+            nameRect("scene.dirsetbase", bRow);
+            std::string typedBase;
+            if (textField("dirsetbase", bRow, dirSpec.base, &typedBase, "walk", 21)) dirSpec.base = typedBase;
+            const ImRect cRow = row("ldircount", "Directions", "4: s w n e. 8: s sw w nw n ne e se. In the order yaw increases from 0.");
+            nameRect("scene.dirsetcount", cRow);
+            static const char* const counts[2] = {"4 directions", "8 directions"};
+            const int cp = dropdownMenu("scene.dirsetcount", cRow, nullptr, counts[dirSpec.directions == 4 ? 0 : 1],
+                                        {counts[0], counts[1]}, dirSpec.directions == 4 ? 0 : 1);
+            if (cp >= 0) dirSpec.directions = cp == 0 ? 4 : 8;
+            auto formInt = [&](const char* lid, const char* label, const char* tip, const char* id, int& value, const char* unit,
+                               int lo, int hi) {
+                const ImRect rr = row(lid, label, tip);
+                nameRect(std::string("scene.") + id, rr);
+                float v = float(value);
+                if (numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v).changed)
+                    value = std::clamp(int(std::lround(v)), lo, hi);
+            };
+            formInt("ldirframes", "Frames", "Cells each direction plays, one after another.", "dirsetframes", dirSpec.framesPerDirection,
+                    "each", 1, 255);
+            formInt("ldirfirst", "First cell", "Where the first direction (s) starts; each next one starts where the last ended.",
+                    "dirsetfirst", dirSpec.firstCell, nullptr, 0, 254);
+            formInt("ldirdur", "Frame time", "How long each cell shows, in vsyncs (60 a second).", "dirsetdur", dirSpec.frameDuration,
+                    "vsyncs", 1, 255);
+            const ImRect lr = row("ldirloop", "Loop", "On: each direction starts again after its last cell.");
+            const ImRect sw(ImVec2(lr.Min.x, lr.GetCenter().y - 8), ImVec2(lr.Min.x + 30, lr.GetCenter().y + 8));
+            nameRect("scene.dirsetloop", sw);
+            if (toggle("dirsetloop", sw, dirSpec.loop)) dirSpec.loop = !dirSpec.loop;
+            {
+                const std::vector<std::string>& suf = splash::spriteDirectionSuffixes(dirSpec.directions);
+                const int last = dirSpec.firstCell + dirSpec.directions * dirSpec.framesPerDirection - 1;
+                caption(dirSpec.base + "_" + suf.front() + " .. " + dirSpec.base + "_" + suf.back() + " on cells " +
+                            std::to_string(dirSpec.firstCell) + ".." + std::to_string(last) + (g.whole ? " of " + std::to_string(g.cells()) : ""),
+                        g.whole && last >= g.cells() ? color::warn : color::textFaint);
+            }
+            float cw = 0;
+            if (button("scene.dirsetcreate", ImVec2(x0 + space::sm + lw, y + 2), icon::plus, "Create", ButtonKind::Primary, &cw)) {
+                const int at = editor::addDirectionSet(doc, sel, dirSpec, g.whole ? g.cells() : 0, &dirMsg);
+                if (at >= 0) {
+                    selAnim = at;
+                    dirForm = false;
+                }
+            }
+            if (button("scene.dirsetcancel", ImVec2(x0 + space::sm + lw + cw + space::sm, y + 2), nullptr, "Cancel", ButtonKind::Ghost)) {
+                dirForm = false;
+                dirMsg.clear();
+            }
+            y += size::field + 6 + space::sm;
+            if (!dirMsg.empty()) {
+                const float my = y;
+                caption(dirMsg, color::bad);
+                nameRect("scene.dirsetmsg", ImRect(ImVec2(x0 + space::sm + lw, my - 2), ImVec2(x1 - space::sm, y)));
+            }
+            dl->AddRect(ImVec2(x0 + space::sm - 4, top), ImVec2(x1 - space::sm + 4, y), rgb(0xffffff, 18), radius::field);
+            y += space::sm;
         }
 
         const splash::SpriteSheet& cur = doc.scene().spriteSheets[size_t(sel)];
@@ -4611,6 +4690,95 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
             const ImRect sw(ImVec2(lr.Min.x, lr.GetCenter().y - 8), ImVec2(lr.Min.x + 30, lr.GetCenter().y + 8));
             nameRect("scene.animloop", sw);
             if (toggle("animloop", sw, a.loop)) editAnim([](splash::SpriteAnim& e) { e.loop = !e.loop; });
+
+            // In a direction set: which yaws play it, on a dial, and the Lua that turns the sprite.
+            const std::vector<editor::DirectionSet> dirSets = editor::directionSets(cur);
+            if (const editor::DirectionSet* ds = editor::directionSetOf(dirSets, selAnim)) {
+                const int n = ds->count, d = selAnim - ds->first;
+                const std::vector<std::string>& suf = splash::spriteDirectionSuffixes(n);
+                const ImRect fr = row("lanimfacing", "Facing",
+                                      "Sprite.SetFacingFromYaw plays this animation while yaw is in its sector. Yaw is in pi-units "
+                                      "like Entity.SetRotationY: 0.5 is a quarter turn. Click a sector to select its animation.");
+                const float dial = 112, R = dial * 0.5f - 2, r0 = 16;
+                const ImVec2 c(fr.Min.x + dial * 0.5f, fr.Min.y + dial * 0.5f);
+                const ImRect dialRect(ImVec2(c.x - R, c.y - R), ImVec2(c.x + R, c.y + R));
+                nameRect("scene.dirdial", dialRect);
+                // Sector k is centred on yaw 2k/n; it is drawn with s at the bottom and
+                // the directions going round clockwise, like a compass seen from above.
+                const float pi = 3.14159265f, span = 2 * pi / n;
+                auto angleOf = [&](int k) { return pi * 0.5f + k * span; };
+                int clickedDir = -1;
+                for (int k = 0; k < n; k++) {
+                    const float a0 = angleOf(k) - span * 0.5f, a1 = angleOf(k) + span * 0.5f;
+                    const int steps = std::max(4, int(std::ceil((a1 - a0) / 0.08f)));
+                    const ImVec2 mid = c + ImVec2(std::cos(angleOf(k)), std::sin(angleOf(k))) * ((R + r0) * 0.5f);
+                    const ImRect hitR(mid - ImVec2(14, 12), mid + ImVec2(14, 12));
+                    ImGui::PushID(2000 + k);
+                    Hit h = interact("dirsector", hitR);
+                    ImGui::PopID();
+                    nameRect("scene.dirdial." + suf[size_t(k)], hitR);
+                    if (h.clicked) clickedDir = k;
+                    const ImU32 fill = k == d ? color::accent : h.hover > 0 ? color::hover : color::field;
+                    // Not anti-aliased: the quads share edges, and fringes there show as seams.
+                    const ImDrawListFlags aaFlags = dl->Flags;
+                    dl->Flags &= ~ImDrawListFlags_AntiAliasedFill;
+                    for (int st = 0; st < steps; st++) {
+                        const float t0 = a0 + (a1 - a0) * st / steps, t1 = a0 + (a1 - a0) * (st + 1) / steps;
+                        const ImVec2 u0(std::cos(t0), std::sin(t0)), u1(std::cos(t1), std::sin(t1));
+                        dl->AddQuadFilled(c + u0 * r0, c + u0 * R, c + u1 * R, c + u1 * r0, fill);
+                    }
+                    dl->Flags = aaFlags;
+                    const ImVec2 e0(std::cos(a0), std::sin(a0));
+                    dl->AddLine(c + e0 * r0, c + e0 * R, color::panel, 2.0f);
+                    const ImVec2 ts = measure(f.medium, type::caption, suf[size_t(k)].c_str());
+                    text(dl, mid - ts * 0.5f, f.medium, type::caption, k == d ? color::text : color::textDim, suf[size_t(k)].c_str());
+                }
+                dl->AddCircle(c, R, color::border, 48, 1.0f);
+                dl->AddCircle(c, r0, color::border, 24, 1.0f);
+                if (clickedDir >= 0 && clickedDir != d) selAnim = ds->first + clickedDir;
+                y = fr.Min.y + dial + space::xs;
+
+                // Under the dial: the yaws that play this direction, then the Lua line.
+                auto yawStr = [](double v) {
+                    char b[24];
+                    std::snprintf(b, sizeof b, "%g", std::round(v * 1000) / 1000);
+                    return std::string(b);
+                };
+                const double centre = 2.0 * d / n, half = 1.0 / n;
+                char t[200];
+                std::snprintf(t, sizeof t, "Direction %d of %d: yaw %s (%d\xc2\xb0), from %s to %s.", d + 1, n, yawStr(centre).c_str(),
+                              int(std::lround(centre * 180)), yawStr(centre - half).c_str(), yawStr(centre + half).c_str());
+                caption(t, color::textDim);
+                caption("Yaw 0 plays " + ds->base + "_s; as yaw grows it goes round the dial clockwise.", color::textFaint);
+
+                // The Lua line in a well (wrapped when narrow), Copy beside it.
+                const std::string lua = editor::facingLuaLine(*ds);
+                ImFont* mono = f.mono ? f.mono : f.regular;
+                const float wellX0 = x0 + space::sm, wellX1 = x1 - space::sm - 32;
+                const float wrap = wellX1 - wellX0 - 2 * space::sm;
+                // Too wide for the well: broken after the sprite argument, the rest indented (Copy keeps one line).
+                std::string shown = lua;
+                if (mono->CalcTextSizeA(type::caption, FLT_MAX, 0, lua.c_str()).x > wrap) {
+                    const size_t comma = lua.find(", ");
+                    if (comma != std::string::npos) shown = lua.substr(0, comma + 1) + "\n    " + lua.substr(comma + 2);
+                }
+                const float textH = mono->CalcTextSizeA(type::caption, FLT_MAX, wrap, shown.c_str()).y;
+                const ImRect well(ImVec2(wellX0, y), ImVec2(wellX1, y + std::max(size::field, textH + 12)));
+                const ImRect copyR(ImVec2(well.Max.x + 4, y), ImVec2(x1 - space::sm, y + size::field));
+                dl->AddRectFilled(well.Min, well.Max, color::field, radius::field);
+                nameRect("scene.dirsetlua", well);
+                dl->AddText(mono, type::caption, ImVec2(well.Min.x + space::sm, well.Min.y + (well.GetHeight() - textH) * 0.5f),
+                            theme::code::api, shown.c_str(), nullptr, wrap);
+                nameRect("scene.dirsetcopy", copyR);
+                if (iconButton("dirsetcopy", copyR, icon::copy, false, "Copy this line")) {
+                    ImGui::SetClipboardText(lua.c_str());
+                    if (namedRectsOn()) {
+                        const char* back = ImGui::GetClipboardText();
+                        scriptLine("dirsetcopy", std::string("scene: sprite copied ") + (back ? back : "(nothing)"));
+                    }
+                }
+                y = well.Max.y + space::sm;
+            }
 
             // Preview: the sheet with its grid and this animation's cells, and
             // the cell psxsplash would show now, from the converted texture.
@@ -4743,6 +4911,25 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
         std::string probs;
         for (const std::string& e : errors) probs += (probs.empty() ? "" : " | ") + e;
         scriptLine("spriteproblems", "scene: sprite problems " + (probs.empty() ? std::string("none") : probs));
+        std::string warns;
+        for (const std::string& e : warnings) warns += (warns.empty() ? "" : " | ") + e;
+        scriptLine("spritewarnings", "scene: sprite warnings " + (warns.empty() ? std::string("none") : warns));
+        // Direction sets the selected sheet's dial would show for, and the facing on it.
+        std::string sets = "scene: sprite dirsets";
+        std::string facing = "scene: sprite facing none";
+        if (sel >= 0 && sel < int(sheets.size())) {
+            const std::vector<editor::DirectionSet> ds = editor::directionSets(sheets[size_t(sel)]);
+            for (const editor::DirectionSet& d : ds) sets += " " + d.base + ":" + std::to_string(d.count) + "@" + std::to_string(d.first);
+            if (const editor::DirectionSet* d = editor::directionSetOf(ds, selAnim))
+                facing = "scene: sprite facing " + sheets[size_t(sel)].anims[size_t(selAnim)].name + " " +
+                         std::to_string(selAnim - d->first + 1) + "/" + std::to_string(d->count);
+            if (ds.empty()) sets += " none";
+        } else {
+            sets += " none";
+        }
+        scriptLine("spritedirsets", sets);
+        scriptLine("spritefacing", facing);
+        scriptLine("spritedirmsg", "scene: sprite dirset message " + (dirMsg.empty() ? std::string("none") : dirMsg));
         scriptLine("spritepreview", "scene: sprite preview " + previewLine);
     }
 

@@ -164,7 +164,9 @@ CLUT padding (half the pixels exact, half one dither step off). Against the wron
 ## Load and save
 
 `roundtrip.py` resaves scene and mesh files with `splashpack-cli resave` and checks that known values
-and unknown keys survive. Bad versions and malformed mesh arrays must fail to load.
+and unknown keys survive. Bad versions and malformed mesh arrays must fail to load. Sprite sheets
+come back with their defaults filled in and their unknown keys, and a scene without them writes no
+`spriteSheets` key.
 
     python3 roundtrip.py <splashpack-cli>
 
@@ -326,6 +328,34 @@ also checks the defaults, a 32-character title, the refused values (a 33-charact
 a 32x32 icon, a missing icon) and that `resave` keeps the fields and leaves defaults out.
 
     python3 memcardcheck.py <splashpack-cli>
+
+## Sprite sheets
+
+`spritecheck.py` exports `sprite/sprite.scene` (two sheets made by `sprite/make_sheets.py`: `hero`
+at 4 bpp in 16x16 cells, `fx` at 8 bpp in 12x8 cells; three animations) and reads the sprite table
+back the way psxsplash's `SpriteSystem` does: the header words at 128 (offset, 4-aligned), 132
+(sheets) and 134 (animations), the 20-byte sheet and 12-byte animation records in scene order and
+the NUL-terminated names after them. Each sheet's texture page, u0/v0 and CLUT must match its
+texture's VRAM placement (packed with cutout on), and every frame of every animation, fetched with
+the engine's `frameToUV` from the `.vram` file through the sheet's CLUT, must be that cell of the
+source PNG. A scene without sheets leaves the three words 0. Export refuses 17 sheets, 65
+animations, an empty or repeated sheet name, no or a missing texture, a texture that is not a whole
+number of cells, a cell side over 255, more than 255 cells, an animation outside the sheet, 0
+frames, 0 vsyncs a frame and one animation name on two sheets (`Sprite.AnimIndex` searches every
+sheet). With `--stats`:
+
+    sprites sheets=N anims=M bytes=B
+    sprite sheet bpp=4|8|16 cell=WxH grid=CxR anims=K <sheet>
+
+`B` is the table from its first sheet record through the last name's NUL (20 N + 12 M + names);
+`grid` is the texture's columns x rows of cells. A scene without sheets prints neither.
+
+    python3 spritecheck.py <splashpack-cli>
+
+Booted on psxsplash (pcdrv, e.g. psxsplash's `tests/boot/boot.sh` on the exported `scene_0.*` with
+token `SPRITE OK`), `sprite/sprite.lua` looks both sheets and the three animations up by name,
+expects the indices the table gives them, makes a sprite from each sheet, plays an animation on each
+and prints `SPRITE OK` when `Sprite.Count()` is 2, else `SPRITE FAIL` and `BOOT FAIL`.
 
 ## UI
 
@@ -496,6 +526,19 @@ write no `memCard`, and one Ctrl+Z must take the title back and leave saves on. 
 sections above and clicks the controls by name (`--click @s_render`, `@scene.mcenable`). Needs a display.
 
     python3 memcardeditcheck.py <splashedit>
+
+`spritesheetcheck.py` drives the scene inspector's Sprite sheets section (its last) on copies of the
+courtyard example with `sprite/hero.png` added to its textures: Add sheet picks the image and makes
+sheet `hero` (4 bpp, 16x16 cells, one `idle` animation); a typed cell width, an added animation and
+its typed frames and frame time land in the saved scene's `spriteSheets` and in the section's
+`scene: sprite <i> <name> texture ... cell WxH grid CxR anims <name>:<first>+<count>@<vsyncs>[L]`
+line. Each of those edits goes back in one Ctrl+Z (Add sheet's too, leaving no `spriteSheets` key).
+The preview's `scene: sprite preview <sheet>/<anim> cell N` lines after the last edit must step through 1, 2, 3 and
+wrap; a 24 px cell on the 64 px texture must show in `scene: sprite problems` and fail the live
+export; the sheet's trash deletes it. Controls are checked to be on screen. A second argument saves
+the screenshot of the edited section.
+
+    python3 spritesheetcheck.py <splashedit> [shot.png]
 
 `scenefogcheck.py` drives the scene inspector's Rendering section on copies of the courtyard example:
 the Fog switch, Density typed (and clamped to 10), GTE scaling typed, Scene type picked from its

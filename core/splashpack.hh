@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -205,6 +206,19 @@ struct ExportStats {
     std::vector<RoomSummary> rooms;  // real rooms in room order; the catch-all is not listed
     int roomCatchAllTris = 0, roomPortals = 0;
     size_t roomBlockOffset = 0;  // byte offset of the room block in the splashpack, 0 = none
+
+    // Sprite sheets in scene (table) order; empty when the scene has none.
+    struct SpriteSheetInfo {
+        std::string name;
+        int bitDepth = 4;
+        int cellW = 0, cellH = 0, cols = 0, rows = 0;
+        int anims = 0;
+    };
+    std::vector<SpriteSheetInfo> spriteSheets;
+    int spriteAnims = 0;
+    // The sprite table from its first sheet record through the last name's NUL.
+    size_t spriteTableBytes = 0;
+
     size_t streamPoolBytes() const { return size_t(streamSlots) * streamSlotBytes; }
     // Negative when streaming costs more RAM than it frees.
     long long streamRamSaved() const {
@@ -247,6 +261,28 @@ inline bool navCoarsened(const ExportStats& s) { return s.navCellSize > s.navCel
 // each saying how to fix it, for the inspector to show as they are typed. Only
 // checks an enabled config, and not the icon files (export loads those).
 void checkMemCard(const MemCardSettings& mc, std::vector<std::string>& errors, std::vector<std::string>& warnings);
+
+// psxsplash's sprite pools (SPRITE_MAX_SHEETS, SPRITE_MAX_ANIMS).
+constexpr int kMaxSpriteSheets = 16, kMaxSpriteAnims = 64;
+// A sprite sheet texture's size in texels, or nullopt with `error` set when
+// it cannot be read (no texture, missing file).
+struct SpriteTextureSize {
+    int width = 0, height = 0;
+    std::string error;  // non-empty: the size is unknown
+};
+// Problems with the scene's sprite sheets that export refuses, one line each
+// saying how to fix it, before VRAM packing (the texture-page check needs the
+// packed position and is export's alone). `sizeOf` gives each sheet's
+// texture size. Also used by the inspector to show them as they are typed.
+void checkSpriteSheets(const std::vector<SpriteSheet>& sheets,
+                       const std::function<SpriteTextureSize(const SpriteSheet&)>& sizeOf, std::vector<std::string>& errors,
+                       std::vector<std::string>& warnings);
+// The check export runs once a sheet's texture is packed at texel u0, v0 of
+// its texture page: psxsplash steps through the cells with 8-bit texture
+// coordinates from there, so the whole width x height grid must lie inside the
+// page's 256 x 256. Empty when it does. (The packer's atlases are one page
+// wide and tall, so today this only guards against a packer change.)
+std::string spriteSheetPageError(const std::string& name, int u0, int v0, int width, int height);
 
 // One agent as the splashpack stores it: the 28-byte SPLASHPACKAgentV2
 // record and its waypoints (fp12 x, -y, z: Y down like every engine position,

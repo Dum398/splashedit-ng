@@ -120,6 +120,7 @@ void visitScenePaths(SceneT& scene, Fn fn) {
         fn("UI font", std::string(), none, f.source);
         fn("UI font", std::string(), none, f.bitmap);
     }
+    for (auto& s : scene.spriteSheets) fn("Sprite sheet", s.name, none, s.texture);
     for (auto& c : scene.canvases)
         for (auto& e : c.elements) fn("UI image", c.name + "/" + e.name, none, e.texture);
     std::vector<int> path;

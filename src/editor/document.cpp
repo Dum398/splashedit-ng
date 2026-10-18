@@ -324,6 +324,24 @@ private:
     std::string m_key;
 };
 
+class SpriteSheetsCommand : public Command {
+public:
+    SpriteSheetsCommand(std::vector<splash::SpriteSheet> before, std::vector<splash::SpriteSheet> after, std::string key)
+        : m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)) {}
+    void apply(Document& doc) override { doc.sceneMut().spriteSheets = m_after; }
+    void revert(Document& doc) override { doc.sceneMut().spriteSheets = m_before; }
+    bool merge(const Command& next) override {
+        auto* n = dynamic_cast<const SpriteSheetsCommand*>(&next);
+        if (!n || m_key.empty() || n->m_key != m_key) return false;
+        m_after = n->m_after;
+        return true;
+    }
+
+private:
+    std::vector<splash::SpriteSheet> m_before, m_after;
+    std::string m_key;
+};
+
 // Inserts (forward) or removes (inverse) one object with its subtree.
 class StructureCommand : public Command {
 public:
@@ -580,6 +598,14 @@ void Document::editSettings(const std::function<void(splash::SceneSettings&)>& f
     splash::SceneSettings after = m_scene.settings;
     fn(after);
     execute(std::make_unique<SettingsCommand>(m_scene.settings, std::move(after), mergeKey), !mergeKey.empty());
+}
+
+bool Document::editSpriteSheets(const std::function<void(std::vector<splash::SpriteSheet>&)>& fn, const std::string& mergeKey) {
+    std::vector<splash::SpriteSheet> after = m_scene.spriteSheets;
+    fn(after);
+    if (after == m_scene.spriteSheets) return false;
+    execute(std::make_unique<SpriteSheetsCommand>(m_scene.spriteSheets, std::move(after), mergeKey), !mergeKey.empty());
+    return true;
 }
 
 bool Document::insertObject(const ObjectPath& path, splash::Object obj) {

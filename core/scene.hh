@@ -370,6 +370,30 @@ struct UICanvas {
     ExtraKeys extra;
 };
 
+// A sprite sheet: one texture cut into a grid of cellW x cellH cells,
+// numbered row by row from the top left, and the animations that play runs
+// of those cells. The splashpack carries only sheets and animations;
+// psxsplash's sprites are made from Lua (Sprite.Create) and refer to them by name.
+struct SpriteAnim {
+    std::string name = "idle";  // looked up across every sheet, so unique in the scene
+    int firstFrame = 0;         // absolute cell index in the sheet
+    int frameCount = 1;
+    int frameDuration = 6;  // vsyncs (1/60 s) each cell shows
+    bool loop = true;
+    ExtraKeys extra;
+    bool operator==(const SpriteAnim&) const = default;
+};
+
+struct SpriteSheet {
+    std::string name;
+    std::string texture;  // project-relative image
+    BitDepth bitDepth = BitDepth::Bpp4;
+    int cellW = 16, cellH = 16;
+    std::vector<SpriteAnim> anims;
+    ExtraKeys extra;
+    bool operator==(const SpriteSheet&) const = default;
+};
+
 // The font a text element draws with: its own when it names one, else its
 // canvas's default font; empty means the system font.
 const std::string& effectiveFont(const UICanvas& canvas, const UIElement& e);
@@ -445,6 +469,7 @@ struct Scene {
     SceneSettings settings;
     std::vector<Object> objects;
     std::vector<UIFont> fonts;
+    std::vector<SpriteSheet> spriteSheets;
     std::vector<UICanvas> canvases;
     std::vector<Cutscene> cutscenes;
     std::vector<Animation> animations;

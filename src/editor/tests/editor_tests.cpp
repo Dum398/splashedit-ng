@@ -37,6 +37,7 @@
 #include "editor/log_view.hh"
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
+#include "editor/sprites.hh"
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
@@ -10431,6 +10432,222 @@ void testMeshAlpha() {
     }
 }
 
+// Sprite sheets: the scene JSON round trip, the exact sprite table of the
+// tests/sprite fixture (2 sheets, 3 animations), each error export refuses
+// with, and the inspector's edits as undo steps.
+void testSpriteSheets() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "sprites";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "tests" / "sprite", project, fs::copy_options::recursive);
+    splash::Scene scene = splash::loadScene(project / "sprite.scene");
+    for (splash::Object& o : scene.objects)
+        if (o.mesh) {
+            o.mesh->mesh = (src / "examples" / "courtyard" / "meshes" / "crate.mesh").string();
+            for (splash::Material& m : o.mesh->materials) m.texture = (src / "examples" / "courtyard" / "textures" / "crate.png").string();
+        }
+    CHECK(scene.spriteSheets.size() == 2 && scene.spriteSheets[0].anims.size() == 2 && scene.spriteSheets[1].anims.size() == 1);
+
+    // JSON: what was read comes back, a second save is byte for byte the
+    // first, and a scene without sheets writes no spriteSheets key.
+    {
+        splash::Scene s = scene;
+        s.spriteSheets[1].anims[0].extra.push_back({"futureAnim", "7"});
+        splash::saveScene(s, project / "rt1.scene");
+        splash::Scene back = splash::loadScene(project / "rt1.scene");
+        CHECK(back.spriteSheets == s.spriteSheets);
+        splash::saveScene(back, project / "rt2.scene");
+        CHECK(readAll(project / "rt1.scene") == readAll(project / "rt2.scene"));
+        s.spriteSheets.clear();
+        splash::saveScene(s, project / "rt3.scene");
+        CHECK(readAll(project / "rt3.scene").find("spriteSheets") == std::string::npos);
+        CHECK(splash::loadScene(project / "rt3.scene").spriteSheets.empty());
+    }
+
+    // The table, byte for byte.
+    splash::ExportResult r = splash::exportSplashpack(scene, project, project / "s.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "sprite export: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string b = readAll(project / "s.splashpack");
+    if (b.size() > 136 && r.ok()) {
+        const size_t off = size_t(rd32(b, 128));
+        CHECK(off % 4 == 0 && off > 136 && rd16(b, 132) == 2 && rd16(b, 134) == 3);
+        auto placed = [&](const char* file) {
+            for (const auto& t : r.stats.textures)
+                if (fs::path(t.source).filename() == file) return t;
+            CHECK(!"sprite texture placed");
+            return splash::ExportStats::TexturePlacement{};
+        };
+        const auto hero = placed("hero.png"), fx = placed("fx.png");
+        CHECK(hero.cutout && fx.cutout && hero.bitDepth == 4 && fx.bitDepth == 8);
+        std::string want;
+        auto u8 = [&](int v) { want += char(uint8_t(v)); };
+        auto u16 = [&](int v) { u8(v & 255), u8((v >> 8) & 255); };
+        auto u32 = [&](size_t v) { u16(int(v & 0xffff)), u16(int(v >> 16)); };
+        const size_t names = off + 2 * 20 + 3 * 12;
+        // name offset, texpage x/y, u0, v0, clut x (16-word units)/y, cell, grid, bpp index, pads
+        u32(names), u8(hero.x / 64), u8(hero.y / 256), u8((hero.x % 64) * 4), u8(hero.y % 256), u16(hero.clutX / 16),
+            u16(hero.clutY), u8(16), u8(16), u8(4), u8(2), u8(0), u8(0), u16(0);
+        u32(names + 5), u8(fx.x / 64), u8(fx.y / 256), u8((fx.x % 64) * 2), u8(fx.y % 256), u16(fx.clutX / 16), u16(fx.clutY),
+            u8(12), u8(8), u8(4), u8(2), u8(1), u8(0), u16(0);
+        // name offset, sheet, first cell, frames, vsyncs, loop, pads
+        u32(names + 8), u8(0), u8(0), u8(4), u8(8), u8(1), u8(0), u16(0);
+        u32(names + 13), u8(0), u8(4), u8(4), u8(4), u8(0), u8(0), u16(0);
+        u32(names + 18), u8(1), u8(2), u8(5), u8(3), u8(1), u8(0), u16(0);
+        want += std::string("hero\0fx\0walk\0jump\0spark\0", 24);
+        CHECK(b.size() >= off + want.size() && b.compare(off, want.size(), want) == 0);
+        CHECK(r.stats.spriteTableBytes == 100 && r.stats.spriteAnims == 3 && r.stats.spriteSheets.size() == 2);
+        if (r.stats.spriteSheets.size() == 2) {
+            const auto& s0 = r.stats.spriteSheets[0];
+            CHECK(s0.name == "hero" && s0.bitDepth == 4 && s0.cellW == 16 && s0.cols == 4 && s0.rows == 2 && s0.anims == 2);
+        }
+    }
+    // Without sheets the header words stay zero.
+    {
+        splash::Scene none = scene;
+        none.spriteSheets.clear();
+        splash::ExportResult nr = splash::exportSplashpack(none, project, project / "none.splashpack");
+        const std::string nb = readAll(project / "none.splashpack");
+        CHECK(nr.ok() && nb.size() > 136 && rd32(nb, 128) == 0 && rd16(nb, 132) == 0 && rd16(nb, 134) == 0);
+        CHECK(nr.stats.spriteSheets.empty() && nr.stats.spriteTableBytes == 0);
+    }
+
+    // Each error, from the check export and the inspector share.
+    auto problems = [&](const std::function<void(std::vector<splash::SpriteSheet>&)>& edit) {
+        std::vector<splash::SpriteSheet> sh = scene.spriteSheets;
+        edit(sh);
+        std::vector<std::string> errors, warnings;
+        splash::checkSpriteSheets(
+            sh,
+            [](const splash::SpriteSheet& s) -> splash::SpriteTextureSize {
+                if (s.texture == "hero.png") return {64, 32, {}};
+                if (s.texture == "fx.png") return {48, 16, {}};
+                return {0, 0, "cannot load image " + s.texture};
+            },
+            errors, warnings);
+        std::string all;
+        for (const std::string& e : errors) all += e + "\n";
+        return all;
+    };
+    CHECK(problems([](auto&) {}).empty());
+    CHECK(problems([](auto& sh) {
+              for (int i = 0; i < 15; i++) {
+                  splash::SpriteSheet c = sh[1];
+                  c.name = "s" + std::to_string(i);
+                  c.anims.clear();
+                  sh.push_back(c);
+              }
+          }).find("17 sprite sheets") != std::string::npos);
+    CHECK(problems([](auto& sh) {
+              for (int i = 0; i < 62; i++) {
+                  splash::SpriteAnim c;
+                  c.name = "a" + std::to_string(i);
+                  sh[1].anims.push_back(c);
+              }
+          }).find("65 sprite animations") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].name.clear(); }).find("sprite sheet 2 has no name") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].name = "hero"; }).find("two sprite sheets are named 'hero'") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].texture.clear(); }).find("'fx' has no texture") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].texture = "gone.png"; }).find("'fx': cannot load image gone.png") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[0].cellW = 12; }).find("64x32, not a whole number of 12x16 cells") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[0].cellH = 256; }).find("each side must be 1..255") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[0].cellW = 0; }).find("each side must be 1..255") != std::string::npos);
+    CHECK(problems([](auto& sh) {
+              sh[0].cellW = sh[0].cellH = 2;
+              sh[0].anims.clear();
+          }).find("32x16 = 512 cells") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].anims[0].firstFrame = 6; }).find("cells 6..10 are outside the sheet's 8 cells") !=
+          std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].anims[0].firstFrame = -1; }).find("are outside the sheet") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].anims[0].frameCount = 0; }).find("0 frames, it needs at least 1") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].anims[0].frameDuration = 0; }).find("lasts 0 vsyncs, it must be 1..255") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].anims[0].frameDuration = 256; }).find("it must be 1..255") != std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].anims[0].name = "jump"; }).find("two sprite animations are named 'jump'") !=
+          std::string::npos);
+    CHECK(problems([](auto& sh) { sh[0].anims[1].name = "walk"; }).find("two sprite animations are named 'walk'") !=
+          std::string::npos);
+    CHECK(problems([](auto& sh) { sh[1].anims[0].name.clear(); }).find("animation 1 has no name") != std::string::npos);
+    // The texture page: inside, and past its right and bottom edges.
+    CHECK(splash::spriteSheetPageError("p", 192, 224, 64, 32).empty());
+    CHECK(splash::spriteSheetPageError("p", 224, 0, 64, 32).find("run past the page") != std::string::npos);
+    CHECK(splash::spriteSheetPageError("p", 0, 240, 64, 32).find("packed at 0,240") != std::string::npos);
+    // Through export: refused, nothing written.
+    {
+        splash::Scene bad = scene;
+        bad.spriteSheets[1].anims[0].name = "walk";
+        fs::remove(project / "bad.splashpack");
+        splash::ExportResult br = splash::exportSplashpack(bad, project, project / "bad.splashpack");
+        CHECK(!br.ok() && hasError(br, "two sprite animations are named 'walk'"));
+        bad = scene;
+        bad.spriteSheets[0].texture = "missing.png";
+        br = splash::exportSplashpack(bad, project, project / "bad.splashpack");
+        CHECK(!br.ok() && hasError(br, "sprite sheet 'hero'") && hasError(br, "missing.png"));
+    }
+
+    // The inspector's edits, each one undo step.
+    {
+        editor::Document d;
+        d.reset(scene, project);
+        CHECK(editor::uniqueSpriteSheetName(d.scene().spriteSheets, "hero") == "hero (2)");
+        CHECK(editor::uniqueSpriteAnimName(d.scene().spriteSheets, "spark") == "spark (2)");
+        CHECK(editor::uniqueSpriteAnimName(d.scene().spriteSheets, "idle") == "idle");
+        const size_t h0 = d.historySize();
+        CHECK(editor::addSpriteSheet(d, "art/hero.png") == 2);
+        const splash::SpriteSheet& added = d.scene().spriteSheets[2];
+        CHECK(added.name == "hero (2)" && added.texture == "art/hero.png" && added.bitDepth == splash::BitDepth::Bpp4 &&
+              added.cellW == 16 && added.cellH == 16 && added.anims.size() == 1 && added.anims[0].name == "idle" &&
+              added.anims[0].frameDuration == 6 && added.anims[0].loop);
+        CHECK(d.historySize() == h0 + 1);
+        // A second sheet's default animation is still unique scene-wide.
+        CHECK(editor::addSpriteSheet(d, "fx.png") == 3 && d.scene().spriteSheets[3].name == "fx (2)" &&
+              d.scene().spriteSheets[3].anims[0].name == "idle (2)");
+        CHECK(d.undo() && d.scene().spriteSheets.size() == 3);
+        // A typed cell size merges into one step under one key.
+        CHECK(editor::editSpriteSheet(d, 2, [](splash::SpriteSheet& s) { s.cellW = 8; }, "cell"));
+        CHECK(editor::editSpriteSheet(d, 2, [](splash::SpriteSheet& s) { s.cellW = 32; }, "cell"));
+        d.endMerge();
+        CHECK(d.scene().spriteSheets[2].cellW == 32 && d.historySize() == h0 + 2);
+        CHECK(!editor::editSpriteSheet(d, 2, [](splash::SpriteSheet& s) { s.cellW = 32; }));  // no change, no step
+        CHECK(d.historySize() == h0 + 2);
+        CHECK(editor::addSpriteAnim(d, 0, 8) == 2 && d.scene().spriteSheets[0].anims[2].name == "anim" &&
+              d.scene().spriteSheets[0].anims[2].firstFrame == 0);  // walk 0..3 and jump 4..7 fill the 8 cells: wraps to 0
+        CHECK(editor::addSpriteAnim(d, 1, 8) == 1 && d.scene().spriteSheets[1].anims[1].name == "anim (2)" &&
+              d.scene().spriteSheets[1].anims[1].firstFrame == 7);  // after spark 2..6
+        CHECK(editor::deleteSpriteAnim(d, 0, 0) && d.scene().spriteSheets[0].anims[0].name == "jump");
+        CHECK(d.undo() && d.scene().spriteSheets[0].anims[0].name == "walk");
+        CHECK(editor::deleteSpriteSheet(d, 0) && d.scene().spriteSheets[0].name == "fx");
+        CHECK(d.undo() && d.scene().spriteSheets[0].name == "hero" && d.redo() && d.scene().spriteSheets[0].name == "fx");
+        CHECK(!editor::deleteSpriteSheet(d, 9) && !editor::deleteSpriteAnim(d, 0, 9) && editor::addSpriteAnim(d, 9, 0) == -1);
+        while (d.undo()) {
+        }
+        CHECK(d.scene().spriteSheets == scene.spriteSheets);
+        // At 16 sheets Add refuses.
+        d.editSpriteSheets([](std::vector<splash::SpriteSheet>& sh) { sh.resize(16); });
+        CHECK(editor::addSpriteSheet(d, "x.png") == -1 && d.scene().spriteSheets.size() == 16);
+    }
+
+    // Grid readout and the preview's frame timing (spritemath::advanceAnim).
+    {
+        splash::SpriteSheet s;
+        editor::SpriteGrid g = editor::spriteGrid(s, 64, 32);
+        CHECK(g.whole && g.cols == 4 && g.rows == 2 && g.cells() == 8);
+        s.cellW = 24;
+        g = editor::spriteGrid(s, 64, 32);
+        CHECK(!g.whole && g.cells() == 0 && g.cols == 2);
+        splash::SpriteAnim a;
+        a.frameCount = 4;
+        a.frameDuration = 8;
+        CHECK(editor::spriteAnimFrameAt(a, 0) == 0 && editor::spriteAnimFrameAt(a, 7) == 0 && editor::spriteAnimFrameAt(a, 8) == 1);
+        CHECK(editor::spriteAnimFrameAt(a, 31) == 3 && editor::spriteAnimFrameAt(a, 32) == 0);  // loops
+        a.loop = false;
+        CHECK(editor::spriteAnimFrameAt(a, 32) == 3 && editor::spriteAnimFrameAt(a, 1000) == 3);  // holds the last
+        a.frameDuration = 0;
+        CHECK(editor::spriteAnimFrameAt(a, 2) == 2);  // 0 steps every vsync, as the engine does
+    }
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -10575,6 +10792,7 @@ int main(int argc, char** argv) {
     testMaterials4bpp();
     testUvOffsetSlots();
     testSceneNetworkId();
+    testSpriteSheets();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

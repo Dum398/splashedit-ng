@@ -36,6 +36,7 @@
 
 #include "gl.h"
 #include "ui/brand.h"
+#include "ui/file_dialog.h"
 #include "ui/icons.h"
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
@@ -460,8 +461,8 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         if (button("locate", ImVec2(o.x + inner - bw - space::sm, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Locate",
                    ButtonKind::Secondary)) {
             const SDL_DialogFileFilter* flt = i == 1 || i == 3 ? exeFilter : i == 2 ? biosFilter : nullptr;
-            SDL_ShowOpenFileDialog(onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), nullptr, flt, flt ? 1 : 0,
-                                   nullptr, false);
+            ui::showOpenFileDialog("tool", onToolPicked, reinterpret_cast<void*>(static_cast<intptr_t>(i)), flt, flt ? 1 : 0, nullptr,
+                                   false);
         }
         ImGui::PopID();
         y += rowH + space::sm;
@@ -1020,7 +1021,8 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // opened for. A file outside the project is copied into it first.
 // SceneLua and MemCardIcon: no target object. MemCardIcon replaces icon frame
 // `index`, or with index -1 adds the picked files as new frames.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon };
+// UiTexture: a UI image's Texture; the target is {canvas, element}.
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 static int g_assetIndex = 0;
@@ -1048,7 +1050,7 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
                                          : slot == AssetSlot::Clip    ? wav
                                          : slot == AssetSlot::SkinClips ? anim
                                                                         : lua;
-    SDL_ShowOpenFileDialog(onAssetPicked, nullptr, nullptr, filter, 1, nullptr,
+    ui::showOpenFileDialog("asset", onAssetPicked, nullptr, filter, 1, nullptr,
                            slot == AssetSlot::SkinClips || (slot == AssetSlot::MemCardIcon && index < 0));
 }
 
@@ -1059,9 +1061,9 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
 // Texture, the material to set (-1 is the first), the list grown to reach it.
 static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, const editor::ObjectPath& target,
                             const std::vector<std::string>& files, bool append = false, int index = -1) {
-    const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon;
+    const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
-    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? "textures"
+    const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
                                                         : "scripts";
@@ -1082,6 +1084,12 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
     const std::string& first = paths.front();
     if (slot == AssetSlot::SceneLua) {
         doc.editSettings([&](splash::SceneSettings& s) { s.script = first; });
+        doc.refreshAssets(paths);
+        return;
+    }
+    if (slot == AssetSlot::UiTexture) {
+        if (target.size() == 2)
+            editor::uic::editElement(doc, target[0], target[1], [&](splash::UIElement& el) { el.texture = first; });
         doc.refreshAssets(paths);
         return;
     }
@@ -1130,6 +1138,7 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                 break;
             case AssetSlot::SceneLua:
             case AssetSlot::MemCardIcon:
+            case AssetSlot::UiTexture:
                 break;
         }
     });
@@ -1165,7 +1174,8 @@ static bool slotTakes(int slot, editor::AssetType t) {
         case AssetSlot::SceneLua: return t == T::Script;
         case AssetSlot::Clip: return t == T::Audio;
         case AssetSlot::SkinClips: return t == T::Animation;
-        case AssetSlot::MemCardIcon: return t == T::Texture;
+        case AssetSlot::MemCardIcon:
+        case AssetSlot::UiTexture: return t == T::Texture;
     }
     return false;
 }
@@ -1173,19 +1183,23 @@ static bool slotTakes(int slot, editor::AssetType t) {
 // An inspector asset field that also takes a file dragged from the Project
 // panel: a drop target where it shows (not in a folded section), outlined
 // while a file it takes is dragged, strongly under the pointer.
+static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRect r, ImRect shown, int index = -1) {
+    if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return;
+    st.assetSlots.push_back({shown, slot, path, index});
+    if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
+        const bool over = shown.Contains(ImGui::GetIO().MousePos);
+        ImGui::GetWindowDrawList()->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft,
+                                            radius::field + 1, 0, over ? 2.0f : 1.5f);
+    }
+}
+
 static bool slotField(State& st, int slot, const editor::ObjectPath& path, const char* id, ImRect r, const char* ic, ImU32 iconColor,
                       const char* name, const char* meta, int index = -1) {
     const bool clicked = assetField(id, r, ic, iconColor, name, meta);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect shown = r;
     shown.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
-    if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return clicked;
-    st.assetSlots.push_back({shown, slot, path, index});
-    if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
-        const bool over = shown.Contains(ImGui::GetIO().MousePos);
-        dl->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft, radius::field + 1, 0,
-                    over ? 2.0f : 1.5f);
-    }
+    slotTarget(st, slot, path, r, shown, index);
     return clicked;
 }
 
@@ -1424,8 +1438,8 @@ static void startExport(State& st, const editor::Document& doc) {
         return;
     }
     const std::string loc = utf8(doc.projectRoot() / (doc.sceneStem() + ".bin"));
-    SDL_ShowSaveFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportDisc)), nullptr, kDiscFilter,
-                           1, loc.c_str());
+    ui::showSaveFileDialog("export", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::ExportDisc)), kDiscFilter, 1,
+                           loc.c_str());
 }
 
 // Opens the folder holding `file` in the system file manager.
@@ -1493,7 +1507,7 @@ static bool saveDoc(State& st, editor::Document& doc) {
 
 static void saveDocAs(editor::Document& doc) {
     const std::string loc = utf8(doc.projectRoot() / doc.scenePath().filename());
-    SDL_ShowSaveFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::SaveAs)), nullptr, kSceneFilter, 1,
+    ui::showSaveFileDialog("save-as", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::SaveAs)), kSceneFilter, 1,
                            doc.projectRoot().empty() ? nullptr : loc.c_str());
 }
 
@@ -1518,7 +1532,7 @@ static void perform(State& st, editor::Document& doc, State::Pending what, const
         }
         case State::Pending::Open: {
             const std::string loc = utf8(doc.projectRoot());
-            SDL_ShowOpenFileDialog(onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::Open)), nullptr, kSceneFilter, 1,
+            ui::showOpenFileDialog("open", onFilePicked, reinterpret_cast<void*>(static_cast<intptr_t>(FileAsk::Open)), kSceneFilter, 1,
                                    loc.empty() ? nullptr : loc.c_str(), false);
             break;
         }
@@ -1744,7 +1758,7 @@ static void newProjectModal(State& st, editor::Document& doc, ImVec2 size) {
     if (button("newproj.browse", ImVec2(o.x + inner - bw, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Choose folder...",
                ButtonKind::Secondary)) {
         const std::string loc = np.location;
-        SDL_ShowOpenFolderDialog(onNewProjectFolder, nullptr, nullptr, loc.empty() ? nullptr : loc.c_str(), false);
+        ui::showOpenFolderDialog("new-project-folder", onNewProjectFolder, nullptr, loc.empty() ? nullptr : loc.c_str(), false);
     }
     y += rowH + space::sm;
 
@@ -2528,7 +2542,10 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     dl->AddLine(ImVec2(foot.Min.x + 1, foot.Min.y), ImVec2(foot.Max.x - 1, foot.Min.y), color::border);
     std::string files = std::to_string(doc.projectFileCount()) + (doc.projectFileCount() == 1 ? " file" : " files");
     TreeRow assets{0, st.assets.open ? icon::folderOpen : icon::folder, kind::folder, "Assets", files.c_str(), true, st.assets.open};
-    if (treeRow("assets", ImRect(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7)), assets).clicked)
+    assets.opensUp = true;  // the Project panel rises from the bottom of the window
+    const ImRect assetsRow(ImVec2(foot.Min.x + 6, foot.Min.y + 7), ImVec2(foot.Max.x - 6, foot.Max.y - 7));
+    nameRect("scene.assets", assetsRow);
+    if (treeRow("assets", assetsRow, assets).clicked)
         toggleProjectTab(st);
 }
 
@@ -4506,13 +4523,13 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
         nameRect("scene.spritecellw", cw);
         nameRect("scene.spritecellh", ch);
         float wv = float(s.cellW), hv = float(s.cellH);
-        FieldEdit fw = numberField("spritecellw", cw, std::to_string(s.cellW).c_str(), "px", color::textFaint, "W", &wv);
+        FieldEdit fw = numberField("spritecellw", cw, std::to_string(s.cellW).c_str(), "px", color::textFaint, "W", &wv, true);
         if (fw.changed) {
             const int v = std::clamp(int(std::lround(wv)), 1, 255);
             edit([v](splash::SpriteSheet& e) { e.cellW = v; }, "spritecellw");
         }
         if (fw.done) doc.endMerge();
-        FieldEdit fh = numberField("spritecellh", ch, std::to_string(s.cellH).c_str(), "px", color::textFaint, "H", &hv);
+        FieldEdit fh = numberField("spritecellh", ch, std::to_string(s.cellH).c_str(), "px", color::textFaint, "H", &hv, true);
         if (fh.changed) {
             const int v = std::clamp(int(std::lround(hv)), 1, 255);
             edit([v](splash::SpriteSheet& e) { e.cellH = v; }, "spritecellh");
@@ -4608,7 +4625,7 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 const ImRect rr = row(lid, label, tip);
                 nameRect(std::string("scene.") + id, rr);
                 float v = float(value);
-                if (numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v).changed)
+                if (numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v, true).changed)
                     value = std::clamp(int(std::lround(v)), lo, hi);
             };
             formInt("ldirframes", "Frames", "Cells each direction plays, one after another.", "dirsetframes", dirSpec.framesPerDirection,
@@ -4665,7 +4682,7 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
                 const ImRect rr = row(lid, label, tip);
                 nameRect(std::string("scene.") + id, rr);
                 float v = float(value);
-                FieldEdit fe = numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v);
+                FieldEdit fe = numberField(id, rr, std::to_string(value).c_str(), unit, 0, nullptr, &v, true);
                 if (fe.changed) {
                     const int n = std::clamp(int(std::lround(v)), lo, hi);
                     editAnim([&](splash::SpriteAnim& e) { set(e, n); }, id);
@@ -5743,7 +5760,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             }
         } else if (pick == 2) {
             const std::string loc = utf8(root);
-            SDL_ShowOpenFileDialog(onLicencePicked, nullptr, nullptr, kLicenceFilter, 2, root.empty() ? nullptr : loc.c_str(), false);
+            ui::showOpenFileDialog("licence", onLicencePicked, nullptr, kLicenceFilter, 2, root.empty() ? nullptr : loc.c_str(), false);
         }
         // One dim line, then room for the error, there from the first frame
         // so nothing below moves when one shows.
@@ -5900,8 +5917,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             save(std::move(next));
         } else if (addPick == int(audioFiles.size())) {
             const std::string loc = utf8(root);
-            SDL_ShowOpenFileDialog(onTrackPicked, nullptr, nullptr, kAudioFilter, 1, root.empty() ? nullptr : loc.c_str(),
-                                   false);
+            ui::showOpenFileDialog("track", onTrackPicked, nullptr, kAudioFilter, 1, root.empty() ? nullptr : loc.c_str(), false);
         }
         y += size::field + space::xs + space::sm;
         caption("Music plays from a disc image only (Build > Disc image), as tracks 2 and up: Audio.PlayCDDA(2) is the first.",
@@ -6531,6 +6547,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // The UI tab inspects its canvas and elements.
     if (st.scripts.uiShown()) {
         st.canvasView.inspector(dl, r, y, doc);
+        // A UI image's Texture takes a texture dragged from the Project panel,
+        // as the scene inspector's asset fields do (#160).
+        const ui::CanvasView::TextureField& tf = st.canvasView.textureField;
+        if (tf.canvas >= 0)
+            slotTarget(st, static_cast<int>(AssetSlot::UiTexture), {tf.canvas, tf.element}, tf.rect, tf.rect);
         return;
     }
     // The lock pins what the inspector shows; selecting other objects leaves it there.
@@ -6940,7 +6961,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 g_modelTarget = path;
             }
             static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj;blend"}};
-            SDL_ShowOpenFileDialog(onModelPicked, nullptr, nullptr, modelFilter, 1, nullptr, false);
+            ui::showOpenFileDialog("model", onModelPicked, nullptr, modelFilter, 1, nullptr, false);
         }
         // An untextured material's tint, from a colour well and its picker
         // (named obj.matcol.<i> and obj.matcolpick.<i>); a drag is one undo step.
@@ -8870,6 +8891,8 @@ static void updateImports(State& st, editor::Document& doc, const viewport::Ps1V
 
 ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view, ImVec2 size) {
     st.importPanel.shown.clear();
+    // A file dialog whose caller names no folder opens in the project, not Documents (#160).
+    ui::setFileDialogFolder(utf8(doc.projectRoot()));
     filesPending(st, doc);
     // Whatever opened the timeline (the View menu, Edit in timeline) brings
     // its tab to the front; closing it shows the Project tab again.

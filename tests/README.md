@@ -426,6 +426,26 @@ the model (`testUiMultiSelect`).
 
     python3 uicanvascheck.py <splashedit>
 
+`uiinspectorcheck.py` drives the UI tab's element inspector on a copy of `ui/ui.scene` (started with
+`--ui`, elements selected by their list rows, fields by their named controls `ui.posa`, `ui.sizea`,
+...). A drag on a pixel field moves it one per pixel at any value: 60 px on the Size W of the 300 px
+wide `title` adds at most 60 (the drag threshold takes the first few), where it used to add about 3
+per pixel. `editor_tests` checks the rate itself (`testNumberScrub`). The Tint picker (well `ui.col`,
+picker `ui.colpick`) opened on the grey `crate` and dragged to red stays where it opened, and so does
+the Tint row: the "Tinted" card it brings shows only once the picker closes (it used to push the
+inspector and the open picker down mid-drag). Tab from a number being typed into (Position X,
+double-clicked) puts the next field in typing too, so `40`, Tab, `50`, Enter sets X and Y; Shift+Tab
+goes back the same way, and Tab runs on past the row labels into Size W. File dialogs are modal: with
+`SPLASHEDIT_FILE_DIALOG=hold` no dialog shows, the editor prints `file dialog: <kind> in <folder>`
+and acts as if it stayed open; then a click on another list row selects nothing, a second Browse
+(`ui.texbrowse`) opens no second dialog and Delete changes nothing (`editor_tests`'
+`testDialogGate` checks the one-at-a-time gate). An image's Texture field (`ui.tex`) takes a texture
+dragged from the Project panel (`textures/other.png`, found by searching), as a Script's File takes a
+.lua, and refuses a scene with a status message; its Browse opens in the project folder (any dialog
+whose caller names no folder does). Needs a display (CI runs it under `xvfb-run` on Linux).
+
+    python3 uiinspectorcheck.py <splashedit>
+
 `uispriteguicheck.py` drives the Image inspector's Sheet row on a project holding `sprite/`'s two
 sheets and a canvas with one plain image: selected on the canvas, its Sheet menu (`ui.sheet`, items
 `ui.sheet/None`, `ui.sheet/<sheet>`) picks `hero`, the cell picker drawn over the sheet's texture
@@ -864,7 +884,12 @@ a root file dragged onto the `textures` folder tile of the grid moves into it, t
 reference along. Delete is refused on a used file and moves an unused one into the project's
 `.trash/1/` after the prompt; Ctrl+Z brings it back. Opening a project empties a `.trash/<n>/`
 older than 30 days (and keeps a newer one), saying so in the status bar. The chevron folds the
-panel and View > Project opens it again. The Timeline tab is clicked low in the dock's tab strip,
+panel and View > Project opens it again; it points up while the panel is folded (the panel opens
+upward) and down while it is open, and so does the scene panel's Assets row (read off the screenshot).
+A right-click on a folder of the panel's tree (rows named `assets.tree/<folder>`, the root
+`assets.tree/.`) opens that folder's menu, as its grid tile does: its Rename renames `meshes`, the
+scene's references along. On the root it opens the grid's menu for the root: New folder, with the
+grid showing another folder, makes `New Folder` in the root and shows the root to rename it. The Timeline tab is clicked low in the dock's tab strip,
 which is 46 px high (the Timeline's header) with Project in front too. Needs a display (CI runs it
 under `xvfb-run` on Linux).
 

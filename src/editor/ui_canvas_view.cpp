@@ -18,6 +18,7 @@
 #include "editor/project.hh"
 #include "font.hh"
 #include "gl.h"
+#include "ui/file_dialog.h"
 #include "ui/icons.h"
 #include "ui/texture_image.h"
 #include "ui/theme.h"
@@ -1134,6 +1135,7 @@ void CanvasView::inspector(ImDrawList* dl, ImRect r, float y, editor::Document& 
             std::fflush(stdout);
         }
     }
+    textureField = {};
     ImGui::PushID("uicanvasinspector");
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
     if (sel.canvas >= 0 && uic::selectedElements(doc).size() > 1) multiInspector(dl, r, y, doc);
@@ -1190,22 +1192,28 @@ bool textField(const char* id, ImRect field, const std::string& value, const cha
 }
 
 // A colour well with a picker under it. Edits merge under `key` until the picker lets go.
-void colourRow(editor::Document& doc, Rows& rows, const char* id, const char* label, const char* tip, std::array<float, 3> value,
+// Returns whether the picker is open. Scripted tests: the well is ui.<id>, the picker ui.<id>pick.
+bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* label, const char* tip, std::array<float, 3> value,
                const std::function<void(UIElement&, const std::array<float, 3>&)>& set, int c, int e) {
     ImRect field = rows.row((std::string("l") + id).c_str(), label, tip);
+    nameRect(std::string("ui.") + id, field);
     std::string popup = std::string("##pick") + id;
     if (colorField(id, field, toColor(value), toHex(value).c_str())) ImGui::OpenPopup(popup.c_str());
     ImGui::SetNextWindowPos(ImVec2(field.Max.x, field.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
     pushMenuStyle();
+    bool open = false;
     if (ImGui::BeginPopup(popup.c_str())) {
+        open = true;
         float v[3] = {value[0], value[1], value[2]};
         ImGui::SetNextItemWidth(220);
         if (ImGui::ColorPicker3("##wheel", v, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoAlpha))
             uic::editElement(doc, c, e, [&](UIElement& el) { set(el, {v[0], v[1], v[2]}); }, std::string("uicol") + id);
         if (ImGui::IsItemDeactivated()) doc.endMerge();
+        nameRect(std::string("ui.") + id + "pick", ImGui::GetCurrentWindow()->Rect());
         ImGui::EndPopup();
     }
     popMenuStyle();
+    return open;
 }
 
 }  // namespace
@@ -1237,8 +1245,16 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
     tooltip("Visible when the scene starts. Lua's UI.SetVisible and cutscene tracks switch it while playing.");
     rows.y += 40 + space::lg;
 
-    // Problems first, each with what to do.
-    const std::vector<uic::Problem> problems = uic::elementProblems(doc, c, ei, s);
+    // Problems first, each with what to do. While a colour picker is open they
+    // stay as they were when it opened: a Tinted warning showing or going as
+    // the colour passes #808080 would move the picker under the pointer
+    // (#157). They catch up when it closes.
+    std::vector<uic::Problem> problems = uic::elementProblems(doc, c, ei, s);
+    if (m_colourOpen && m_heldProblems.canvas == c && m_heldProblems.element == ei)
+        problems = m_heldProblems.problems;
+    else
+        m_heldProblems = {c, ei, problems};
+    m_colourOpen = false;
     for (size_t i = 0; i < problems.size(); i++) {
         bool fixed = false;
         ImGui::PushID(int(i));
@@ -1252,7 +1268,8 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
     auto number = [&](const char* id, ImRect field, int value, const char* unit, ImU32 axis, const char* axisLabel,
                       const std::function<void(UIElement&, int)>& set) {
         float v = float(value);
-        FieldEdit fe = numberField(id, field, std::to_string(value).c_str(), unit, axis, axisLabel, &v);
+        nameRect(std::string("ui.") + id, field);  // scripted tests: ui.posa, ui.sizeb, ...
+        FieldEdit fe = numberField(id, field, std::to_string(value).c_str(), unit, axis, axisLabel, &v, true);
         if (fe.changed) uic::editElement(doc, c, ei, [&](UIElement& el) { set(el, int(std::lround(v))); }, std::string("uinum") + id);
         if (fe.done) doc.endMerge();
     };
@@ -1473,14 +1490,23 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                 ImRect pf = rows.row("ltex", "Texture", "A project-relative image file. Browse copies one from outside into textures/.");
                 std::string p;
                 ImRect tfield(pf.Min, ImVec2(pf.Max.x - size::field - space::xs, pf.Max.y));
+                const ImRect browse(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max);
+                nameRect("ui.tex", tfield);  // scripted tests
+                textureField.rect = tfield;
+                textureField.rect.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
+                textureField.canvas = c, textureField.element = ei;
+                nameRect("ui.texbrowse", browse);
                 if (textField("tex", tfield, e.texture, "textures/hud.png", &p)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.texture = p; });
-                if (iconButton("texbrowse", ImRect(ImVec2(pf.Max.x - size::field, pf.Min.y), pf.Max), icon::folderOpen, false, "Pick an image")) {
+                if (iconButton("texbrowse", browse, icon::folderOpen, false, "Pick an image")) {
                     {
                         std::lock_guard<std::mutex> lock(g_texMutex);
                         g_texCanvas = c, g_texElement = ei;
                     }
                     static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
-                    SDL_ShowOpenFileDialog(onTexturePicked, nullptr, nullptr, images, 1, nullptr, false);
+                    // It opens in the project, where the textures are (#160).
+                    const std::u8string root8 = doc.projectRoot().u8string();
+                    const std::string root(root8.begin(), root8.end());
+                    ui::showOpenFileDialog("ui-texture", onTexturePicked, nullptr, images, 1, root.empty() ? nullptr : root.c_str(), false);
                 }
                 if (!e.texture.empty()) {
                     const uic::Assets::Texture& t = m_assets.texture(e.texture, e.bitDepth, e.cutout);
@@ -1530,13 +1556,13 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
         if (e.type == UIElementType::Progress) {
             ImRect vf = rows.row("lval", "Value", "How full the bar is, 0 to 100. Lua's UI.SetProgress changes it while playing.");
             number("val", vf, e.value, "%", 0, nullptr, [](UIElement& el, int v) { el.value = v; });
-            colourRow(doc, rows, "bg", "Background", "The empty part of the bar.", e.background,
-                      [](UIElement& el, const std::array<float, 3>& v) { el.background = v; }, c, ei);
+            m_colourOpen |= colourRow(doc, rows, "bg", "Background", "The empty part of the bar.", e.background,
+                                      [](UIElement& el, const std::array<float, 3>& v) { el.background = v; }, c, ei);
         }
-        colourRow(doc, rows, "col", e.type == UIElementType::Image ? "Tint" : e.type == UIElementType::Progress ? "Fill" : "Colour",
-                  e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
-                                                 : "Cut to 15-bit colour on the PS1, as the preview shows.",
-                  e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, ei);
+        m_colourOpen |= colourRow(doc, rows, "col", e.type == UIElementType::Image ? "Tint" : e.type == UIElementType::Progress ? "Fill" : "Colour",
+                                  e.type == UIElementType::Image ? "Multiplies the texture by colour/128: #808080 shows it as it is."
+                                                                 : "Cut to 15-bit colour on the PS1, as the preview shows.",
+                                  e.color, [](UIElement& el, const std::array<float, 3>& v) { el.color = v; }, c, ei);
         rows.gap();
     }
 }
@@ -1569,7 +1595,7 @@ void CanvasView::multiInspector(ImDrawList* dl, ImRect r, float y, editor::Docum
         const float half = (field.GetWidth() - space::xs) * 0.5f;
         auto number = [&](const char* id, ImRect fr, int value, ImU32 axis, const char* axisLabel, bool isX) {
             float v = float(value);
-            FieldEdit fe = numberField(id, fr, std::to_string(value).c_str(), nullptr, axis, axisLabel, &v);
+            FieldEdit fe = numberField(id, fr, std::to_string(value).c_str(), nullptr, axis, axisLabel, &v, true);
             if (fe.changed) {
                 const int d = int(std::lround(v)) - value;
                 uic::editElements(doc, c, sels, [&](UIElement& el, size_t) {
@@ -1617,7 +1643,7 @@ void CanvasView::canvasInspector(ImDrawList* dl, ImRect r, float y, editor::Docu
             uic::editCanvas(doc, c, [](UICanvas& x) { x.visible = !x.visible; });
         ImRect sf = rows.row("lcvsort", "Sort order", "0 is at the back, 255 in front; canvases with higher orders draw over lower ones.");
         float v = float(cv.sortOrder);
-        FieldEdit fe = numberField("cvsort", sf, std::to_string(cv.sortOrder).c_str(), nullptr, 0, nullptr, &v);
+        FieldEdit fe = numberField("cvsort", sf, std::to_string(cv.sortOrder).c_str(), nullptr, 0, nullptr, &v, true);
         if (fe.changed)
             uic::editCanvas(doc, c, [&](UICanvas& x) { x.sortOrder = std::clamp(int(std::lround(v)), 0, 255); }, "uicvsort");
         if (fe.done) doc.endMerge();
@@ -1805,7 +1831,7 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             ImRect zf = rows.row("lfsize", "Size", "Pixels per em the TTF/OTF is rasterised at, 4 to 64.");
             nameRect(id + ".size", zf);
             float v = float(uf.size);
-            FieldEdit fe = numberField("fsize", zf, std::to_string(uf.size).c_str(), "px", 0, nullptr, &v);
+            FieldEdit fe = numberField("fsize", zf, std::to_string(uf.size).c_str(), "px", 0, nullptr, &v, true);
             if (fe.changed)
                 uic::editFont(doc, i, [&](splash::UIFont& x) { x.size = std::clamp(int(std::lround(v)), 4, 64); }, "uifontsize" + id);
             if (fe.done) doc.endMerge();
@@ -1816,11 +1842,11 @@ void CanvasView::fontsSection(ImDrawList* dl, float x0, float x1, float* yp, edi
             nameRect(id + ".gw", wf);
             nameRect(id + ".gh", hf);
             float w = float(uf.glyphWidth), h = float(uf.glyphHeight);
-            FieldEdit fw = numberField("fgw", wf, std::to_string(uf.glyphWidth).c_str(), nullptr, color::axisX, "W", &w);
+            FieldEdit fw = numberField("fgw", wf, std::to_string(uf.glyphWidth).c_str(), nullptr, color::axisX, "W", &w, true);
             if (fw.changed)
                 uic::editFont(doc, i, [&](splash::UIFont& x) { x.glyphWidth = std::clamp(int(std::lround(w)), 4, 64); }, "uifontgw" + id);
             if (fw.done) doc.endMerge();
-            FieldEdit fh = numberField("fgh", hf, std::to_string(uf.glyphHeight).c_str(), nullptr, color::axisY, "H", &h);
+            FieldEdit fh = numberField("fgh", hf, std::to_string(uf.glyphHeight).c_str(), nullptr, color::axisY, "H", &h, true);
             if (fh.changed)
                 uic::editFont(doc, i, [&](splash::UIFont& x) { x.glyphHeight = std::clamp(int(std::lround(h)), 4, 64); }, "uifontgh" + id);
             if (fh.done) doc.endMerge();

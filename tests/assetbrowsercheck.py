@@ -8,11 +8,14 @@
 # used file and moves an unused one to the project's .trash folder after the
 # prompt, and Ctrl+Z brings it back; opening the project empties deletes
 # a month old from .trash. A rename leaves the scene unsaved; a file dropped
-# on a folder tile moves into it; View > Project reopens the folded panel.
+# on a folder tile moves into it; View > Project reopens the folded panel,
+# whose chevron points up (the way it opens) and down when open. A right-click
+# on a folder of the tree opens that folder's menu (its Rename renames it, the
+# scene's references along); on the tree's root, the grid's menu for the root.
 # The dock's tab strip is the Timeline's 46 px with either in front. Drives the editor headless on copies of
 # the courtyard example and reads the saved scenes and the files on disk.
 # usage: python3 assetbrowsercheck.py <splashedit>   (needs a display: xvfb-run -a)
-import json, os, shutil, subprocess, sys, tempfile
+import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
 editor = os.path.abspath(sys.argv[1])
 here = os.path.dirname(os.path.abspath(__file__))
@@ -63,8 +66,9 @@ def run(project, args, select=None):
     names the panel showed at the end. Sets run.open and run.unsaved from
     the dump (None when it lacks them)."""
     run.open = run.unsaved = None
+    run.shot = os.path.join(os.path.dirname(project), 'shot.png')
     cmd = [editor, '--size', '1600x960', '--project', project] + (['--select', select] if select else []) + \
-        ['--wait', '5'] + args + ['--wait', '10', '--screenshot', os.path.join(os.path.dirname(project), 'shot.png')]
+        ['--wait', '5'] + args + ['--wait', '10', '--screenshot', run.shot]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=180)
     out = (r.stdout + r.stderr).strip()
     shown = None
@@ -100,11 +104,79 @@ def find(objects, name):
     return None
 
 
+def flat(objects):
+    for o in objects:
+        yield o
+        yield from flat(o.get('children', []))
+
+
 def comp(obj, kind):
     for c in (obj or {}).get('components', []):
         if c.get('type') == kind:
             return c
     return None
+
+
+def png_rgb(path):
+    """(width, height, rows of RGB bytes) of an 8-bit RGBA or RGB PNG."""
+    data = open(path, 'rb').read()
+    pos, idat, w = 8, b'', 0
+    while pos < len(data):
+        n, kind = struct.unpack('>I4s', data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + n]
+        if kind == b'IHDR':
+            w, h, depth, ctype = struct.unpack('>IIBB', body[:10])
+            bpp = 4 if ctype == 6 else 3
+        elif kind == b'IDAT':
+            idat += body
+        pos += 12 + n
+    raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b, c = prev[i], prev[i - bpp] if i >= bpp else 0
+            if f == 1: line[i] = (line[i] + a) & 255
+            elif f == 2: line[i] = (line[i] + b) & 255
+            elif f == 3: line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                p = a + b - c
+                pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line[i] for i in range(stride) if i % bpp < 3))
+        prev = line
+    return w, h, rows
+
+
+def chevron(out, shot, control='project.collapse', width=None):
+    """Which way a chevron points in `shot`: 'up', 'down', 'right' or
+    'left', from the pixels that stand out from the background in the
+    control the editor printed (its first `width` px when given: the
+    Assets row's chevron leads it)."""
+    m = re.search(r'control ' + re.escape(control) + r' at (\d+),(\d+) (\d+),(\d+)', out)
+    if not m:
+        return None
+    x0, y0, x1, y1 = map(int, m.groups())
+    if width:
+        x1 = x0 + width
+    _, _, rows = png_rgb(shot)
+    px = {(x, y): rows[y][x * 3:x * 3 + 3] for y in range(y0, y1) for x in range(x0, x1)}
+    bg = max(set(px.values()), key=list(px.values()).count)
+    ink = [p for p, c in px.items() if sum(abs(a - b) for a, b in zip(c, bg)) > 90]
+    if not ink:
+        return 'none'
+    xs, ys = [p[0] for p in ink], [p[1] for p in ink]
+    bx0, bx1, by0, by1 = min(xs), max(xs), min(ys), max(ys)
+    def span(points, key):
+        vals = [key(p) for p in points]
+        return max(vals) - min(vals) if vals else 0
+    if bx1 - bx0 >= by1 - by0:  # a wide glyph: up or down by where its arms spread
+        top = span([p for p in ink if p[1] <= by0 + (by1 - by0) // 3], lambda p: p[0])
+        bottom = span([p for p in ink if p[1] >= by1 - (by1 - by0) // 3], lambda p: p[0])
+        return 'up' if top < bottom else 'down'
+    left = span([p for p in ink if p[0] <= bx0 + (bx1 - bx0) // 3], lambda p: p[1])
+    right = span([p for p in ink if p[0] >= bx1 - (bx1 - bx0) // 3], lambda p: p[1])
+    return 'left' if left < right else 'right'
 
 
 original = scene(example)
@@ -309,12 +381,41 @@ check('the Timeline tab brings its lanes back: a key added there is saved', fram
 
 # --- View > Project: the panel folded by its chevron comes back ---
 project = project_copy()
+out, shown = run(project, ['--wait', '3'])
+check('the chevron of the open panel points down (the way it folds)', chevron(out, run.shot) == 'down', chevron(out, run.shot))
+check("the scene panel's Assets row points down too", chevron(out, run.shot, 'scene.assets', 19) == 'down',
+      chevron(out, run.shot, 'scene.assets', 19))
 out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3'])
 check('the chevron folds the Project panel', getattr(run, 'open', None) is False, out[-200:])
+check('the chevron of the folded panel points up (the way it opens)', chevron(out, run.shot) == 'up', chevron(out, run.shot))
+check("the scene panel's Assets row points up too", chevron(out, run.shot, 'scene.assets', 19) == 'up',
+      chevron(out, run.shot, 'scene.assets', 19))
 out, shown = run(project, ['--click', COLLAPSE + ',0', '--wait', '3', '--click', VIEW_MENU + ',0', '--wait', '3',
                            '--click', '@menu.view/Project', '--wait', '5'])
 check('View > Project opens it again on the project root', getattr(run, 'open', None) is True and
       shown == ['meshes', 'scripts', 'textures', 'courtyard.scene'] and 'popups open: no' in out, str(shown) + ' | ' + out[-200:])
+
+# --- the folder tree's right-click menu: a folder's own (as its grid tile has),
+# and the grid's menu for the project root ---
+project = project_copy()
+out, shown = run(project, ['--click', MESHES_ROW + ',1', '--wait', '3'])
+check('right-clicking a folder in the tree opens its menu', 'popups open: yes' in out and 'control assets.menu/Rename at' in out
+      and 'control assets.menu/Delete at' in out, out[-300:])
+out, shown = run(project, ['--click', MESHES_ROW + ',1', '--wait', '3', '--click', '@assets.menu/Rename', '--wait', '3',
+                           '--text', 'props', '--key', 'enter', '--wait', '5', '--key', 'ctrl+s', '--wait', '5'])
+meshes = sorted({comp(o, 'mesh')['mesh'].split('/')[0] for o in flat(scene(project)['objects']) if comp(o, 'mesh')})
+check("its Rename renames the folder, the scene's references along", os.path.isdir(os.path.join(project, 'props')) and
+      not os.path.exists(os.path.join(project, 'meshes')) and meshes == ['props'], (os.listdir(project), meshes, out[-300:]))
+root = re.search(r'control assets\.tree/\. at (\d+),(\d+) (\d+),(\d+)', out)
+check('the tree names its root row', root is not None, out[-300:])
+if root:
+    x0, y0, x1, y1 = map(int, root.groups())
+    rootRow = '%d,%d' % ((x0 + x1) // 2, (y0 + y1) // 2)
+    project = project_copy()
+    out, shown = run(project, ['--click', MESHES_ROW + ',0', '--wait', '3', '--click', rootRow + ',1', '--wait', '3',
+                               '--click', '@assets.menu/New folder', '--wait', '3', '--key', 'enter', '--wait', '5'])
+    check("the root's menu makes a new folder in the root (shown there to rename)",
+          os.path.isdir(os.path.join(project, 'New Folder')) and 'New Folder' in (shown or []), (os.listdir(project), shown))
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

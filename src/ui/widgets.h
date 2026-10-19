@@ -34,7 +34,8 @@ struct Hit {
 };
 
 // Registers an interactive rectangle at an absolute screen position.
-Hit interact(const char* id, ImRect r);
+// `itemFlags` go to ImGui::ItemAdd (ImGuiItemFlags_Inputable: a field typed into).
+Hit interact(const char* id, ImRect r, int itemFlags = 0);
 
 // Every rectangle interact() registered since the last clear. The window hit test
 // uses it to keep clicks on title bar controls away from window dragging.
@@ -80,6 +81,7 @@ struct TreeRow {
     bool warning = false;
     bool hidden = false;        // the object's own flag: dims the row and shows the eye crossed out
     bool inheritedOff = false;  // under an off ancestor: dims the row, the eye keeps the row's own state
+    bool opensUp = false;       // what it opens shows above it: the chevron points up while closed
 };
 // Returns the row's hit state so the caller can tell a chevron click from a row click.
 // With `visibilityClicked` the row draws an eye that sets it when clicked; the eye wins over the row.
@@ -105,8 +107,9 @@ struct FieldEdit {
 // A number in a well. With `edit`, it is editable: drag horizontally to
 // scrub (faster for larger values, Shift for fine steps), double-click to
 // type (Enter or clicking away commits, Esc cancels). `value` is the text shown.
+// An `integer` field (pixels, frames) scrubs one per pixel (ui/scrub.hh).
 FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0,
-                      const char* axisLabel = nullptr, float* edit = nullptr);
+                      const char* axisLabel = nullptr, float* edit = nullptr, bool integer = false);
 // Three numberFields; `edit` points at three floats.
 FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit = nullptr,
                     float* edit = nullptr);

@@ -11,6 +11,7 @@
 
 #include "budget.hh"
 #include "ui/icons.h"
+#include "ui/scrub.hh"
 
 using namespace theme;
 
@@ -56,13 +57,13 @@ std::vector<ImRect>& interactiveRects() {
     return rects;
 }
 
-Hit interact(const char* id, ImRect r) {
+Hit interact(const char* id, ImRect r, int itemFlags) {
     interactiveRects().push_back(r);
     Hit h;
     ImGuiID gid = ImGui::GetID(id);
     ImGui::SetCursorScreenPos(r.Min);
     ImGui::ItemSize(r.GetSize());
-    if (ImGui::ItemAdd(r, gid)) h.clicked = ImGui::ButtonBehavior(r, gid, &h.hovered, &h.held);
+    if (ImGui::ItemAdd(r, gid, nullptr, itemFlags)) h.clicked = ImGui::ButtonBehavior(r, gid, &h.hovered, &h.held);
     h.hover = anim(gid, h.hovered || h.held);
     return h;
 }
@@ -308,7 +309,7 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicke
     ImU32 dimmed = faint ? color::textFaint : color::text;
     if (row.hasChildren)
         text(dl, ImVec2(x, centerY(f.medium, type::label, r.Min.y, r.Max.y)), f.medium, type::label, color::textFaint,
-             row.expanded ? icon::chevronDown : icon::chevronRight);
+             row.expanded ? icon::chevronDown : row.opensUp ? icon::chevronUp : icon::chevronRight);
     x += 16;
     if (row.icon) {
         text(dl, ImVec2(x, centerY(f.medium, type::icon, r.Min.y, r.Max.y)), f.medium, type::icon - 1,
@@ -425,7 +426,8 @@ bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const ch
 ImRect property(const char* id, ImRect row, float labelWidth, const char* label, const char* tip) {
     Fonts& f = fonts();
     ImRect lr(row.Min, ImVec2(row.Min.x + labelWidth, row.Max.y));
-    Hit h = interact(id, lr);
+    // Hovered for its tip only: Tab goes from field to field past it.
+    Hit h = interact(id, lr, ImGuiItemFlags_NoTabStop | ImGuiItemFlags_NoNav);
     if (tip) tooltip(tip);
     text(ImGui::GetWindowDrawList(), ImVec2(lr.Min.x, centerY(f.regular, type::label, row.Min.y, row.Max.y)), f.regular, type::label,
          lerpColor(color::textDim, color::text, h.hover), label);
@@ -436,6 +438,13 @@ ImRect property(const char* id, ImRect row, float labelWidth, const char* label,
 static void well(ImDrawList* dl, ImRect r, float hover) {
     dl->AddRectFilled(r.Min, r.Max, color::field, radius::field);
     dl->AddRect(r.Min, r.Max, lerpColor(color::border, color::borderStrong, hover), radius::field);
+}
+
+// Tab (or Enter) landed on the item `gid` just drawn as Inputable: the
+// field goes straight to typing, as ImGui's own inputs do.
+static bool keyboardActivated(ImGuiID gid) {
+    const ImGuiContext& g = *GImGui;
+    return g.NavActivateId == gid && (g.NavActivateFlags & ImGuiActivateFlags_PreferInput);
 }
 
 // The one in-place text editor; only one field edits at a time.
@@ -491,12 +500,16 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
     bool enter = ImGui::InputText("##textedit", s.buf, std::min(sizeof s.buf, maxLen + 1), flags, charFilter);
     bool deactivated = ImGui::IsItemDeactivated();
     bool active = ImGui::IsItemActive();
+    // Tab and Shift+Tab move to the next or previous field: commit now, so a
+    // field that starts typing first (Shift+Tab: one drawn earlier) does not
+    // take over the editor before this one has stored its text.
+    const bool tabbed = active && ImGui::IsKeyPressed(ImGuiKey_Tab, false);
     ImGui::PopID();
     ImGui::PopStyleColor(7);
     ImGui::PopStyleVar(2);
     ImGui::PopFont();
     ++s.frames;
-    if (enter || deactivated || (s.frames > 2 && !active)) {
+    if (enter || deactivated || tabbed || (s.frames > 2 && !active)) {
         *out = s.buf;
         s.id = 0;
         return TextEdit::Commit;
@@ -529,9 +542,9 @@ bool textField(const char* id, ImRect r, const std::string& value, std::string* 
         }
         return false;
     }
-    Hit h = interact(id, r);
+    Hit h = interact(id, r, ImGuiItemFlags_Inputable);
     if (h.hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
-    if (h.clicked) beginTextEdit(id, value);
+    if (h.clicked || keyboardActivated(ImGui::GetID(id))) beginTextEdit(id, value);
     well(dl, r, h.hover);
     drawCount(value.size());
     const bool empty = value.empty() && placeholder;
@@ -553,7 +566,8 @@ static ScrubState& scrubState() {
     return s;
 }
 
-FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit, ImU32 axis, const char* axisLabel, float* edit) {
+FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit, ImU32 axis, const char* axisLabel, float* edit,
+                      bool integer) {
     FieldEdit out;
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -591,7 +605,7 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
         return out;
     }
 
-    Hit h = interact(id, r);
+    Hit h = interact(id, r, edit ? ImGuiItemFlags_Inputable : 0);
     if (h.hovered || h.held) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
     if (edit) {
         ScrubState& sc = scrubState();
@@ -601,11 +615,8 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
             if (!sc.dragging && ImGui::IsMouseDragPastThreshold(0)) sc.dragging = true;
             float dx = ImGui::GetIO().MouseDelta.x;
             if (sc.dragging && dx != 0) {
-                // Steps grow with the value: 0.01 per pixel below 1, then 1% of it.
-                float speed = std::max(0.01f, std::fabs(sc.value) * 0.01f) * (ImGui::GetIO().KeyShift ? 0.1f : 1.0f);
-                sc.value += dx * speed;
-                float step = std::pow(10.0f, std::floor(std::log10(speed)));
-                float shown = std::round(sc.value / step) * step;
+                // scrubRate(): one per pixel for whole numbers, else growing with the value.
+                const float shown = scrubTo(sc.value, dx, integer, ImGui::GetIO().KeyShift);
                 if (shown != *edit) {
                     *edit = shown;
                     out.changed = true;
@@ -615,7 +626,8 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
             out.done = sc.dragging;
             sc.id = 0;
         }
-        if (h.hovered && ImGui::IsMouseDoubleClicked(0)) {
+        // Double-click, or Tab or Enter onto it: type a value (#158).
+        if ((h.hovered && ImGui::IsMouseDoubleClicked(0)) || keyboardActivated(gid)) {
             char b[32];
             std::snprintf(b, sizeof b, "%.6g", static_cast<double>(*edit));
             beginTextEdit(id, b);

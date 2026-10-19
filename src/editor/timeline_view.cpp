@@ -423,7 +423,7 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
         float v = std::round(m_frame);
         char b[16];
         std::snprintf(b, sizeof b, "%d", int(v));
-        FieldEdit fe = numberField("frame", ImRect(ImVec2(x, cy - 12), ImVec2(x + 58, cy + 12)), b, nullptr, 0, nullptr, &v);
+        FieldEdit fe = numberField("frame", ImRect(ImVec2(x, cy - 12), ImVec2(x + 58, cy + 12)), b, nullptr, 0, nullptr, &v, true);
         if (fe.changed) {
             m_frame = std::clamp(std::round(v), 0.0f, float(len));
             m_playing = false;
@@ -436,7 +436,7 @@ void TimelinePanel::header(ImDrawList* dl, ImRect r, editor::Document& doc) {
         float v = float(len);
         char b[16];
         std::snprintf(b, sizeof b, "%d", len);
-        FieldEdit fe = numberField("length", ImRect(ImVec2(x, cy - 12), ImVec2(x + 58, cy + 12)), b, nullptr, 0, nullptr, &v);
+        FieldEdit fe = numberField("length", ImRect(ImVec2(x, cy - 12), ImVec2(x + 58, cy + 12)), b, nullptr, 0, nullptr, &v, true);
         if (fe.changed) editor::setLength(doc, m_ref, int(std::lround(v)), "timeline.length");
         if (fe.done) {
             doc.endMerge();
@@ -1242,7 +1242,7 @@ void TimelinePanel::keyRow(ImDrawList* dl, ImRect r, editor::Document& doc) {
         char b[16];
         std::snprintf(b, sizeof b, "%d", kf.frame);
         const ImRect fr(ImVec2(x, cy - 12), ImVec2(x + 54, cy + 12));
-        FieldEdit fe = numberField("kframe", fr, b, nullptr, 0, nullptr, &v);
+        FieldEdit fe = numberField("kframe", fr, b, nullptr, 0, nullptr, &v, true);
         nameRect("timeline.kframe", fr);
         if (fe.changed) {
             const int to = std::clamp(int(std::lround(v)), 0, editor::kMaxTimelineFrame);

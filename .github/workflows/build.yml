@@ -227,6 +227,9 @@ jobs:
       - name: Debug overlays
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/overlaycheck.py build/splashedit
+      - name: Boot logo off
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/bootlogocheck.py build/splashedit build/emulator_tests
       - name: Centre panel tabs
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/scripttabscheck.py build/splashedit

@@ -79,10 +79,15 @@ def run(args, shot=None):
     return json.load(open(scene, encoding='utf-8')).get('tilemap'), out
 
 
+def rows(t):
+    """The cells as lists of ints: the scene keeps one string a row (" 0  1 -1")."""
+    return [[int(v) for v in r.split()] for r in t['cells']]
+
+
 def painted(t):
     """{(x, y): brush} of the painted cells."""
     if not t: return None
-    return {(x, y): b for y, row in enumerate(t['cells']) for x, b in enumerate(row) if b != -1}
+    return {(x, y): b for y, row in enumerate(rows(t)) for x, b in enumerate(row) if b != -1}
 
 
 def last(pattern, out):
@@ -101,7 +106,8 @@ check('no Tilemap tab without a tilemap', 'tab.ui' in drawn and 'tab.tiles' not 
 # Add: 20 x 15 empty, from the sheet, a floor and a wall brush.
 t, out = run(ADD)
 check('Add tilemap adds a 20x15 map on the sheet', t and t['tileset'] == 'tiles' and t['width'] == 20 and t['height'] == 15 and
-      len(t['cells']) == 15 and all(len(r) == 20 and set(r) == {-1} for r in t['cells']), str(t)[:300])
+      len(rows(t)) == 15 and all(len(r) == 20 and set(r) == {-1} for r in rows(t)), str(t)[:300])
+check('each row is one string, the indices right-aligned', t and t['cells'][0] == ' '.join(['-1'] * 20), str(t and t['cells'][:1]))
 check('the section reports it', last(r'^scene: tilemap (tileset.*)$', out) ==
       'tileset tiles size 20x15 brushes floor:0W:0:-1 wall:1S:0:-1 kinds none selected 0', out[-400:])
 check('an empty map exports its 620 bytes',

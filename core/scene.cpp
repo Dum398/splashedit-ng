@@ -669,16 +669,24 @@ TileBrush readTileBrush(const json& j) {
     return b;
 }
 
-// The cells as rows of brush indices, top row first. Brush indices read as
-// written (one past the brushes is reported by the export); the grid is made
-// width x height, cells outside the rows read empty.
+// The cells as one string a row, top row first: the brush indices separated
+// by spaces and right-aligned to the widest, so a map reads (and diffs) as a
+// grid, " 0  0  1 -1". Read back split on any whitespace; the earlier array of
+// number arrays still reads. Brush indices read as written (one past the
+// brushes is reported by the export); the grid is made width x height, cells
+// past the end of a row or the rows read empty.
 json writeTilemap(const Tilemap& t) {
     json brushes = json::array(), kinds = json::array(), rows = json::array();
     for (const TileBrush& b : t.brushes) brushes.push_back(writeTileBrush(b));
     for (const std::string& k : t.kindNames) kinds.push_back(k);
+    size_t w = 1;
+    for (int c : t.cells) w = std::max(w, std::to_string(c).size());
     for (int y = 0; y < t.height; y++) {
-        json row = json::array();
-        for (int x = 0; x < t.width; x++) row.push_back(t.at(x, y));
+        std::string row;
+        for (int x = 0; x < t.width; x++) {
+            const std::string v = std::to_string(t.at(x, y));
+            row += (x ? " " : "") + std::string(w - v.size(), ' ') + v;
+        }
         rows.push_back(row);
     }
     json j = {{"tileset", t.tileset}, {"width", t.width},     {"height", t.height},
@@ -696,9 +704,23 @@ Tilemap readTilemap(const json& j) {
     if (j.contains("kindNames")) t.kindNames = j["kindNames"].get<std::vector<std::string>>();
     t.cells.assign(size_t(t.width * t.height), -1);
     const json rows = j.value("cells", json::array());
-    for (int y = 0; y < t.height && y < int(rows.size()); y++)
-        for (int x = 0; x < t.width && x < int(rows[size_t(y)].size()); x++)
-            t.cells[size_t(y * t.width + x)] = rows[size_t(y)][size_t(x)].get<int>();
+    for (int y = 0; y < t.height && y < int(rows.size()); y++) {
+        const json& row = rows[size_t(y)];
+        std::vector<int> v;
+        if (row.is_string()) {
+            std::istringstream in(row.get<std::string>());
+            for (std::string tok; in >> tok;) {
+                int n = 0;
+                const auto [end, ec] = std::from_chars(tok.data(), tok.data() + tok.size(), n);
+                if (ec != std::errc() || end != tok.data() + tok.size())
+                    fail("tilemap row " + std::to_string(y + 1) + ": '" + tok + "' is not a brush index");
+                v.push_back(n);
+            }
+        } else {
+            for (const json& c : row) v.push_back(c.get<int>());
+        }
+        for (int x = 0; x < t.width && x < int(v.size()); x++) t.cells[size_t(y * t.width + x)] = v[size_t(x)];
+    }
     t.extra = extrasOf(j, writeTilemap(t));
     return t;
 }

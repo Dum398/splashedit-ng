@@ -11102,19 +11102,37 @@ void testTilemapModel() {
     splash::saveScene(back, dir / "rt2.scene");
     const std::string text = readAll(dir / "rt1.scene");
     CHECK(text == readAll(dir / "rt2.scene"));
-    // Stable key order, cells as rows.
+    // Stable key order, cells as one string a row, right-aligned to the widest index.
     const size_t k0 = text.find("\"tileset\""), k1 = text.find("\"width\"", k0), k2 = text.find("\"brushes\"", k1),
                  k3 = text.find("\"kindNames\"", k2), k4 = text.find("\"cells\"", k3), k5 = text.find("\"futureMap\"", k4);
     CHECK(k0 != std::string::npos && k1 != std::string::npos && k2 != std::string::npos && k3 != std::string::npos &&
           k4 != std::string::npos && k5 != std::string::npos);
+    const std::string rowsText = "\"cells\": [\n      \" 0  1 -1\",\n      \" 2  0  5\"\n    ],";
+    CHECK(text.compare(k4, rowsText.size(), rowsText) == 0);
     {
-        std::string compact;
-        for (char c : text.substr(k4, k5 - k4))
-            if (!std::isspace((unsigned char)c)) compact += c;
-        CHECK(compact.rfind("\"cells\":[[0,1,-1],[2,0,5]]", 0) == 0);
+        // One digit wide when no index needs more.
+        splash::Scene one;
+        one.tilemap = t;
+        one.tilemap->cells = {0, 1, 2, 2, 0, 1};
+        splash::saveScene(one, dir / "one.scene");
+        CHECK(readAll(dir / "one.scene").find("\"0 1 2\",\n      \"2 0 1\"") != std::string::npos);
     }
-    // Short rows read empty, long ones are cut, and the size is clamped.
+    // Rows split on any whitespace; short rows read empty, long ones are cut;
+    // the earlier arrays of numbers still read; a word is an error; the size is clamped.
     {
+        std::ofstream(dir / "ws.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                           R"("tilemap":{"width":3,"height":3,"cells":["\t1   -1\t 0  ","2","3 3 3 3"]}})";
+        const splash::Scene ws = splash::loadScene(dir / "ws.scene");
+        CHECK(ws.tilemap && ws.tilemap->cells == std::vector<int>({1, -1, 0, 2, -1, -1, 3, 3, 3}));
+        std::ofstream(dir / "word.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                             R"("tilemap":{"width":2,"height":1,"cells":["1 x"]}})";
+        bool threw = false;
+        try {
+            splash::loadScene(dir / "word.scene");
+        } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("tilemap row 1: 'x' is not a brush index") != std::string::npos;
+        }
+        CHECK(threw);
         std::ofstream(dir / "short.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
                                               R"("tilemap":{"tileset":"t","width":3,"height":2,"cells":[[1],[2,2,2,2]]}})";
         const splash::Scene sh = splash::loadScene(dir / "short.scene");

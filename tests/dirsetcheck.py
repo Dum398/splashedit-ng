@@ -21,9 +21,11 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 H = 960
-# Sprite sheets is the inspector's last section: the wheel over the inspector
-# scrolls to the bottom once the background export has landed; again after
-# each change that grows the section.
+# Sprite sheets is near the bottom of the inspector: the wheel over it scrolls
+# to the bottom once the background export has landed, and again after each
+# change that grows the section. Sections below it (Tilemap) can push a control
+# above the panel there, so every click first scrolls its control into view
+# (--scroll-to @name).
 SCROLL = ['--wheel', '1420,500,-200', '--wait', '3']
 START = ['--wait', '20', '--wait-export'] + SCROLL
 SUF8 = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']
@@ -37,13 +39,19 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
+def inview(name):
+    """Scrolls the inspector until the control is inside it (not for popup items, "a/b")."""
+    return [] if '/' in name else ['--scroll-to', '@' + name]
+
+
 def click(name):
-    return ['--click', '@' + name, '--wait', '3']
+    return inview(name) + ['--click', '@' + name, '--wait', '3']
 
 
 def typed(name, text):
     """Double-click a number field, replace its text, Enter."""
-    return ['--dblclick', '@' + name, '--wait', '3', '--key', 'ctrl+a', '--text', text, '--key', 'enter', '--wait', '3']
+    return inview(name) + ['--dblclick', '@' + name, '--wait', '3', '--key', 'ctrl+a', '--text', text, '--key', 'enter', '--wait',
+                           '3']
 
 
 UNDO = ['--key', 'ctrl+z', '--wait', '3']

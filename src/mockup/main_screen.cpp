@@ -29,6 +29,7 @@
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/sprites.hh"
+#include "editor/tilemap.hh"
 #include "editor/texture_preview.hh"
 #include "texture.hh"
 #include <SDL3/SDL.h>
@@ -5012,9 +5013,358 @@ static void spriteSheetsSection(ImDrawList* dl, editor::Document& doc, float x0,
     }
 }
 
+// The scene inspector's Tilemap section: the scene's one tilemap (psxsplash's
+// TileSystem), its tileset and size, the brushes it is painted with and the
+// object kind labels. The Tilemap tab paints it. Every edit is one undo step
+// (editor/tilemap.hh).
+template <typename Row, typename Caption>
+static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, float x0, float x1, float& y, float lw, Row& row,
+                           Caption& caption) {
+    Fonts& f = fonts();
+    const std::optional<splash::Tilemap>& tm = doc.scene().tilemap;
+    const std::vector<splash::SpriteSheet>& sheets = doc.scene().spriteSheets;
+    const float stop = y;
+    const bool open = section("s_tilemap", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::grid, rgb(0x7fcb55), "Tilemap", true,
+                              true, false);
+    if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+    y += 34 + space::xs;
+
+    // The selected brush: UI state, not part of the scene or its undo.
+    static int selBrush = 0;
+    static unsigned seenLoad = ~0u;
+    if (seenLoad != doc.loadId()) {
+        seenLoad = doc.loadId();
+        selBrush = 0;
+    }
+    const ui::TilesetImage& img = ui::tilesetImage(doc);
+    std::vector<std::string> errors;
+
+    if (!tm) {
+        caption("A grid of tiles drawn from a sprite sheet's cells, behind the sprites. Lua asks it what is walkable "
+                "(Tile.Walkable, Tile.MoveActor) and where its objects are (Tile.ObjectAt).",
+                color::textFaint);
+        float bw = 0;
+        const bool can = !sheets.empty();
+        if (button("scene.tileadd", ImVec2(x0 + space::sm, y + 2), icon::plus, "Add tilemap", can ? ButtonKind::Secondary : ButtonKind::Ghost,
+                   &bw, "A 20 x 15 map (a 320 x 240 screen of 16 px tiles) drawn from the first sprite sheet, with a floor and a wall brush.") &&
+            can) {
+            editor::addTilemap(doc, sheets[0].name, 0);
+            selBrush = 0;
+        }
+        y += size::field + 6 + space::sm;
+        if (!can) caption("Add a sprite sheet first: the tiles are drawn from its cells.", color::warn);
+    } else {
+        const splash::Tilemap& t = *tm;
+        auto edit = [&](const std::function<void(splash::Tilemap&)>& fn, const std::string& key = {}) {
+            editor::editTilemap(doc, fn, key);
+        };
+        const int si = splash::tilesetIndex(t, sheets);
+
+        std::vector<const char*> items;
+        for (const splash::SpriteSheet& s : sheets) items.push_back(s.name.c_str());
+        const ImRect setRow = row("ltileset", "Tileset", "The sprite sheet the tiles are drawn from. Its cell size is the tile size.");
+        nameRect("scene.tileset", setRow);
+        const int sp = dropdownMenu("scene.tileset", setRow, icon::image, t.tileset.empty() ? "None" : t.tileset.c_str(), items, si);
+        if (sp >= 0 && size_t(sp) < sheets.size()) {
+            const std::string picked = sheets[size_t(sp)].name;
+            edit([&](splash::Tilemap& e) { e.tileset = picked; });
+        }
+
+        const ImRect sizeRow = row("ltilesize", "Size", "Width and height in tiles, 1 to 256 each. A smaller size cuts the map at the right and bottom.");
+        const float half = (sizeRow.GetWidth() - space::sm) * 0.5f;
+        const ImRect wr(sizeRow.Min, ImVec2(sizeRow.Min.x + half, sizeRow.Max.y));
+        const ImRect hr(ImVec2(wr.Max.x + space::sm, sizeRow.Min.y), sizeRow.Max);
+        nameRect("scene.tilewidth", wr);
+        nameRect("scene.tileheight", hr);
+        float wv = float(t.width), hv = float(t.height);
+        FieldEdit fw = numberField("tilewidth", wr, std::to_string(t.width).c_str(), "tiles", color::textFaint, "W", &wv, true);
+        if (fw.changed) editor::resizeTilemap(doc, std::clamp(int(std::lround(wv)), 1, 256), t.height, "tilewidth");
+        if (fw.done) doc.endMerge();
+        const splash::Tilemap& t2 = *doc.scene().tilemap;
+        FieldEdit fh = numberField("tileheight", hr, std::to_string(t2.height).c_str(), "tiles", color::textFaint, "H", &hv, true);
+        if (fh.changed) editor::resizeTilemap(doc, t2.width, std::clamp(int(std::lround(hv)), 1, 256), "tileheight");
+        if (fh.done) doc.endMerge();
+        {
+            const splash::Tilemap& tn = *doc.scene().tilemap;
+            const splash::FlatTilemap ft = splash::flattenTilemap(tn);
+            if (si >= 0) {
+                const splash::SpriteSheet& s = sheets[size_t(si)];
+                caption(std::to_string(s.cellW) + " x " + std::to_string(s.cellH) + " px tiles, " + std::to_string(tn.width * s.cellW) +
+                            " x " + std::to_string(tn.height * s.cellH) + " px",
+                        color::textFaint);
+            }
+            caption(std::to_string(ft.objects.size()) + (ft.objects.size() == 1 ? " object, " : " objects, ") +
+                        std::to_string(20 + ft.cells.size() + ft.objects.size() * 6) + " bytes in the splashpack",
+                    color::textFaint);
+        }
+        {
+            float bw = 0;
+            if (button("scene.tileopen", ImVec2(x0 + space::sm + lw, y + 2), icon::grid, "Paint", ButtonKind::Primary, &bw,
+                       "Open the Tilemap tab to paint the cells"))
+                st.scripts.showTiles();
+            float rw = 0;
+            if (button("scene.tileremove", ImVec2(x0 + space::sm + lw + bw + space::sm, y + 2), icon::trash, "Remove", ButtonKind::Ghost, &rw,
+                       "Remove the tilemap, its brushes and cells (Ctrl+Z brings it back)")) {
+                editor::removeTilemap(doc);
+            }
+            y += size::field + 6 + space::sm;
+        }
+    }
+
+    // The brushes and kinds (the tilemap may have just been removed).
+    if (doc.scene().tilemap) {
+        const splash::Tilemap& t = *doc.scene().tilemap;
+        auto edit = [&](const std::function<void(splash::Tilemap&)>& fn, const std::string& key = {}) {
+            editor::editTilemap(doc, fn, key);
+        };
+        auto kindLabel = [&](int k) {
+            if (k >= 0 && k < int(t.kindNames.size()) && !t.kindNames[size_t(k)].empty()) return t.kindNames[size_t(k)];
+            return k == 0 ? std::string("(none)") : "kind " + std::to_string(k);
+        };
+        y += space::xs;
+        dl->AddLine(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y), rgb(0xffffff, 14));
+        y += space::sm;
+        text(dl, ImVec2(x0 + space::sm, y), f.medium, type::label, color::textDim, "Brushes");
+        y += 22;
+        selBrush = t.brushes.empty() ? -1 : std::clamp(selBrush, 0, int(t.brushes.size()) - 1);
+        int removeBrush = -1;
+        for (int i = 0; i < int(t.brushes.size()); i++) {
+            const splash::TileBrush& b = t.brushes[size_t(i)];
+            ImGui::PushID(2000 + i);
+            const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + 30));
+            const ImRect del(ImVec2(rr.Max.x - 26, rr.Min.y + 4), ImVec2(rr.Max.x - 4, rr.Max.y - 4));
+            const ImRect body(rr.Min, ImVec2(del.Min.x - 2, rr.Max.y));
+            Hit h = interact("tilebrushrow", body);
+            nameRect("scene.tilebrush." + std::to_string(i), body);
+            if (i == selBrush) {
+                dl->AddRectFilled(rr.Min, rr.Max, color::accentSoft, radius::field);
+                dl->AddRectFilled(rr.Min + ImVec2(0, 6), ImVec2(rr.Min.x + 2, rr.Max.y - 6), color::accent, 1);
+            } else if (h.hover > 0) {
+                dl->AddRectFilled(rr.Min, rr.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, h.hover), radius::field);
+            }
+            const ImRect th(ImVec2(rr.Min.x + space::sm, rr.Min.y + 4), ImVec2(rr.Min.x + space::sm + 22, rr.Min.y + 26));
+            ui::drawTileCell(dl, img, b.cell, th);
+            std::string meta = (b.cell < 0 ? std::string("hole") : "cell " + std::to_string(b.cell)) + (b.walkable ? ", walkable" : ", solid");
+            if (b.kind != 0) meta += ", " + kindLabel(b.kind);
+            const ImVec2 ms = measure(f.regular, type::caption, meta.c_str());
+            ImGui::PushClipRect(rr.Min, ImVec2(del.Min.x - ms.x - space::md, rr.Max.y), true);
+            text(dl, ImVec2(th.Max.x + space::sm, centerY(f.medium, type::body, rr.Min.y, rr.Max.y)), f.medium, type::body,
+                 i == selBrush ? color::text : color::textDim, b.name.empty() ? "(no name)" : b.name.c_str());
+            ImGui::PopClipRect();
+            text(dl, ImVec2(del.Min.x - ms.x - space::sm, centerY(f.regular, type::caption, rr.Min.y, rr.Max.y)), f.regular, type::caption,
+                 color::textFaint, meta.c_str());
+            nameRect("scene.tilebrush." + std::to_string(i) + ".delete", del);
+            if (iconButton("tilebrushdel", del, icon::trash, false, "Delete this brush: the cells painted with it become empty")) removeBrush = i;
+            else if (h.clicked) selBrush = i;
+            ImGui::PopID();
+            y += 32;
+        }
+        if (removeBrush >= 0) {
+            editor::deleteTileBrush(doc, removeBrush);
+            if (selBrush >= removeBrush && selBrush > 0) selBrush--;
+        }
+        {
+            float bw = 0;
+            if (button("scene.tilebrushadd", ImVec2(x0 + space::sm, y + 2), icon::plus, "Add brush", ButtonKind::Secondary, &bw,
+                       "A new kind of tile to paint: what it draws, whether it can be walked on, whether it is an object")) {
+                const int at = editor::addTileBrush(doc, img.ready() ? img.cells() : 0);
+                if (at >= 0) selBrush = at;
+            }
+            y += size::field + 6 + space::sm;
+        }
+
+        const splash::Tilemap& tb = *doc.scene().tilemap;
+        if (selBrush >= 0 && selBrush < int(tb.brushes.size())) {
+            const splash::TileBrush& b = tb.brushes[size_t(selBrush)];
+            auto editBrush = [&](const std::function<void(splash::TileBrush&)>& fn, const std::string& key = {}) {
+                const int k = selBrush;
+                edit([&](splash::Tilemap& e) { fn(e.brushes[size_t(k)]); }, key);
+            };
+            std::string typed;
+            const ImRect nameRow = row("ltilebrushname", "Name", "Shown in the palette; only for you.");
+            nameRect("scene.tilebrushname", nameRow);
+            if (textField("tilebrushname", nameRow, b.name, &typed, "Brush name", 32)) editBrush([&](splash::TileBrush& e) { e.name = typed; });
+
+            // The cell: a thumbnail that opens the tileset to pick from, and its number.
+            const ImRect cellRow = row("ltilebrushcell", "Tile", "The tileset cell it draws, row by row from 0 at the top left; -1 draws nothing (a hole).");
+            const ImRect thumb(cellRow.Min + ImVec2(0, 1), ImVec2(cellRow.Min.x + cellRow.GetHeight() - 2, cellRow.Max.y - 1));
+            nameRect("scene.tilebrushcell", thumb);
+            Hit th = interact("tilebrushcellpick", thumb);
+            ui::drawTileCell(dl, img, b.cell, thumb);
+            dl->AddRect(thumb.Min, thumb.Max, th.hovered ? color::accent : color::borderStrong, 0, 0, 1.0f);
+            tooltip("Pick the cell from the tileset");
+            if (th.clicked) ImGui::OpenPopup("##tilecellpick");
+            const ImRect num(ImVec2(thumb.Max.x + space::sm, cellRow.Min.y), cellRow.Max);
+            nameRect("scene.tilebrushcellnum", num);
+            float cv = float(b.cell);
+            FieldEdit fc = numberField("tilebrushcellnum", num, std::to_string(b.cell).c_str(), b.cell < 0 ? "hole" : nullptr, 0, nullptr, &cv, true);
+            if (fc.changed) {
+                const int v = std::clamp(int(std::lround(cv)), -1, 254);
+                editBrush([v](splash::TileBrush& e) { e.cell = v; }, "tilebrushcell");
+            }
+            if (fc.done) doc.endMerge();
+            // Under the row, right edges lined up: it opens leftwards, inside the window.
+            ImGui::SetNextWindowPos(ImVec2(cellRow.Max.x, thumb.Max.y + 4), ImGuiCond_Always, ImVec2(1, 0));
+            if (ImGui::BeginPopup("##tilecellpick")) {
+                ImDrawList* pdl = ImGui::GetWindowDrawList();
+                if (!img.ready()) {
+                    ImGui::TextUnformatted("The tileset is not ready: pick a sprite sheet whose image loads.");
+                } else {
+                    // The whole tileset at a whole-texel zoom, a cell to click each, and Hole.
+                    const float zoom = std::max(1.0f, std::floor(std::min(320.0f / img.width, 240.0f / img.height)));
+                    const ImVec2 o = ImGui::GetCursorScreenPos();
+                    const ImVec2 sz(img.width * zoom, img.height * zoom);
+                    pdl->AddRectFilled(o, o + sz, rgb(0x1f232b));
+                    ui::addTextureImage(pdl, (ImTextureID)(intptr_t)img.tex, o, o + sz);
+                    for (int c = 0; c < img.cells(); c++) {
+                        const ImVec2 m(o.x + (c % img.cols) * img.cellW * zoom, o.y + (c / img.cols) * img.cellH * zoom);
+                        const ImRect cr(m, m + ImVec2(img.cellW * zoom, img.cellH * zoom));
+                        ImGui::PushID(c);
+                        Hit ch = interact("tilecell", cr);
+                        nameRect("scene.tilecell." + std::to_string(c), cr);
+                        pdl->AddRect(cr.Min, cr.Max, c == b.cell ? color::accentHover : ch.hovered ? rgb(0xffffff, 160) : rgb(0xffffff, 30), 0, 0,
+                                     c == b.cell ? 2.0f : 1.0f);
+                        if (ch.clicked) {
+                            editBrush([c](splash::TileBrush& e) { e.cell = c; });
+                            ImGui::CloseCurrentPopup();
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::SetCursorScreenPos(ImVec2(o.x, o.y + sz.y + space::sm));
+                    ImGui::Dummy(ImVec2(sz.x, 0));
+                    float hw = 0;
+                    if (button("scene.tilecell.hole", ImGui::GetCursorScreenPos(), nullptr, "Hole (draws nothing)", ButtonKind::Ghost, &hw)) {
+                        editBrush([](splash::TileBrush& e) { e.cell = -1; });
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::Dummy(ImVec2(hw, size::field + 2));
+                }
+                ImGui::EndPopup();
+            }
+
+            const ImRect wl = row("ltilebrushwalk", "Walkable", "On: a player can stand here. Off: a wall; Tile.MoveActor stops at it.");
+            const ImRect sw(ImVec2(wl.Min.x, wl.GetCenter().y - 8), ImVec2(wl.Min.x + 30, wl.GetCenter().y + 8));
+            nameRect("scene.tilebrushwalk", sw);
+            if (toggle("tilebrushwalk", sw, b.walkable)) editBrush([](splash::TileBrush& e) { e.walkable = !e.walkable; });
+
+            std::vector<std::string> kindItems;
+            const int kinds = std::max(int(tb.kindNames.size()), b.kind + 1);
+            for (int k = 0; k < kinds; k++) kindItems.push_back(std::to_string(k) + ": " + kindLabel(k));
+            std::vector<const char*> kindPtrs;
+            for (const std::string& k : kindItems) kindPtrs.push_back(k.c_str());
+            const ImRect kr = row("ltilebrushkind", "Object kind",
+                                  "0: a plain tile. Anything else makes each cell painted with it an object Lua finds with "
+                                  "Tile.ObjectCount and Tile.ObjectAt (kind, id, x, z). The game decides what a kind means.");
+            nameRect("scene.tilebrushkind", kr);
+            const int kp = dropdownMenu("scene.tilebrushkind", kr, nullptr, kindItems[size_t(std::max(b.kind, 0))].c_str(), kindPtrs,
+                                        b.kind);
+            if (kp >= 0 && kp != b.kind) editBrush([kp](splash::TileBrush& e) { e.kind = kp; });
+            if (b.kind != 0) {
+                const ImRect ir = row("ltilebrushid", "Object id", "The id Tile.ObjectAt gives each of its cells; -1 numbers them 1, 2, 3 in reading order, per kind.");
+                nameRect("scene.tilebrushid", ir);
+                float iv = float(b.id);
+                FieldEdit fi = numberField("tilebrushid", ir, std::to_string(b.id).c_str(), b.id < 0 ? "auto" : nullptr, 0, nullptr, &iv, true);
+                if (fi.changed) {
+                    const int v = std::clamp(int(std::lround(iv)), -1, 255);
+                    editBrush([v](splash::TileBrush& e) { e.id = v; }, "tilebrushid");
+                }
+                if (fi.done) doc.endMerge();
+            }
+        }
+
+        // Kind labels: authoring only, the engine sees the numbers.
+        y += space::md;
+        text(dl, ImVec2(x0 + space::sm, y), f.medium, type::label, color::textDim, "Kind names");
+        y += 22;
+        const splash::Tilemap& tk = *doc.scene().tilemap;
+        int removeKind = -1;
+        for (int k = 1; k < int(tk.kindNames.size()); k++) {
+            ImGui::PushID(3000 + k);
+            const ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + size::field));
+            const ImRect del(ImVec2(rr.Max.x - 26, rr.Min.y + 1), ImVec2(rr.Max.x - 4, rr.Max.y - 1));
+            text(dl, ImVec2(rr.Min.x + space::sm, centerY(f.regular, type::body, rr.Min.y, rr.Max.y)), f.regular, type::body, color::textDim,
+                 std::to_string(k).c_str());
+            const ImRect field(ImVec2(rr.Min.x + 32, rr.Min.y), ImVec2(del.Min.x - space::sm, rr.Max.y));
+            nameRect("scene.tilekind." + std::to_string(k), field);
+            std::string typed;
+            if (textField("tilekindname", field, tk.kindNames[size_t(k)], &typed, "Kind name", 32)) {
+                const int kk = k;
+                edit([&](splash::Tilemap& e) { e.kindNames[size_t(kk)] = typed; });
+            }
+            nameRect("scene.tilekind." + std::to_string(k) + ".delete", del);
+            if (k == int(tk.kindNames.size()) - 1 && iconButton("tilekinddel", del, icon::trash, false, "Remove the last kind's name"))
+                removeKind = k;
+            ImGui::PopID();
+            y += size::field + space::xs;
+        }
+        if (removeKind >= 0) edit([](splash::Tilemap& e) { e.kindNames.pop_back(); });
+        {
+            float bw = 0;
+            if (button("scene.tilekindadd", ImVec2(x0 + space::sm, y + 2), icon::plus, "Name a kind", ButtonKind::Secondary, &bw,
+                       "A label for the next kind number, shown in the Object kind list"))
+                edit([](splash::Tilemap& e) {
+                    if (e.kindNames.empty()) e.kindNames.push_back("(none)");
+                    e.kindNames.push_back("kind " + std::to_string(e.kindNames.size()));
+                });
+            y += size::field + 6 + space::sm;
+        }
+
+        // What export would refuse, as it is typed.
+        const int si = splash::tilesetIndex(tk, sheets);
+        splash::checkTilemap(tk, sheets, [&](size_t i) { return int(i) == si && img.ready() ? img.cells() : -1; }, errors);
+        for (size_t i = 0; i < errors.size() && i < 6; i++) caption(errors[i], color::bad);
+    }
+
+    if (namedRectsOn()) {
+        // Scripted tests: the map, its brushes, the problems, and what the last export wrote.
+        const std::optional<splash::Tilemap>& t = doc.scene().tilemap;
+        std::string line = "scene: tilemap ";
+        if (!t) {
+            line += "none";
+        } else {
+            line += "tileset " + (t->tileset.empty() ? std::string("-") : t->tileset) + " size " + std::to_string(t->width) + "x" +
+                    std::to_string(t->height) + " brushes";
+            for (const splash::TileBrush& b : t->brushes)
+                line += " " + b.name + ":" + std::to_string(b.cell) + (b.walkable ? "W" : "S") + ":" + std::to_string(b.kind) + ":" +
+                        std::to_string(b.id);
+            if (t->brushes.empty()) line += " none";
+            line += " kinds";
+            for (size_t k = 1; k < t->kindNames.size(); k++) line += " " + t->kindNames[k];
+            if (t->kindNames.size() <= 1) line += " none";
+            line += " selected " + std::to_string(selBrush);
+        }
+        scriptLine("tilemap", line);
+        std::string probs;
+        for (const std::string& e : errors) probs += (probs.empty() ? "" : " | ") + e;
+        scriptLine("tilemapproblems", "scene: tilemap problems " + (probs.empty() ? std::string("none") : probs));
+        const std::optional<splash::ExportResult>& res = st.live.result();
+        std::string ex = "none";
+        if (res && res->ok() && res->stats.tilemap.bytes) {
+            const auto& s = res->stats.tilemap;
+            char b[128];
+            std::snprintf(b, sizeof b, "tilemap %dx%d tile=%dx%d sheet=%d objects=%d bytes=%zu", s.width, s.height, s.tileW, s.tileH, s.sheet,
+                          s.objects, s.bytes);
+            ex = b;
+        } else if (res && !res->ok()) {
+            ex = "failed";
+        }
+        scriptLine("tilemapexport", "scene: tilemap export " + ex);
+    }
+
+    if (!open) {
+        ImGui::PopClipRect();
+        y = stop + 34 + space::md;
+    } else {
+        dl->AddRect(ImVec2(x0, stop), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+        y += space::sm + space::md;
+    }
+}
+
 static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    // The scene inspector's visible body: --scroll-to wheels it until a control is inside.
+    nameRect("scene.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
     const float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
     const splash::SceneSettings& set = doc.scene().settings;
     // Taller than the panel, it scrolls with the wheel.
@@ -6550,6 +6900,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     }
 
     spriteSheetsSection(dl, doc, x0, x1, y, lw, row, caption);
+    tilemapSection(st, dl, doc, x0, x1, y, lw, row, caption);
 
     const char* hint = "Pick an object in the Scene panel to edit it.";
     ImVec2 hs = measure(f.regular, type::label, hint);
@@ -9040,6 +9391,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     st.timeline.tabsWidth = tabsW;
     st.assets.tabs = tabs;
     st.assets.tabsWidth = tabsW;
+    st.scripts.setTilesTab(doc.scene().tilemap.has_value());
     const ImRect body = st.scripts.tabStrip(dl, tl ? st.timeline.dock(mid) : st.assets.dock(mid));
     // The timeline takes this frame's scrub first, so the Scene draws the
     // pose at the new scrub head now rather than a frame late (empty when
@@ -9055,6 +9407,9 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
             notify(st, st.canvasView.status, st.canvasView.statusBad);
             st.canvasView.status.clear();
         }
+        st.viewportRect = ImRect();
+    } else if (st.scripts.tilesShown()) {
+        st.tilemapView.draw(dl, body, doc);
         st.viewportRect = ImRect();
     } else {
         st.scripts.setBlockContext(blockContext(doc));

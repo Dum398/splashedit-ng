@@ -99,7 +99,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
 // Scripted input for screenshot mode, so interactions can be checked headless.
 // Actions run one after another from frame 5, in command-line order.
 struct Action {
-    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, WaitExport, WaitPlay, CopyFile, DeleteFile, Maximize, Restore, HitTest } kind;
+    enum Kind { Click, DoubleClick, Drag, Key, Wheel, Text, Wait, KeyDown, KeyUp, MouseDown, MouseUp, Move, Drop, Shot, WaitImport, WaitExport, WaitPlay, ScrollTo, CopyFile, DeleteFile, Maximize, Restore, HitTest } kind;
     explicit Action(Kind k) : kind(k) {}
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
     int button = 0;
@@ -185,11 +185,12 @@ bool parseKey(const char* spec, Action& a) {
     return true;
 }
 
-// "@name" or "@name,dx,dy": a control by name, and an offset from its centre.
+// "@name", "@name,dx,dy" or "@name,dx,dy,button": a control by name, an
+// offset from its centre, and the mouse button (0 left, 1 right, 2 middle).
 void parseTarget(const char* spec, Action& a) {
     std::string s = spec + 1;
     const size_t comma = s.find(',');
-    if (comma != std::string::npos) std::sscanf(s.c_str() + comma + 1, "%f,%f", &a.dx, &a.dy);
+    if (comma != std::string::npos) std::sscanf(s.c_str() + comma + 1, "%f,%f,%d", &a.dx, &a.dy, &a.button);
     a.target = s.substr(0, comma);
 }
 
@@ -425,7 +426,9 @@ Args parse(int argc, char** argv) {
             else std::fprintf(stderr, "unknown key '%s'\n", spec);
         } else if (!std::strcmp(argv[i], "--mousedown")) {
             Action act(Action::MouseDown);
-            std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
+            const char* v = next();
+            if (v[0] == '@') parseTarget(v, act);
+            else std::sscanf(v, "%f,%f,%d", &act.x0, &act.y0, &act.button);
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--mouseup")) {
             Action act(Action::MouseUp);
@@ -461,6 +464,18 @@ Args parse(int argc, char** argv) {
         } else if (!std::strcmp(argv[i], "--wait-export")) {
             // Holds the script here until the live export has caught up with the scene, up to 90 s.
             a.actions.push_back(Action(Action::WaitExport));
+        } else if (!std::strcmp(argv[i], "--scroll-to")) {
+            // --scroll-to @name: wheels the panel the control lies across (a named
+            // "<x>.panel" rect: the scene or object inspector) until the control is
+            // inside it, then goes on; up to 90 s, or until the panel scrolls no further.
+            Action act(Action::ScrollTo);
+            const char* v = next();
+            if (v[0] != '@') {
+                std::fprintf(stderr, "--scroll-to wants @name\n");
+                std::exit(2);
+            }
+            parseTarget(v, act);
+            a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--wait-play")) {
             // Holds the script here while a Play, Run on hardware or Export build is running, up to 90 s.
             a.actions.push_back(Action(Action::WaitPlay));
@@ -774,6 +789,12 @@ int main(int argc, char** argv) {
     bool held = false;
     Action::Kind heldKind = Action::WaitImport;
     std::chrono::steady_clock::time_point heldSince;
+    // --scroll-to holding the script: its control, the step it is on (aim,
+    // wheel, look), where the control was before the last wheel, and done.
+    std::string scrollTarget;
+    int scrollStep = 0;
+    ImRect scrollSeen;
+    bool scrollDone = false;
     // The live export is running, or its last result is for an older revision of the scene.
     const auto playBuilding = [&] { return state.play.build.valid() || state.play.hwBuild.valid() || state.play.disc.valid(); };
     const auto exportBehind = [&] { return state.live.busy() || state.live.resultRevision() != doc.revision() || !state.live.result(); };
@@ -863,11 +884,54 @@ int main(int argc, char** argv) {
                 if (a.kind == Action::WaitImport && state.importBusy()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
                 if (a.kind == Action::WaitExport && exportBehind()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
                 if (a.kind == Action::WaitPlay && playBuilding()) held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
+                if (a.kind == Action::ScrollTo) {
+                    held = true, heldKind = a.kind, heldSince = std::chrono::steady_clock::now();
+                    scrollTarget = a.target, scrollStep = 0, scrollSeen = ImRect(), scrollDone = false;
+                }
             }
-            const bool holding = heldKind == Action::WaitExport ? exportBehind() : heldKind == Action::WaitPlay ? playBuilding() : state.importBusy();
+            if (held && heldKind == Action::ScrollTo) {
+                // Where the last frame drew the control and the panel across it; the
+                // wheel (48 px a notch) that would bring it 8 px inside, 0 when it is in.
+                const std::map<std::string, ImRect>& rects = ui::namedRects();
+                const auto it = rects.find(scrollTarget);
+                const ImRect* panel = nullptr;
+                if (it != rects.end())
+                    for (const auto& [name, r] : rects)
+                        if (name.ends_with(".panel") && it->second.GetCenter().x >= r.Min.x && it->second.GetCenter().x <= r.Max.x) {
+                            panel = &r;
+                            break;
+                        }
+                float notches = 0;
+                if (panel) {
+                    const ImRect& c = it->second;
+                    const float m = 8;
+                    if (c.Min.y < panel->Min.y + m) notches = (panel->Min.y + m - c.Min.y) / 48.0f;
+                    else if (c.Max.y > panel->Max.y - m && c.GetHeight() < panel->GetHeight() - 2 * m)
+                        notches = -(c.Max.y - (panel->Max.y - m)) / 48.0f;
+                }
+                if (it == rects.end() || !panel) {
+                    std::fprintf(stderr, "--scroll-to @%s: %s\n", scrollTarget.c_str(), it == rects.end() ? "no such control drawn" : "not in a panel");
+                    scrollDone = true;
+                } else if (notches == 0) {
+                    scrollDone = true;
+                } else if (scrollStep % 3 == 0) {
+                    if (scrollStep > 0 && it->second.Min.y == scrollSeen.Min.y) {
+                        std::fprintf(stderr, "--scroll-to @%s: the panel scrolls no further\n", scrollTarget.c_str());
+                        scrollDone = true;
+                    }
+                    scrollSeen = it->second;
+                    postMousePos(io, panel->GetCenter().x, panel->GetCenter().y);
+                } else if (scrollStep % 3 == 1) {
+                    io.AddMouseWheelEvent(0, notches);
+                }
+                scrollStep++;
+            }
+            const bool holding = heldKind == Action::WaitExport ? exportBehind() : heldKind == Action::WaitPlay ? playBuilding()
+                                 : heldKind == Action::ScrollTo ? !scrollDone : state.importBusy();
             if (held && (!holding || std::chrono::steady_clock::now() - heldSince > std::chrono::seconds(90))) {
                 if (holding) std::fprintf(stderr, heldKind == Action::WaitExport ? "--wait-export: export still behind after 90 s\n"
                                                   : heldKind == Action::WaitPlay ? "--wait-play: build still running after 90 s\n"
+                                                  : heldKind == Action::ScrollTo ? "--scroll-to: still scrolling after 90 s\n"
                                                                                  : "--wait-import: still importing after 90 s\n");
                 held = false;
                 ++frame;  // past the --wait-import frame

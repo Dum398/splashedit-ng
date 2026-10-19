@@ -153,6 +153,8 @@ public:
     // as one undo step (none when nothing changed); merges like editSettings.
     // Returns whether anything changed.
     bool editSpriteSheets(const std::function<void(std::vector<splash::SpriteSheet>&)>& fn, const std::string& mergeKey = {});
+    // The same for the scene's tilemap (nullopt: the scene has none).
+    bool editTilemap(const std::function<void(std::optional<splash::Tilemap>&)>& fn, const std::string& mergeKey = {});
     // Closes the open merge, so the next edit starts a new undo step.
     void endMerge() { m_mergeOpen = false; }
     // Inserts `obj` so that it ends up at `path`, and selects it.

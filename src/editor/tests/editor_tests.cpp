@@ -38,6 +38,7 @@
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/sprites.hh"
+#include "editor/tilemap.hh"
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
@@ -11067,6 +11068,276 @@ void testSpriteSheets() {
     }
 }
 
+// The tilemap in the scene JSON: what was read comes back with unknown keys
+// kept, a second save is byte for byte the first, the cells are rows of brush
+// indices, and a scene without one writes no tilemap key.
+void testTilemapModel() {
+    using namespace roomtest;
+    const fs::path dir = g_outDir / "tilemapmodel";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Scene s;
+    splash::Tilemap t;
+    t.tileset = "tiles";
+    t.resize(3, 2);
+    splash::TileBrush wall;
+    wall.name = "wall";
+    wall.cell = 1;
+    wall.walkable = false;
+    wall.color = {0.5f, 0.25f, 1};
+    wall.extra.push_back({"futureBrush", "\"x\""});
+    splash::TileBrush task;
+    task.name = "task";
+    task.cell = 2;
+    task.kind = 3;
+    task.id = 7;
+    t.brushes = {splash::TileBrush{}, wall, task};
+    t.kindNames = {"(none)", "vent", "spawn", "task"};
+    t.cells = {0, 1, -1, 2, 0, 5};
+    t.extra.push_back({"futureMap", "[1,2]"});
+    s.tilemap = t;
+    splash::saveScene(s, dir / "rt1.scene");
+    const splash::Scene back = splash::loadScene(dir / "rt1.scene");
+    CHECK(back.tilemap && *back.tilemap == t);
+    splash::saveScene(back, dir / "rt2.scene");
+    const std::string text = readAll(dir / "rt1.scene");
+    CHECK(text == readAll(dir / "rt2.scene"));
+    // Stable key order, cells as one string a row, right-aligned to the widest index.
+    const size_t k0 = text.find("\"tileset\""), k1 = text.find("\"width\"", k0), k2 = text.find("\"brushes\"", k1),
+                 k3 = text.find("\"kindNames\"", k2), k4 = text.find("\"cells\"", k3), k5 = text.find("\"futureMap\"", k4);
+    CHECK(k0 != std::string::npos && k1 != std::string::npos && k2 != std::string::npos && k3 != std::string::npos &&
+          k4 != std::string::npos && k5 != std::string::npos);
+    const std::string rowsText = "\"cells\": [\n      \" 0  1 -1\",\n      \" 2  0  5\"\n    ],";
+    CHECK(text.compare(k4, rowsText.size(), rowsText) == 0);
+    {
+        // One digit wide when no index needs more.
+        splash::Scene one;
+        one.tilemap = t;
+        one.tilemap->cells = {0, 1, 2, 2, 0, 1};
+        splash::saveScene(one, dir / "one.scene");
+        CHECK(readAll(dir / "one.scene").find("\"0 1 2\",\n      \"2 0 1\"") != std::string::npos);
+    }
+    // Rows split on any whitespace; short rows read empty, long ones are cut;
+    // the earlier arrays of numbers still read; a word is an error; the size is clamped.
+    {
+        std::ofstream(dir / "ws.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                           R"("tilemap":{"width":3,"height":3,"cells":["\t1   -1\t 0  ","2","3 3 3 3"]}})";
+        const splash::Scene ws = splash::loadScene(dir / "ws.scene");
+        CHECK(ws.tilemap && ws.tilemap->cells == std::vector<int>({1, -1, 0, 2, -1, -1, 3, 3, 3}));
+        std::ofstream(dir / "word.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                             R"("tilemap":{"width":2,"height":1,"cells":["1 x"]}})";
+        bool threw = false;
+        try {
+            splash::loadScene(dir / "word.scene");
+        } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("tilemap row 1: 'x' is not a brush index") != std::string::npos;
+        }
+        CHECK(threw);
+        std::ofstream(dir / "short.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                              R"("tilemap":{"tileset":"t","width":3,"height":2,"cells":[[1],[2,2,2,2]]}})";
+        const splash::Scene sh = splash::loadScene(dir / "short.scene");
+        CHECK(sh.tilemap && sh.tilemap->cells == std::vector<int>({1, -1, -1, 2, 2, 2}) && sh.tilemap->brushes.empty() &&
+              sh.tilemap->kindNames == std::vector<std::string>({"(none)"}));
+        std::ofstream(dir / "big.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                            R"("tilemap":{"width":999,"height":0}})";
+        const splash::Scene big = splash::loadScene(dir / "big.scene");
+        CHECK(big.tilemap && big.tilemap->width == 256 && big.tilemap->height == 1 && big.tilemap->cells.size() == 256);
+    }
+    // Resize keeps the overlap and fills the rest empty.
+    {
+        splash::Tilemap r = t;
+        r.resize(2, 3);
+        CHECK(r.width == 2 && r.height == 3 && r.cells == std::vector<int>({0, 1, 2, 0, -1, -1}));
+        r.resize(0, 999);
+        CHECK(r.width == 1 && r.height == 256 && r.at(0, 0) == 0 && r.at(0, 1) == 2 && r.at(0, 2) == -1 && r.at(1, 0) == -1);
+    }
+    s.tilemap.reset();
+    splash::saveScene(s, dir / "rt3.scene");
+    CHECK(readAll(dir / "rt3.scene").find("tilemap") == std::string::npos);
+    CHECK(!splash::loadScene(dir / "rt3.scene").tilemap);
+}
+
+// The tilemap chunk, byte for byte as psxsplash's tilesystem.cpp reads it
+// (SplashEdit's PSXTilemapExporter.Flatten and PSXSceneWriter), and each
+// problem export refuses it for.
+void testTilemapExport() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "tilemap";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "tests" / "sprite", project, fs::copy_options::recursive);
+    splash::Scene scene = splash::loadScene(project / "sprite.scene");
+    for (splash::Object& o : scene.objects)
+        if (o.mesh) {
+            o.mesh->mesh = (src / "examples" / "courtyard" / "meshes" / "crate.mesh").string();
+            for (splash::Material& m : o.mesh->materials) m.texture = (src / "examples" / "courtyard" / "textures" / "crate.png").string();
+        }
+    // fx.png: 48x16 in 12x8 cells, so 8 cells; the second sheet, so index 1.
+    splash::Tilemap t;
+    t.tileset = "fx";
+    t.resize(4, 3);
+    auto brush = [](const char* name, int cell, bool walkable, int kind, int id) {
+        splash::TileBrush b;
+        b.name = name, b.cell = cell, b.walkable = walkable, b.kind = kind, b.id = id;
+        return b;
+    };
+    t.brushes = {brush("floor", 0, true, 0, -1), brush("wall", 1, false, 0, -1), brush("task", 2, true, 3, -1),
+                 brush("hole", -1, true, 5, -1), brush("vent", 7, false, 2, 9)};
+    t.cells = {0, 1, 2, -1,  //
+               2, 3, 4, 0,   //
+               1, 1, 2, -1};
+    scene.tilemap = t;
+
+    // Flatten: holes and empty cells draw nothing and are solid; a hole is no
+    // object; auto ids count each kind in reading order, a set id is kept.
+    {
+        const splash::FlatTilemap ft = splash::flattenTilemap(t);
+        const std::vector<uint8_t> cells = {0, 1, 1, 0, 2, 1, 0xFF, 0, 2, 1, 0xFF, 0, 7, 0, 0, 1, 1, 0, 1, 0, 2, 1, 0xFF, 0};
+        CHECK(ft.cells == cells);
+        const std::vector<splash::TileObjectRecord> objs = {{3, 1, 2, 0}, {3, 2, 0, 1}, {2, 9, 2, 1}, {3, 3, 2, 2}};
+        CHECK(ft.objects == objs);
+    }
+
+    splash::ExportResult r = splash::exportSplashpack(scene, project, project / "t.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "tilemap export: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string b = readAll(project / "t.splashpack");
+    if (r.ok() && b.size() > 144) {
+        // The header word (v23's former reserved word, after the scene hash).
+        const size_t off = size_t(rd32(b, 140));
+        CHECK(off != 0 && off % 4 == 0 && b.size() >= off + 68);
+        CHECK(rd16(b, off) == 4 && rd16(b, off + 2) == 3);                          // width, height
+        CHECK(uint8_t(b[off + 4]) == 12 && uint8_t(b[off + 5]) == 8);                // tile size: the sheet's cell
+        CHECK(uint8_t(b[off + 6]) == 1 && uint8_t(b[off + 7]) == 0);                 // tileset sheet, pad
+        CHECK(rd16(b, off + 8) == 4 && rd16(b, off + 10) == 0);                      // object count, pad
+        CHECK(size_t(rd32(b, off + 12)) == off + 20 && size_t(rd32(b, off + 16)) == off + 44);  // absolute offsets
+        // A cell: (2,1) is the vent, tile 7, solid.
+        CHECK(uint8_t(b[off + 20 + (1 * 4 + 2) * 2]) == 7 && uint8_t(b[off + 20 + (1 * 4 + 2) * 2 + 1]) == 0);
+        // A wall cell, and an empty one.
+        CHECK(uint8_t(b[off + 20 + 2]) == 1 && uint8_t(b[off + 20 + 3]) == 0);
+        CHECK(uint8_t(b[off + 20 + 6]) == 0xFF && uint8_t(b[off + 20 + 7]) == 0);
+        // An object: the third, the vent with its own id 9 at 2,1.
+        const size_t o2 = off + 44 + 2 * 6;
+        CHECK(uint8_t(b[o2]) == 2 && uint8_t(b[o2 + 1]) == 9 && rd16(b, o2 + 2) == 2 && rd16(b, o2 + 4) == 1);
+        CHECK(r.stats.tilemap.width == 4 && r.stats.tilemap.height == 3 && r.stats.tilemap.tileW == 12 && r.stats.tilemap.tileH == 8 &&
+              r.stats.tilemap.sheet == 1 && r.stats.tilemap.objects == 4 && r.stats.tilemap.bytes == 20 + 24 + 24);
+    }
+    // Without objects the objects offset is 0; without a tilemap the word is.
+    {
+        splash::Scene s = scene;
+        for (splash::TileBrush& br : s.tilemap->brushes) br.kind = 0;
+        splash::ExportResult nr = splash::exportSplashpack(s, project, project / "noobj.splashpack");
+        const std::string nb = readAll(project / "noobj.splashpack");
+        const size_t off = nb.size() > 144 ? size_t(rd32(nb, 140)) : 0;
+        CHECK(nr.ok() && off && rd16(nb, off + 8) == 0 && rd32(nb, off + 16) == 0 && nr.stats.tilemap.bytes == 20 + 24);
+        s.tilemap.reset();
+        nr = splash::exportSplashpack(s, project, project / "none.splashpack");
+        const std::string zb = readAll(project / "none.splashpack");
+        CHECK(nr.ok() && zb.size() > 144 && rd32(zb, 140) == 0 && nr.stats.tilemap.bytes == 0);
+    }
+    // Each problem: export refuses, saying what to fix.
+    auto refused = [&](const std::function<void(splash::Tilemap&)>& edit, const std::string& part) {
+        splash::Scene s = scene;
+        edit(*s.tilemap);
+        const splash::ExportResult br = splash::exportSplashpack(s, project, project / "bad.splashpack");
+        if (!hasError(br, part))
+            for (const std::string& e : br.errors) std::fprintf(stderr, "tilemap error: %s\n", e.c_str());
+        return !br.ok() && hasError(br, part);
+    };
+    CHECK(refused([](splash::Tilemap& m) { m.tileset.clear(); }, "The tilemap has no tileset"));
+    CHECK(refused([](splash::Tilemap& m) { m.tileset = "gone"; }, "tileset 'gone' is not one of the scene's sprite sheets"));
+    CHECK(refused([](splash::Tilemap& m) { m.brushes[4].cell = 8; },
+                  "Tile brush 'vent' draws tileset cell 8, but 'fx' has 8 (0..7)"));
+    CHECK(refused([](splash::Tilemap& m) { m.brushes[0].cell = -2; }, "Tile brush 'floor' draws tileset cell -2: use -1 for a hole"));
+    CHECK(refused([](splash::Tilemap& m) { m.cells[3] = 5, m.cells[11] = 6; },
+                  "2 tilemap cells are painted with a brush that no longer exists"));
+    CHECK(refused(
+        [](splash::Tilemap& m) {
+            m.resize(16, 9);
+            std::fill(m.cells.begin(), m.cells.end(), 2);
+        },
+        "144 tilemap object tiles, psxsplash holds at most 128"));
+    {
+        // 128 is still fine.
+        splash::Scene s = scene;
+        s.tilemap->resize(16, 8);
+        std::fill(s.tilemap->cells.begin(), s.tilemap->cells.end(), 2);
+        CHECK(splash::exportSplashpack(s, project, project / "max.splashpack").stats.tilemap.objects == 128);
+    }
+}
+
+// The inspector's and the Tilemap tab's edits (editor/tilemap.hh), each one undo step.
+void testTilemapEdits() {
+    splash::Scene scene;
+    splash::SpriteSheet sheet;
+    sheet.name = "tiles";
+    sheet.texture = "tiles.png";
+    scene.spriteSheets = {sheet};
+    editor::Document d;
+    d.reset(scene, g_outDir);
+    const size_t h0 = d.historySize();
+    CHECK(editor::addTilemap(d, "tiles", 8) && d.historySize() == h0 + 1);
+    CHECK(!editor::addTilemap(d, "tiles", 8));  // one a scene
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.tileset == "tiles" && t.width == 20 && t.height == 15 && t.cells.size() == 300 &&
+              std::all_of(t.cells.begin(), t.cells.end(), [](int c) { return c == -1; }));
+        CHECK(t.brushes.size() == 2 && t.brushes[0].name == "floor" && t.brushes[0].cell == 0 && t.brushes[0].walkable &&
+              t.brushes[1].name == "wall" && t.brushes[1].cell == 1 && !t.brushes[1].walkable);
+    }
+    // A stroke: several paints under one key are one undo step; the next stroke is another.
+    CHECK(editor::paintTiles(d, {{0, 0}}, 0, "s1"));
+    CHECK(editor::paintTiles(d, editor::tileLine(0, 0, 3, 0), 0, "s1"));
+    CHECK(!editor::paintTiles(d, {{2, 0}}, 0, "s1"));  // nothing changed
+    d.endMerge();
+    CHECK(d.historySize() == h0 + 2 && d.scene().tilemap->at(3, 0) == 0 && d.scene().tilemap->at(4, 0) == -1);
+    CHECK(editor::paintTiles(d, {{1, 0}, {1, 1}, {-1, 0}, {99, 99}}, 1, "s2"));  // off-map cells skipped
+    d.endMerge();
+    CHECK(d.historySize() == h0 + 3 && d.scene().tilemap->at(1, 0) == 1 && d.scene().tilemap->at(1, 1) == 1);
+    CHECK(d.undo() && d.scene().tilemap->at(1, 0) == 0 && d.scene().tilemap->at(1, 1) == -1);
+    CHECK(d.undo() && d.scene().tilemap->at(0, 0) == -1 && d.redo() && d.scene().tilemap->at(3, 0) == 0);
+    // A rectangle, either corner first, clipped to the map.
+    CHECK(editor::fillTiles(d, 2, 3, 0, 1, 1) == 9 && d.scene().tilemap->at(0, 1) == 1 && d.scene().tilemap->at(2, 3) == 1);
+    CHECK(editor::fillTiles(d, 18, 13, 25, 25, 0) == 4 && d.scene().tilemap->at(19, 14) == 0);
+    CHECK(editor::fillTiles(d, 18, 13, 25, 25, 0) == 0);
+    // The line has no gaps, either way round.
+    CHECK(editor::tileLine(0, 0, 3, 1).size() == 4 && editor::tileLine(3, 1, 0, 0).front() == (std::array<int, 2>{3, 1}));
+    CHECK(editor::tileLine(2, 2, 2, 2).size() == 1 && editor::tileLine(0, 0, 0, 5).size() == 6);
+    // Resize keeps the overlap; a typed size merges under its key.
+    CHECK(editor::resizeTilemap(d, 4, 2, "w") && editor::resizeTilemap(d, 3, 2, "w"));
+    d.endMerge();
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.width == 3 && t.height == 2 && t.cells == std::vector<int>({0, 0, 0, 1, 1, 1}));
+    }
+    CHECK(d.undo() && d.scene().tilemap->width == 20 && d.scene().tilemap->at(19, 14) == 0 && d.redo());
+    // Brushes: added after the last cell; deleting one empties its cells and moves the later ones down.
+    CHECK(editor::addTileBrush(d, 8) == 2 && d.scene().tilemap->brushes[2].name == "brush" && d.scene().tilemap->brushes[2].cell == 2);
+    CHECK(editor::addTileBrush(d, 3) == 3 && d.scene().tilemap->brushes[3].name == "brush (2)" && d.scene().tilemap->brushes[3].cell == 0);
+    CHECK(editor::paintTiles(d, {{2, 1}}, 3, "s3"));
+    d.endMerge();
+    CHECK(editor::deleteTileBrush(d, 1));
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.brushes.size() == 3 && t.brushes[1].name == "brush" && t.cells == std::vector<int>({0, 0, 0, -1, -1, 2}));
+    }
+    CHECK(d.undo() && d.scene().tilemap->cells == std::vector<int>({0, 0, 0, 1, 1, 3}) && d.scene().tilemap->brushes.size() == 4);
+    CHECK(!editor::deleteTileBrush(d, 9));
+    // A sheet rename carries the tileset, in the same step.
+    CHECK(editor::editSpriteSheet(d, 0, [](splash::SpriteSheet& s) { s.name = "floor tiles"; }));
+    CHECK(d.scene().tilemap->tileset == "floor tiles");
+    CHECK(d.undo() && d.scene().spriteSheets[0].name == "tiles" && d.scene().tilemap->tileset == "tiles");
+    // Remove, and back.
+    const splash::Tilemap kept = *d.scene().tilemap;
+    CHECK(editor::removeTilemap(d) && !d.scene().tilemap && !editor::removeTilemap(d));
+    CHECK(!editor::paintTiles(d, {{0, 0}}, 0, "s4") && editor::fillTiles(d, 0, 0, 1, 1, 0) == 0);
+    CHECK(d.undo() && d.scene().tilemap && *d.scene().tilemap == kept);
+    while (d.undo()) {
+    }
+    CHECK(!d.scene().tilemap);
+}
+
 // Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
 // animation facingFromYaw(yaw, n) places after walk_s in the exported table,
 // so a set is n animations named in increasing-yaw order, one after another.
@@ -11624,6 +11895,9 @@ int main(int argc, char** argv) {
     testUvOffsetSlots();
     testSceneNetworkId();
     testSpriteSheets();
+    testTilemapModel();
+    testTilemapExport();
+    testTilemapEdits();
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();

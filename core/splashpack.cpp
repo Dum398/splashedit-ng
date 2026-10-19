@@ -1697,6 +1697,68 @@ std::string spriteSheetPageError(const std::string& name, int u0, int v0, int wi
            " texels run past the page's 256x256: use a smaller image or a lower bit depth";
 }
 
+// ---- tilemap (v23; psxsplash tilesystem.cpp SPLASHPACKTilemap, tilemath.hh TileCell/TileObject)
+
+int tilesetIndex(const Tilemap& t, const std::vector<SpriteSheet>& sheets) {
+    if (t.tileset.empty()) return -1;
+    for (size_t i = 0; i < sheets.size(); i++)
+        if (sheets[i].name == t.tileset) return int(i);
+    return -1;
+}
+
+FlatTilemap flattenTilemap(const Tilemap& t) {
+    FlatTilemap out;
+    out.cells.assign(size_t(t.width * t.height) * 2, 0);
+    std::map<int, int> nextId;  // kind -> the id the next auto-numbered object of it gets
+    for (int y = 0; y < t.height; y++)
+        for (int x = 0; x < t.width; x++) {
+            const int bi = t.at(x, y);
+            const size_t c = size_t(y * t.width + x) * 2;
+            const TileBrush* b = bi >= 0 && bi < int(t.brushes.size()) ? &t.brushes[size_t(bi)] : nullptr;
+            if (!b || b->cell < 0) {
+                out.cells[c] = 0xFF;
+                continue;
+            }
+            out.cells[c] = uint8_t(std::clamp(b->cell, 0, 254));
+            out.cells[c + 1] = b->walkable ? 1 : 0;
+            if (b->kind == 0) continue;
+            const int kind = std::clamp(b->kind, 0, 255);
+            int id = b->id;
+            if (id < 0) {
+                auto [it, fresh] = nextId.emplace(kind, 1);
+                id = it->second++;
+            }
+            out.objects.push_back({uint8_t(kind), uint8_t(std::clamp(id, 0, 255)), uint16_t(x), uint16_t(y)});
+        }
+    return out;
+}
+
+void checkTilemap(const Tilemap& t, const std::vector<SpriteSheet>& sheets, const std::function<int(size_t)>& sheetCells,
+                  std::vector<std::string>& errors) {
+    const int sheet = tilesetIndex(t, sheets);
+    if (t.tileset.empty()) errors.push_back("The tilemap has no tileset: pick the sprite sheet its tiles are drawn from");
+    else if (sheet < 0) errors.push_back("The tilemap's tileset '" + t.tileset + "' is not one of the scene's sprite sheets: pick one");
+    const int cells = sheet >= 0 ? sheetCells(size_t(sheet)) : -1;
+    for (size_t i = 0; i < t.brushes.size(); i++) {
+        const TileBrush& b = t.brushes[i];
+        const std::string where = "Tile brush " + (b.name.empty() ? std::to_string(i + 1) : "'" + b.name + "'");
+        if (b.cell < -1) errors.push_back(where + " draws tileset cell " + std::to_string(b.cell) + ": use -1 for a hole");
+        else if (cells >= 0 && b.cell >= cells)
+            errors.push_back(where + " draws tileset cell " + std::to_string(b.cell) + ", but '" + t.tileset + "' has " +
+                             std::to_string(cells) + " (0.." + std::to_string(cells - 1) + ")");
+    }
+    size_t missing = 0;
+    for (int c : t.cells)
+        if (c >= int(t.brushes.size())) missing++;
+    if (missing)
+        errors.push_back(std::to_string(missing) + (missing == 1 ? " tilemap cell is" : " tilemap cells are") +
+                         " painted with a brush that no longer exists: repaint or erase them");
+    const size_t objects = flattenTilemap(t).objects.size();
+    if (objects > size_t(kMaxTileObjects))
+        errors.push_back(std::to_string(objects) + " tilemap object tiles, psxsplash holds at most " + std::to_string(kMaxTileObjects) +
+                         ": paint fewer cells with brushes that have a kind");
+}
+
 namespace {
 
 // The sprite table: `count` 20-byte sheet records, then 12-byte animation
@@ -2062,6 +2124,16 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         };
         const size_t before = res.errors.size();
         checkSpriteSheets(scene.spriteSheets, sizeOf, res.errors, res.warnings);
+        if (scene.tilemap)
+            checkTilemap(
+                *scene.tilemap, scene.spriteSheets,
+                [&](size_t i) {
+                    const SpriteSheet& s = scene.spriteSheets[i];
+                    const SpriteTextureSize sz = sizeOf(s);
+                    if (!sz.error.empty() || s.cellW < 1 || s.cellH < 1) return -1;
+                    return (sz.width / s.cellW) * (sz.height / s.cellH);
+                },
+                res.errors);
         if (res.errors.size() == before)
             for (size_t i = 0; i < scene.spriteSheets.size(); i++) {
                 const SpriteSheet& s = scene.spriteSheets[i];
@@ -2538,7 +2610,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u16(uint16_t(scene.spriteSheets.size()));
     w.u16(uint16_t(spriteAnimCount));
     w.u32(hashSceneId(scene.settings.networkId));
-    w.u32(0);  // tilemap table offset
+    const size_t tilemapTableOffsetPos = w.pos();
+    w.u32(0);  // tilemap table offset, patched when the scene has a tilemap
     size_t lightTableOffsetPos = w.pos();
     w.u32(0);
     w.u32(st.orderingTableSize);
@@ -2898,6 +2971,47 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
             res.stats.spriteSheets.push_back(
                 {s.name, int(s.bitDepth), s.cellW, s.cellH, t.width / s.cellW, t.height / s.cellH, int(s.anims.size())});
         }
+    }
+
+    // ---- tilemap (v23): the 20-byte header, then 2-byte cells, then 6-byte
+    // objects. psxsplash points straight into these (u16 loads), so the chunk
+    // starts 4-aligned; cells are an even count of bytes, which keeps the objects 2-aligned.
+    if (scene.tilemap) {
+        const Tilemap& tm = *scene.tilemap;
+        const SpriteSheet& sheet = scene.spriteSheets[size_t(tilesetIndex(tm, scene.spriteSheets))];
+        const FlatTilemap ft = flattenTilemap(tm);
+        w.align4();
+        const size_t start = w.pos();
+        w.patchU32(tilemapTableOffsetPos, uint32_t(start));
+        auto& info = res.stats.tilemap;
+        info.width = tm.width;
+        info.height = tm.height;
+        info.tileW = std::clamp(sheet.cellW, 1, 255);
+        info.tileH = std::clamp(sheet.cellH, 1, 255);
+        info.sheet = tilesetIndex(tm, scene.spriteSheets);
+        info.objects = int(ft.objects.size());
+        w.u16(uint16_t(tm.width));
+        w.u16(uint16_t(tm.height));
+        w.u8(uint8_t(info.tileW));
+        w.u8(uint8_t(info.tileH));
+        w.u8(uint8_t(info.sheet));
+        w.u8(0);
+        w.u16(uint16_t(ft.objects.size()));
+        w.u16(0);
+        const size_t cellsPos = w.pos();
+        w.u32(0);
+        const size_t objectsPos = w.pos();
+        w.u32(0);
+        w.patchU32(cellsPos, uint32_t(w.pos()));
+        w.bytes(ft.cells.data(), ft.cells.size());
+        if (!ft.objects.empty()) w.patchU32(objectsPos, uint32_t(w.pos()));
+        for (const TileObjectRecord& o : ft.objects) {
+            w.u8(o.kind);
+            w.u8(o.id);
+            w.u16(o.x);
+            w.u16(o.y);
+        }
+        info.bytes = w.pos() - start;
     }
 
     // ---- point lights (v24): {u16 count, u16 0}, 28-byte records, then names

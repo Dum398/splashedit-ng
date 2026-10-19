@@ -515,6 +515,9 @@ int main(int argc, char** argv) {
                     std::printf("sprite sheet bpp=%d cell=%dx%d grid=%dx%d anims=%d %s\n", s.bitDepth, s.cellW, s.cellH, s.cols,
                                 s.rows, s.anims, s.name.c_str());
             }
+            if (st.tilemap.bytes)
+                std::printf("tilemap %dx%d tile=%dx%d sheet=%d objects=%d bytes=%zu\n", st.tilemap.width, st.tilemap.height,
+                            st.tilemap.tileW, st.tilemap.tileH, st.tilemap.sheet, st.tilemap.objects, st.tilemap.bytes);
             for (const auto& im : st.uiImages)
                 std::printf("ui image sheet=%s cell=%d %s/%s\n", im.sheet.empty() ? "-" : im.sheet.c_str(), im.cell,
                             im.canvas.c_str(), im.element.c_str());

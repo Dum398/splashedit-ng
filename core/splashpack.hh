@@ -218,6 +218,12 @@ struct ExportStats {
     int spriteAnims = 0;
     // The sprite table from its first sheet record through the last name's NUL.
     size_t spriteTableBytes = 0;
+    // The tilemap chunk (header, cells, objects); bytes 0 when the scene has none.
+    struct TilemapInfo {
+        int width = 0, height = 0, tileW = 0, tileH = 0, sheet = 0, objects = 0;
+        size_t bytes = 0;
+    };
+    TilemapInfo tilemap;
     // UI Image elements in canvas order (the loading canvas is not listed):
     // the sprite sheet a sheet-backed one shows a cell of (empty = a plain
     // image) and that cell.
@@ -303,6 +309,34 @@ void checkSpriteDirectionSets(const std::vector<SpriteSheet>& sheets, std::vecto
 // page's 256 x 256. Empty when it does. (The packer's atlases are one page
 // wide and tall, so today this only guards against a packer change.)
 std::string spriteSheetPageError(const std::string& name, int u0, int v0, int width, int height);
+
+// psxsplash's tile object pool (TILE_MAX_OBJECTS).
+constexpr int kMaxTileObjects = 128;
+// One object tile lifted out of the map: psxsplash's 6-byte TileObject.
+struct TileObjectRecord {
+    uint8_t kind = 0, id = 0;
+    uint16_t x = 0, y = 0;
+    bool operator==(const TileObjectRecord&) const = default;
+};
+// A tilemap as the splashpack stores it, read from psxsplash's tilesystem.cpp
+// and SplashEdit's PSXTilemapExporter.Flatten: 2 bytes a cell, row-major,
+// {tileset cell (0xFF: nothing drawn), flags (bit 0: walkable)}; an empty cell
+// or one painted with a hole brush (cell -1) or a missing brush is {0xFF, 0}.
+// Each painted cell whose brush has a kind other than 0 is an object, in
+// reading order; a brush id of -1 numbers each kind 1, 2, 3 in that order.
+struct FlatTilemap {
+    std::vector<uint8_t> cells;
+    std::vector<TileObjectRecord> objects;
+};
+FlatTilemap flattenTilemap(const Tilemap& t);
+// Problems with the scene's tilemap that export refuses, one line each saying
+// how to fix it. `sheetCells(i)` is scene sprite sheet i's cell count, or -1
+// when it is not known (its own problems are checkSpriteSheets'). Also used by
+// the inspector to show them as they are typed.
+void checkTilemap(const Tilemap& t, const std::vector<SpriteSheet>& sheets, const std::function<int(size_t)>& sheetCells,
+                  std::vector<std::string>& errors);
+// The scene sprite sheet a tilemap draws from, or -1.
+int tilesetIndex(const Tilemap& t, const std::vector<SpriteSheet>& sheets);
 
 // One agent as the splashpack stores it: the 28-byte SPLASHPACKAgentV2
 // record and its waypoints (fp12 x, -y, z: Y down like every engine position,

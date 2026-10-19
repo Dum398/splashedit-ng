@@ -43,4 +43,10 @@ void addTextureImageRounded(ImDrawList* dl, ImTextureID tex, const ImVec2& pMin,
     dl->AddCallback(restoreSampler, nullptr);
 }
 
+void addTextureImages(ImDrawList* dl, const std::function<void()>& draw) {
+    dl->AddCallback(useTextureFilter, nullptr);
+    draw();
+    dl->AddCallback(restoreSampler, nullptr);
+}
+
 }  // namespace ui

@@ -400,6 +400,40 @@ struct SpriteSheet {
     bool operator==(const SpriteSheet&) const = default;
 };
 
+// A tilemap brush: what a painted cell draws and how the world behaves there.
+// Cells store brush indices, so changing a brush changes every cell painted with it.
+struct TileBrush {
+    std::string name = "floor";
+    int cell = 0;           // tileset cell drawn, row by row from 0; -1 draws nothing (a hole)
+    bool walkable = true;   // off: a wall
+    int kind = 0;           // 0: a plain tile; else an object Lua finds with Tile.ObjectAt
+    int id = -1;            // the object's id; -1 numbers each kind 1, 2, 3 in reading order
+    std::array<float, 3> color{1, 1, 1};  // the painter's tint, not exported
+    ExtraKeys extra;
+    bool operator==(const TileBrush&) const = default;
+};
+
+// The scene's one screen-space tilemap (psxsplash's TileSystem): a grid of
+// brush indices drawn from a sprite sheet's cells, the sheet's cell size being
+// the tile size.
+struct Tilemap {
+    static constexpr int kMaxSide = 256;
+    std::string tileset;  // a scene sprite sheet's name
+    int width = 32, height = 32;  // 1..kMaxSide
+    std::vector<TileBrush> brushes;
+    std::vector<std::string> kindNames{"(none)"};  // labels for kind values, authoring only
+    std::vector<int> cells = std::vector<int>(size_t(32 * 32), -1);  // row-major brush indices, -1 = empty
+    ExtraKeys extra;
+    bool operator==(const Tilemap&) const = default;
+    // The brush index at x, y; -1 off the map (or past a short cell list).
+    int at(int x, int y) const {
+        const size_t i = size_t(y * width + x);
+        return x < 0 || y < 0 || x >= width || y >= height || i >= cells.size() ? -1 : cells[i];
+    }
+    // A new size (each side clamped to 1..kMaxSide), keeping the cells both sizes share.
+    void resize(int w, int h);
+};
+
 // The font a text element draws with: its own when it names one, else its
 // canvas's default font; empty means the system font.
 const std::string& effectiveFont(const UICanvas& canvas, const UIElement& e);
@@ -476,6 +510,7 @@ struct Scene {
     std::vector<Object> objects;
     std::vector<UIFont> fonts;
     std::vector<SpriteSheet> spriteSheets;
+    std::optional<Tilemap> tilemap;
     std::vector<UICanvas> canvases;
     std::vector<Cutscene> cutscenes;
     std::vector<Animation> animations;

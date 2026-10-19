@@ -222,6 +222,14 @@ static void togglePlay(State& st, const editor::Document& doc) {
     });
 }
 
+// Ctrl+Shift+F5 and the Restart button: stop the running game, then build
+// and run again, edits included, in one step.
+static void restartPlay(State& st, const editor::Document& doc) {
+    if (!st.play.emu.running()) return;
+    st.play.emu.stop();
+    togglePlay(st, doc);
+}
+
 // Run on hardware exports here, apart from Play's folder, and serves this one.
 static std::filesystem::path hardwareDir() {
     std::error_code ec;
@@ -325,6 +333,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
     else {
         p.startedAt = SDL_GetTicks();
         editor::restartLog(p.playLog);
+        scriptLine(nullptr, "play: started");
     }
 }
 
@@ -639,6 +648,9 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     const char* playIcon = playing ? icon::square : icon::play;
     const char* playLabel = playing ? "Stop" : building ? "Building" : "Play";
     wPlay = width(playIcon, playLabel);
+    // While the game runs, Restart sits right of Stop as a square icon button.
+    const float sq = size::field + 6;
+    const float wRestart = playing ? sq + space::sm : 0;
     const bool onHw = st.play.hw.active(), hwBuilding = st.play.hwBuild.valid();
     const char* runIcon = onHw ? icon::square : icon::cpu;
     const char* runLabel = onHw ? "Stop hardware" : hwBuilding ? "Building" : "Run on hardware";
@@ -646,7 +658,7 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     const bool exporting = st.play.disc.valid();
     const char* exportLabel = exporting ? "Exporting" : "Export";
     wExport = width(icon::package, exportLabel);
-    float total = wPlay + wRun + wExport + space::sm * 2;
+    float total = wPlay + wRestart + wRun + wExport + space::sm * 2;
     float ax = std::floor(size.x * 0.5f + 90 - total * 0.5f);
     float ay = bar.Min.y + (bar.GetHeight() - (size::field + 6)) * 0.5f;
     const editor::PlayTools& tools = st.play.tools;
@@ -658,6 +670,12 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
                                                      : std::string("Build and run in pcsx-redux (F5)");
     if (button("play", ImVec2(ax, ay), playIcon, playLabel, ButtonKind::Primary, nullptr, playTip.c_str()))
         togglePlay(st, doc);
+    if (playing) {
+        const ImRect rr(ImVec2(ax + wPlay + space::sm, ay), ImVec2(ax + wPlay + space::sm + sq, ay + sq));
+        nameRect("restart", rr);
+        if (iconButton("restart", rr, icon::restart, false, "Restart: stop, rebuild and run again (Ctrl+Shift+F5)", color::text))
+            restartPlay(st, doc);
+    }
     if (namedRectsOn()) {
         // Scripted tests: the overlays and the build they boot, at the start and after every change.
         static std::string reported;
@@ -673,10 +691,10 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
             std::fflush(stdout);
         }
     }
-    if (button("run", ImVec2(ax + wPlay + space::sm, ay), runIcon, runLabel, ButtonKind::Secondary, nullptr,
+    if (button("run", ImVec2(ax + wPlay + wRestart + space::sm, ay), runIcon, runLabel, ButtonKind::Secondary, nullptr,
                onHw ? "Stop serving the console (Ctrl+F5)" : "Upload to a console over serial (Ctrl+F5)"))
         toggleRun(st, doc);
-    if (button("export", ImVec2(ax + wPlay + wRun + space::sm * 2, ay), icon::package, exportLabel, ButtonKind::Ghost, nullptr,
+    if (button("export", ImVec2(ax + wPlay + wRestart + wRun + space::sm * 2, ay), icon::package, exportLabel, ButtonKind::Ghost, nullptr,
                "Build a disc image (Ctrl+B)"))
         startExport(st, doc);
 
@@ -1933,6 +1951,7 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             break;
         case 3:  // Build
             m.push_back(item(st.play.emu.running() ? "Stop" : "Play", "F5", !st.play.build.valid(), [&] { togglePlay(st, doc); }));
+            m.push_back(item("Restart", "Ctrl+Shift+F5", st.play.emu.running(), [&] { restartPlay(st, doc); }));
             m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
                              [&] { toggleRun(st, doc); }));
             m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
@@ -8418,7 +8437,7 @@ static std::string cutTo(ImFont* font, float size, const std::string& s, float r
 
 // Status bar entry for Play: building, running (click for its output), how
 // it ended, or why it did not start.
-static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& st) {
+static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& st, const editor::Document& doc) {
     State::Play& p = st.play;
     Fonts& f = fonts();
     std::string label;
@@ -8465,7 +8484,11 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     outputLog(st, "play", p.emu.output(), p.emu.lineCount(), p.playLog);
     if (p.emu.running()) {
         ImVec2 c = ImGui::GetCursorScreenPos();
-        if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary)) p.emu.stop();
+        float ws = 0;
+        if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary, &ws)) p.emu.stop();
+        else if (button("restartplay", ImVec2(c.x + ws + space::sm, c.y), icon::restart, "Restart", ButtonKind::Secondary, nullptr,
+                        "Stop, rebuild and run again (Ctrl+Shift+F5)"))
+            restartPlay(st, doc);
         ImGui::Dummy(ImVec2(1, size::field + 6));
     }
     ImGui::EndPopup();
@@ -8662,7 +8685,7 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     const float leftMax = size.x - space::md - (res ? 200.0f : 0.0f) - space::xl - revealW -
                           std::min(measure(f.regular, type::caption, saved).x, 240.0f);
     x = importStatus(dl, bar, x, st);
-    x = playStatus(dl, bar, x, leftMax, st);
+    x = playStatus(dl, bar, x, leftMax, st, doc);
     x = hardwareStatus(dl, bar, x, leftMax, st);
     // A long message (an import error with its fix) is cut to the room left
     // of it, beside the problems pill, and shown whole on hover.
@@ -8783,12 +8806,14 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (st.scripts.hasKeyboard()) {
         if (st.unsavedShown || st.newProject.shown || st.menuOpen >= 0) return;
         if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
+        if (ctrl && shift && pressed(ImGuiKey_F5)) restartPlay(st, doc);
         return;
     }
     if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.menuOpen >= 0) return;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
     if (st.play.gameFocus && st.play.game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
+        if (ctrl && shift && pressed(ImGuiKey_F5)) restartPlay(st, doc);
         return;
     }
     if (ctrl && !shift && repeat(ImGuiKey_Z)) doc.undo();
@@ -8821,6 +8846,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     if (ctrl && !shift && pressed(ImGuiKey_F)) st.focusTreeFilter = true;
     if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
     if (ctrl && !shift && pressed(ImGuiKey_F5)) toggleRun(st, doc);
+    if (ctrl && shift && pressed(ImGuiKey_F5)) restartPlay(st, doc);
     if (ctrl && !shift && pressed(ImGuiKey_S)) saveDoc(st, doc);
     if (ctrl && !shift && pressed(ImGuiKey_B)) startExport(st, doc);
     if (ctrl && shift && pressed(ImGuiKey_S) && !doc.projectRoot().empty()) saveDocAs(doc);

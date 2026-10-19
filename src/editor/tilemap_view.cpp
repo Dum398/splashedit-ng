@@ -46,6 +46,8 @@ ImU32 tint(const std::array<float, 3>& c, unsigned a) {
 
 // Zoom steps the wheel moves through: whole steps from 1 up keep texels square.
 constexpr float kZooms[] = {0.25f, 0.5f, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16};
+// The tool strip's (and the map header's) height.
+constexpr float kToolH = 30;
 
 float stepZoom(float z, int dir) {
     if (dir > 0) {
@@ -148,12 +150,44 @@ void TilemapView::draw(ImDrawList* dl, ImRect r, editor::Document& doc) {
     map(dl, ImRect(ImVec2(r.Min.x + pw, r.Min.y), r.Max), doc);
 }
 
+void TilemapView::tools(ImDrawList* dl, ImRect r) {
+    struct ToolButton {
+        Tool tool;
+        const char* icon;
+        const char* name;
+        const char* tip;
+    };
+    static const ToolButton buttons[] = {
+        {Tool::Paint, icon::pencil, "paint", "Paint: click or drag to draw the brush, the right button erases.\n"
+                                             "Shift+drag: a rectangle, Alt+click: pick, in any tool."},
+        {Tool::Rect, icon::squareDashed, "rect", "Rectangle: drag to fill one with the brush, the right button erases one.\n"
+                                                 "Shift+drag does this in any tool."},
+        {Tool::Fill, icon::paintBucket, "fill", "Fill: the connected cells like the one clicked take the brush; the right "
+                                                "button empties them.\nShift+drag: a rectangle, Alt+click: pick."},
+        {Tool::Pick, icon::pipette, "pick", "Pick: click a cell to take its brush, then back to Paint.\n"
+                                            "Alt+click picks in any tool."},
+    };
+    const float gap = space::xs, w = std::floor((r.GetWidth() - gap * 3) / 4);
+    for (int i = 0; i < 4; i++) {
+        const ToolButton& b = buttons[i];
+        const ImRect br(ImVec2(r.Min.x + float(i) * (w + gap), r.Min.y), ImVec2(r.Min.x + float(i) * (w + gap) + w, r.Max.y));
+        nameRect(std::string("tiles.tool.") + b.name, br);
+        const bool on = m_tool == b.tool;
+        if (!on) dl->AddRect(br.Min, br.Max, color::border, radius::button);
+        if (iconButton((std::string("tiletool") + b.name).c_str(), br, b.icon, on, b.tip)) m_tool = b.tool;
+    }
+    static const char* const names[] = {"paint", "rect", "fill", "pick"};
+    scriptLine("tilestool", std::string("tiles: tool ") + names[int(m_tool)]);
+}
+
 void TilemapView::palette(ImDrawList* dl, ImRect r, editor::Document& doc) {
     Fonts& f = fonts();
     const splash::Tilemap& t = *doc.scene().tilemap;
     const TilesetImage& img = tilesetImage(doc);
     dl->AddLine(ImVec2(r.Max.x, r.Min.y + space::sm), ImVec2(r.Max.x, r.Max.y - space::sm), color::border);
     float y = r.Min.y + space::md;
+    tools(dl, ImRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + kToolH)));
+    y += kToolH + space::md;
     text(dl, ImVec2(r.Min.x + space::md, y), f.semibold, type::label, color::textDim, "Brushes");
     y += 22;
     ImGui::PushClipRect(r.Min, r.Max, true);
@@ -199,7 +233,7 @@ void TilemapView::palette(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
     ImGui::PopClipRect();
     // How to paint, at the bottom.
-    static const char* const help[] = {"Left: paint", "Right: erase", "Shift+drag: fill a rectangle", "Alt+click: pick the brush",
+    static const char* const help[] = {"Left: the tool, right: erase", "Shift+drag: fill a rectangle", "Alt+click: pick the brush",
                                        "Wheel: zoom, middle drag: pan"};
     float hy = r.Max.y - space::md - 17 * float(std::size(help));
     if (hy > y + space::md)
@@ -345,16 +379,29 @@ void TilemapView::map(ImDrawList* dl, ImRect r, editor::Document& doc) {
     const bool onMap = cellAt(io.MousePos, &hx, &hy);
     if (over && m_button < 0 && !m_panning) {
         const bool left = ImGui::IsMouseClicked(ImGuiMouseButton_Left), right = ImGui::IsMouseClicked(ImGuiMouseButton_Right);
-        if (left && io.KeyAlt) {
+        // Shift (a rectangle) and Alt (pick) work whatever the tool; the right
+        // button erases in every tool (in Fill, the whole region).
+        const bool rect = io.KeyShift || (m_tool == Tool::Rect && !io.KeyAlt);
+        if (left && (io.KeyAlt || (m_tool == Tool::Pick && !io.KeyShift))) {
             if (onMap) {
                 const int b = t.at(hx, hy);
                 m_brush = b >= 0 && b < int(t.brushes.size()) ? b : -1;
                 scriptLine(nullptr, "tiles: pick brush " + std::to_string(m_brush) + " at " + std::to_string(hx) + "," + std::to_string(hy));
+                // As in an image editor's eyedropper: one pick, then back to painting with it.
+                if (m_tool == Tool::Pick) m_tool = Tool::Paint;
             }
-        } else if ((left || right) && (onMap || io.KeyShift)) {
+        } else if ((left || right) && m_tool == Tool::Fill && !rect) {
+            if (onMap) {
+                doc.endMerge();
+                const int paint = left ? m_brush : -1;
+                const int n = editor::floodTiles(doc, hx, hy, paint);
+                scriptLine(nullptr, std::string("tiles: flood ") + (paint < 0 ? std::string("erase") : "brush " + std::to_string(paint)) +
+                                        " cells " + std::to_string(n) + " at " + std::to_string(hx) + "," + std::to_string(hy));
+            }
+        } else if ((left || right) && (onMap || rect)) {
             m_button = left ? ImGuiMouseButton_Left : ImGuiMouseButton_Right;
             m_paint = left ? m_brush : -1;
-            m_rect = io.KeyShift;
+            m_rect = rect;
             m_from[0] = m_last[0] = std::clamp(hx, 0, t.width - 1);
             m_from[1] = m_last[1] = std::clamp(hy, 0, t.height - 1);
             m_min[0] = m_max[0] = m_from[0];
@@ -390,7 +437,7 @@ void TilemapView::map(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
     if (onMap && over && m_button < 0) {
         const ImRect cr(ImVec2(sx(hx), sy(hy)), ImVec2(sx(hx + 1), sy(hy + 1)));
-        dl->AddRect(cr.Min, cr.Max, io.KeyAlt ? color::warn : rgb(0xffffff, 160), 0, 0, 1.5f);
+        dl->AddRect(cr.Min, cr.Max, io.KeyAlt || m_tool == Tool::Pick ? color::warn : rgb(0xffffff, 160), 0, 0, 1.5f);
     }
     ImGui::PopClipRect();
 

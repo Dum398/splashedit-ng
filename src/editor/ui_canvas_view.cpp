@@ -76,18 +76,6 @@ ImU32 typeColor(UIElementType t) {
     return color::textDim;
 }
 
-ImU32 toColor(const std::array<float, 3>& c) {
-    auto b = [](float v) { return unsigned(std::clamp(std::lround(v * 255.f), 0l, 255l)); };
-    return IM_COL32(b(c[0]), b(c[1]), b(c[2]), 255);
-}
-
-std::string toHex(const std::array<float, 3>& c) {
-    auto b = [](float v) { return unsigned(std::clamp(std::lround(v * 255.f), 0l, 255l)); };
-    char buf[8];
-    std::snprintf(buf, sizeof buf, "#%02X%02X%02X", b(c[0]), b(c[1]), b(c[2]));
-    return buf;
-}
-
 void pushMenuStyle() {
     ImGui::PushStyleColor(ImGuiCol_PopupBg, color::raised);
     ImGui::PushStyleColor(ImGuiCol_Border, color::borderStrong);
@@ -1192,13 +1180,17 @@ bool textField(const char* id, ImRect field, const std::string& value, const cha
 }
 
 // A colour well with a picker under it. Edits merge under `key` until the picker lets go.
-// Returns whether the picker is open. Scripted tests: the well is ui.<id>, the picker ui.<id>pick.
+// Returns whether the picker is open. Scripted tests: the well is ui.<id>, the picker ui.<id>pick,
+// its right-click menu's rows ui.<id>.menu/Copy and ui.<id>.menu/Paste.
 bool colourRow(editor::Document& doc, Rows& rows, const char* id, const char* label, const char* tip, std::array<float, 3> value,
                const std::function<void(UIElement&, const std::array<float, 3>&)>& set, int c, int e) {
     ImRect field = rows.row((std::string("l") + id).c_str(), label, tip);
     nameRect(std::string("ui.") + id, field);
     std::string popup = std::string("##pick") + id;
-    if (colorField(id, field, toColor(value), toHex(value).c_str())) ImGui::OpenPopup(popup.c_str());
+    const ColorFieldHit hit = colorField(id, field, value, (std::string("ui.") + id).c_str());
+    if (hit.clicked) ImGui::OpenPopup(popup.c_str());
+    // Paste from the field's right-click menu: one undo step.
+    if (hit.pasted) uic::editElement(doc, c, e, [&](UIElement& el) { set(el, *hit.pasted); });
     ImGui::SetNextWindowPos(ImVec2(field.Max.x, field.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
     pushMenuStyle();
     bool open = false;

@@ -56,6 +56,7 @@
 #include "ui/window_chrome.hh"
 #include "ui/ui_scale.hh"
 #include "ui/scrub.hh"
+#include "ui/colour_hex.hh"
 #include "budget.hh"
 #include "disc.hh"
 #include "font.hh"
@@ -11216,6 +11217,35 @@ void testNumberScrub() {
     CHECK(std::fabs(drag(2.0f, {1}, false, false) - 2.02f) < 1e-4f);
 }
 
+// A colour field's Copy / Paste text (#176): Copy writes what the field
+// shows, Paste reads that back and the usual hand-typed forms, nothing else.
+void testColourHex() {
+    CHECK(ui::colourHex({1.0f, 0.5f, 0.0f}) == "#FF8000");
+    CHECK(ui::colourHex({-1.0f, 2.0f, 0.2f}) == "#00FF33");
+    auto is = [](const char* text, unsigned rgb) {
+        const auto c = ui::parseColourHex(text);
+        if (!c) return false;
+        const unsigned want[3] = {(rgb >> 16) & 255u, (rgb >> 8) & 255u, rgb & 255u};
+        for (int i = 0; i < 3; i++)
+            if (std::lround((*c)[size_t(i)] * 255.0f) != long(want[i])) return false;
+        return true;
+    };
+    CHECK(is("#FF8000", 0xFF8000));
+    CHECK(is("ff8000", 0xFF8000));
+    CHECK(is("  #a1B2c3\n", 0xA1B2C3));
+    CHECK(is("#F80", 0xFF8800));
+    CHECK(is("#000", 0x000000));
+    for (const char* bad : {"", "#", "F80", "#FF80", "#FF80000", "FF800G", "#GG0000", "red", "# FF8000", "0xFF8000", "#FF 8000"})
+        CHECK(!ui::parseColourHex(bad));
+    // Round trip: what Copy writes, Paste reads back to the same field text.
+    for (unsigned rgb : {0x000000u, 0x123456u, 0xFFFFFFu, 0x7F807Fu}) {
+        char hex[8];
+        std::snprintf(hex, sizeof hex, "#%06X", rgb);
+        const auto c = ui::parseColourHex(hex);
+        CHECK(c && ui::colourHex(*c) == hex);
+    }
+}
+
 // One native file dialog at a time (#159): a second is refused while one is
 // open, and the gate opens again once it answers.
 void testDialogGate() {
@@ -11473,6 +11503,7 @@ int main(int argc, char** argv) {
     testUiSprite();
     testNumberScrub();
     testDialogGate();
+    testColourHex();
     testWindowChrome();
     testUiScale();
     if (g_failures) {

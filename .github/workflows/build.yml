@@ -128,6 +128,9 @@ jobs:
       - name: Copy, cut and paste
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/clipboardcheck.py build/splashedit
+      - name: Copy and paste a colour field
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/colourclipcheck.py build/splashedit
       - name: Export from the editor matches the CLI
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/exportflipcheck.py build/splashedit build/cli/splashpack-cli

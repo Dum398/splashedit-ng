@@ -95,11 +95,14 @@ static void windowControls(State& st, ImDrawList* dl, ImRect bar) {
     for (int i = 0; i < 3; ++i) {
         ImRect r(ImVec2(bar.Max.x - w * (3 - i), bar.Min.y), ImVec2(bar.Max.x - w * (2 - i), bar.Max.y));
         Hit h = interact(ids[i], r);
+        const bool maximized = st.maximized;
+        nameRect(i == 0 ? "chrome.minimize" : i == 1 ? (maximized ? "chrome.restore" : "chrome.maximize") : "chrome.close", r);
+        if (h.hover > 0.5f) tooltip(i == 0 ? "Minimize" : i == 1 ? (maximized ? "Restore Down" : "Maximize") : "Close");
         if (h.clicked) {
             SDL_Window* win = SDL_GL_GetCurrentWindow();
             if (i == 0) SDL_MinimizeWindow(win);
             if (i == 1) {
-                if (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED)
+                if (maximized)
                     SDL_RestoreWindow(win);
                 else
                     SDL_MaximizeWindow(win);
@@ -110,7 +113,13 @@ static void windowControls(State& st, ImDrawList* dl, ImRect bar) {
         ImVec2 c = r.GetCenter();
         ImU32 col = i == 2 && h.hover > 0.5f ? rgb(0xffffff) : color::textDim;
         if (i == 0) dl->AddLine(ImVec2(c.x - 5, c.y), ImVec2(c.x + 5, c.y), col, 1.2f);
-        if (i == 1) dl->AddRect(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), col, 1.5f, 0, 1.2f);
+        if (i == 1 && !maximized) dl->AddRect(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), col, 1.5f, 0, 1.2f);
+        if (i == 1 && maximized) {
+            // Restore: a square in front, the corner of a second one behind it.
+            dl->AddRect(ImVec2(c.x - 6, c.y - 3), ImVec2(c.x + 3, c.y + 6), col, 1.5f, 0, 1.2f);
+            dl->AddLine(ImVec2(c.x - 3, c.y - 6), ImVec2(c.x + 6, c.y - 6), col, 1.2f);
+            dl->AddLine(ImVec2(c.x + 6, c.y - 6), ImVec2(c.x + 6, c.y + 3), col, 1.2f);
+        }
         if (i == 2) {
             dl->AddLine(ImVec2(c.x - 5, c.y - 5), ImVec2(c.x + 5, c.y + 5), col, 1.2f);
             dl->AddLine(ImVec2(c.x - 5, c.y + 5), ImVec2(c.x + 5, c.y - 5), col, 1.2f);

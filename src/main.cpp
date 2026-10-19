@@ -132,6 +132,9 @@ struct Args {
     const char* select = nullptr;   // object name to select at startup
     const char* timeline = nullptr; // cutscene or animation to open in the Timeline at startup
     bool ui = false;                // --ui: start on the UI tab and print its layout (scripted tests)
+    // --assume-maximized: draw the chrome as if maximized. Under xvfb there is
+    // no window manager, so SDL_MaximizeWindow never sets the flag.
+    bool assumeMaximized = false;
     std::vector<Action> actions;
     int padButton = -1;  // SDL_GamepadButton held on a virtual gamepad for the whole run
     bool splash = false;
@@ -484,6 +487,8 @@ Args parse(int argc, char** argv) {
             a.actions.push_back(Action(Action::WaitImport));
         } else if (!std::strcmp(argv[i], "--maximize")) {
             a.actions.push_back(Action(Action::Maximize));
+        } else if (!std::strcmp(argv[i], "--assume-maximized")) {
+            a.assumeMaximized = true;
         } else if (!std::strcmp(argv[i], "--restore")) {
             a.actions.push_back(Action(Action::Restore));
         } else if (!std::strcmp(argv[i], "--hittest")) {
@@ -964,6 +969,8 @@ int main(int argc, char** argv) {
         ui::interactiveRects().clear();
         ui::namedRects().clear();
         // The splash hides the editor until it starts fading out.
+        state.maximized = args.assumeMaximized ||
+                          (SDL_GetWindowFlags(SDL_GL_GetCurrentWindow()) & SDL_WINDOW_MAXIMIZED) != 0;
         const ImRect titleBar =
             splash::covering() ? ImRect() : mockup::drawMainScreen(state, doc, view, io.DisplaySize);
         g_hit.titleBar = chromeRect(titleBar);

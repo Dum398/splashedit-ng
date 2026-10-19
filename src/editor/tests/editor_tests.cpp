@@ -11067,6 +11067,77 @@ void testSpriteSheets() {
     }
 }
 
+// The tilemap in the scene JSON: what was read comes back with unknown keys
+// kept, a second save is byte for byte the first, the cells are rows of brush
+// indices, and a scene without one writes no tilemap key.
+void testTilemapModel() {
+    using namespace roomtest;
+    const fs::path dir = g_outDir / "tilemapmodel";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Scene s;
+    splash::Tilemap t;
+    t.tileset = "tiles";
+    t.resize(3, 2);
+    splash::TileBrush wall;
+    wall.name = "wall";
+    wall.cell = 1;
+    wall.walkable = false;
+    wall.color = {0.5f, 0.25f, 1};
+    wall.extra.push_back({"futureBrush", "\"x\""});
+    splash::TileBrush task;
+    task.name = "task";
+    task.cell = 2;
+    task.kind = 3;
+    task.id = 7;
+    t.brushes = {splash::TileBrush{}, wall, task};
+    t.kindNames = {"(none)", "vent", "spawn", "task"};
+    t.cells = {0, 1, -1, 2, 0, 5};
+    t.extra.push_back({"futureMap", "[1,2]"});
+    s.tilemap = t;
+    splash::saveScene(s, dir / "rt1.scene");
+    const splash::Scene back = splash::loadScene(dir / "rt1.scene");
+    CHECK(back.tilemap && *back.tilemap == t);
+    splash::saveScene(back, dir / "rt2.scene");
+    const std::string text = readAll(dir / "rt1.scene");
+    CHECK(text == readAll(dir / "rt2.scene"));
+    // Stable key order, cells as rows.
+    const size_t k0 = text.find("\"tileset\""), k1 = text.find("\"width\"", k0), k2 = text.find("\"brushes\"", k1),
+                 k3 = text.find("\"kindNames\"", k2), k4 = text.find("\"cells\"", k3), k5 = text.find("\"futureMap\"", k4);
+    CHECK(k0 != std::string::npos && k1 != std::string::npos && k2 != std::string::npos && k3 != std::string::npos &&
+          k4 != std::string::npos && k5 != std::string::npos);
+    {
+        std::string compact;
+        for (char c : text.substr(k4, k5 - k4))
+            if (!std::isspace((unsigned char)c)) compact += c;
+        CHECK(compact.rfind("\"cells\":[[0,1,-1],[2,0,5]]", 0) == 0);
+    }
+    // Short rows read empty, long ones are cut, and the size is clamped.
+    {
+        std::ofstream(dir / "short.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                              R"("tilemap":{"tileset":"t","width":3,"height":2,"cells":[[1],[2,2,2,2]]}})";
+        const splash::Scene sh = splash::loadScene(dir / "short.scene");
+        CHECK(sh.tilemap && sh.tilemap->cells == std::vector<int>({1, -1, -1, 2, 2, 2}) && sh.tilemap->brushes.empty() &&
+              sh.tilemap->kindNames == std::vector<std::string>({"(none)"}));
+        std::ofstream(dir / "big.scene") << R"({"format":"splashedit-ng/scene","version":1,"settings":{},"objects":[],)"
+                                            R"("tilemap":{"width":999,"height":0}})";
+        const splash::Scene big = splash::loadScene(dir / "big.scene");
+        CHECK(big.tilemap && big.tilemap->width == 256 && big.tilemap->height == 1 && big.tilemap->cells.size() == 256);
+    }
+    // Resize keeps the overlap and fills the rest empty.
+    {
+        splash::Tilemap r = t;
+        r.resize(2, 3);
+        CHECK(r.width == 2 && r.height == 3 && r.cells == std::vector<int>({0, 1, 2, 0, -1, -1}));
+        r.resize(0, 999);
+        CHECK(r.width == 1 && r.height == 256 && r.at(0, 0) == 0 && r.at(0, 1) == 2 && r.at(0, 2) == -1 && r.at(1, 0) == -1);
+    }
+    s.tilemap.reset();
+    splash::saveScene(s, dir / "rt3.scene");
+    CHECK(readAll(dir / "rt3.scene").find("tilemap") == std::string::npos);
+    CHECK(!splash::loadScene(dir / "rt3.scene").tilemap);
+}
+
 // Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
 // animation facingFromYaw(yaw, n) places after walk_s in the exported table,
 // so a set is n animations named in increasing-yaw order, one after another.
@@ -11624,6 +11695,7 @@ int main(int argc, char** argv) {
     testUvOffsetSlots();
     testSceneNetworkId();
     testSpriteSheets();
+    testTilemapModel();
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();

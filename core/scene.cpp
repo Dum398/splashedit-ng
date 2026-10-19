@@ -651,6 +651,58 @@ SpriteSheet readSpriteSheet(const json& j) {
     return s;
 }
 
+json writeTileBrush(const TileBrush& b) {
+    json j = {{"name", b.name}, {"cell", b.cell}, {"walkable", b.walkable}, {"kind", b.kind}, {"id", b.id}, {"color", rgb(b.color)}};
+    putExtras(j, b.extra);
+    return j;
+}
+
+TileBrush readTileBrush(const json& j) {
+    TileBrush b;
+    b.name = j.value("name", b.name);
+    b.cell = j.value("cell", b.cell);
+    b.walkable = j.value("walkable", b.walkable);
+    b.kind = j.value("kind", b.kind);
+    b.id = j.value("id", b.id);
+    readRgb(j, "color", b.color);
+    b.extra = extrasOf(j, writeTileBrush(b));
+    return b;
+}
+
+// The cells as rows of brush indices, top row first. Brush indices read as
+// written (one past the brushes is reported by the export); the grid is made
+// width x height, cells outside the rows read empty.
+json writeTilemap(const Tilemap& t) {
+    json brushes = json::array(), kinds = json::array(), rows = json::array();
+    for (const TileBrush& b : t.brushes) brushes.push_back(writeTileBrush(b));
+    for (const std::string& k : t.kindNames) kinds.push_back(k);
+    for (int y = 0; y < t.height; y++) {
+        json row = json::array();
+        for (int x = 0; x < t.width; x++) row.push_back(t.at(x, y));
+        rows.push_back(row);
+    }
+    json j = {{"tileset", t.tileset}, {"width", t.width},     {"height", t.height},
+              {"brushes", brushes},   {"kindNames", kinds}, {"cells", rows}};
+    putExtras(j, t.extra);
+    return j;
+}
+
+Tilemap readTilemap(const json& j) {
+    Tilemap t;
+    t.tileset = j.value("tileset", "");
+    t.width = std::clamp(j.value("width", t.width), 1, Tilemap::kMaxSide);
+    t.height = std::clamp(j.value("height", t.height), 1, Tilemap::kMaxSide);
+    for (const json& bj : j.value("brushes", json::array())) t.brushes.push_back(readTileBrush(bj));
+    if (j.contains("kindNames")) t.kindNames = j["kindNames"].get<std::vector<std::string>>();
+    t.cells.assign(size_t(t.width * t.height), -1);
+    const json rows = j.value("cells", json::array());
+    for (int y = 0; y < t.height && y < int(rows.size()); y++)
+        for (int x = 0; x < t.width && x < int(rows[size_t(y)].size()); x++)
+            t.cells[size_t(y * t.width + x)] = rows[size_t(y)][size_t(x)].get<int>();
+    t.extra = extrasOf(j, writeTilemap(t));
+    return t;
+}
+
 json writeElement(const UIElement& e) {
     if (!e.unknown.empty()) return json::parse(e.unknown);
     json j = {{"type", enumTo(e.type, kUITypes)}, {"name", e.name}, {"visible", e.visible}};
@@ -939,6 +991,17 @@ int matchingNavPreset(const NavBakeSettings& n) {
     return -1;
 }
 
+void Tilemap::resize(int w, int h) {
+    w = std::clamp(w, 1, kMaxSide);
+    h = std::clamp(h, 1, kMaxSide);
+    std::vector<int> next(size_t(w * h), -1);
+    for (int y = 0; y < std::min(h, height); y++)
+        for (int x = 0; x < std::min(w, width); x++) next[size_t(y * w + x)] = at(x, y);
+    cells = std::move(next);
+    width = w;
+    height = h;
+}
+
 int uvTextureSlot(const MeshComponent& mc, size_t mat) {
     if (mat >= mc.materials.size() || mc.materials[mat].texture.empty()) return -1;
     std::vector<const std::string*> seen;
@@ -996,11 +1059,12 @@ Scene loadScene(const fs::path& file) {
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));
     for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));
     for (const json& sj : j.value("spriteSheets", json::array())) s.spriteSheets.push_back(readSpriteSheet(sj));
+    if (j.contains("tilemap") && !j["tilemap"].is_null()) s.tilemap = readTilemap(j["tilemap"]);
     for (const json& cj : j.value("canvases", json::array())) s.canvases.push_back(readCanvas(cj));
     for (const json& cj : j.value("cutscenes", json::array())) s.cutscenes.push_back(readCutscene(cj));
     for (const json& aj : j.value("animations", json::array())) s.animations.push_back(readAnimation(aj));
     s.extra = extrasOf(j, json{{"format", 0}, {"version", 0}, {"settings", 0}, {"objects", 0}, {"fonts", 0},
-                               {"spriteSheets", 0}, {"canvases", 0}, {"cutscenes", 0}, {"animations", 0}});
+                               {"spriteSheets", 0}, {"tilemap", 0}, {"canvases", 0}, {"cutscenes", 0}, {"animations", 0}});
     return s;
 }
 
@@ -1022,6 +1086,7 @@ void saveScene(const Scene& s, const fs::path& file) {
         for (const SpriteSheet& sh : s.spriteSheets) sheets.push_back(writeSpriteSheet(sh));
         j["spriteSheets"] = sheets;
     }
+    if (s.tilemap) j["tilemap"] = writeTilemap(*s.tilemap);
     if (!s.canvases.empty()) {
         json cvs = json::array();
         for (const UICanvas& c : s.canvases) cvs.push_back(writeCanvas(c));

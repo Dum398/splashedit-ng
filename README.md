@@ -6,7 +6,7 @@ Standalone scene editor for [psxsplash](https://github.com/psxsplash/psxsplash),
 
 [Nightly build](https://github.com/psxsplash/splashedit-ng/releases/tag/nightly), rebuilt from every push to `main`: one archive per OS with the editor, the psxsplash engine and pcsx-redux. Per-OS notes are on the release page.
 
-`engine/` holds psxsplash.ps-exe, which Play and Run on hardware boot, psxsplash-cdrom.ps-exe for disc images, and builds with on-screen debug overlays: Build > Performance Overlay (FPS counter and heap bar) and Room Debug Overlay (room wireframe) make Play and Run on hardware boot psxsplash-perf, psxsplash-rooms or psxsplash-perf-rooms instead. Disc images always get the plain CD-ROM build.
+`engine/` holds psxsplash.ps-exe, which Play and Run on hardware boot, psxsplash-cdrom.ps-exe for disc images, and builds with on-screen debug overlays: Build > Performance Overlay (FPS counter and heap bar) and Room Debug Overlay (room wireframe) make Play and Run on hardware boot psxsplash-perf, psxsplash-rooms or psxsplash-perf-rooms instead. Disc images always get the plain CD-ROM build. Each also comes as a -nologo build (psxsplash-nologo.ps-exe, psxsplash-cdrom-nologo.ps-exe, ...) without the psxsplash boot logo and jingle: turn off Build > Boot Logo in Test Runs to have Play and Run on hardware boot those, and set Boot logo to off in the scene inspector's Disc section to put psxsplash-cdrom-nologo on the disc. A psxsplash build you point at by hand with no -nologo build beside it boots with the logo, and the build report says so.
 
 ## Building
 

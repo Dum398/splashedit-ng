@@ -299,6 +299,8 @@ DiscSettings readDiscSettings(const fs::path& file) {
     if (tr != j.end() && tr->is_array())
         for (const auto& t : *tr)
             if (t.is_string()) s.tracks.push_back(t.get<std::string>());
+    auto logo = j.find("bootLogo");
+    if (logo != j.end() && logo->is_boolean()) s.bootLogo = logo->get<bool>();
     return s;
 }
 
@@ -308,6 +310,7 @@ bool writeDiscSettings(const fs::path& file, const DiscSettings& s) {
     j["volume"] = s.volume;
     j["licence"] = s.licence;
     if (!s.tracks.empty()) j["tracks"] = s.tracks;  // written only when there is music
+    if (!s.bootLogo) j["bootLogo"] = false;  // written only when it is off
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
     if (!out) return false;
     out << j.dump(2) << '\n';

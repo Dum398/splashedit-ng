@@ -1877,6 +1877,14 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     const float gte = scene.settings.gteScaling;
     std::vector<FlatObject> flat = flatten(scene);
 
+    // Prefab instances export their content, which resolvePrefabs fills in;
+    // an instance without it would export as an empty object.
+    for (const FlatObject& fo : flat)
+        if (!fo.object->prefab.empty() && !fo.object->prefabResolved)
+            res.errors.push_back(fo.object->name + ": prefab " + fo.object->prefab + " is not loaded");
+    if (!res.errors.empty()) return res;
+    for (std::string& w : prefabNameWarnings(scene)) res.warnings.push_back(std::move(w));
+
     std::map<std::string, std::unique_ptr<Mesh>> meshes;
     std::map<std::string, Image> images;
     std::deque<PsxTexture> textureStore;

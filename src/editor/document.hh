@@ -194,6 +194,52 @@ public:
     // move. Refused (nullopt) when `toParent` is the object itself or inside
     // it. Selects the object and returns its new path.
     std::optional<ObjectPath> moveObject(const ObjectPath& from, const ObjectPath& toParent, int index);
+    // Prefabs. An instance (Object::prefab set) shows its prefab's content,
+    // which is read-only here: its children cannot be edited, renamed,
+    // moved, deleted or given children, and on the instance itself only the
+    // name, the active flags and the transform change. Edits that would touch
+    // the content are refused (return false / nullopt / 0).
+    //
+    // The object at `path` is content of a prefab instance (some object
+    // above it is an instance).
+    bool inInstance(const ObjectPath& path) const;
+    // The outermost instance at or above `path`; nullopt when there is none.
+    // What a click in the viewport selects.
+    std::optional<ObjectPath> instanceRoot(const ObjectPath& path) const;
+    // Fills every instance in from its prefab file again (see
+    // splash::resolvePrefabs), outside the history; load(), undo, redo and
+    // leaving a prefab do it. Returns the instances it could not fill.
+    std::vector<std::string> resolvePrefabs();
+    // The messages of the last resolvePrefabs().
+    const std::vector<std::string>& prefabErrors() const { return m_prefabErrors; }
+    // Writes the object at `path` with its children to prefabs/<name>.prefab
+    // (a new file: "<name> (2).prefab" when that one exists) and turns it
+    // into an instance of it, as one undo step. Returns the prefab's project
+    // path, or empty with `error` set.
+    std::string createPrefab(const ObjectPath& path, std::string* error);
+    // Places an instance of `prefab` (project-relative) so that it ends up at
+    // `at`, named after the file and unique among its siblings, at `position`,
+    // and selects it. One undo step. False, with `error` set, when the file
+    // does not load or the prefab would contain itself.
+    bool insertPrefab(const ObjectPath& at, const std::string& prefab, splash::Vec3 position, std::string* error);
+    // Turns the instance at `path` into plain objects holding what it shows,
+    // as one undo step.
+    bool unpackPrefab(const ObjectPath& path);
+    // Prefab mode: the document edits the prefab file `prefab` (project
+    // relative) as a scene whose only top-level object is the prefab's root;
+    // save() writes the .prefab. The scene, with its selection and history,
+    // waits until closePrefab(). Opening one from prefab mode goes one deeper.
+    std::optional<std::string> openPrefab(const std::string& prefab);
+    // Back to what was open before openPrefab (unsaved prefab edits are
+    // dropped: save first), every instance filled in again from its file.
+    // False when not in prefab mode.
+    bool closePrefab();
+    bool inPrefabMode() const { return m_outer != nullptr; }
+    // The prefab being edited ('/' separators); empty outside prefab mode.
+    const std::string& prefabFile() const { return m_prefabFile; }
+    // The scene (or prefab) that closePrefab() goes back to.
+    std::string outerName() const { return m_outer ? m_outer->m_stem : std::string(); }
+
     // Applies `cmd` and pushes it, dropping anything that could be redone.
     // With `mergeable`, it may fold into the previous command (see Command::merge).
     void execute(std::unique_ptr<Command> cmd, bool mergeable = false);
@@ -263,6 +309,11 @@ public:
 private:
     void cacheAssets(const splash::Object& o);
     void clearHistory();
+    // Prefab mode: the root is the only top-level object.
+    bool prefabRootLevel(const ObjectPath& parentPath) const { return m_outer && parentPath.empty(); }
+    // resolvePrefabs() when the scene has an instance (after undo and redo,
+    // whose snapshots may hold older prefab content).
+    void refill();
 
     splash::Scene m_scene;
     std::filesystem::path m_project;
@@ -288,6 +339,12 @@ private:
     size_t m_savedCursor = 0;  // m_cursor at the last load or save; kNever once unreachable
     bool m_mergeOpen = false;
     static constexpr size_t kNever = static_cast<size_t>(-1);
+
+    std::vector<std::string> m_prefabErrors;
+    // Prefab mode: the document to go back to, the prefab file and its unknown keys.
+    std::unique_ptr<Document> m_outer;
+    std::string m_prefabFile;
+    splash::ExtraKeys m_prefabExtra;
 };
 
 }  // namespace editor

@@ -66,6 +66,7 @@ const char* assetTypeName(AssetType t, bool plural) {
         case AssetType::Audio: return plural ? "Audio" : "Audio";
         case AssetType::Animation: return plural ? "Animations" : "Animation";
         case AssetType::Scene: return plural ? "Scenes" : "Scene";
+        case AssetType::Prefab: return plural ? "Prefabs" : "Prefab";
         case AssetType::Font: return plural ? "Fonts" : "Font";
         case AssetType::Other: return plural ? "Other files" : "File";
     }
@@ -85,6 +86,7 @@ AssetType classifyAsset(const fs::path& file, bool directory) {
     if (splash::isAudioFile(file)) return AssetType::Audio;
     if (e == ".anim") return AssetType::Animation;
     if (e == ".scene") return AssetType::Scene;
+    if (e == ".prefab") return AssetType::Prefab;
     if (e == ".ttf" || e == ".otf") return AssetType::Font;
     return AssetType::Other;
 }
@@ -98,6 +100,12 @@ namespace {
 // scan and the reference update walk, so neither misses a field.
 template <class SceneT, class Fn>
 void visitObjectPaths(SceneT& o, const std::string& names, std::vector<int>& path, Fn& fn) {
+    // An instance refers to its prefab; what it shows is the prefab file's
+    // own references (the prefab file is scanned as one).
+    if (!o.prefab.empty()) {
+        fn("Prefab", names, path, o.prefab);
+        return;
+    }
     if (o.mesh) {
         fn("Mesh", names, path, o.mesh->mesh);
         for (auto& m : o.mesh->materials) fn("Texture", names, path, m.texture);
@@ -131,6 +139,28 @@ void visitScenePaths(SceneT& scene, Fn fn) {
         path.assign(1, static_cast<int>(i));
         visitObjectPaths(scene.objects[i], scene.objects[i].name, path, fn);
     }
+}
+
+}  // namespace
+
+namespace {
+
+// A file whose references are scanned and rewritten: a scene, or a prefab
+// read as a scene holding its root alone.
+bool refersToAssets(AssetType t) { return t == AssetType::Scene || t == AssetType::Prefab; }
+
+splash::Scene loadReferrer(const fs::path& file, AssetType t, splash::ExtraKeys* prefabExtra = nullptr) {
+    if (t != AssetType::Prefab) return splash::loadScene(file);
+    splash::Prefab p = splash::loadPrefab(file);
+    if (prefabExtra) *prefabExtra = p.extra;
+    splash::Scene s;
+    s.objects.push_back(std::move(p.root));
+    return s;
+}
+
+void saveReferrer(const splash::Scene& s, const fs::path& file, AssetType t, const splash::ExtraKeys& prefabExtra) {
+    if (t != AssetType::Prefab) return splash::saveScene(s, file);
+    splash::savePrefab({s.objects.at(0), prefabExtra}, file);
 }
 
 }  // namespace
@@ -301,14 +331,14 @@ void AssetReferences::update(const AssetIndex& index, const splash::Scene& open,
         m_indexGeneration = index.generation();
         std::set<std::string> seen;
         for (const AssetEntry& e : index.entries()) {
-            if (e.type != AssetType::Scene || e.path == m_openFile) continue;
+            if (!refersToAssets(e.type) || e.path == m_openFile) continue;
             seen.insert(e.path);
             auto it = m_other.find(e.path);
             if (it != m_other.end() && it->second.mtime == e.mtime) continue;
             Cached c;
             c.mtime = e.mtime;
             try {
-                c.refs = sceneReferences(splash::loadScene(index.project() / fromUtf8(e.path)), e.path);
+                c.refs = sceneReferences(loadReferrer(index.project() / fromUtf8(e.path), e.type), e.path);
                 m_unreadable.erase(e.path);
             } catch (const std::exception& ex) {
                 m_unreadable[e.path] = ex.what();
@@ -504,6 +534,8 @@ class AssetFilesCommand : public Command {
         }
         m_first = false;
         if (sceneChanged) doc.sceneMut() = after;
+        // Prefab files moved or rewritten: what the instances show, again.
+        doc.resolvePrefabs();
         if (!recheck.empty()) doc.refreshAssets(recheck);
         log(moves);
     }
@@ -515,6 +547,7 @@ class AssetFilesCommand : public Command {
         // A trashed file back home leaves its trash folder empty.
         for (const auto& [from, to] : moves) pruneEmpty(root / ".trash", (root / fromUtf8(to)).parent_path());
         if (sceneChanged) doc.sceneMut() = before;
+        doc.resolvePrefabs();
         if (!recheck.empty()) doc.refreshAssets(recheck);
         log(reversed(moves));
     }
@@ -737,7 +770,7 @@ AssetOp applyPlan(Document& doc, const AssetIndex& index, const std::string& ope
     // anything moves, so a scene that cannot be read stops it untouched.
     if (!plan.trash)
         for (const AssetEntry& e : index.entries()) {
-            if (e.type != AssetType::Scene || e.path == normal(openScene)) continue;
+            if (!refersToAssets(e.type) || e.path == normal(openScene)) continue;
             AssetFilesCommand::SceneFile sf;
             sf.path = movedPath(e.path, plan.moves);  // a scene inside a moved folder is rewritten where it lands
             const fs::path file = root / fromUtf8(e.path);
@@ -746,8 +779,9 @@ AssetOp applyPlan(Document& doc, const AssetIndex& index, const std::string& ope
                 return r;
             }
             splash::Scene s;
+            splash::ExtraKeys prefabExtra;
             try {
-                s = splash::loadScene(file);
+                s = loadReferrer(file, e.type, &prefabExtra);
             } catch (const std::exception&) {
                 continue;  // the plan was refused when it names a moved file
             }
@@ -756,7 +790,7 @@ AssetOp applyPlan(Document& doc, const AssetIndex& index, const std::string& ope
             r.references += n;
             const fs::path tmp = file.parent_path() / fromUtf8("." + e.name + ".moving");
             try {
-                splash::saveScene(s, tmp);
+                saveReferrer(s, tmp, e.type, prefabExtra);
             } catch (const std::exception& ex) {
                 r.error = "could not update " + e.path + ": " + ex.what();
                 return r;

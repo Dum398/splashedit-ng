@@ -10,6 +10,7 @@
 #include <unordered_set>
 
 #include "audio.hh"
+#include "editor/catalog.hh"
 #include "texture.hh"
 
 namespace fs = std::filesystem;
@@ -109,6 +110,10 @@ AudioInfo analyseAudio(const fs::path& file) {
 
 std::optional<std::string> Document::load(const fs::path& project, const fs::path& scene) {
     if (project != m_project) m_importWarnings.clear();
+    m_outer.reset();  // another scene leaves prefab mode
+    m_prefabFile.clear();
+    m_prefabExtra.clear();
+    m_prefabErrors.clear();
     m_project = project;
     m_sceneFile = scene;
     m_stem = scene.stem().string();
@@ -139,6 +144,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
         m_scene = {};
         return std::string(e.what());
     }
+    resolvePrefabs();
     m_objectCount = countObjects(m_scene.objects);
     for (const splash::Object& o : m_scene.objects) cacheAssets(o);
     return std::nullopt;
@@ -146,6 +152,10 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
 
 void Document::reset(splash::Scene scene, const fs::path& project, const std::string& stem) {
     if (project != m_project) m_importWarnings.clear();
+    m_outer.reset();
+    m_prefabFile.clear();
+    m_prefabExtra.clear();
+    m_prefabErrors.clear();
     m_project = project;
     m_stem = stem;
     m_sceneFile = stem + ".scene";
@@ -162,6 +172,7 @@ void Document::reset(splash::Scene scene, const fs::path& project, const std::st
     m_audio.clear();
     m_files.clear();
     m_projectFiles = 0;
+    resolvePrefabs();
     recount();
     for (const splash::Object& o : m_scene.objects) cacheAssets(o);
 }
@@ -559,13 +570,32 @@ void Document::execute(std::unique_ptr<Command> cmd, bool mergeable) {
     m_mergeOpen = mergeable;
 }
 
+namespace {
+
+// `after` differs from `before` (an instance, children left out) in more
+// than what an instance overrides: its name, active flags and transform.
+bool touchesContent(splash::Object before, splash::Object after) {
+    if (before.prefab != after.prefab) return true;
+    after.name = before.name;
+    after.active = before.active;
+    after.startActive = before.startActive;
+    after.transform = before.transform;
+    after.extra = before.extra;
+    before.prefab.clear();
+    after.prefab.clear();
+    return splash::writeObjectsText({before}) != splash::writeObjectsText({after});
+}
+
+}  // namespace
+
 bool Document::edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey) {
     splash::Object* o = objectMut(path);
-    if (!o) return false;
+    if (!o || inInstance(path)) return false;
     splash::Object before = shallowCopy(*o);
     splash::Object after = before;
     fn(after);
     after.children.clear();
+    if (!before.prefab.empty() && touchesContent(before, after)) return false;
     execute(std::make_unique<EditCommand>(path, std::move(before), std::move(after), mergeKey), !mergeKey.empty());
     return true;
 }
@@ -574,11 +604,12 @@ int Document::editMany(const std::vector<ObjectPath>& paths, const std::function
     std::vector<std::unique_ptr<Command>> parts;
     for (const ObjectPath& path : paths) {
         splash::Object* o = objectMut(path);
-        if (!o) continue;
+        if (!o || inInstance(path)) continue;
         splash::Object before = shallowCopy(*o);
         splash::Object after = before;
         fn(after);
         after.children.clear();
+        if (!before.prefab.empty() && touchesContent(before, after)) continue;
         parts.push_back(std::make_unique<EditCommand>(path, std::move(before), std::move(after), std::string()));
     }
     if (parts.empty()) return 0;
@@ -589,7 +620,7 @@ int Document::editMany(const std::vector<ObjectPath>& paths, const std::function
 
 int Document::renameObject(const ObjectPath& path, const std::string& name) {
     const splash::Object* target = object(path);
-    if (!target || name.empty() || target->name == name) return -1;
+    if (!target || name.empty() || target->name == name || inInstance(path)) return -1;
     const std::string oldName = target->name;
     bool retarget = target->room.has_value();
     std::vector<ObjectPath> portals;
@@ -630,7 +661,7 @@ int Document::replaceTrees(std::vector<std::pair<ObjectPath, splash::Object>> tr
     std::vector<std::unique_ptr<Command>> parts;
     for (auto& [path, obj] : trees) {
         const splash::Object* o = object(path);
-        if (!o) continue;
+        if (!o || inInstance(path)) continue;
         parts.push_back(std::make_unique<TreeCommand>(path, *o, std::move(obj)));
     }
     if (parts.empty()) return 0;
@@ -685,13 +716,22 @@ bool Document::editTilemap(const std::function<void(std::optional<splash::Tilema
 }
 
 bool Document::insertObject(const ObjectPath& path, splash::Object obj) {
-    if (path.empty() || !childrenMut(ObjectPath(path.begin(), path.end() - 1))) return false;
-    execute(std::make_unique<StructureCommand>(path, std::move(obj), true));
+    if (path.empty()) return false;
+    ObjectPath at = path;
+    // Prefab mode: the root is the prefab's only top-level object, so what
+    // would go beside it goes in it, last.
+    if (prefabRootLevel({}) && at.size() == 1 && !m_scene.objects.empty())
+        at = {0, static_cast<int>(m_scene.objects[0].children.size())};
+    const ObjectPath parentPath(at.begin(), at.end() - 1);
+    if (!childrenMut(parentPath)) return false;
+    // Nothing goes into an instance: its children come from its prefab.
+    if (!parentPath.empty() && (inInstance(parentPath) || !object(parentPath)->prefab.empty())) return false;
+    execute(std::make_unique<StructureCommand>(at, std::move(obj), true));
     return true;
 }
 
 bool Document::removeObject(const ObjectPath& path) {
-    if (!object(path)) return false;
+    if (!object(path) || inInstance(path) || prefabRootLevel(ObjectPath(path.begin(), path.end() - 1))) return false;
     execute(std::make_unique<StructureCommand>(path, splash::Object{}, false));
     return true;
 }
@@ -736,7 +776,7 @@ std::vector<std::string> namesOf(const std::vector<splash::Object>& objs) {
 
 std::optional<ObjectPath> Document::duplicateObject(const ObjectPath& path) {
     const splash::Object* o = object(path);
-    if (!o) return std::nullopt;
+    if (!o || inInstance(path) || prefabRootLevel(ObjectPath(path.begin(), path.end() - 1))) return std::nullopt;
     const ObjectPath parentPath(path.begin(), path.end() - 1);
     splash::Object copy = *o;
     copy.name = numberedName(o->name, namesOf(parentPath.empty() ? m_scene.objects : object(parentPath)->children));
@@ -753,6 +793,7 @@ std::string Document::copyObject(const ObjectPath& path) const {
 }
 
 std::string Document::cutObject(const ObjectPath& path) {
+    if (inInstance(path) || prefabRootLevel(ObjectPath(path.begin(), path.end() - 1))) return {};
     std::string text = copyObject(path);
     if (!text.empty()) removeObject(path);
     return text;
@@ -763,9 +804,17 @@ std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const 
     if (!objs) return std::nullopt;
     ObjectPath parentPath;
     size_t index = m_scene.objects.size();
-    if (after && !after->empty() && object(*after)) {
-        parentPath.assign(after->begin(), after->end() - 1);
-        index = static_cast<size_t>(after->back()) + 1;
+    // Pasted onto an instance's content: after the instance instead.
+    std::optional<ObjectPath> anchor = after;
+    if (anchor && !anchor->empty() && object(*anchor) && inInstance(*anchor)) anchor = instanceRoot(*anchor);
+    if (anchor && !anchor->empty() && object(*anchor)) {
+        parentPath.assign(anchor->begin(), anchor->end() - 1);
+        index = static_cast<size_t>(anchor->back()) + 1;
+    }
+    // Prefab mode: into the root, last.
+    if (prefabRootLevel(parentPath) && !m_scene.objects.empty()) {
+        parentPath = {0};
+        index = m_scene.objects[0].children.size();
     }
     const std::vector<splash::Object>& siblings = *childrenMut(parentPath);
     // Moved off what it would cover: k steps along X, the least k at which no
@@ -812,6 +861,8 @@ std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const 
         parts.push_back(std::make_unique<StructureCommand>(at, std::move(o), true));
     }
     execute(std::make_unique<GroupCommand>(std::move(parts)));
+    // Pasted instances are links: fill them in.
+    if (text.find("\"prefab\"") != std::string::npos) resolvePrefabs();
     return at;
 }
 
@@ -819,6 +870,9 @@ std::optional<ObjectPath> Document::moveObject(const ObjectPath& from, const Obj
     const splash::Object* o = object(from);
     if (!o || index < 0) return std::nullopt;
     if (!toParent.empty() && !object(toParent)) return std::nullopt;
+    // An instance's content stays where its prefab has it, and nothing goes in.
+    if (inInstance(from) || prefabRootLevel(ObjectPath(from.begin(), from.end() - 1)) || prefabRootLevel(toParent)) return std::nullopt;
+    if (!toParent.empty() && (inInstance(toParent) || !object(toParent)->prefab.empty())) return std::nullopt;
     // Into itself or its own subtree.
     if (toParent.size() >= from.size() && std::equal(from.begin(), from.end(), toParent.begin())) return std::nullopt;
     const std::vector<splash::Object>& kids = toParent.empty() ? m_scene.objects : object(toParent)->children;
@@ -847,6 +901,7 @@ bool Document::undo() {
     if (!canUndo()) return false;
     m_mergeOpen = false;
     m_history[--m_cursor]->revert(*this);
+    refill();
     ++m_revision;
     return true;
 }
@@ -855,13 +910,19 @@ bool Document::redo() {
     if (!canRedo()) return false;
     m_mergeOpen = false;
     m_history[m_cursor++]->apply(*this);
+    refill();
     ++m_revision;
     return true;
 }
 
 std::optional<std::string> Document::save() {
     try {
-        splash::saveScene(m_scene, scenePath());
+        if (m_outer) {
+            if (m_scene.objects.size() != 1) return std::string("a prefab holds exactly one top-level object");
+            splash::savePrefab({m_scene.objects[0], m_prefabExtra}, scenePath());
+        } else {
+            splash::saveScene(m_scene, scenePath());
+        }
     } catch (const std::exception& e) {
         return std::string(e.what());
     }
@@ -871,6 +932,7 @@ std::optional<std::string> Document::save() {
 }
 
 std::optional<std::string> Document::saveAs(const fs::path& scene) {
+    if (m_outer) return std::string("a prefab is saved where it is: use Save, or go back to the scene first");
     const fs::path oldFile = m_sceneFile;
     const std::string oldStem = m_stem;
     m_sceneFile = scene;
@@ -947,6 +1009,7 @@ bool Document::missingMeshColors(const splash::MeshComponent& m) const {
 }
 
 bool Document::hasWarning(const splash::Object& o) const {
+    if (!o.prefab.empty() && !o.prefabResolved) return true;
     if (o.mesh) {
         if (const MeshInfo* mi = mesh(o.mesh->mesh); !mi || mi->status != AssetStatus::Ok) return true;
         for (const splash::Material& mat : o.mesh->materials)
@@ -979,6 +1042,204 @@ const std::vector<std::string>& Document::importWarnings(const fs::path& model) 
     static const std::vector<std::string> none;
     auto it = m_importWarnings.find(modelKey(m_project, model));
     return it == m_importWarnings.end() ? none : it->second;
+}
+
+// --- prefabs ---
+
+bool Document::inInstance(const ObjectPath& path) const {
+    for (size_t k = 1; k < path.size(); ++k) {
+        const splash::Object* a = object(ObjectPath(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(k)));
+        if (a && !a->prefab.empty()) return true;
+    }
+    return false;
+}
+
+std::optional<ObjectPath> Document::instanceRoot(const ObjectPath& path) const {
+    for (size_t k = 1; k <= path.size(); ++k) {
+        const ObjectPath p(path.begin(), path.begin() + static_cast<std::ptrdiff_t>(k));
+        const splash::Object* a = object(p);
+        if (!a) return std::nullopt;
+        if (!a->prefab.empty()) return p;
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+bool hasInstance(const std::vector<splash::Object>& objs) {
+    for (const splash::Object& o : objs)
+        if (!o.prefab.empty() || hasInstance(o.children)) return true;
+    return false;
+}
+
+// Some instance in `o` (itself included) links to `key`.
+bool usesPrefab(const splash::Object& o, const std::string& key) {
+    if (!o.prefab.empty() && fs::path(o.prefab).lexically_normal() == fs::path(key).lexically_normal()) return true;
+    for (const splash::Object& c : o.children)
+        if (usesPrefab(c, key)) return true;
+    return false;
+}
+
+// A file name made of `name`: characters a file name cannot hold become '_'.
+std::string fileStem(const std::string& name) {
+    std::string s;
+    for (char c : name) s += std::string("/\\:*?\"<>|").find(c) != std::string::npos || static_cast<unsigned char>(c) < 32 ? '_' : c;
+    while (!s.empty() && (s.back() == ' ' || s.back() == '.')) s.pop_back();
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    return s.empty() ? std::string("Prefab") : s;
+}
+
+}  // namespace
+
+void Document::refill() {
+    if (hasInstance(m_scene.objects)) resolvePrefabs();
+}
+
+std::vector<std::string> Document::resolvePrefabs() {
+    m_prefabErrors = splash::resolvePrefabs(m_scene, m_project);
+    // A selection inside content that changed shape moves to its instance.
+    for (std::optional<ObjectPath> p : {m_selection, m_pinned}) {
+        if (!p || object(*p)) continue;
+        std::optional<ObjectPath> up = *p;
+        while (up && !up->empty() && !object(*up)) up->pop_back();
+        if (up && up->empty()) up.reset();
+        if (p == m_selection) m_selection = up;
+        if (p == m_pinned) m_pinned = up;
+    }
+    recount();
+    for (const splash::Object& o : m_scene.objects) cacheAssets(o);
+    ++m_revision;
+    return m_prefabErrors;
+}
+
+std::string Document::createPrefab(const ObjectPath& path, std::string* error) {
+    const splash::Object* o = object(path);
+    auto failed = [&](const std::string& why) {
+        if (error) *error = why;
+        return std::string();
+    };
+    if (!o) return failed("there is no such object");
+    if (inInstance(path)) return failed("it is part of a prefab: open that prefab to change it");
+    if (!o->prefab.empty()) return failed("it is already an instance of " + o->prefab);
+    if (m_project.empty()) return failed("the scene has no project folder");
+    const std::string stem = fileStem(o->name);
+    std::error_code ec;
+    fs::create_directories(m_project / "prefabs", ec);
+    std::string rel;
+    for (int n = 1;; ++n) {
+        rel = "prefabs/" + stem + (n == 1 ? std::string() : " (" + std::to_string(n) + ")") + ".prefab";
+        if (!fs::exists(m_project / fs::path(rel), ec)) break;
+    }
+    // The root keeps where it is in the world: that is the frame its agent
+    // waypoints (world positions) are in. Instances override it anyway.
+    splash::Prefab p;
+    p.root = *o;
+    const World w = worldOf(*this, path);
+    p.root.transform = {w.pos, w.rot, w.scale};
+    try {
+        splash::savePrefab(p, m_project / fs::path(rel));
+    } catch (const std::exception& e) {
+        return failed(e.what());
+    }
+    splash::Object inst = *o;
+    inst.prefab = rel;
+    inst.prefabResolved = true;
+    replaceTrees({{path, std::move(inst)}});
+    resolvePrefabs();
+    return rel;
+}
+
+bool Document::insertPrefab(const ObjectPath& at, const std::string& prefab, splash::Vec3 position, std::string* error) {
+    auto failed = [&](const std::string& why) {
+        if (error) *error = why;
+        return false;
+    };
+    if (at.empty()) return failed("there is nowhere to put it");
+    splash::Prefab p;
+    try {
+        p = splash::loadPrefab(m_project / fs::path(prefab));
+    } catch (const std::exception& e) {
+        return failed(e.what());
+    }
+    // In prefab mode, a prefab that holds the one being edited (or one
+    // further out) would hold itself once saved.
+    for (const Document* d = this; d && d->m_outer; d = d->m_outer.get()) {
+        splash::Scene probe;
+        probe.objects.push_back(p.root);
+        probe.objects.back().prefab = prefab;
+        splash::resolvePrefabs(probe, m_project);
+        if (usesPrefab(probe.objects[0], d->m_prefabFile)) return failed("a prefab cannot contain itself");
+    }
+    ObjectPath to = at;
+    if (prefabRootLevel({}) && to.size() == 1 && !m_scene.objects.empty())
+        to = {0, static_cast<int>(m_scene.objects[0].children.size())};
+    const ObjectPath parentPath(to.begin(), to.end() - 1);
+    const std::vector<splash::Object>* siblings = childrenMut(parentPath);
+    if (!siblings) return failed("there is nowhere to put it");
+    splash::Object inst;
+    inst.name = uniqueName(fs::path(prefab).stem().string(), *siblings);
+    inst.prefab = prefab;
+    inst.transform.position = position;
+    if (!insertObject(to, std::move(inst))) return failed("a prefab's content cannot hold other objects");
+    resolvePrefabs();
+    return true;
+}
+
+bool Document::unpackPrefab(const ObjectPath& path) {
+    const splash::Object* o = object(path);
+    if (!o || o->prefab.empty() || !o->prefabResolved || inInstance(path)) return false;
+    splash::Object plain = *o;
+    plain.prefab.clear();
+    plain.prefabResolved = false;
+    return replaceTrees({{path, std::move(plain)}}) == 1;
+}
+
+std::optional<std::string> Document::openPrefab(const std::string& prefab) {
+    for (const Document* d = this; d && d->m_outer; d = d->m_outer.get())
+        if (fs::path(d->m_prefabFile).lexically_normal() == fs::path(prefab).lexically_normal())
+            return std::string(prefab + " is already open");
+    splash::Prefab p;
+    try {
+        p = splash::loadPrefab(m_project / fs::path(prefab));
+    } catch (const std::exception& e) {
+        return std::string(e.what());
+    }
+    auto outer = std::make_unique<Document>(std::move(*this));
+    *this = Document();
+    m_project = outer->m_project;
+    m_importWarnings = outer->m_importWarnings;
+    m_projectFiles = outer->m_projectFiles;
+    m_sceneFile = fs::path(prefab);
+    m_stem = m_sceneFile.stem().string();
+    m_prefabFile = prefab;
+    m_prefabExtra = p.extra;
+    m_loadId = outer->m_loadId + 1;
+    m_revision = outer->m_revision + 1;
+    m_assetsId = outer->m_assetsId + 1;
+    m_outer = std::move(outer);
+    m_scene.objects.push_back(std::move(p.root));
+    m_selection = ObjectPath{0};
+    resolvePrefabs();
+    return std::nullopt;
+}
+
+bool Document::closePrefab() {
+    if (!m_outer) return false;
+    const unsigned load = m_loadId, rev = m_revision, assets = m_assetsId;
+    std::map<std::string, std::vector<std::string>> warnings = std::move(m_importWarnings);
+    std::unique_ptr<Document> outer = std::move(m_outer);
+    *this = std::move(*outer);
+    m_importWarnings = std::move(warnings);
+    m_loadId = std::max(load, m_loadId) + 1;
+    m_revision = std::max(rev, m_revision) + 1;
+    m_assetsId = std::max(assets, m_assetsId) + 1;
+    // The cached asset facts may be stale (the prefab mode refreshed some).
+    m_meshes.clear();
+    m_textures.clear();
+    m_audio.clear();
+    m_files.clear();
+    resolvePrefabs();
+    return true;
 }
 
 }  // namespace editor

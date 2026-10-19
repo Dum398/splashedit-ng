@@ -37,13 +37,15 @@ void LiveExport::update(const Document& doc, double now) {
     m_started = true;
     m_jobRev = doc.revision();
     std::filesystem::path root = doc.projectRoot();
-    m_job = std::async(std::launch::async, [scene = doc.scene(), root] {
+    m_job = std::async(std::launch::async, [scene = doc.scene(), root]() mutable {
         splash::ExportOptions opt;
         opt.dryRun = true;
         opt.vram = loadVramSettings(root);
         splash::ExportResult r;
         try {
-            r = splash::exportSplashpack(scene, root, root / "scene.splashpack", opt);
+            // Prefab instances filled in from their files as they are now.
+            r.errors = splash::resolvePrefabs(scene, root);
+            if (r.ok()) r = splash::exportSplashpack(scene, root, root / "scene.splashpack", opt);
         } catch (const std::exception& e) {
             r = {};
             r.errors.push_back(e.what());

@@ -11804,12 +11804,12 @@ void testPrefabFiles() {
     CHECK(text.rfind("{\n  \"format\": \"splashedit-ng/prefab\",\n  \"version\": 1,\n  \"root\": {", 0) == 0);
     // Unknown keys at the top and on the root survive a load and a save.
     std::string extra = text;
-    extra.replace(extra.find("\"version\": 1,"), 13, "\"version\": 1,\n  \"author\": \"rix\",");
+    extra.replace(extra.find("\"version\": 1,"), 13, "\"version\": 1,\n  \"author\": \"maker\",");
     extra.replace(extra.find("\"name\": \"Stack\","), 16, "\"name\": \"Stack\",\n    \"tag\": [1, 2],");
     splash::Prefab back = splash::readPrefabText(extra);
     CHECK(back.root.name == "Stack" && back.root.mesh && back.root.children.size() == 1);
     const std::string again = splash::writePrefabText(back);
-    CHECK(again.find("\"author\": \"rix\"") != std::string::npos && again.find("\"tag\": [") != std::string::npos);
+    CHECK(again.find("\"author\": \"maker\"") != std::string::npos && again.find("\"tag\": [") != std::string::npos);
     CHECK(splash::writePrefabText(splash::readPrefabText(again)) == again);
     // Not a prefab, a later version, no root: refused, naming the file.
     bool threw = false;

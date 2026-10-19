@@ -12,6 +12,10 @@ jobs:
   # (psxsplash-cdrom.ps-exe) Export puts on a disc, and the PCdrv builds with
   # Build > Performance / Room Debug Overlay on: psxsplash-perf (FPS counter
   # and heap bar), psxsplash-rooms (room wireframe) and psxsplash-perf-rooms.
+  # Each also comes as <name>-nologo.ps-exe, built without the boot logo (every
+  # feature in the engine Makefile's ALL_FEATURES but bootlogo): Play and Run on
+  # hardware boot those with Build > Boot Logo in Test Runs off, and Export puts
+  # psxsplash-cdrom-nologo on the disc when the project's Boot logo is Off.
   engine:
     runs-on: ubuntu-24.04
     steps:
@@ -26,21 +30,36 @@ jobs:
       - name: Build
         run: |
           # make clean deletes every *.ps-exe, so park each build outside the tree.
-          make -j4 LOADER=cdrom PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
-          mv psxsplash.ps-exe ../psxsplash-cdrom
-          make clean
-          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips FPSOVERLAY=1 MEMOVERLAY=1
-          mv psxsplash.ps-exe ../psxsplash-perf
-          make clean
-          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips ROOMDEBUG=1
-          mv psxsplash.ps-exe ../psxsplash-rooms
-          make clean
-          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips FPSOVERLAY=1 MEMOVERLAY=1 ROOMDEBUG=1
-          mv psxsplash.ps-exe ../psxsplash-perf-rooms
-          make clean
-          make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips
-          for v in cdrom perf rooms perf-rooms; do mv ../psxsplash-$v psxsplash-$v.ps-exe; done
-          for v in "" -cdrom -perf -rooms -perf-rooms; do test -f psxsplash$v.ps-exe; done
+          out=$(mktemp -d)
+          # The -nologo builds: every feature the Makefile knows but bootlogo.
+          NOLOGO=$(sed -n 's/^ALL_FEATURES = //p' Makefile | tr ' ' '\n' | grep -vx bootlogo | paste -sd,)
+          echo "features without the boot logo: $NOLOGO"
+          case ",$NOLOGO," in ,, | *,bootlogo,*) echo "bad feature list"; exit 1 ;; esac
+          mk() {
+            make clean
+            make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips "$@"
+          }
+          for logo in "" -nologo; do
+            if [ -n "$logo" ]; then set -- "FEATURES=$NOLOGO"; else set --; fi
+            mk LOADER=cdrom "$@"
+            mv psxsplash.ps-exe "$out/psxsplash-cdrom$logo"
+            mk FPSOVERLAY=1 MEMOVERLAY=1 "$@"
+            mv psxsplash.ps-exe "$out/psxsplash-perf$logo"
+            mk ROOMDEBUG=1 "$@"
+            mv psxsplash.ps-exe "$out/psxsplash-rooms$logo"
+            mk FPSOVERLAY=1 MEMOVERLAY=1 ROOMDEBUG=1 "$@"
+            mv psxsplash.ps-exe "$out/psxsplash-perf-rooms$logo"
+            mk "$@"
+            mv psxsplash.ps-exe "$out/psxsplash$logo"
+          done
+          for v in "" -cdrom -perf -rooms -perf-rooms; do
+            for logo in "" -nologo; do
+              mv "$out/psxsplash$v$logo" psxsplash$v$logo.ps-exe
+              test -f psxsplash$v$logo.ps-exe
+            done
+          done
+          # The two must differ: a -nologo build that kept the logo would be the same bytes.
+          if cmp -s psxsplash.ps-exe psxsplash-nologo.ps-exe; then echo "the -nologo build is the logo build"; exit 1; fi
       - uses: actions/upload-artifact@v4
         with:
           name: engine
@@ -50,6 +69,11 @@ jobs:
             psxsplash-perf.ps-exe
             psxsplash-rooms.ps-exe
             psxsplash-perf-rooms.ps-exe
+            psxsplash-nologo.ps-exe
+            psxsplash-cdrom-nologo.ps-exe
+            psxsplash-perf-nologo.ps-exe
+            psxsplash-rooms-nologo.ps-exe
+            psxsplash-perf-rooms-nologo.ps-exe
 
   build:
     needs: engine
@@ -361,6 +385,11 @@ jobs:
           test -f pkg/engine/psxsplash-perf.ps-exe
           test -f pkg/engine/psxsplash-rooms.ps-exe
           test -f pkg/engine/psxsplash-perf-rooms.ps-exe
+          test -f pkg/engine/psxsplash-nologo.ps-exe
+          test -f pkg/engine/psxsplash-cdrom-nologo.ps-exe
+          test -f pkg/engine/psxsplash-perf-nologo.ps-exe
+          test -f pkg/engine/psxsplash-rooms-nologo.ps-exe
+          test -f pkg/engine/psxsplash-perf-rooms-nologo.ps-exe
           test -f pkg/redux/pcsx-redux.exe || test -f pkg/redux/pcsx-redux || test -d pkg/redux/PCSX-Redux.app
           # Nothing outside the OS may be linked in.
           case "${{ runner.os }}" in

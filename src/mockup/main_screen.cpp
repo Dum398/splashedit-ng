@@ -5791,6 +5791,25 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             save(std::move(next));
         }
 
+        // Boot logo: off, Export writes the psxsplash build without it.
+        {
+            const ImRect br = row("ldisclogo", "Boot logo",
+                                  "On: the disc plays the psxsplash logo and jingle before your first scene. Off: Export puts the "
+                                  "psxsplash build without them on the disc, so the game starts straight in scene 0.");
+            const ImRect sw(ImVec2(br.Min.x, br.GetCenter().y - 8), ImVec2(br.Min.x + 30, br.GetCenter().y + 8));
+            nameRect("disc.bootlogo", sw);
+            const char* state = ds.bootLogo ? "Logo and jingle before scene 0" : "Off: starts straight in scene 0";
+            text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, br.Min.y, br.Max.y)), f.regular, type::caption,
+                 color::textFaint, state);
+            if (toggle("disclogo", sw, ds.bootLogo) && !root.empty()) {
+                splash::DiscSettings next = ds;
+                next.bootLogo = !ds.bootLogo;
+                save(std::move(next));
+            }
+            if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty())
+                scriptLine("disclogo", std::string("disc logo: ") + (ds.bootLogo ? "on" : "off"));
+        }
+
         // Licence: none, the built-in psxsplash one, or a file.
         const int cur = ds.licence.empty() ? 0 : ds.licence == "psxsplash" ? 1 : 2;
         const std::string shown = cur == 0 ? "None" : cur == 1 ? "psxsplash" : licenceFile;
@@ -5838,22 +5857,6 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 tooltip(licenceError.c_str());
             }
             y += errH + space::xs;
-        }
-
-        // Boot logo: off, Export writes the psxsplash build without it.
-        {
-            const ImRect br = row("ldisclogo", "Boot logo",
-                                  "On: the disc plays the psxsplash logo and jingle before your first scene. Off: Export puts the "
-                                  "psxsplash build without them on the disc, so the game starts straight in scene 0.");
-            const ImRect sw(ImVec2(br.Min.x, br.GetCenter().y - 8), ImVec2(br.Min.x + 30, br.GetCenter().y + 8));
-            nameRect("disc.bootlogo", sw);
-            if (toggle("disclogo", sw, ds.bootLogo) && !root.empty()) {
-                splash::DiscSettings next = ds;
-                next.bootLogo = !ds.bootLogo;
-                save(std::move(next));
-            }
-            if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty())
-                scriptLine("disclogo", std::string("disc logo: ") + (ds.bootLogo ? "on" : "off"));
         }
 
         // Music (CD-DA): the audio tracks Export writes as disc tracks 2 and

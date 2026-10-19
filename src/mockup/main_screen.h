@@ -53,7 +53,7 @@ struct State {
     };
     std::vector<PrefabView> prefabViews;
     bool framePrefab = false;  // frame the whole prefab once it is drawn
-    bool maximized = false;
+    bool maximized = false;  // set by the main loop each frame; picks the maximize or restore button
     bool quit = false;   // the close button was pressed
     std::string saveError;  // last Ctrl+S failure, shown in the status bar; empty after a good save
     // A file dragged over the window: where the pointer is while it hovers,

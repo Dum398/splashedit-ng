@@ -688,6 +688,7 @@ static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
         const ImRect tr(ImVec2(x, r.Min.y), ImVec2(x + dockTabWidth(label), r.Max.y));
         x = tr.Max.x;
         Hit h = interact(id, tr);
+        nameRect(id, tr);  // --click @tab_frame
         if (h.hover > 0 && !front) dl->AddRectFilled(ImVec2(tr.Min.x + 2, tr.Min.y + 4), ImVec2(tr.Max.x - 2, tr.Max.y - 4), color::hover, radius::field);
         const float ih = measure(f.medium, type::icon, "Ag").y, lh = measure(f.semibold, type::body, "Ag").y;
         text(dl, ImVec2(tr.Min.x + space::md, tr.Min.y + (tr.GetHeight() - ih) * 0.5f), f.medium, type::icon - 1, iconColor, ic);

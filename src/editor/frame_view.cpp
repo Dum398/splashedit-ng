@@ -372,8 +372,8 @@ void FramePanel::imageColumn(ImDrawList* dl, ImRect r) {
         for (auto [x, y] : pts) sp.push_back(toScreen(float(x), float(y)));
         const bool closed = c.kind != Kind::Line;
         if (sp.size() >= 2) {
-            dl->AddPolyline(sp.data(), int(sp.size()), rgb(0x000000, 200), closed ? ImDrawFlags_Closed : 0, 3.5f);
-            dl->AddPolyline(sp.data(), int(sp.size()), rgb(0xffd166), closed ? ImDrawFlags_Closed : 0, 1.5f);
+            dl->AddPolyline(sp.data(), int(sp.size()), rgb(0x000000, 200), closed ? ImDrawFlags_Closed : 0, 4.0f);
+            dl->AddPolyline(sp.data(), int(sp.size()), rgb(0xffd166), closed ? ImDrawFlags_Closed : 0, 2.0f);
         }
     }
     if (m_pickX >= 0) {

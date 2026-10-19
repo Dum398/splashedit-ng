@@ -32,7 +32,12 @@ public:
     // The UI tab (the canvas editor) is showing.
     bool uiShown() const { return m_active == kUi; }
     void showUi() { m_active = kUi; }
-    // The tab strip over `r`: Scene, UI, then a tab per open script.
+    // The Tilemap tab (the tile painter) is showing; it is offered only while
+    // setTilesTab(true) (the scene has a tilemap), set each frame before tabStrip.
+    bool tilesShown() const { return m_active == kTiles; }
+    void showTiles() { m_active = kTiles; }
+    void setTilesTab(bool shown) { m_tilesTab = shown; }
+    // The tab strip over `r`: Scene, UI, Tilemap (when offered), then a tab per open script.
     // Returns the rest of `r`.
     ImRect tabStrip(ImDrawList* dl, ImRect r);
     // The editor of the script showing, in `r`.
@@ -92,9 +97,11 @@ private:
     void pollDisk();
     const Tab* tabOf(const std::filesystem::path& file) const;
     double m_polledAt = -1;
-    static constexpr int kScene = -1, kUi = -2;
+    // The fixed tabs' ids: negative, so no script tab index is one.
+    static constexpr int kScene = -1, kUi = -2, kTiles = -3;
     std::vector<std::unique_ptr<Tab>> m_tabs;
-    int m_active = kScene;  // a script tab's index, or kScene / kUi
+    int m_active = kScene;  // a script tab's index, or kScene / kUi / kTiles
+    bool m_tilesTab = false;
     int m_closing = -1;  // a changed tab waiting on the save prompt
     bool m_openClosePrompt = false;
     int m_menuFor = -1;  // the tab whose right-click menu is open

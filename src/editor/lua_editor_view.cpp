@@ -226,7 +226,7 @@ void ScriptTabs::moved(const std::filesystem::path& from, const std::filesystem:
                     for (size_t k = 0; k < m_tabs.size(); ++k) m_tabs[k]->focused = k == i;
             } else {
                 if (m_active > (int)i || m_active >= (int)m_tabs.size()) --m_active;
-                if (m_active < 0) m_active = kScene;
+                if (m_active < 0 && keep >= 0) m_active = kScene;  // a fixed tab in front stays there
             }
             continue;
         }
@@ -586,32 +586,35 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
     dl->AddRectFilled(strip.Min, strip.Max, color::panel, radius::window);
     ImGui::PushID("scripttabs");
     float x = strip.Min.x + space::xs;
-    // -3 is "none" for both: -1 and -2 are the Scene and UI tabs.
-    int pick = -3, closeIt = -3;
+    // Empty is "none" for both: the fixed tabs (kScene, kUi, kTiles) are negative ids.
+    std::optional<int> pick, closeIt;
+    if (m_active == kTiles && !m_tilesTab) m_active = kScene;
     std::vector<int> order = {kScene, kUi};
+    if (m_tilesTab) order.push_back(kTiles);
     for (int i = 0; i < (int)m_tabs.size(); ++i) order.push_back(i);
     for (int i : order) {
-        const bool scene = i < 0;  // Scene or UI: no close button
-        std::string label = i == kScene ? std::string("Scene") : i == kUi ? std::string("UI") : m_tabs[i]->script.title();
+        const bool scene = i < 0;  // Scene, UI or Tilemap: no close button
+        std::string label = i == kScene ? std::string("Scene") : i == kUi ? std::string("UI") : i == kTiles ? std::string("Tilemap") : m_tabs[i]->script.title();
         if (i >= 0 && m_tabs[i]->diskDeleted) label += " (deleted)";
         const bool blocksTab = i >= 0 && m_tabs[i]->blocks;
-        const char* ic = i == kScene ? icon::box : i == kUi ? icon::layoutTemplate : blocksTab ? icon::layers : icon::fileCode;
+        const char* ic = i == kScene ? icon::box : i == kUi ? icon::layoutTemplate : i == kTiles ? icon::grid : blocksTab ? icon::layers : icon::fileCode;
         const float iw = measure(f.medium, type::icon, ic).x, tw = measure(f.medium, type::label, label.c_str()).x;
         const float w = space::md + iw + space::sm - 2 + tw + (scene ? space::md : 28);
         ImRect tr(ImVec2(x, strip.Min.y + space::xs), ImVec2(x + w, strip.Max.y));
         ImGui::PushID(i);
-        nameRect(i == kScene ? std::string("tab.scene") : i == kUi ? std::string("tab.ui") : "tab." + std::to_string(i), tr);
+        nameRect(i == kScene ? std::string("tab.scene") : i == kUi ? std::string("tab.ui") : i == kTiles ? std::string("tab.tiles") : "tab." + std::to_string(i), tr);
         Hit hit = interact("tab", tr);
         const bool active = i == m_active;
         if (active) dl->AddRectFilled(tr.Min, tr.Max, color::raised, radius::button, ImDrawFlags_RoundCornersTop);
         else if (hit.hovered) dl->AddRectFilled(tr.Min, tr.Max, color::hover, radius::button, ImDrawFlags_RoundCornersTop);
         if (active) dl->AddRectFilled(ImVec2(tr.Min.x + 6, tr.Max.y - 2), ImVec2(tr.Max.x - 6, tr.Max.y), color::accent, 1);
         const float cy = tr.GetCenter().y;
-        ImU32 icol = i == kScene ? color::textDim : i == kUi ? rgb(0xf2c25c) : blocksTab ? blocks::events : rgb(0x5ccfe0);
+        ImU32 icol = i == kScene ? color::textDim : i == kUi ? rgb(0xf2c25c) : i == kTiles ? rgb(0x7fcb55) : blocksTab ? blocks::events : rgb(0x5ccfe0);
         dl->AddText(f.medium, type::icon, ImVec2(tr.Min.x + space::md, cy - type::icon * 0.5f - 1), icol, ic);
         dl->AddText(f.medium, type::label, ImVec2(tr.Min.x + space::md + iw + space::sm - 2, cy - type::label * 0.5f - 1),
                     active ? color::text : color::textDim, label.c_str());
         if (i == kUi) tooltip("The scene's UI canvases: HUD, menus and prompts at PS1 resolution");
+        if (i == kTiles) tooltip("The scene's tilemap: paint its cells with the brushes");
         if (!scene) {
             tooltip(utf8(m_tabs[i]->script.path()).c_str());
             ImRect cr(ImVec2(tr.Max.x - 24, cy - 8), ImVec2(tr.Max.x - 8, cy + 8));
@@ -634,18 +637,18 @@ ImRect ScriptTabs::tabStrip(ImDrawList* dl, ImRect r) {
         x += w + space::xxs;
     }
     ImGui::PopID();
-    if (pick != -3) {
+    if (pick) {
         for (auto& t : m_tabs) t->focused = false;
-        m_active = pick;
+        m_active = *pick;
         if (m_active >= 0) m_tabs[m_active]->focused = true;
         if (namedRectsOn()) {
             // Scripted tests: which tab a click brought to the front.
             std::printf("scripttabs: active %s\n",
-                        m_active == kScene ? "Scene" : m_active == kUi ? "UI" : m_tabs[m_active]->script.title().c_str());
+                        m_active == kScene ? "Scene" : m_active == kUi ? "UI" : m_active == kTiles ? "Tilemap" : m_tabs[m_active]->script.title().c_str());
             std::fflush(stdout);
         }
     }
-    if (closeIt >= 0) close(closeIt);
+    if (closeIt && *closeIt >= 0) close(*closeIt);
     return ImRect(ImVec2(r.Min.x, strip.Max.y), r.Max);
 }
 

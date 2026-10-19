@@ -22,6 +22,7 @@
 #include "editor/model_import.hh"
 #include "editor/texture_preview_view.hh"
 #include "editor/lua_editor_view.hh"
+#include "editor/tilemap_view.hh"
 #include "editor/ui_canvas_view.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
@@ -279,6 +280,8 @@ struct State {
     ui::ScriptTabs scripts;
     // The UI tab: the canvas editor.
     ui::CanvasView canvasView;
+    // The Tilemap tab: the tile painter.
+    ui::TilemapView tilemapView;
     std::filesystem::path scriptsProject;  // the project they belong to
     unsigned scriptsAssets = 0;            // doc.assetsId() the tabs last matched disk at
     // The Interactable section's Event row: whether the object's script

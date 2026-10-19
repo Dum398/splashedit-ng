@@ -185,11 +185,12 @@ bool parseKey(const char* spec, Action& a) {
     return true;
 }
 
-// "@name" or "@name,dx,dy": a control by name, and an offset from its centre.
+// "@name", "@name,dx,dy" or "@name,dx,dy,button": a control by name, an
+// offset from its centre, and the mouse button (0 left, 1 right, 2 middle).
 void parseTarget(const char* spec, Action& a) {
     std::string s = spec + 1;
     const size_t comma = s.find(',');
-    if (comma != std::string::npos) std::sscanf(s.c_str() + comma + 1, "%f,%f", &a.dx, &a.dy);
+    if (comma != std::string::npos) std::sscanf(s.c_str() + comma + 1, "%f,%f,%d", &a.dx, &a.dy, &a.button);
     a.target = s.substr(0, comma);
 }
 
@@ -425,7 +426,9 @@ Args parse(int argc, char** argv) {
             else std::fprintf(stderr, "unknown key '%s'\n", spec);
         } else if (!std::strcmp(argv[i], "--mousedown")) {
             Action act(Action::MouseDown);
-            std::sscanf(next(), "%f,%f,%d", &act.x0, &act.y0, &act.button);
+            const char* v = next();
+            if (v[0] == '@') parseTarget(v, act);
+            else std::sscanf(v, "%f,%f,%d", &act.x0, &act.y0, &act.button);
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--mouseup")) {
             Action act(Action::MouseUp);

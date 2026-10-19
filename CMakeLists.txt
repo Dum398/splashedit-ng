@@ -96,6 +96,7 @@ add_library(splasheditdoc STATIC
     src/editor/project.cpp
     src/editor/serial.cpp
     src/editor/sprites.cpp
+    src/editor/tilemap.cpp
     src/editor/timeline.cpp
     src/editor/hardware.cpp
     src/editor/log_view.cpp
@@ -208,7 +209,8 @@ add_executable(splashedit
     src/editor/timeline_view.cpp
     src/editor/asset_browser_view.cpp
     src/editor/ui_canvas_view.cpp
-    src/editor/texture_preview_view.cpp)
+    src/editor/texture_preview_view.cpp
+    src/editor/tilemap_view.cpp)
 target_include_directories(splashedit PRIVATE src)
 target_include_directories(splashedit SYSTEM PRIVATE ${stb_SOURCE_DIR})
 target_link_libraries(splashedit PRIVATE imgui splasheditdoc splashcore)

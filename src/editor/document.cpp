@@ -329,17 +329,22 @@ private:
 class SpriteSheetsCommand : public Command {
 public:
     // `canvases`: the UI canvases before and after when a rename carried the
-    // sheet field of the UI images that name the sheet (else not touched).
+    // sheet field of the UI images that name the sheet (else not touched);
+    // `tileset`: the tilemap's tileset name before and after, the same way.
     SpriteSheetsCommand(std::vector<splash::SpriteSheet> before, std::vector<splash::SpriteSheet> after, std::string key,
-                        std::optional<std::pair<std::vector<splash::UICanvas>, std::vector<splash::UICanvas>>> canvases)
-        : m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)), m_canvases(std::move(canvases)) {}
+                        std::optional<std::pair<std::vector<splash::UICanvas>, std::vector<splash::UICanvas>>> canvases,
+                        std::optional<std::pair<std::string, std::string>> tileset = {})
+        : m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)), m_canvases(std::move(canvases)),
+          m_tileset(std::move(tileset)) {}
     void apply(Document& doc) override {
         doc.sceneMut().spriteSheets = m_after;
         if (m_canvases) doc.sceneMut().canvases = m_canvases->second;
+        if (m_tileset && doc.sceneMut().tilemap) doc.sceneMut().tilemap->tileset = m_tileset->second;
     }
     void revert(Document& doc) override {
         doc.sceneMut().spriteSheets = m_before;
         if (m_canvases) doc.sceneMut().canvases = m_canvases->first;
+        if (m_tileset && doc.sceneMut().tilemap) doc.sceneMut().tilemap->tileset = m_tileset->first;
     }
     bool merge(const Command& next) override {
         auto* n = dynamic_cast<const SpriteSheetsCommand*>(&next);
@@ -349,6 +354,10 @@ public:
             if (m_canvases) m_canvases->second = n->m_canvases->second;
             else m_canvases = n->m_canvases;
         }
+        if (n->m_tileset) {
+            if (m_tileset) m_tileset->second = n->m_tileset->second;
+            else m_tileset = n->m_tileset;
+        }
         return true;
     }
 
@@ -356,6 +365,26 @@ private:
     std::vector<splash::SpriteSheet> m_before, m_after;
     std::string m_key;
     std::optional<std::pair<std::vector<splash::UICanvas>, std::vector<splash::UICanvas>>> m_canvases;
+    std::optional<std::pair<std::string, std::string>> m_tileset;
+};
+
+// The scene's tilemap before and after (nullopt: none).
+class TilemapCommand : public Command {
+public:
+    TilemapCommand(std::optional<splash::Tilemap> before, std::optional<splash::Tilemap> after, std::string key)
+        : m_before(std::move(before)), m_after(std::move(after)), m_key(std::move(key)) {}
+    void apply(Document& doc) override { doc.sceneMut().tilemap = m_after; }
+    void revert(Document& doc) override { doc.sceneMut().tilemap = m_before; }
+    bool merge(const Command& next) override {
+        auto* n = dynamic_cast<const TilemapCommand*>(&next);
+        if (!n || m_key.empty() || n->m_key != m_key) return false;
+        m_after = n->m_after;
+        return true;
+    }
+
+private:
+    std::optional<splash::Tilemap> m_before, m_after;
+    std::string m_key;
 };
 
 // Inserts (forward) or removes (inverse) one object with its subtree.
@@ -624,6 +653,7 @@ bool Document::editSpriteSheets(const std::function<void(std::vector<splash::Spr
     // show a cell of it, in every canvas, in the same undo step. Deleting a
     // sheet leaves them naming it: the element's problem marker shows that.
     std::optional<std::pair<std::vector<splash::UICanvas>, std::vector<splash::UICanvas>>> canvases;
+    std::optional<std::pair<std::string, std::string>> tileset;
     if (after.size() == m_scene.spriteSheets.size()) {
         std::vector<splash::UICanvas> cv = m_scene.canvases;
         bool changed = false;
@@ -636,11 +666,21 @@ bool Document::editSpriteSheets(const std::function<void(std::vector<splash::Spr
             for (splash::UICanvas& c : cv)
                 for (splash::UIElement& e : c.elements)
                     if (e.type == splash::UIElementType::Image && e.sheet == from) e.sheet = to, changed = true;
+            if (m_scene.tilemap && m_scene.tilemap->tileset == from) tileset.emplace(from, to);
         }
         if (changed) canvases.emplace(m_scene.canvases, std::move(cv));
     }
-    execute(std::make_unique<SpriteSheetsCommand>(m_scene.spriteSheets, std::move(after), mergeKey, std::move(canvases)),
+    execute(std::make_unique<SpriteSheetsCommand>(m_scene.spriteSheets, std::move(after), mergeKey, std::move(canvases),
+                                                  std::move(tileset)),
             !mergeKey.empty());
+    return true;
+}
+
+bool Document::editTilemap(const std::function<void(std::optional<splash::Tilemap>&)>& fn, const std::string& mergeKey) {
+    std::optional<splash::Tilemap> after = m_scene.tilemap;
+    fn(after);
+    if (after == m_scene.tilemap) return false;
+    execute(std::make_unique<TilemapCommand>(m_scene.tilemap, std::move(after), mergeKey), !mergeKey.empty());
     return true;
 }
 

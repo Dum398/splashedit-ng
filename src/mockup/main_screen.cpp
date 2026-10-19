@@ -5087,15 +5087,15 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
         {
             const splash::Tilemap& tn = *doc.scene().tilemap;
             const splash::FlatTilemap ft = splash::flattenTilemap(tn);
-            std::string c;
             if (si >= 0) {
                 const splash::SpriteSheet& s = sheets[size_t(si)];
-                c = std::to_string(s.cellW) + " x " + std::to_string(s.cellH) + " px tiles, " + std::to_string(tn.width * s.cellW) + " x " +
-                    std::to_string(tn.height * s.cellH) + " px; ";
+                caption(std::to_string(s.cellW) + " x " + std::to_string(s.cellH) + " px tiles, " + std::to_string(tn.width * s.cellW) +
+                            " x " + std::to_string(tn.height * s.cellH) + " px",
+                        color::textFaint);
             }
-            c += std::to_string(ft.objects.size()) + (ft.objects.size() == 1 ? " object, " : " objects, ") +
-                 std::to_string(20 + ft.cells.size() + ft.objects.size() * 6) + " bytes";
-            caption(c, color::textFaint);
+            caption(std::to_string(ft.objects.size()) + (ft.objects.size() == 1 ? " object, " : " objects, ") +
+                        std::to_string(20 + ft.cells.size() + ft.objects.size() * 6) + " bytes in the splashpack",
+                    color::textFaint);
         }
         {
             float bw = 0;
@@ -5203,7 +5203,8 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
                 editBrush([v](splash::TileBrush& e) { e.cell = v; }, "tilebrushcell");
             }
             if (fc.done) doc.endMerge();
-            ImGui::SetNextWindowPos(ImVec2(thumb.Min.x, thumb.Max.y + 4));
+            // Under the row, right edges lined up: it opens leftwards, inside the window.
+            ImGui::SetNextWindowPos(ImVec2(cellRow.Max.x, thumb.Max.y + 4), ImGuiCond_Always, ImVec2(1, 0));
             if (ImGui::BeginPopup("##tilecellpick")) {
                 ImDrawList* pdl = ImGui::GetWindowDrawList();
                 if (!img.ready()) {
@@ -5272,8 +5273,8 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
         }
 
         // Kind labels: authoring only, the engine sees the numbers.
-        y += space::xs;
-        text(dl, ImVec2(x0 + space::sm, y), f.medium, type::label, color::textDim, "Object kinds");
+        y += space::md;
+        text(dl, ImVec2(x0 + space::sm, y), f.medium, type::label, color::textDim, "Kind names");
         y += 22;
         const splash::Tilemap& tk = *doc.scene().tilemap;
         int removeKind = -1;

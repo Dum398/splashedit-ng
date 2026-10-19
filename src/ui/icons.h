@@ -27,6 +27,7 @@ inline constexpr const char* square = "\xee\x85\xa7";          // e167
 inline constexpr const char* settings = "\xee\x85\x94";        // e154
 inline constexpr const char* move = "\xee\x8b\xa5";            // e2e5
 inline constexpr const char* rotate = "\xee\x8b\xaa";          // e2ea
+inline constexpr const char* restart = "\xee\x85\x88";         // e148 rotate-ccw
 inline constexpr const char* scale = "\xee\x8b\xab";           // e2eb
 inline constexpr const char* warning = "\xee\x86\x93";         // e193
 inline constexpr const char* monitor = "\xee\x84\x9d";         // e11d

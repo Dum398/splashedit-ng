@@ -284,6 +284,9 @@ void Ps1View::rebuild() {
     auto meshCacheKey = [](const std::string& p) { return p; };
     m_pick.clear();
     std::set<std::string> uvPosed;
+    const bool prefabUnlit = m_doc->inPrefabMode() && std::none_of(flats.begin(), flats.end(), [](const splash::FlatObject& fo) {
+        return fo.activeInHierarchy && fo.object->light && fo.object->light->enabled;
+    });
     for (size_t fi = 0; fi < flats.size(); ++fi) {
         const splash::FlatObject& fo = flats[fi];
         // Inactive objects ship switched off and the runtime skips them until a
@@ -316,7 +319,10 @@ void Ps1View::rebuild() {
         if (auto pit = m_preview.objects.find(fo.object->name); pit != m_preview.objects.end() && pit->second.uvOffset &&
                                                               uvPosed.insert(fo.object->name).second)
             uvOff = pit->second.uvOffset;
-        const std::vector<splash::Vec3> colors = splash::exportVertexColors(flats, fo, *mesh);
+        std::vector<splash::Vec3> colors = splash::exportVertexColors(flats, fo, *mesh);
+        // A prefab edited on its own seldom carries a light, and baked
+        // lighting without one is black: drawn at the neutral colour instead.
+        if (prefabUnlit) colors.clear();
 
         for (size_t sub = 0; sub < mesh->submeshes.size(); ++sub) {
             const splash::Material& mat = mc.materials[std::min(sub, mc.materials.size() - 1)];

@@ -96,6 +96,13 @@ class Ps1View {
     // backed away along the view so nothing near the pivot is clipped.
     Vec3 eye() const;
     Vec3 pivot() const { return m_target; }
+    // The camera as a whole, to put back later (prefab mode keeps the scene's).
+    struct Pose {
+        Vec3 eye, target;
+        bool ortho = false;
+    };
+    Pose pose() const { return {m_eye, m_target, m_ortho}; }
+    void setPose(const Pose& p) { m_eye = p.eye, m_target = p.target, m_ortho = p.ortho; }
     static constexpr float kFovY = 0.95f;
     static constexpr float kOrthoBack = 150.0f;  // orthographic: render eye's distance behind the pivot
 

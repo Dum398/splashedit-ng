@@ -235,6 +235,8 @@ public:
     // False when not in prefab mode.
     bool closePrefab();
     bool inPrefabMode() const { return m_outer != nullptr; }
+    // How many prefabs deep the document is (0 = the scene).
+    int prefabDepth() const { return m_outer ? 1 + m_outer->prefabDepth() : 0; }
     // The prefab being edited ('/' separators); empty outside prefab mode.
     const std::string& prefabFile() const { return m_prefabFile; }
     // The scene (or prefab) that closePrefab() goes back to.

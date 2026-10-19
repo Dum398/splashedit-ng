@@ -49,6 +49,9 @@ using namespace ui;
 
 namespace mockup {
 
+// Lucide arrow-left (e048), which the shared icon list does not carry.
+constexpr const char* kArrowLeft = "\xee\x81\x88";
+
 namespace kind {
 constexpr ImU32 mesh = rgb(0x7aa7ff);
 constexpr ImU32 light = rgb(0xf2c25c);
@@ -66,6 +69,7 @@ constexpr ImU32 portal = rgb(0xffe14d);
 constexpr ImU32 walkoff = rgb(0xff6a00);
 constexpr ImU32 agent = rgb(0xff5fa0);
 constexpr ImU32 hearing = rgb(0x6ad8ff);
+constexpr ImU32 prefab = rgb(0x6ab0ff);  // a prefab instance, and .prefab files in the Project panel
 }  // namespace kind
 
 static void panel(ImDrawList* dl, ImRect r) {
@@ -123,7 +127,16 @@ static std::filesystem::path playDir() {
 }
 
 static void notify(State& st, std::string msg, bool bad);
+// What a click on an object in the viewport selects: a prefab instance as a
+// whole (its content is edited in the prefab), else the object itself.
+static editor::ObjectPath pickTarget(const editor::Document& doc, const editor::ObjectPath& path) {
+    if (std::optional<editor::ObjectPath> inst = doc.instanceRoot(path)) return *inst;
+    return path;
+}
 static void scriptLine(const char* tag, const std::string& line);
+static void openPrefabUi(State& st, editor::Document& doc, const std::string& file);
+static bool closePrefabUi(State& st, editor::Document& doc);
+static bool leavePrefabMode(State& st, editor::Document& doc);
 static std::string utf8(const std::filesystem::path& p);
 
 // Renames from the hierarchy (F2) or the inspector title: portals naming a
@@ -820,6 +833,7 @@ static void treeDropTarget(TreeCtx& c, ImRect rr, const editor::ObjectPath& path
     const ImVec2 m = ImGui::GetIO().MousePos;
     if (!c.st.treeDragging || m.y < rr.Min.y || m.y >= rr.Max.y || m.x < c.panel.Min.x || m.x >= c.panel.Max.x) return;
     if (isUnder(path, c.st.treeDragPath)) return;  // onto itself or inside it
+    if (c.doc.inInstance(path)) return;            // an instance's content comes from its prefab
     const float t = (m.y - rr.Min.y) / rr.GetHeight();
     const float indent = rr.Min.x + space::xs + static_cast<float>(path.size()) * 16.0f + 16;
     const editor::ObjectPath parent(path.begin(), path.end() - 1);
@@ -843,6 +857,9 @@ static void treeDropTarget(TreeCtx& c, ImRect rr, const editor::ObjectPath& path
         c.dropInto = true;
         c.dropMark = rr;
     }
+    // Nothing goes into an instance (or beside the prefab's root in prefab mode).
+    const splash::Object* into = c.doc.object(c.dropParent);
+    if ((into && !into->prefab.empty()) || (c.doc.inPrefabMode() && c.dropParent.empty())) c.hasDrop = false;
 }
 
 // Clicks left of the chevron's right edge toggle; anywhere else selects.
@@ -862,6 +879,9 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         // A filter shows every match with the rows above it, opened.
         bool open = !c.filter.empty() || c.doc.expanded(path);
         ObjectLook look = lookOf(o, open);
+        // A prefab instance shows in the prefab colour; what it holds is greyed: it is edited in the prefab.
+        const bool readOnly = c.doc.inInstance(path);
+        if (!o.prefab.empty()) look = {icon::package, kind::prefab};
         std::string meta;
         if (o.mesh)
             if (const editor::MeshInfo* mi = c.doc.mesh(o.mesh->mesh); mi && mi->status == editor::AssetStatus::Ok)
@@ -878,10 +898,14 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         row.warning = c.doc.hasWarning(o);
         row.hidden = !o.active;
         row.inheritedOff = ancestorOff;
+        row.labelColor = o.prefab.empty() ? 0 : kind::prefab;
+        row.readOnly = readOnly;
         ImRect rr(ImVec2(c.panel.Min.x + space::xs + 2, c.y), ImVec2(c.panel.Max.x - space::xs - 2, c.y + size::row));
         ImGui::PushID(static_cast<int>(i));
         bool flipActive = false;
-        Hit h = treeRow("row", rr, row, &flipActive);
+        Hit h = treeRow("row", rr, row, readOnly ? nullptr : &flipActive);
+        if (readOnly) tooltip(("Part of the prefab " + c.doc.object(*c.doc.instanceRoot(path))->prefab +
+                               ". Open the prefab to change it (Inspector > Prefab > Open).").c_str());
         nameRect("tree." + o.name, rr);
         ++c.shown;
         if (ImGui::IsRectVisible(rr.Min, rr.Max)) {
@@ -913,7 +937,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             c.st.treeMenuRight = false;
         }
         // Pressing a row and moving starts dragging it.
-        if (h.held && !c.st.treeDragging && !c.st.renaming && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6)) {
+        if (h.held && !readOnly && !c.st.treeDragging && !c.st.renaming && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6)) {
             c.st.treeDragging = true;
             c.st.treeDragPath = path;
         }
@@ -966,7 +990,8 @@ static void addObjectPicker(State& st, editor::Document& doc, const viewport::Ps
     if (pick < 0) return;
     editor::ObjectPath at;
     if (const std::optional<editor::ObjectPath>& sel = doc.selection(); sel && doc.object(*sel)) {
-        at = *sel;
+        // After the selection; after its prefab instance when it is part of one.
+        at = doc.inInstance(*sel) ? *doc.instanceRoot(*sel) : *sel;
         at.back() += 1;
     } else {
         at = {static_cast<int>(doc.scene().objects.size())};
@@ -1545,7 +1570,7 @@ static bool saveDoc(State& st, editor::Document& doc) {
         std::fprintf(stderr, "save failed: %s\n", err->c_str());
         return false;
     }
-    st.recent.add(doc.scenePath());
+    if (!doc.inPrefabMode()) st.recent.add(doc.scenePath());
     return true;
 }
 
@@ -1593,6 +1618,8 @@ static void perform(State& st, editor::Document& doc, State::Pending what, const
 
 // Runs `what` now, or after the unsaved-changes prompt when there are changes.
 static void request(State& st, editor::Document& doc, State::Pending what, const std::filesystem::path& path = {}) {
+    // Another scene, a new project or quitting: out of prefab mode first (the prefab saved), so the prompt below is the scene's.
+    if (!leavePrefabMode(st, doc)) return;
     if (!doc.dirty() && !st.scripts.dirtyCount()) {
         perform(st, doc, what, path);
         return;
@@ -2211,6 +2238,11 @@ static void modelPlace(editor::Document& doc, const viewport::Ps1View& view, con
         }
         pos = spawnPoint(view, doc, editor::ObjectPath(at.begin(), at.end() - 1));
     }
+    // Not into a prefab instance (its children come from its prefab): beside it.
+    if (std::optional<editor::ObjectPath> inst = doc.instanceRoot(editor::ObjectPath(at.begin(), at.end() - 1))) {
+        at = *inst;
+        at.back() += 1;
+    }
 }
 
 // Places a model built on the worker thread (see editor::applyPlace), as one undo step.
@@ -2318,6 +2350,27 @@ static void placeMesh(State& st, editor::Document& doc, const viewport::Ps1View&
     notify(st, "Added " + name, false);
 }
 
+// A .prefab from the Project panel: an instance of it, placed the way a mesh
+// is (on a row: as its child; on the viewport: at the surface). One undo step.
+static void placePrefab(State& st, editor::Document& doc, const viewport::Ps1View& view, const std::string& file, const ModelTarget& to) {
+    ModelTarget where = to;
+    where.replace.reset();  // a Model field takes meshes, not prefabs: placed as if dropped nowhere in particular
+    editor::ObjectPath at;
+    splash::Vec3 pos{};
+    modelPlace(doc, view, where, at, pos);  // on an instance's row: beside the instance
+    std::string err;
+    if (!doc.insertPrefab(at, file, pos, &err)) {
+        notify(st, "Could not place " + file + ": " + err, true);
+        return;
+    }
+    const editor::ObjectPath parentPath(at.begin(), at.end() - 1);
+    if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
+    if (doc.selected()) {
+        scriptLine(nullptr, "prefab: placed " + doc.selected()->name + " from " + file);
+        notify(st, "Added " + doc.selected()->name, false);
+    }
+}
+
 // Where a model or mesh dragged from the Project panel would land: the Model
 // field, a scene tree row (as its child) or the viewport (at the surface
 // under the pointer). Nothing elsewhere.
@@ -2343,7 +2396,7 @@ static std::optional<ModelTarget> modelTargetAt(State& st, const viewport::Ps1Vi
 // the viewport it would land on, outlined, and a hint saying so.
 static void assetDragHint(State& st, ImDrawList* dl, const editor::Document& doc) {
     const editor::AssetEntry* e = st.assets.dragging();
-    if (!e || (e->type != editor::AssetType::Model && e->type != editor::AssetType::Mesh)) return;
+    if (!e || (e->type != editor::AssetType::Model && e->type != editor::AssetType::Mesh && e->type != editor::AssetType::Prefab)) return;
     const ImVec2 pos = ImGui::GetIO().MousePos;
     std::string hint;
     ImRect zone;
@@ -2353,7 +2406,11 @@ static void assetDragHint(State& st, ImDrawList* dl, const editor::Document& doc
         for (const auto& [rect, path] : st.treeRows)
             if (path == *rowPath && doc.object(path)) {
                 zone = rect;
-                hint = "Drop to add " + e->name + " under " + doc.object(path)->name;
+                // A prefab instance takes no children: what lands there goes beside it (see modelPlace).
+                if (std::optional<editor::ObjectPath> inst = doc.instanceRoot(path))
+                    hint = "Drop to add " + e->name + " next to " + doc.object(*inst)->name;
+                else
+                    hint = "Drop to add " + e->name + " under " + doc.object(path)->name;
             }
     } else if (st.viewportRect.GetWidth() > 0 && st.viewportRect.Contains(pos)) {
         zone = st.viewportRect;
@@ -2392,16 +2449,18 @@ static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1V
                     }
                     break;
                 }
-                if (r.type != T::Model && r.type != T::Mesh) break;
+                if (r.type != T::Model && r.type != T::Mesh && r.type != T::Prefab) break;
                 std::optional<ModelTarget> to = modelTargetAt(st, view, r.pos);
                 if (!to) break;
                 if (r.type == T::Model) importModelFile(st, doc, view, utf8(abs), *to);
+                else if (r.type == T::Prefab) placePrefab(st, doc, view, r.path, *to);
                 else placeMesh(st, doc, view, r.path, *to);
                 break;
             }
             case ui::AssetBrowser::Request::Open:
                 if (r.type == T::Script) openScript(st, doc, r.path);
                 else if (r.type == T::Scene) request(st, doc, State::Pending::Recent, abs);
+                else if (r.type == T::Prefab) openPrefabUi(st, doc, r.path);
                 else if (r.type == T::Model) importModelFile(st, doc, view, utf8(abs), ModelTarget{});
                 else if (r.type == T::Mesh) placeMesh(st, doc, view, r.path, ModelTarget{});
                 else SDL_OpenURL(editor::fileUrl(abs).c_str());
@@ -2426,25 +2485,104 @@ static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1V
     }
 }
 
+// --- prefabs ---
+
+// Right-click > Create Prefab: the object and its children into
+// prefabs/<name>.prefab, the object an instance of it. One undo step.
+static void createPrefabUi(State& st, editor::Document& doc, const editor::ObjectPath& p) {
+    std::string err;
+    const std::string made = doc.createPrefab(p, &err);
+    if (made.empty()) {
+        notify(st, "Could not create a prefab: " + err, true);
+        return;
+    }
+    scriptLine(nullptr, "prefab: created " + made);
+    notify(st, "Created " + made + ". Drag it from the Project panel to place it again.", false);
+}
+
+static void unpackPrefabUi(State& st, editor::Document& doc, const editor::ObjectPath& p) {
+    const splash::Object* o = doc.object(p);
+    if (!o) return;
+    const std::string name = o->name, file = o->prefab;
+    if (!doc.unpackPrefab(p)) {
+        notify(st, "Could not unpack " + name + ": its prefab " + file + " did not load", true);
+        return;
+    }
+    scriptLine(nullptr, "prefab: unpacked " + name);
+    notify(st, "Unpacked " + name + ": its objects are plain objects of the scene now, no longer linked to " + file, false);
+}
+
+// Prefab mode: the scene waits, with its unsaved changes, while the prefab is edited.
+static void openPrefabUi(State& st, editor::Document& doc, const std::string& file) {
+    if (auto err = doc.openPrefab(file)) {
+        notify(st, "Could not open " + file + ": " + *err, true);
+        return;
+    }
+    st.renaming = false;
+    st.treeFilter.clear();
+    scriptLine(nullptr, "prefab: opened " + file);
+    notify(st, "Editing the prefab " + file + ". Back returns to " + doc.outerName() + " and updates every instance.", false);
+}
+
+// Back: the prefab is saved first when it has changes, the way Unity's prefab
+// mode saves on leaving. False, staying, when that save fails.
+static bool closePrefabUi(State& st, editor::Document& doc) {
+    if (!doc.inPrefabMode()) return true;
+    const std::string file = doc.prefabFile();
+    if (doc.dirty()) {
+        if (auto err = doc.save()) {
+            st.saveError = "Save failed: " + *err;
+            notify(st, "Could not save " + file + ": " + *err, true);
+            return false;
+        }
+        st.saveError.clear();
+    }
+    doc.closePrefab();
+    st.renaming = false;
+    scriptLine(nullptr, "prefab: back to " + doc.sceneStem());
+    notify(st, "Back to " + doc.sceneStem() + (doc.prefabErrors().empty() ? "" : ": " + doc.prefabErrors().front()),
+           !doc.prefabErrors().empty());
+    return true;
+}
+
+// Every prefab level open, closed (each saved first), for leaving the scene.
+static bool leavePrefabMode(State& st, editor::Document& doc) {
+    while (doc.inPrefabMode())
+        if (!closePrefabUi(st, doc)) return false;
+    return true;
+}
+
 // The menu a right-click on a row (kind 1) or the panel's ellipsis (kind 2) opens.
 static std::vector<MenuEntry> treeMenuEntries(int kind, State& st, editor::Document& doc) {
     std::vector<MenuEntry> m;
     if (kind == 1) {
         const editor::ObjectPath p = st.treeMenuPath;
         if (!doc.object(p)) return m;
-        m.push_back(item("Rename", "F2", true, [&st, p] {
+        // Content of a prefab instance is changed in the prefab; the prefab's own root stays where it is.
+        const bool part = doc.inInstance(p);
+        const bool root = doc.inPrefabMode() && p.size() == 1;
+        const bool instance = !doc.object(p)->prefab.empty();
+        m.push_back(item("Rename", "F2", !part, [&st, p] {
             st.renaming = true;
             st.renameStart = true;
             st.renamePath = p;
         }));
-        m.push_back(item("Duplicate", "Ctrl+D", true, [&doc, p] { doc.duplicateObject(p); }));
-        m.push_back(item("Cut", "Ctrl+X", true, [&st, &doc, p] { cutSelection(st, doc, p); }));
+        m.push_back(item("Duplicate", "Ctrl+D", !part && !root, [&doc, p] { doc.duplicateObject(p); }));
+        m.push_back(item("Cut", "Ctrl+X", !part && !root, [&st, &doc, p] { cutSelection(st, doc, p); }));
         m.push_back(item("Copy", "Ctrl+C", true, [&st, &doc, p] { copySelection(st, doc, p); }));
         m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, p] { pasteClipboard(st, doc, p); }));
-        m.push_back(item("Delete", "Del", true, [&doc, p] { doc.removeObject(p); }));
+        m.push_back(item("Delete", "Del", !part && !root, [&doc, p] { doc.removeObject(p); }));
+        m.push_back(separator());
+        // A prefab: a file in prefabs/ that holds the object and its children, placed again from the Project panel.
+        if (instance && !part) {
+            m.push_back(item("Open Prefab", "", true, [&st, &doc, p] { openPrefabUi(st, doc, doc.object(p)->prefab); }));
+            m.push_back(item("Unpack Prefab", "", true, [&st, &doc, p] { unpackPrefabUi(st, doc, p); }));
+        } else {
+            m.push_back(item("Create Prefab", "", !part && !root, [&st, &doc, p] { createPrefabUi(st, doc, p); }));
+        }
         m.push_back(separator());
         // Out of its group, to the top level right after the group it was in.
-        m.push_back(item("Move to Top Level", "", p.size() > 1, [&doc, p] { doc.moveObject(p, {}, p.front() + 1); }));
+        m.push_back(item("Move to Top Level", "", p.size() > 1 && !part && !doc.inPrefabMode(), [&doc, p] { doc.moveObject(p, {}, p.front() + 1); }));
         m.push_back(item("Frame in View", "F", true, [&st] { st.frameRequest = true; }));
         const bool pinned = doc.pinned() && *doc.pinned() == p;
         m.push_back(item("Pin in Inspector", "", true, [&doc, p, pinned] { doc.pin(pinned ? std::nullopt : std::optional(p)); }, pinned));
@@ -2487,7 +2625,8 @@ static void treeMenu(State& st, editor::Document& doc) {
                                                 ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(2);
     if (!open) return;
-    std::function<void()> run = menuRows(entries, w, h);
+    // Named treemenu/<label> for scripted tests (--click "@treemenu/Create Prefab").
+    std::function<void()> run = menuRows(entries, w, h, "treemenu");
     if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false) || entries.empty()) ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
     if (run) run();
@@ -2511,6 +2650,28 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 &st.treeFilter, st.focusTreeFilter);
     st.focusTreeFilter = false;
     y += 28 + space::sm;
+
+    // Prefab mode: what is being edited, and the way back to the scene.
+    if (doc.inPrefabMode()) {
+        Fonts& f = fonts();
+        const float bh = size::field + 6;
+        ImRect bar(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + bh + space::sm * 2));
+        nameRect("prefab.bar", bar);
+        dl->AddRectFilled(bar.Min, bar.Max, (kind::prefab & 0x00ffffffu) | (28u << IM_COL32_A_SHIFT), radius::card);
+        dl->AddRect(bar.Min, bar.Max, (kind::prefab & 0x00ffffffu) | (90u << IM_COL32_A_SHIFT), radius::card);
+        const std::string tip = "Save the prefab and go back to " + doc.outerName() + ". Every instance of it there updates.";
+        float bw = 0;
+        if (button("prefab.back", ImVec2(bar.Min.x + space::sm, bar.Min.y + space::sm), kArrowLeft, "Back", ButtonKind::Secondary, &bw,
+                   tip.c_str()))
+            closePrefabUi(st, doc);
+        const float tx = bar.Min.x + space::sm + bw + space::md;
+        ImGui::PushClipRect(ImVec2(tx, bar.Min.y), ImVec2(bar.Max.x - space::sm, bar.Max.y), true);
+        text(dl, ImVec2(tx, bar.Min.y + space::sm - 1), f.regular, type::caption, color::textDim, "Editing prefab");
+        const std::string file = std::filesystem::path(doc.prefabFile()).filename().string() + (doc.dirty() ? " *" : "");
+        text(dl, ImVec2(tx, bar.Min.y + space::sm + 15), f.medium, type::body, kind::prefab, file.c_str());
+        ImGui::PopClipRect();
+        y = bar.Max.y + space::sm;
+    }
 
     ImRect foot(ImVec2(r.Min.x, r.Max.y - 40), r.Max);
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y), true);
@@ -3522,7 +3683,7 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
             if (mode == Select && !st.vpDragged && r.Contains(io.MousePos)) {
                 std::optional<int> hit = view.pick(io.MousePos, r.Min, r.GetSize());
                 std::vector<editor::ObjectPath> paths = doc.flatPaths();
-                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) doc.select(paths[(size_t)*hit]);
+                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) doc.select(pickTarget(doc, paths[(size_t)*hit]));
                 else doc.select(std::nullopt);
             }
             ImGui::ClearActiveID();
@@ -3552,6 +3713,16 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
         st.followAt[0] = selAt.x, st.followAt[1] = selAt.y, st.followAt[2] = selAt.z;
     }
     st.frameRequest = false;
+    // Just into prefab mode: the whole prefab in view (the root alone may be an empty group).
+    if (st.framePrefab) {
+        viewport::Vec3 lo, hi;
+        if (view.sceneBounds(&lo, &hi)) {
+            const viewport::Vec3 c{(lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f, (lo.z + hi.z) * 0.5f};
+            const viewport::Vec3 e{(hi.x - lo.x) * 0.5f, (hi.y - lo.y) * 0.5f, (hi.z - lo.z) * 0.5f};
+            view.frame(c, std::sqrt(e.x * e.x + e.y * e.y + e.z * e.z));
+        }
+        st.framePrefab = false;
+    }
 
     // The fly speed, shown for a moment after the wheel changes it.
     if (ImGui::GetTime() < st.flySpeedShownUntil) {
@@ -3959,6 +4130,16 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
 }
 
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
+    // Into prefab mode: the scene's camera kept and the prefab framed; back
+    // out, the camera put back where it was.
+    while (static_cast<int>(st.prefabViews.size()) < doc.prefabDepth()) {
+        st.prefabViews.push_back({view.pose(), st.viewMode});
+        st.framePrefab = true;
+    }
+    while (static_cast<int>(st.prefabViews.size()) > doc.prefabDepth()) {
+        view.setPose(st.prefabViews.back().pose);
+        st.prefabViews.pop_back();
+    }
     Fonts& f = fonts();
     if (st.play.game.attached()) r = splitViewport(st, dl, r);
     view.clean = st.viewMode == 1;
@@ -4128,7 +4309,8 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                     if (GImGui->ActiveId == ImGui::GetID("##gizmo")) ImGui::ClearActiveID();
                     st.gizmo.handle = -1;
                 }
-                if (!posed && st.tool >= 1 && st.tool <= 3) {
+                // Content of a prefab instance does not move here: no handles.
+                if (!posed && st.tool >= 1 && st.tool <= 3 && !doc.inInstance(*doc.selection())) {
                     const splash::Object* par = doc.parent(*doc.selection());
                     const splash::Mat34* parentToWorld = nullptr;
                     for (const splash::FlatObject& pf : flats)
@@ -4240,7 +4422,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
         if (!ic) continue;
         ImGui::PushID((int)i);
-        if (sceneIcon(dl, view, mn, sz, pos, ic, col) && i < paths.size()) doc.select(paths[i]);
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col) && i < paths.size()) doc.select(pickTarget(doc, paths[i]));
         ImGui::PopID();
     }
     if (previewing) previewCamera(dl, view, mn, sz, view.preview());
@@ -6999,8 +7181,42 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     y -= scroll;
 
     float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
+    // Prefabs: the content of an instance is shown, not edited (it comes
+    // from the prefab file); on an instance only the name, the active flags
+    // and the transform are its own. What cannot change is drawn disabled
+    // from `lockedFrom` down, and the document refuses such edits anyway.
+    const bool partOfPrefab = doc.inInstance(*target);
+    std::optional<float> lockedFrom;
+    if (partOfPrefab) {
+        const editor::ObjectPath ip = *doc.instanceRoot(*target);
+        const std::string instName = doc.object(ip)->name, file = doc.object(ip)->prefab;
+        const float h = 96;
+        ImRect card(ImVec2(x0, y), ImVec2(x1, y + h));
+        nameRect("obj.prefabpart", card);
+        dl->AddRectFilled(card.Min, card.Max, (kind::prefab & 0x00ffffffu) | (24u << IM_COL32_A_SHIFT), radius::card);
+        dl->AddRect(card.Min, card.Max, (kind::prefab & 0x00ffffffu) | (80u << IM_COL32_A_SHIFT), radius::card);
+        ImGui::PushClipRect(card.Min, card.Max, true);
+        text(dl, ImVec2(card.Min.x + space::md, card.Min.y + space::sm + 1), f.medium, type::icon - 1, kind::prefab, icon::package);
+        text(dl, ImVec2(card.Min.x + space::md + 24, card.Min.y + space::sm + 2), f.semibold, type::body, color::text,
+             ("Part of " + instName).c_str());
+        text(dl, ImVec2(card.Min.x + space::md, card.Min.y + space::sm + 24), f.regular, type::caption, color::textDim,
+             ("From " + file + ". Open the prefab to change it.").c_str());
+        ImGui::PopClipRect();
+        float bw = 0;
+        const ImVec2 bp(card.Min.x + space::md, card.Max.y - space::sm - size::field - 6);
+        if (button("obj.prefabpartopen", bp, nullptr, "Open prefab", ButtonKind::Secondary, &bw,
+                   ("Edit " + file + "; every instance of it updates").c_str()))
+            openPrefabUi(st, doc, file);
+        if (button("obj.prefabpartselect", bp + ImVec2(bw + space::sm, 0), nullptr, "Select instance", ButtonKind::Ghost, nullptr,
+                   ("Select " + instName + ", the instance this belongs to").c_str()))
+            doc.select(ip);
+        y += h + space::md;
+        lockedFrom = y;
+        ImGui::BeginDisabled(true);
+    }
     // Object header.
     ObjectLook look = lookOf(*o, true);
+    if (!o->prefab.empty()) look = {icon::package, kind::prefab};
     const splash::Object* parent = doc.parent(*target);
     std::string where = "in " + (parent ? parent->name : doc.sceneStem());
     ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
@@ -7133,6 +7349,45 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                    fmtFixed(t.scale.z).c_str(), nullptr, scl);
     commit(fe, "scl", [&](splash::Object& ob) { ob.transform.scale = {scl[0], scl[1], scl[2]}; });
     sectionEnd(top);
+
+    // A prefab instance: its file, Open (prefab mode) and Unpack. Its
+    // components below come from the file, so they show disabled.
+    if (!o->prefab.empty() && !partOfPrefab) {
+        const std::string file = o->prefab;
+        const float h = o->prefabResolved ? 90 : 108;
+        ImRect card(ImVec2(x0, y), ImVec2(x1, y + h));
+        nameRect("obj.prefab", card);
+        dl->AddRectFilled(card.Min, card.Max, (kind::prefab & 0x00ffffffu) | (24u << IM_COL32_A_SHIFT), radius::card);
+        dl->AddRect(card.Min, card.Max, (kind::prefab & 0x00ffffffu) | (80u << IM_COL32_A_SHIFT), radius::card);
+        ImGui::PushClipRect(card.Min, card.Max, true);
+        text(dl, ImVec2(card.Min.x + space::md, card.Min.y + space::sm + 1), f.medium, type::icon - 1, kind::prefab, icon::package);
+        text(dl, ImVec2(card.Min.x + space::md + 24, card.Min.y + space::sm + 2), f.semibold, type::body, color::text, "Prefab");
+        const ImVec2 fp(card.Min.x + space::md + 24 + measure(f.semibold, type::body, "Prefab").x + space::sm, card.Min.y + space::sm + 4);
+        text(dl, fp, f.regular, type::caption, color::textDim, file.c_str());
+        nameRect("obj.prefabfile", ImRect(fp, fp + measure(f.regular, type::caption, file.c_str())));
+        float ty = card.Min.y + space::sm + 24;
+        if (!o->prefabResolved) {
+            text(dl, ImVec2(card.Min.x + space::md, ty), f.regular, type::caption, color::warn,
+                 "The prefab file did not load: see Problems.");
+            ty += 18;
+        }
+        text(dl, ImVec2(card.Min.x + space::md, ty), f.regular, type::caption, color::textFaint,
+             "Name, position and on/off are this copy's own.");
+        ImGui::PopClipRect();
+        float bw = 0;
+        const ImVec2 bp(card.Min.x + space::md, card.Max.y - space::sm - size::field - 6);
+        if (button("obj.prefabopen", bp, nullptr, "Open", ButtonKind::Secondary, &bw,
+                   ("Edit " + file + ": every instance of it updates when you go back").c_str()))
+            openPrefabUi(st, doc, file);
+        ImGui::BeginDisabled(!o->prefabResolved);
+        if (button("obj.prefabunpack", bp + ImVec2(bw + space::sm, 0), nullptr, "Unpack", ButtonKind::Ghost, nullptr,
+                   "Make this copy plain objects you can edit here. It no longer follows the prefab."))
+            unpackPrefabUi(st, doc, path);
+        ImGui::EndDisabled();
+        y += h + space::md;
+        lockedFrom = y;
+        ImGui::BeginDisabled(true);
+    }
 
     // Import settings of the model the object's mesh came from; for the top
     // of a placed model, the first mesh below it.
@@ -8670,6 +8925,13 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     text(dl, ImVec2(lx, add.Min.y + 8), f.medium, type::icon, color::textDim, icon::plus);
     text(dl, ImVec2(lx + 22, add.Min.y + 8), f.medium, type::body, color::textDim, lbl);
     if (h.clicked) st.openAddComponent = true;
+    if (lockedFrom) {
+        ImGui::EndDisabled();
+        // Drawn over what it covers: the custom-drawn fields ignore ImGui's disabled alpha.
+        dl->AddRectFilled(ImVec2(r.Min.x, std::max(*lockedFrom, top0)), ImVec2(r.Max.x - 6, add.Max.y + space::sm),
+                          (color::panel & 0x00ffffffu) | (150u << IM_COL32_A_SHIFT));
+        st.openAddComponent = false;
+    }
     ImGui::PopClipRect();
     {
         const float content = add.Max.y + space::xl - (top0 - scroll), view = r.Max.y - top0;
@@ -9067,7 +9329,8 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
         }
     }
     if (!res || !res->ok()) {
-        std::string msg = !res ? "Measuring..." : "Export failed: see problems";
+        std::string msg = !res ? (doc.inPrefabMode() ? "Editing a prefab: Back shows the scene's budgets" : "Measuring...")
+                               : "Export failed: see problems";
         if (res && shownRes) msg += " (meters from the last good export)";
         ImVec2 ms = measure(f.regular, type::caption, msg.c_str());
         text(dl, ImVec2(x, bar.Min.y + (size::statusBar - ms.y) * 0.5f), f.regular, type::caption,
@@ -9340,7 +9603,22 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     // scene's shortcuts see them; only while its tab is in front.
     if (timelineInFront(st)) st.timeline.takeKeys(doc);
     shortcuts(st, doc);
-    st.live.update(doc, ImGui::GetTime());
+    // In prefab mode the last scene export stays in Problems: the prefab alone is no scene to export.
+    if (!doc.inPrefabMode()) st.live.update(doc, ImGui::GetTime());
+    if (namedRectsOn()) {
+        // Scripted tests: where the document is, and every instance with how many objects it holds.
+        std::string line = "prefabs: " + (doc.inPrefabMode() ? "editing " + doc.prefabFile() : std::string("scene ") + doc.sceneStem());
+        std::function<int(const splash::Object&)> count = [&](const splash::Object& o) {
+            int n = 0;
+            for (const splash::Object& c : o.children) n += 1 + count(c);
+            return n;
+        };
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+            if (!fo.object->prefab.empty())
+                line += " | " + fo.object->name + "=" + fo.object->prefab + (fo.object->prefabResolved ? "" : "!") + ":" +
+                        std::to_string(count(*fo.object));
+        scriptLine("prefabs", line);
+    }
     updatePlay(st, doc);
     updateExport(st);
     updateModels(st, doc);

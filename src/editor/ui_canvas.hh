@@ -255,9 +255,14 @@ std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, c
 // row 0 on top) as psxsplash draws them: canvases by sortOrder, elements in
 // order, hidden elements skipped, system-font text last, 15-bit colour, PS1
 // texture tinting. Pixels nothing drew keep `background`; `covered`, when
-// given, gets 1 where something drew.
+// given, gets 1 where something drew. With `tilemapTiles`, the scene's tilemap
+// goes under the canvases first, as psxsplash's TileSystem::renderOT draws it at
+// view offset 0,0: each painted cell's tileset cell texel for texel, untinted,
+// texel 0 transparent; empty cells, holes, missing brushes and cells past the
+// sheet skipped. *tilemapTiles gets the tiles drawn, -1 when there is no
+// tilemap or no readable tileset.
 std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>& show, Screen s, Assets& assets,
-                             uint32_t background, std::vector<uint8_t>* covered = nullptr);
+                             uint32_t background, std::vector<uint8_t>* covered = nullptr, int* tilemapTiles = nullptr);
 
 }  // namespace uic
 }  // namespace editor

@@ -62,7 +62,7 @@ SAVE_MID = ['--key', 'ctrl+s', '--wait', '10', '--copy-file', '{scene}@{snap}', 
 TAB = click('tab.tiles') + ['--wait', '5']
 
 
-def run(args, shot=None, tilemap=TILEMAP):
+def run(args, shot=None, tilemap=TILEMAP, canvases=None):
     """Runs `args` on a fresh courtyard copy whose one sprite sheet is the
     tileset (and with `tilemap`), then Ctrl+S; returns the saved tilemap and
     the editor's output without its list of controls."""
@@ -75,6 +75,7 @@ def run(args, shot=None, tilemap=TILEMAP):
     j['spriteSheets'] = [{'name': 'tiles', 'texture': 'textures/tiles.png', 'bitDepth': 4, 'cellWidth': 16, 'cellHeight': 16,
                           'anims': []}]
     if tilemap: j['tilemap'] = tilemap
+    if canvases: j['canvases'] = canvases
     json.dump(j, open(scene, 'w', encoding='utf-8'), indent=2)
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
     args = [a.replace('{scene}', scene).replace('{snap}', snap) for a in args]
@@ -236,6 +237,38 @@ check('the existing tilemap line is unchanged in form',
                                                      'selected 2', out[-400:])
 t, out = run(SCROLL + click('scene.tilebrushcolor'))
 check('a left click on the Colour opens the picker', 'popups open: yes' in out, out[-200:])
+
+# The UI tab draws the tilemap under the canvases, as the game does (tiles,
+# then sprites, then UI) at view offset 0,0: texel for texel, untinted, empty
+# cells left out. A red box on the canvas covers cell 3,1. (--ui opens the UI
+# tab and reports where the canvas is drawn.)
+HUD = [{'name': 'hud', 'visible': True, 'sortOrder': 0, 'elements': [
+    {'type': 'box', 'name': 'cover', 'rect': [48, 16, 16, 16], 'anchorMin': [0, 0], 'anchorMax': [0, 0], 'color': [1, 0, 0]}]}]
+UISHOT = os.path.join(shots, 'ui.png')
+PAINTED = sum(v != -1 for r in MAP for v in r)
+t, out = run(['--ui', '--wait', '5', '--shot', UISHOT] + TAB + click('tiles.brush.0') + click('tiles.cell.0.0') +
+             click('tab.ui') + ['--wait', '5'], canvases=HUD)
+layers = re.findall(r'^ui: tilemap layer (.*)$', out, re.M)
+check('the layer counts the painted tiles, and again after a paint', layers and layers[0] == 'tiles %d' % PAINTED and
+      layers[-1] == 'tiles %d' % (PAINTED + 1), layers)
+geo = re.findall(r'^uicanvas: screen ([\d.]+),([\d.]+) scale ([\d.]+)', out, re.M)
+if geo and os.path.exists(UISHOT):
+    X, Y, S = map(float, geo[0])
+    shot, sheet = readpng(UISHOT), readpng(os.path.join(here, 'tilemap', 'tiles.png'))
+    at = lambda cx, cy: pixel(shot, int(X + (cx + 0.5) * S), int(Y + (cy + 0.5) * S))
+    five = lambda c: tuple((v >> 3 << 3) | (v >> 5) for v in c)  # 15-bit colour, as the GPU keeps it
+    near = lambda a, b: all(abs(p - q) <= 8 for p, q in zip(a, b))
+    # Cell x,y, texel 5,6 of it, against the sheet cell its brush draws.
+    tile = lambda x, y, cell: (at(x * 16 + 5, y * 16 + 6), five(pixel(sheet, (cell % 4) * 16 + 5, (cell // 4) * 16 + 6)))
+    got = [tile(1, 1, 1), tile(3, 2, 0), tile(6, 3, 3), tile(7, 5, 1)]
+    check('the tiles show their sheet cells untinted, in place', all(near(a, b) for a, b in got), got)
+    check('an empty cell shows nothing', sum(at(8, 8)) < 120 and sum(at(2 * 16 + 8, 2 * 16 + 8)) < 120,
+          (at(8, 8), at(40, 40)))
+    check('the canvas draws over the map', near(at(56, 24), (255, 0, 0)), at(56, 24))
+else:
+    check('UI screenshot and geometry', False, (geo, os.path.exists(UISHOT)))
+t, out = run(click('tab.ui') + ['--wait', '5'], tilemap=None, canvases=HUD)
+check('no tilemap: the layer says none', re.findall(r'^ui: tilemap layer (.*)$', out, re.M)[-1:] == ['none'], out[-300:])
 
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

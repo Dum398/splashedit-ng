@@ -11,6 +11,7 @@
 
 #include "editor/document.hh"
 #include "font.hh"
+#include "splashpack.hh"
 #include "texture.hh"
 #include "unitymath.hh"
 
@@ -1304,6 +1305,39 @@ void drawFontText(Frame& f, int x, int y, const std::string& text, const splash:
     }
 }
 
+// The tilemap layer (see render()); the tiles drawn, -1 for none.
+int drawTilemap(Frame& f, const splash::Scene& scene, Assets& assets) {
+    if (!scene.tilemap) return -1;
+    const splash::Tilemap& t = *scene.tilemap;
+    const int si = splash::tilesetIndex(t, scene.spriteSheets);
+    if (si < 0) return -1;
+    const splash::SpriteSheet& sh = scene.spriteSheets[size_t(si)];
+    if (sh.texture.empty() || sh.cellW <= 0 || sh.cellH <= 0) return -1;
+    // Cutout on, at the sheet's depth, as the export packs a sheet.
+    const Assets::Texture& tex = assets.texture(sh.texture, sh.bitDepth, true);
+    if (!tex.error.empty() || tex.width <= 0 || tex.height <= 0) return -1;
+    const int tw = sh.cellW, th = sh.cellH, cols = tex.width / tw, cells = cols * (tex.height / th);
+    // The cells under the screen, from the top left (view offset 0,0).
+    const int x1 = std::min(t.width - 1, (f.s.w - 1) / tw), y1 = std::min(t.height - 1, (f.s.h - 1) / th);
+    int n = 0;
+    for (int ty = 0; ty <= y1; ty++)
+        for (int tx = 0; tx <= x1; tx++) {
+            const int b = t.at(tx, ty);
+            if (b < 0 || b >= int(t.brushes.size())) continue;
+            const int cell = t.brushes[size_t(b)].cell;
+            if (cell < 0 || cell >= cells) continue;
+            const int u0 = (cell % cols) * tw, v0 = (cell / cols) * th;
+            for (int y = 0; y < th; y++)
+                for (int x = 0; x < tw; x++) {
+                    // Neutral 128 tint: the texel as it is.
+                    const uint16_t w = tex.words[size_t(v0 + y) * size_t(tex.width) + size_t(u0 + x)];
+                    if (w) f.put(tx * tw + x, ty * th + y, w);
+                }
+            n++;
+        }
+    return n;
+}
+
 }  // namespace
 
 int textWidth(const splash::Scene& scene, Assets& assets, const std::string& font, const std::string& text) {
@@ -1341,8 +1375,10 @@ std::vector<uint32_t> renderSample(const splash::Scene& scene, Assets& assets, c
 }
 
 std::vector<uint32_t> render(const splash::Scene& scene, const std::vector<bool>& show, Screen s, Assets& assets,
-                             uint32_t background, std::vector<uint8_t>* covered) {
+                             uint32_t background, std::vector<uint8_t>* covered, int* tilemapTiles) {
     Frame f{s, std::vector<uint16_t>(size_t(s.w) * size_t(s.h), 0), std::vector<uint8_t>(size_t(s.w) * size_t(s.h), 0)};
+    // The renderer draws the tiles, then sprites, then the UI: the map is under every canvas.
+    if (tilemapTiles) *tilemapTiles = drawTilemap(f, scene, assets);
     std::vector<int> order;
     for (int c = 0; c < int(scene.canvases.size()); c++)
         if (c < int(show.size()) && show[size_t(c)]) order.push_back(c);

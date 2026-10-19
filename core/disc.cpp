@@ -679,9 +679,12 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
             const fs::path spk = tmp / ("scene_" + std::to_string(i) + ".splashpack");
             ExportResult one;
             try {
-                one = exportSplashpack(*scenes[i], projectRoot, spk, opt);
-                if (one.ok() && !scenes[i]->settings.loadingCanvas.empty()) {
-                    ExportResult lr = exportLoaderPack(*scenes[i], projectRoot,
+                // Prefab instances filled in from their files as they are now.
+                Scene scene = *scenes[i];
+                one.errors = resolvePrefabs(scene, projectRoot);
+                if (one.ok()) one = exportSplashpack(scene, projectRoot, spk, opt);
+                if (one.ok() && !scene.settings.loadingCanvas.empty()) {
+                    ExportResult lr = exportLoaderPack(scene, projectRoot,
                                                        fs::path(spk).replace_extension(".loading"), opt);
                     one.errors.insert(one.errors.end(), lr.errors.begin(), lr.errors.end());
                     one.warnings.insert(one.warnings.end(), lr.warnings.begin(), lr.warnings.end());

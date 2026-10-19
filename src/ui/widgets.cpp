@@ -309,8 +309,8 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicke
         dl->AddRectFilled(r.Min, r.Max, rgb(0x2a2f39, (int)(160 * rowHover)), radius::field);
     }
     float x = r.Min.x + space::xs + row.depth * 16.0f;
-    const bool faint = row.hidden || row.inheritedOff;
-    ImU32 dimmed = faint ? color::textFaint : color::text;
+    const bool faint = row.hidden || row.inheritedOff || row.readOnly;
+    ImU32 dimmed = faint ? color::textFaint : row.labelColor ? row.labelColor : color::text;
     if (row.hasChildren)
         text(dl, ImVec2(x, centerY(f.medium, type::label, r.Min.y, r.Max.y)), f.medium, type::label, color::textFaint,
              row.expanded ? icon::chevronDown : row.opensUp ? icon::chevronUp : icon::chevronRight);

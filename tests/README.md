@@ -607,6 +607,18 @@ Problems. A second argument saves the dial's screenshot (and the form's as `<nam
 
     python3 dirsetcheck.py <splashedit> [shot.png]
 
+`prefabcheck.py` drives prefabs on copies of the courtyard example: a right-click on the Crates row
+then `@treemenu/Create Prefab` must write `prefabs/Crates.prefab` with the three crates and make
+Crates its instance, and one Ctrl+Z must turn it back (the file stays). The whole round: Create, the
+`.prefab` dragged from the Project panel onto the viewport (`prefab: placed Crates (2)`), the first
+instance's `@obj.prefabunpack`, the second's `@obj.prefabopen` (prefab mode), a crate deleted and
+Ctrl+S there, then `@prefab.back`. The scripted `prefabs:` line must show `Crates (2)` holding three
+objects, then two after Back; the saved prefab has two crates, the unpacked Crates keeps its three,
+and the scene holds `Crates (2)` as a link only (`prefab`, no `components` or `children`). A second
+argument saves the final screenshot.
+
+    python3 prefabcheck.py <splashedit> [shot.png]
+
 `scenefogcheck.py` drives the scene inspector's Rendering section on copies of the courtyard example:
 the Fog switch, Density typed (and clamped to 10), GTE scaling typed, Scene type picked from its
 menu (`@scenetype/Interior`), then Ctrl+S, reading `settings.fog`, `gteScaling` and `sceneType` back

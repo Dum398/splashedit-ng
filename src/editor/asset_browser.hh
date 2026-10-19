@@ -18,8 +18,8 @@
 
 namespace editor {
 
-enum class AssetType { Folder, Model, Mesh, Texture, Script, Audio, Animation, Scene, Font, Other };
-constexpr int kAssetTypes = 10;
+enum class AssetType { Folder, Model, Mesh, Texture, Script, Audio, Animation, Scene, Prefab, Font, Other };
+constexpr int kAssetTypes = 11;
 
 // "Model", "Texture", ...; plural for the type filter ("Models").
 const char* assetTypeName(AssetType t, bool plural = false);
@@ -45,7 +45,7 @@ struct AssetRef {
     std::string scene;   // the scene file, project-relative ("courtyard.scene")
     std::string object;  // the object's path of names ("Crates/Crate (2)"); empty for the scene itself
     std::string field;   // "Texture", "Mesh", "Script", "Trigger script", "Audio clip", "Skin clip", "Scene script",
-                         // "UI font", "UI image", "Sprite sheet", "Memory card icon"
+                         // "UI font", "UI image", "Sprite sheet", "Memory card icon", "Prefab"
     std::string asset;   // the path the field holds
     std::vector<int> path;  // the object's ObjectPath in that scene; empty for the scene itself
 };

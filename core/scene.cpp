@@ -5,6 +5,8 @@
 #include <cctype>
 #include <charconv>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 
@@ -433,7 +435,9 @@ Object readObject(const json& j) {
         }
     }
     for (const json& cj : j.value("children", json::array())) o.children.push_back(readObject(cj));
-    o.extra = extrasOf(j, json{{"name", 0}, {"active", 0}, {"startActive", 0}, {"transform", 0}, {"components", 0}, {"children", 0}});
+    if (j.contains("prefab") && !j["prefab"].is_null()) o.prefab = j["prefab"].get<std::string>();
+    o.extra = extrasOf(j, json{{"name", 0}, {"active", 0}, {"startActive", 0}, {"transform", 0}, {"prefab", 0}, {"components", 0},
+                               {"children", 0}});
     return o;
 }
 
@@ -446,6 +450,12 @@ json writeObject(const Object& o) {
                       {"rotation", json::array({o.transform.rotation.x, o.transform.rotation.y,
                                                 o.transform.rotation.z, o.transform.rotation.w})},
                       {"scale", vec3(o.transform.scale)}};
+    // An instance is its link: the content comes from the prefab file.
+    if (!o.prefab.empty()) {
+        j["prefab"] = o.prefab;
+        putExtras(j, o.extra);
+        return j;
+    }
     json comps = json::array();
     if (o.mesh) comps.push_back(writeMesh(*o.mesh));
     if (o.collider) comps.push_back(writeCollider(*o.collider));
@@ -1154,6 +1164,242 @@ std::optional<std::vector<Object>> readObjectsText(const std::string& text) {
         for (const json& oj : *objs) out.push_back(readObject(oj));
     } catch (const std::exception&) {
         return std::nullopt;
+    }
+    return out;
+}
+
+
+// --- prefabs ---
+
+namespace {
+
+constexpr const char* kPrefabFormat = "splashedit-ng/prefab";
+
+Prefab readPrefabJson(const json& j, const std::string& where) {
+    if (!j.is_object() || j.value("format", "") != kPrefabFormat) fail(where + ": not a splashedit-ng prefab");
+    if (!j.contains("version") || !j["version"].is_number_integer()) fail(where + ": missing or invalid \"version\"");
+    const auto v = j["version"].get<int64_t>();
+    if (v < 1 || v > kPrefabVersion)
+        fail(where + ": prefab version " + std::to_string(v) + ", this build reads up to " + std::to_string(kPrefabVersion));
+    if (!j.contains("root") || !j["root"].is_object()) fail(where + ": the prefab has no root object");
+    Prefab p;
+    p.root = readObject(j["root"]);
+    p.extra = extrasOf(j, json{{"format", 0}, {"version", 0}, {"root", 0}});
+    return p;
+}
+
+json writePrefabJson(const Prefab& p) {
+    json j;
+    j["format"] = kPrefabFormat;
+    j["version"] = kPrefabVersion;
+    j["root"] = writeObject(p.root);
+    putExtras(j, p.extra);
+    return j;
+}
+
+// A prefab path as the cycle check and the cache compare it.
+std::string prefabKey(const std::string& p) {
+    std::string s = p;
+    for (char& c : s)
+        if (c == '\\') c = '/';
+    return fs::path(s).lexically_normal().generic_string();
+}
+
+// Where an object sits in the world, composed the way flatten composes it.
+struct WorldTRS {
+    Vec3 pos;
+    Quat rot;
+    Vec3 scale{1, 1, 1};
+};
+
+WorldTRS childWorld(const WorldTRS* parent, const Transform& t) {
+    if (!parent) return {t.position, t.rotation, t.scale};
+    WorldTRS w;
+    w.pos = Mat34::trs(parent->pos, parent->rot, parent->scale).point(t.position);
+    w.rot = mul(parent->rot, t.rotation);
+    w.scale = scale(parent->scale, t.scale);
+    return w;
+}
+
+// Every agent waypoint in the tree, world position p, moved to
+// world(inverse(from)(p)): from the prefab root's frame to the instance's.
+void moveWaypoints(Object& o, const Transform& from, const WorldTRS& to) {
+    if (o.agent) {
+        const Mat34 m = Mat34::trs(to.pos, to.rot, to.scale);
+        const Quat inv{-from.rotation.x, -from.rotation.y, -from.rotation.z, from.rotation.w};
+        auto div = [](float a, float b) { return b != 0.f ? a / b : 0.f; };
+        for (Vec3& p : o.agent->waypoints) {
+            const Vec3 r = rotate(inv, p - from.position);
+            p = m.point({div(r.x, from.scale.x), div(r.y, from.scale.y), div(r.z, from.scale.z)});
+        }
+    }
+    for (Object& c : o.children) moveWaypoints(c, from, to);
+}
+
+struct Resolver {
+    fs::path root;
+    std::map<std::string, std::pair<std::optional<Prefab>, std::string>> cache;  // key -> prefab or why not
+    std::vector<std::string> stack;  // prefab keys being filled in, outermost first
+    std::vector<std::string> errors;
+
+    const Prefab* load(const std::string& key, std::string* why) {
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+            std::pair<std::optional<Prefab>, std::string> e;
+            const fs::path file = root / fs::path(key);
+            std::error_code ec;
+            if (!fs::is_regular_file(file, ec)) {
+                e.second = "not found";
+            } else {
+                try {
+                    e.first = loadPrefab(file);
+                } catch (const std::exception& ex) {
+                    e.second = std::string("could not be read: ") + ex.what();
+                }
+            }
+            it = cache.emplace(key, std::move(e)).first;
+        }
+        *why = it->second.second;
+        return it->second.first ? &*it->second.first : nullptr;
+    }
+
+    void clearContent(Object& o) {
+        Object empty;
+        empty.name = std::move(o.name);
+        empty.active = o.active;
+        empty.startActive = o.startActive;
+        empty.transform = o.transform;
+        empty.extra = std::move(o.extra);
+        empty.prefab = std::move(o.prefab);
+        o = std::move(empty);
+    }
+
+    // `names`: the object's path of names, for messages. `parent`: the
+    // parent's world transform, null at the top of the tree being filled.
+    void object(Object& o, const std::string& names, const WorldTRS* parent) {
+        const WorldTRS world = childWorld(parent, o.transform);
+        if (o.prefab.empty()) {
+            for (Object& c : o.children) object(c, names + "/" + c.name, &world);
+            return;
+        }
+        const std::string key = prefabKey(o.prefab);
+        o.prefabResolved = false;
+        if (std::find(stack.begin(), stack.end(), key) != stack.end()) {
+            std::string chain;
+            for (auto it = std::find(stack.begin(), stack.end(), key); it != stack.end(); ++it) chain += *it + " -> ";
+            errors.push_back(names + ": prefab " + o.prefab + " includes itself (" + chain + key + ")");
+            clearContent(o);
+            return;
+        }
+        std::string why;
+        const Prefab* p = load(key, &why);
+        if (!p) {
+            errors.push_back(names + ": prefab " + o.prefab + " " + why);
+            clearContent(o);
+            return;
+        }
+        // The prefab's root, its own nested instances filled in where it
+        // sits in its file, then moved to where the instance sits.
+        Object content = p->root;
+        stack.push_back(key);
+        const size_t before = errors.size();
+        object(content, names, nullptr);
+        stack.pop_back();
+        if (errors.size() != before) {
+            clearContent(o);
+            return;
+        }
+        const Transform& from = p->root.transform;
+        const bool same = from.position == world.pos && from.scale == world.scale && from.rotation.x == world.rot.x &&
+                          from.rotation.y == world.rot.y && from.rotation.z == world.rot.z && from.rotation.w == world.rot.w;
+        if (!same) moveWaypoints(content, from, world);
+        content.name = std::move(o.name);
+        content.active = o.active;
+        content.startActive = o.startActive;
+        content.transform = o.transform;
+        content.extra = std::move(o.extra);
+        content.prefab = std::move(o.prefab);
+        content.prefabResolved = true;
+        o = std::move(content);
+    }
+};
+
+}  // namespace
+
+Prefab loadPrefab(const fs::path& file) { return readPrefabJson(readJson(file), file.string()); }
+
+void savePrefab(const Prefab& prefab, const fs::path& file) { writeJson(writePrefabJson(prefab), file); }
+
+std::string writePrefabText(const Prefab& prefab) { return writePrefabJson(prefab).dump(2) + "\n"; }
+
+Prefab readPrefabText(const std::string& text, const std::string& where) {
+    json j;
+    try {
+        j = json::parse(text);
+    } catch (const json::exception& e) {
+        fail(where + ": " + e.what());
+    }
+    return readPrefabJson(j, where);
+}
+
+std::vector<std::string> resolvePrefabs(Scene& scene, const fs::path& projectRoot) {
+    Resolver r;
+    r.root = projectRoot;
+    for (Object& o : scene.objects) r.object(o, o.name, nullptr);
+    return r.errors;
+}
+
+std::vector<std::string> prefabNameWarnings(const Scene& scene) {
+    // Every object's name, with the instance whose content it is (if any).
+    struct Named {
+        const Object* object;
+        const Object* instance;  // the outermost instance root it is content of; null outside any
+    };
+    std::vector<Named> all;
+    std::function<void(const Object&, const Object*)> walk = [&](const Object& o, const Object* inst) {
+        all.push_back({&o, inst});
+        const Object* in = inst ? inst : (o.prefab.empty() ? nullptr : &o);
+        for (const Object& c : o.children) walk(c, in);
+    };
+    for (const Object& o : scene.objects) walk(o, nullptr);
+    // What refers to a name, once each.
+    std::map<std::string, std::vector<std::string>> refs;
+    auto refer = [&](const std::string& name, const std::string& by) {
+        if (name.empty()) return;
+        auto& v = refs[name];
+        if (std::find(v.begin(), v.end(), by) == v.end()) v.push_back(by);
+    };
+    for (const Named& n : all) {
+        const Object& o = *n.object;
+        if (o.portal) {
+            refer(o.portal->roomA, "Portal '" + o.name + "'");
+            refer(o.portal->roomB, "Portal '" + o.name + "'");
+        }
+        if (o.navigation) refer(o.navigation->spawnAnchor, "the navigation spawnAnchor");
+    }
+    for (const Cutscene& c : scene.cutscenes)
+        for (const CutsceneTrack& t : c.tracks) refer(t.target, "cutscene '" + c.name + "'");
+    for (const Animation& a : scene.animations)
+        for (const CutsceneTrack& t : a.tracks) refer(t.target, "animation '" + a.name + "'");
+    std::vector<std::string> out;
+    for (const auto& [name, by] : refs) {
+        std::vector<const Named*> holders;
+        bool fromPrefab = false;
+        for (const Named& n : all)
+            if (n.object->name == name) {
+                holders.push_back(&n);
+                if (n.instance && n.instance != n.object) fromPrefab = true;
+            }
+        if (holders.size() < 2 || !fromPrefab) continue;
+        std::string where, prefab;
+        for (const Named* h : holders) {
+            where += (where.empty() ? "" : ", ") + (h->instance && h->instance != h->object ? "in " + h->instance->name : std::string("in the scene"));
+            if (prefab.empty() && h->instance && h->instance != h->object) prefab = h->instance->prefab;
+        }
+        std::string users;
+        for (size_t i = 0; i < by.size(); ++i) users += (i ? (i + 1 == by.size() ? " and " : ", ") : "") + by[i];
+        out.push_back("Prefab " + prefab + ": " + std::to_string(holders.size()) + " objects are named '" + name + "' (" + where +
+                      ") and " + users + " refers to it by name, so only one of them is meant. Unpack an instance and rename it.");
     }
     return out;
 }

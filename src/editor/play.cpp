@@ -258,9 +258,13 @@ static splash::ExportResult exportScene(const splash::Scene& scene, const fs::pa
     opt.luaBytecode = true;
     opt.vram = loadVramSettings(projectRoot);
     try {
-        r = splash::exportSplashpack(scene, projectRoot, dir / (sceneStem(i) + ".splashpack"), opt);
-        if (r.ok() && !scene.settings.loadingCanvas.empty()) {
-            splash::ExportResult lr = splash::exportLoaderPack(scene, projectRoot, dir / (sceneStem(i) + ".loading"), opt);
+        // Prefab instances filled in from their files as they are now.
+        splash::Scene resolved = scene;
+        r.errors = splash::resolvePrefabs(resolved, projectRoot);
+        if (!r.ok()) return r;
+        r = splash::exportSplashpack(resolved, projectRoot, dir / (sceneStem(i) + ".splashpack"), opt);
+        if (r.ok() && !resolved.settings.loadingCanvas.empty()) {
+            splash::ExportResult lr = splash::exportLoaderPack(resolved, projectRoot, dir / (sceneStem(i) + ".loading"), opt);
             r.errors.insert(r.errors.end(), lr.errors.begin(), lr.errors.end());
             r.warnings.insert(r.warnings.end(), lr.warnings.begin(), lr.warnings.end());
         }

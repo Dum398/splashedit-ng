@@ -47,6 +47,7 @@ const char* typeIcon(AssetType t) {
         case AssetType::Audio: return icon::music;
         case AssetType::Animation: return kFilm;
         case AssetType::Scene: return kClapper;
+        case AssetType::Prefab: return icon::package;
         case AssetType::Font: return kType;
         case AssetType::Other: return kFile;
     }
@@ -63,6 +64,7 @@ ImU32 typeColor(AssetType t) {
         case AssetType::Audio: return rgb(0x46c98a);
         case AssetType::Animation: return rgb(0xd98ad2);
         case AssetType::Scene: return color::accent;
+        case AssetType::Prefab: return rgb(0x6ab0ff);
         case AssetType::Font: return color::text;
         case AssetType::Other: return color::textFaint;
     }
@@ -334,11 +336,14 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
     ImRect gb(ImVec2(lb.Min.x - 28, h.Min.y + 4), ImVec2(lb.Min.x - 2, h.Max.y - 4));
     if (iconButton("gridview", gb, kLayoutGrid, !m_list, "Grid")) m_list = false;
     x = gb.Min.x - space::sm;
-    static const char* typeNames[] = {"All types", "Models", "Meshes", "Textures", "Scripts", "Audio", "Animations", "Scenes", "Fonts", "Other files"};
-    static const AssetType typeOf[] = {AssetType::Folder, AssetType::Model, AssetType::Mesh, AssetType::Texture, AssetType::Script,
-                                       AssetType::Audio, AssetType::Animation, AssetType::Scene, AssetType::Font, AssetType::Other};
+    static const char* typeNames[] = {"All types", "Models", "Meshes",  "Textures", "Scripts",    "Audio",
+                                      "Animations", "Scenes", "Prefabs", "Fonts",    "Other files"};
+    static const AssetType typeOf[] = {AssetType::Folder,    AssetType::Model, AssetType::Mesh,   AssetType::Texture,
+                                       AssetType::Script,    AssetType::Audio, AssetType::Animation, AssetType::Scene,
+                                       AssetType::Prefab,    AssetType::Font,  AssetType::Other};
+    static_assert(sizeof typeOf / sizeof typeOf[0] == editor::kAssetTypes, "a filter entry per asset type");
     int current = 0;
-    for (int i = 1; i < 10; ++i)
+    for (int i = 1; i < editor::kAssetTypes; ++i)
         if (m_types == (1u << static_cast<unsigned>(typeOf[i]))) current = i;
     ImRect tf(ImVec2(x - 132, h.Min.y + 5), ImVec2(x, h.Max.y - 5));
     // Its list opens above: the panel sits at the bottom of the window.
@@ -346,7 +351,7 @@ void AssetBrowser::header(ImDrawList* dl, ImRect h) {
     if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) ImGui::OpenPopup("##typefilter");
     if (ImGui::IsPopupOpen("##typefilter")) {
         std::vector<MenuItem> items;
-        for (int i = 0; i < 10; ++i)
+        for (int i = 0; i < editor::kAssetTypes; ++i)
             items.push_back({std::string(i == current ? "\xe2\x80\xa2 " : "") + typeNames[i], "", true, [this, i] {
                                  m_types = i == 0 ? 0 : 1u << static_cast<unsigned>(typeOf[i]);
                                  m_scroll = 0;
@@ -789,6 +794,7 @@ void AssetBrowser::menu(editor::Document& doc) {
         const char* openLabel = t == AssetType::Folder   ? "Open"
                                 : t == AssetType::Script ? "Edit script"
                                 : t == AssetType::Scene  ? "Open scene"
+                                : t == AssetType::Prefab ? "Open prefab"
                                 : t == AssetType::Model || t == AssetType::Mesh ? "Add to scene"
                                                                                 : "Open in default app";
         items.push_back({openLabel, "Enter", t != AssetType::Scene || path != m_openScene, [this, path] {

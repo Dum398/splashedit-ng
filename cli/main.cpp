@@ -442,7 +442,10 @@ int main(int argc, char** argv) {
         opt.vram = splash::readVramSettings(root / "vram.json");
         if (!orderFrom.empty()) opt.objectOrder = readNameTable(orderFrom);
         opt.luaBytecode = luaBytecode;
-        splash::ExportResult r = splash::exportSplashpack(scene, root, outPath, opt);
+        // Prefab instances filled in from their files; one that cannot be is an error.
+        splash::ExportResult r;
+        r.errors = splash::resolvePrefabs(scene, root);
+        if (r.ok()) r = splash::exportSplashpack(scene, root, outPath, opt);
         if (r.ok() && !scene.settings.loadingCanvas.empty()) {
             // The loading screen: <out>.loading, psxsplash's scene_<i>.loading.
             splash::ExportResult lr =

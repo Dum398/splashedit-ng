@@ -236,6 +236,15 @@ struct Object {
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;
+    // A prefab instance: the project-relative path ('/' separators) of the
+    // .prefab file its components and children come from. A saved instance
+    // holds its name, active flags, transform and this link only; its
+    // components and children are filled in from the file by resolvePrefabs
+    // and never written back.
+    std::string prefab;
+    // resolvePrefabs filled this instance's content in from its file. Not
+    // saved; false on an instance whose file is missing or unreadable.
+    bool prefabResolved = false;
 };
 
 struct FogSettings {
@@ -601,6 +610,38 @@ std::vector<FlatObject> flatten(const Scene& scene);
 
 Scene loadScene(const std::filesystem::path& file);
 void saveScene(const Scene& scene, const std::filesystem::path& file);
+
+// A prefab file (<name>.prefab): one object tree, written by the scene's
+// own object writer, that scenes place as instances (Object::prefab).
+// {"format": "splashedit-ng/prefab", "version": 1, "root": {...}}
+constexpr int kPrefabVersion = 1;
+struct Prefab {
+    Object root;
+    ExtraKeys extra;  // unknown top-level keys, kept on save
+};
+Prefab loadPrefab(const std::filesystem::path& file);
+void savePrefab(const Prefab& prefab, const std::filesystem::path& file);
+// The same as text; readPrefabText throws on anything that is not a prefab
+// (`where` names it in the message).
+std::string writePrefabText(const Prefab& prefab);
+Prefab readPrefabText(const std::string& text, const std::string& where = "prefab");
+
+// Fills every prefab instance of the scene in from its file (relative to
+// `projectRoot`): the instance keeps its name, active flags, transform and
+// unknown keys, and takes the prefab root's components and children, with
+// nested instances in them filled in the same way. Agent waypoints, which
+// are world positions, move with the instance: from where the prefab's root
+// sits in its file to where the instance sits in the scene. Run again, it
+// reloads the files. Returns one message per instance it could not fill (a
+// missing or unreadable file, a prefab that includes itself), naming the
+// instance by its path of names; such an instance is left without content
+// and with prefabResolved false.
+std::vector<std::string> resolvePrefabs(Scene& scene, const std::filesystem::path& projectRoot);
+// Warnings for names that prefab instances make ambiguous: an object name
+// that a Portal (as a room), a cutscene or animation track, or the
+// navigation spawnAnchor refers to, carried by more than one object where
+// at least one of them comes from a prefab instance's content.
+std::vector<std::string> prefabNameWarnings(const Scene& scene);
 
 // Objects with their children as a self-contained JSON document, in the same
 // form the scene file stores them: {"splashedit-objects": 1, "objects": [...]}.

@@ -11748,6 +11748,422 @@ void testUiScale() {
     CHECK(unknown.w == 3200 && unknown.h == 1920);
 }
 
+// --- prefabs ---
+
+namespace prefabtest {
+
+namespace fs = std::filesystem;
+
+// project/meshes/quad.mesh and project/prefabs/stack.prefab: a root "Stack"
+// drawing the quad, with a child "Top" drawing it too, its root at `at`.
+fs::path makeProject(const char* name, splash::Vec3 at = {}) {
+    using namespace roomtest;
+    const fs::path project = g_outDir / name;
+    fs::remove_all(project);
+    fs::create_directories(project / "meshes");
+    fs::create_directories(project / "prefabs");
+    splash::Mesh quad;
+    quad.positions = {{-1, 0, -1}, {-1, 0, 1}, {1, 0, 1}, {1, 0, -1}};
+    quad.normals.assign(4, {0, 1, 0});
+    quad.submeshes = {{0, 1, 2, 0, 2, 3}};
+    splash::saveMesh(quad, project / "meshes/quad.mesh");
+    splash::Prefab p;
+    p.root = meshObject("Stack", "meshes/quad.mesh", at, false);
+    p.root.children.push_back(meshObject("Top", "meshes/quad.mesh", {0, 1, 0}, false));
+    splash::savePrefab(p, project / "prefabs/stack.prefab");
+    return project;
+}
+
+splash::Object instance(const char* name, const char* prefab, splash::Vec3 pos) {
+    splash::Object o;
+    o.name = name;
+    o.prefab = prefab;
+    o.transform.position = pos;
+    return o;
+}
+
+void writeText(const fs::path& p, const std::string& text) {
+    std::ofstream out(p, std::ios::binary);
+    out << text;
+}
+
+bool anyHas(const std::vector<std::string>& v, const std::string& a, const std::string& b = {}) {
+    return std::any_of(v.begin(), v.end(), [&](const std::string& s) {
+        return s.find(a) != std::string::npos && (b.empty() || s.find(b) != std::string::npos);
+    });
+}
+
+}  // namespace prefabtest
+
+// The .prefab file round-trips with its unknown keys; a saved instance is
+// its link alone, whatever content it was showing, and keeps its own unknown keys.
+void testPrefabFiles() {
+    using namespace prefabtest;
+    const fs::path project = makeProject("prefabfiles");
+    const std::string text = roomtest::readAll(project / "prefabs/stack.prefab");
+    CHECK(text.rfind("{\n  \"format\": \"splashedit-ng/prefab\",\n  \"version\": 1,\n  \"root\": {", 0) == 0);
+    // Unknown keys at the top and on the root survive a load and a save.
+    std::string extra = text;
+    extra.replace(extra.find("\"version\": 1,"), 13, "\"version\": 1,\n  \"author\": \"maker\",");
+    extra.replace(extra.find("\"name\": \"Stack\","), 16, "\"name\": \"Stack\",\n    \"tag\": [1, 2],");
+    splash::Prefab back = splash::readPrefabText(extra);
+    CHECK(back.root.name == "Stack" && back.root.mesh && back.root.children.size() == 1);
+    const std::string again = splash::writePrefabText(back);
+    CHECK(again.find("\"author\": \"maker\"") != std::string::npos && again.find("\"tag\": [") != std::string::npos);
+    CHECK(splash::writePrefabText(splash::readPrefabText(again)) == again);
+    // Not a prefab, a later version, no root: refused, naming the file.
+    bool threw = false;
+    try {
+        splash::readPrefabText("{\"format\":\"splashedit-ng/scene\",\"version\":1}", "x.prefab");
+    } catch (const std::exception& e) {
+        threw = std::string(e.what()).find("x.prefab: not a splashedit-ng prefab") != std::string::npos;
+    }
+    CHECK(threw);
+    threw = false;
+    try {
+        splash::readPrefabText("{\"format\":\"splashedit-ng/prefab\",\"version\":2,\"root\":{\"name\":\"a\"}}");
+    } catch (const std::exception& e) {
+        threw = std::string(e.what()).find("version 2") != std::string::npos;
+    }
+    CHECK(threw);
+
+    // A scene with an instance, filled in, saves the instance without its content.
+    splash::Scene s;
+    splash::Object inst = instance("Pile", "prefabs/stack.prefab", {4, 0, 0});
+    inst.startActive = false;
+    inst.extra.push_back({"note", "\"kept\""});
+    s.objects.push_back(inst);
+    CHECK(splash::resolvePrefabs(s, project).empty());
+    CHECK(s.objects[0].prefabResolved && s.objects[0].mesh && s.objects[0].children.size() == 1 && s.objects[0].name == "Pile");
+    splash::saveScene(s, project / "a.scene");
+    const std::string saved = roomtest::readAll(project / "a.scene");
+    const size_t at = saved.find("\"name\": \"Pile\"");
+    const size_t end = saved.find('}', saved.find("\"prefab\"", at));
+    const std::string obj = at == std::string::npos ? std::string() : saved.substr(at, end - at);
+    CHECK(obj.find("\"prefab\": \"prefabs/stack.prefab\"") != std::string::npos);
+    CHECK(obj.find("\"startActive\": false") != std::string::npos && obj.find("\"transform\"") != std::string::npos);
+    CHECK(saved.find("\"components\"") == std::string::npos && saved.find("\"children\"") == std::string::npos);
+    CHECK(saved.find("\"note\": \"kept\"") != std::string::npos);
+    // Read back: the link, the overrides and the unknown key, and no content until resolved.
+    splash::Scene r = splash::loadScene(project / "a.scene");
+    CHECK(r.objects.size() == 1 && r.objects[0].prefab == "prefabs/stack.prefab" && !r.objects[0].prefabResolved);
+    CHECK(!r.objects[0].mesh && r.objects[0].children.empty() && !r.objects[0].startActive);
+    CHECK(r.objects[0].extra.size() == 1 && r.objects[0].extra[0].first == "note");
+    CHECK(r.objects[0].transform.position.x == 4);
+    // The clipboard carries the link the same way.
+    std::optional<std::vector<splash::Object>> clip = splash::readObjectsText(splash::writeObjectsText({s.objects[0]}));
+    CHECK(clip && clip->size() == 1 && (*clip)[0].prefab == "prefabs/stack.prefab" && (*clip)[0].children.empty());
+}
+
+// resolvePrefabs: nested prefabs fill in; a missing file, a broken file and a
+// prefab that includes itself are errors naming the instance, which is left empty.
+void testPrefabResolve() {
+    using namespace prefabtest;
+    const fs::path project = makeProject("prefabresolve");
+    // outer.prefab: a root holding an instance of stack.prefab.
+    splash::Prefab outer;
+    outer.root.name = "Outer";
+    outer.root.children.push_back(instance("Inner", "prefabs/stack.prefab", {0, 2, 0}));
+    splash::savePrefab(outer, project / "prefabs/outer.prefab");
+    splash::Scene s;
+    s.objects.push_back(instance("Big", "prefabs/outer.prefab", {1, 0, 0}));
+    CHECK(splash::resolvePrefabs(s, project).empty());
+    CHECK(s.objects[0].children.size() == 1 && s.objects[0].children[0].name == "Inner");
+    CHECK(s.objects[0].children[0].prefabResolved && s.objects[0].children[0].children.size() == 1 &&
+          s.objects[0].children[0].children[0].name == "Top");
+    // Resolving again reloads: an edit of the file shows.
+    splash::Prefab stack = splash::loadPrefab(project / "prefabs/stack.prefab");
+    stack.root.children.push_back(roomtest::meshObject("Extra", "meshes/quad.mesh", {0, 2, 0}, false));
+    splash::savePrefab(stack, project / "prefabs/stack.prefab");
+    CHECK(splash::resolvePrefabs(s, project).empty());
+    CHECK(s.objects[0].children[0].children.size() == 2);
+
+    // Missing file.
+    splash::Scene m;
+    splash::Object holder;
+    holder.name = "Group";
+    holder.children.push_back(instance("Lost", "prefabs/nope.prefab", {}));
+    m.objects.push_back(holder);
+    std::vector<std::string> errs = splash::resolvePrefabs(m, project);
+    CHECK(errs.size() == 1 && anyHas(errs, "Group/Lost: prefab prefabs/nope.prefab not found"));
+    CHECK(!m.objects[0].children[0].prefabResolved && m.objects[0].children[0].children.empty());
+    // Broken file.
+    writeText(project / "prefabs/broken.prefab", "{ not json");
+    splash::Scene b;
+    b.objects.push_back(instance("Bad", "prefabs/broken.prefab", {}));
+    errs = splash::resolvePrefabs(b, project);
+    CHECK(errs.size() == 1 && anyHas(errs, "Bad: prefab prefabs/broken.prefab could not be read"));
+    // A cycle: a holds b, b holds a.
+    splash::Prefab pa, pb;
+    pa.root.name = "A";
+    pa.root.children.push_back(instance("toB", "prefabs/b.prefab", {}));
+    pb.root.name = "B";
+    pb.root.children.push_back(instance("toA", "prefabs/a.prefab", {}));
+    splash::savePrefab(pa, project / "prefabs/a.prefab");
+    splash::savePrefab(pb, project / "prefabs/b.prefab");
+    splash::Scene c;
+    c.objects.push_back(instance("Loop", "prefabs/a.prefab", {}));
+    errs = splash::resolvePrefabs(c, project);
+    CHECK(errs.size() == 1 && anyHas(errs, "includes itself", "prefabs/a.prefab -> prefabs/b.prefab -> prefabs/a.prefab"));
+    CHECK(!c.objects[0].prefabResolved && c.objects[0].children.empty());
+    // An unresolved instance is an export error naming it; the export callers'
+    // resolve error names it too.
+    splash::ExportResult r = splash::exportSplashpack(m, project, project / "m.splashpack");
+    CHECK(!r.ok() && roomtest::hasError(r, "Lost: prefab prefabs/nope.prefab is not loaded"));
+}
+
+// An instance exports byte for byte what the same objects placed by hand do.
+void testPrefabExportIdentity() {
+    using namespace prefabtest;
+    // The prefab's root sits elsewhere in its file: the instance's own transform counts.
+    const fs::path project = makeProject("prefabexport", {9, 9, 9});
+    splash::Scene viaPrefab;
+    viaPrefab.objects.push_back(roomtest::meshObject("Ground", "meshes/quad.mesh", {0, 0, 0}, false));
+    splash::Object inst = instance("Stack", "prefabs/stack.prefab", {3, 0, 1});
+    inst.transform.rotation = {0, 0.38268343f, 0, 0.92387953f};
+    viaPrefab.objects.push_back(inst);
+    splash::Scene byHand = viaPrefab;
+    byHand.objects[1] = roomtest::meshObject("Stack", "meshes/quad.mesh", {3, 0, 1}, false);
+    byHand.objects[1].transform.rotation = inst.transform.rotation;
+    byHand.objects[1].children.push_back(roomtest::meshObject("Top", "meshes/quad.mesh", {0, 1, 0}, false));
+    CHECK(splash::resolvePrefabs(viaPrefab, project).empty());
+    splash::ExportResult a = splash::exportSplashpack(viaPrefab, project, project / "prefab.splashpack");
+    splash::ExportResult b = splash::exportSplashpack(byHand, project, project / "hand.splashpack");
+    for (const std::string& e : a.errors) std::fprintf(stderr, "prefab export: %s\n", e.c_str());
+    CHECK(a.ok() && b.ok());
+    const std::string pa = roomtest::readAll(project / "prefab.splashpack"), pb = roomtest::readAll(project / "hand.splashpack");
+    CHECK(!pa.empty() && pa == pb);
+    CHECK(roomtest::readAll(project / "prefab.vram") == roomtest::readAll(project / "hand.vram"));
+    // And from disk, the way play and the CLI export a saved scene.
+    splash::saveScene(viaPrefab, project / "p.scene");
+    splash::Scene loaded = splash::loadScene(project / "p.scene");
+    CHECK(splash::resolvePrefabs(loaded, project).empty());
+    splash::ExportResult c = splash::exportSplashpack(loaded, project, project / "loaded.splashpack");
+    CHECK(c.ok() && roomtest::readAll(project / "loaded.splashpack") == pb);
+
+    // The export callers fill instances in themselves: play, from a scene as
+    // loaded (links only), packs what the hand-placed scene packs.
+    const splash::Scene linksOnly = splash::loadScene(project / "p.scene");
+    CHECK(!linksOnly.objects[1].prefabResolved);
+    const splash::ExportResult pp = editor::exportForPlay(linksOnly, project, project / "play-prefab");
+    const splash::ExportResult ph = editor::exportForPlay(byHand, project, project / "play-hand");
+    for (const std::string& e : pp.errors) std::fprintf(stderr, "prefab play export: %s\n", e.c_str());
+    CHECK(pp.ok() && ph.ok());
+    CHECK(roomtest::readAll(project / "play-prefab" / "scene_0.splashpack") == roomtest::readAll(project / "play-hand" / "scene_0.splashpack"));
+    // A missing prefab stops play's export with the instance named.
+    splash::Scene lost = linksOnly;
+    lost.objects[1].prefab = "prefabs/gone.prefab";
+    const splash::ExportResult pl = editor::exportForPlay(lost, project, project / "play-lost");
+    CHECK(!pl.ok() && prefabtest::anyHas(pl.errors, "Stack: prefab prefabs/gone.prefab not found"));
+    // The live export reads the prefab as it is on disk now.
+    editor::Document d;
+    CHECK(!d.load(project, "p.scene"));
+    editor::LiveExport live(0.3);
+    live.update(d, 10.0);
+    live.update(d, 10.4);
+    live.wait();
+    CHECK(live.result() && live.result()->ok() && live.result()->stats.gameObjects == 3);
+    splash::Prefab grown = splash::loadPrefab(project / "prefabs/stack.prefab");
+    grown.root.children.push_back(roomtest::meshObject("Lid", "meshes/quad.mesh", {0, 2, 0}, false));
+    splash::savePrefab(grown, project / "prefabs/stack.prefab");
+    live.settingsChanged();
+    live.update(d, 11.0);
+    live.update(d, 11.4);
+    live.wait();
+    CHECK(live.result() && live.result()->ok() && live.result()->stats.gameObjects == 4);
+}
+
+// Agent waypoints are world positions (the exporter writes them as they are):
+// an instance moved and turned takes them along.
+void testPrefabWaypoints() {
+    using namespace prefabtest;
+    const fs::path project = makeProject("prefabwaypoints");
+    splash::Prefab p;
+    p.root.name = "Guard";
+    p.root.transform.position = {1, 0, 0};
+    p.root.agent = splash::AgentComponent{};
+    p.root.agent->waypoints = {{1, 0, 0}, {3, 0, 0}, {1, 0, 2}};
+    splash::savePrefab(p, project / "prefabs/guard.prefab");
+    splash::Scene s;
+    s.objects.push_back(instance("Same", "prefabs/guard.prefab", {1, 0, 0}));
+    splash::Object moved = instance("Moved", "prefabs/guard.prefab", {10, 0, 5});
+    moved.transform.rotation = {0, 0.70710678f, 0, 0.70710678f};  // 90 degrees about +Y: +X -> -Z
+    s.objects.push_back(moved);
+    CHECK(splash::resolvePrefabs(s, project).empty());
+    const auto& same = s.objects[0].agent->waypoints;
+    CHECK(same.size() == 3 && same[1].x == 3 && same[2].z == 2);  // where the root sits in the file: untouched
+    const auto& w = s.objects[1].agent->waypoints;
+    auto near = [](splash::Vec3 a, splash::Vec3 b) { return std::fabs(a.x - b.x) < 1e-4f && std::fabs(a.y - b.y) < 1e-4f && std::fabs(a.z - b.z) < 1e-4f; };
+    CHECK(w.size() == 3 && near(w[0], {10, 0, 5}) && near(w[1], {10, 0, 3}) && near(w[2], {12, 0, 5}));
+}
+
+// Two instances of a prefab holding a Room that a Portal names: ambiguous, warned.
+void testPrefabNameWarnings() {
+    using namespace prefabtest;
+    const fs::path project = makeProject("prefabnames");
+    splash::Prefab p;
+    p.root = roomtest::roomObject("Hall", {0, 0, 0}, {4, 4, 4});
+    splash::savePrefab(p, project / "prefabs/hall.prefab");
+    splash::Prefab wrap;
+    wrap.root.name = "Wing";
+    wrap.root.children.push_back(roomtest::roomObject("Hall", {0, 0, 0}, {4, 4, 4}));
+    splash::savePrefab(wrap, project / "prefabs/wing.prefab");
+    splash::Scene s;
+    s.objects.push_back(instance("Wing A", "prefabs/wing.prefab", {0, 0, 0}));
+    s.objects.push_back(instance("Wing B", "prefabs/wing.prefab", {10, 0, 0}));
+    splash::Object door;
+    door.name = "Door";
+    door.portal = splash::PortalComponent{};
+    door.portal->roomA = "Hall";
+    door.portal->roomB = "Yard";
+    s.objects.push_back(door);
+    CHECK(splash::resolvePrefabs(s, project).empty());
+    std::vector<std::string> w = splash::prefabNameWarnings(s);
+    CHECK(w.size() == 1 && anyHas(w, "Prefab prefabs/wing.prefab: 2 objects are named 'Hall'", "Portal 'Door'"));
+    // A cutscene target in one instance only, unreferenced names, an
+    // instance's own (overridden) name: nothing.
+    s.objects[2].portal->roomA = "Wing A";
+    CHECK(splash::prefabNameWarnings(s).empty());
+    // A cutscene naming content of both.
+    splash::Cutscene cs;
+    cs.name = "intro";
+    splash::CutsceneTrack t;
+    t.target = "Hall";
+    cs.tracks.push_back(t);
+    s.cutscenes.push_back(cs);
+    CHECK(anyHas(splash::prefabNameWarnings(s), "'Hall'", "cutscene 'intro'"));
+}
+
+// The Project panel's references: a scene names its prefab (not what the
+// prefab holds), a prefab file is scanned as its own referrer, and a rename
+// of a file a prefab uses rewrites the prefab; a renamed prefab is followed
+// by the scene's instance.
+void testPrefabReferences() {
+    using namespace prefabtest;
+    const fs::path project = makeProject("prefabrefs");
+    splash::Scene s;
+    s.objects.push_back(instance("Pile", "prefabs/stack.prefab", {}));
+    splash::saveScene(s, project / "game.scene");
+    editor::Document doc;
+    CHECK(!doc.load(project, "game.scene"));
+    CHECK(doc.object({0}) && doc.object({0})->children.size() == 1);
+    editor::AssetIndex index;
+    index.scan(project);
+    editor::AssetReferences refs;
+    refs.update(index, doc.scene(), "game.scene", doc.revision());
+    auto mesh = refs.to(index, "meshes/quad.mesh");
+    CHECK(mesh.size() == 2 && std::all_of(mesh.begin(), mesh.end(), [](const editor::AssetRef& r) { return r.scene == "prefabs/stack.prefab"; }));
+    auto pre = refs.to(index, "prefabs/stack.prefab");
+    CHECK(pre.size() == 1 && pre[0].scene == "game.scene" && pre[0].field == "Prefab" && pre[0].object == "Pile");
+    CHECK(editor::classifyAsset("prefabs/stack.prefab") == editor::AssetType::Prefab);
+    CHECK(std::string(editor::assetTypeName(editor::AssetType::Prefab, true)) == "Prefabs");
+
+    // Rename the mesh: the prefab file follows, and the open scene's instance shows it.
+    editor::AssetOp op = editor::applyAssetPlan(doc, index, "game.scene", editor::planRename(index, refs, "meshes/quad.mesh", "tile", "game.scene"));
+    CHECK(op.error.empty() && op.references == 2);
+    CHECK(std::find(op.scenes.begin(), op.scenes.end(), "prefabs/stack.prefab") != op.scenes.end());
+    CHECK(splash::loadPrefab(project / "prefabs/stack.prefab").root.mesh->mesh == "meshes/tile.mesh");
+    CHECK(doc.object({0})->mesh && doc.object({0})->mesh->mesh == "meshes/tile.mesh");
+    CHECK(doc.undo());
+    CHECK(splash::loadPrefab(project / "prefabs/stack.prefab").root.mesh->mesh == "meshes/quad.mesh");
+    CHECK(doc.object({0})->mesh->mesh == "meshes/quad.mesh");
+    // Rename the prefab: the instance's link follows (in memory: the open scene is unsaved).
+    index.scan(project);
+    refs.update(index, doc.scene(), "game.scene", doc.revision());
+    op = editor::applyAssetPlan(doc, index, "game.scene", editor::planRename(index, refs, "prefabs/stack.prefab", "pile", "game.scene"));
+    CHECK(op.error.empty() && op.references == 1);
+    CHECK(doc.object({0})->prefab == "prefabs/pile.prefab" && doc.object({0})->prefabResolved && doc.object({0})->children.size() == 1);
+}
+
+// Create Prefab, Unpack and the read-only content, each one undo step;
+// prefab mode edits the file and Back refills every instance.
+void testPrefabDocument() {
+    using namespace prefabtest;
+    const fs::path project = makeProject("prefabdoc");
+    fs::remove_all(project / "prefabs");
+    splash::Scene s;
+    splash::Object crates;
+    crates.name = "Crates";
+    crates.transform.position = {2, 0, 0};
+    crates.children.push_back(roomtest::meshObject("Crate", "meshes/quad.mesh", {0, 0, 0}, false));
+    crates.children.push_back(roomtest::meshObject("Crate (2)", "meshes/quad.mesh", {1, 0, 0}, false));
+    s.objects.push_back(crates);
+    s.objects.push_back(named("Lamp", 5));
+    splash::saveScene(s, project / "game.scene");
+    editor::Document doc;
+    CHECK(!doc.load(project, "game.scene"));
+
+    // Create: the file is written, the object becomes its instance, one undo step.
+    std::string err;
+    const std::string made = doc.createPrefab({0}, &err);
+    CHECK(made == "prefabs/Crates.prefab" && err.empty());
+    CHECK(fs::exists(project / "prefabs/Crates.prefab"));
+    CHECK(doc.object({0})->prefab == made && doc.object({0})->prefabResolved && doc.object({0})->children.size() == 2);
+    CHECK(doc.historySize() == 1 && doc.dirty());
+    CHECK(doc.inInstance({0, 1}) && !doc.inInstance({0}) && (doc.instanceRoot({0, 1}) == editor::ObjectPath{0}));
+    // Another Create of a same-named object: a new file, the first untouched.
+    const std::string first = roomtest::readAll(project / "prefabs/Crates.prefab");
+    doc.renameObject({1}, "Crates");
+    CHECK(doc.createPrefab({1}, &err) == "prefabs/Crates (2).prefab");
+    CHECK(roomtest::readAll(project / "prefabs/Crates.prefab") == first);
+    CHECK(doc.undo() && doc.undo());
+    CHECK(doc.object({1})->name == "Lamp" && doc.object({1})->prefab.empty());
+
+    // The content is read-only; the instance's own name, transform and flags are not.
+    CHECK(!doc.edit({0, 0}, [](splash::Object& o) { o.transform.position.x = 7; }));
+    CHECK(doc.renameObject({0, 0}, "Box") == -1 && !doc.removeObject({0, 0}));
+    CHECK(!doc.duplicateObject({0, 1}) && !doc.moveObject({0, 0}, {}, 0) && !doc.insertObject({0, 0}, named("X")));
+    CHECK(!doc.moveObject({1}, {0}, 0));  // nothing goes into an instance
+    CHECK(!doc.edit({0}, [](splash::Object& o) { o.collider = splash::ColliderComponent{}; }));
+    CHECK(doc.edit({0}, [](splash::Object& o) { o.transform.position.z = 3; }));
+    CHECK(doc.object({0})->transform.position.z == 3);
+    CHECK(doc.undo());
+    const size_t steps = doc.historySize();
+
+    // Undo of Create brings the plain object back; redo the instance.
+    CHECK(doc.undo());
+    CHECK(doc.object({0})->prefab.empty() && doc.object({0})->children.size() == 2 && !doc.inInstance({0, 0}));
+    CHECK(doc.redo());
+    CHECK(doc.object({0})->prefab == made && doc.object({0})->prefabResolved);
+    CHECK(doc.historySize() == steps);
+
+    // A second instance, from the file.
+    CHECK(doc.insertPrefab({2}, made, {0, 0, 8}, &err));
+    CHECK(doc.object({2}) && doc.object({2})->name == "Crates (2)" && doc.object({2})->prefab == made && doc.object({2})->children.size() == 2);
+    CHECK(doc.selection() == editor::ObjectPath{2});
+    CHECK(!doc.insertPrefab({3}, "prefabs/none.prefab", {}, &err) && !err.empty());
+
+    // Unpack the first: plain objects, editable, one undo step.
+    CHECK(doc.unpackPrefab({0}));
+    CHECK(doc.object({0})->prefab.empty() && doc.object({0})->children.size() == 2 && !doc.inInstance({0, 0}));
+    CHECK(doc.edit({0, 0}, [](splash::Object& o) { o.transform.position.x = 7; }));
+    CHECK(doc.undo() && doc.undo());
+    CHECK(doc.object({0})->prefab == made && doc.inInstance({0, 0}));
+    CHECK(doc.redo());
+    CHECK(doc.object({0})->prefab.empty());
+
+    // Prefab mode: delete a crate in the prefab, save, back: the instance shows one crate.
+    CHECK(!doc.openPrefab(made));
+    CHECK(doc.inPrefabMode() && doc.prefabFile() == made && doc.scene().objects.size() == 1 && doc.object({0})->name == "Crates");
+    CHECK(!doc.removeObject({0}) && !doc.duplicateObject({0}));  // the root stays
+    CHECK(doc.removeObject({0, 1}));
+    CHECK(doc.insertObject({1}, named("Lid")));  // beside the root goes into it
+    CHECK(doc.object({0, 1}) && doc.object({0, 1})->name == "Lid" && doc.scene().objects.size() == 1);
+    CHECK(!doc.insertPrefab({1}, made, {}, &err) && err.find("itself") != std::string::npos);
+    CHECK(doc.saveAs("other.scene").has_value());
+    CHECK(!doc.save());
+    CHECK(doc.closePrefab());
+    CHECK(!doc.inPrefabMode() && doc.sceneStem() == "game");
+    const splash::Object* second = doc.object({2});
+    CHECK(second && second->children.size() == 2 && second->children[1].name == "Lid");
+    CHECK(doc.object({0})->children.size() == 2 && doc.object({0})->children[1].name == "Crate (2)");  // the unpacked copy keeps its own
+    // The scene's history waited: its steps are still there.
+    CHECK(doc.dirty() && doc.canUndo());
+    CHECK(!doc.save());
+    splash::Scene saved = splash::loadScene(project / "game.scene");
+    CHECK(saved.objects.size() == 3 && saved.objects[2].prefab == made && saved.objects[2].children.empty());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -11905,6 +12321,13 @@ int main(int argc, char** argv) {
     testColourHex();
     testWindowChrome();
     testUiScale();
+    testPrefabFiles();
+    testPrefabResolve();
+    testPrefabExportIdentity();
+    testPrefabWaypoints();
+    testPrefabNameWarnings();
+    testPrefabReferences();
+    testPrefabDocument();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -29,6 +29,7 @@
 #include "editor/timeline_view.hh"
 #include "emulator.h"
 #include "game_view.h"
+#include "viewport/ps1view.h"
 
 namespace viewport {
 class Ps1View;
@@ -45,6 +46,13 @@ using ModelTarget = editor::ModelTarget;
 struct State {
     int tool = 1;        // 0 hand, 1 move, 2 rotate, 3 scale
     int viewMode = 0;    // 0 PS1, 1 clean
+    // Prefab mode, one entry a level deep: the camera and look to put back on leaving it.
+    struct PrefabView {
+        viewport::Ps1View::Pose pose;
+        int viewMode = 0;
+    };
+    std::vector<PrefabView> prefabViews;
+    bool framePrefab = false;  // frame the whole prefab once it is drawn
     bool maximized = false;
     bool quit = false;   // the close button was pressed
     std::string saveError;  // last Ctrl+S failure, shown in the status bar; empty after a good save

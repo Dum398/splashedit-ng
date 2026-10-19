@@ -11940,6 +11940,37 @@ void testPrefabExportIdentity() {
     CHECK(splash::resolvePrefabs(loaded, project).empty());
     splash::ExportResult c = splash::exportSplashpack(loaded, project, project / "loaded.splashpack");
     CHECK(c.ok() && roomtest::readAll(project / "loaded.splashpack") == pb);
+
+    // The export callers fill instances in themselves: play, from a scene as
+    // loaded (links only), packs what the hand-placed scene packs.
+    const splash::Scene linksOnly = splash::loadScene(project / "p.scene");
+    CHECK(!linksOnly.objects[1].prefabResolved);
+    const splash::ExportResult pp = editor::exportForPlay(linksOnly, project, project / "play-prefab");
+    const splash::ExportResult ph = editor::exportForPlay(byHand, project, project / "play-hand");
+    for (const std::string& e : pp.errors) std::fprintf(stderr, "prefab play export: %s\n", e.c_str());
+    CHECK(pp.ok() && ph.ok());
+    CHECK(roomtest::readAll(project / "play-prefab" / "scene_0.splashpack") == roomtest::readAll(project / "play-hand" / "scene_0.splashpack"));
+    // A missing prefab stops play's export with the instance named.
+    splash::Scene lost = linksOnly;
+    lost.objects[1].prefab = "prefabs/gone.prefab";
+    const splash::ExportResult pl = editor::exportForPlay(lost, project, project / "play-lost");
+    CHECK(!pl.ok() && prefabtest::anyHas(pl.errors, "Stack: prefab prefabs/gone.prefab not found"));
+    // The live export reads the prefab as it is on disk now.
+    editor::Document d;
+    CHECK(!d.load(project, "p.scene"));
+    editor::LiveExport live(0.3);
+    live.update(d, 10.0);
+    live.update(d, 10.4);
+    live.wait();
+    CHECK(live.result() && live.result()->ok() && live.result()->stats.gameObjects == 3);
+    splash::Prefab grown = splash::loadPrefab(project / "prefabs/stack.prefab");
+    grown.root.children.push_back(roomtest::meshObject("Lid", "meshes/quad.mesh", {0, 2, 0}, false));
+    splash::savePrefab(grown, project / "prefabs/stack.prefab");
+    live.settingsChanged();
+    live.update(d, 11.0);
+    live.update(d, 11.4);
+    live.wait();
+    CHECK(live.result() && live.result()->ok() && live.result()->stats.gameObjects == 4);
 }
 
 // Agent waypoints are world positions (the exporter writes them as they are):

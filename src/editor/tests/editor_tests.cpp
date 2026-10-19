@@ -11338,6 +11338,54 @@ void testTilemapEdits() {
     CHECK(!d.scene().tilemap);
 }
 
+// The Tilemap tab's bucket fill (editor::floodTiles): the 4-connected region of
+// the clicked cell's value, one undo step, nothing when it already is the brush.
+void testTilemapFlood() {
+    splash::Scene scene;
+    editor::Document d;
+    d.reset(scene, g_outDir);
+    CHECK(editor::floodTiles(d, 0, 0, 0) == 0);  // no tilemap
+    CHECK(editor::addTilemap(d, "", 0) && editor::resizeTilemap(d, 6, 5));
+    // A 6 x 5 map: a wall ring (brush 1) round a 2 x 1 room with a floor cell
+    // (brush 0) in it; the rest empty. Diagonal neighbours do not connect.
+    //   -1 -1 -1 -1 -1 -1
+    //   -1  1  1  1  1 -1
+    //   -1  1 -1  0  1 -1
+    //   -1  1  1  1  1 -1
+    //   -1 -1 -1 -1 -1  1
+    const std::vector<int> start = {-1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, -1, -1, 1, -1, 0, 1, -1,
+                                    -1, 1,  1,  1,  1,  -1, -1, -1, -1, -1, -1, 1};
+    CHECK(editor::editTilemap(d, [&](splash::Tilemap& t) { t.cells = start; }));
+    d.endMerge();
+    const size_t h0 = d.historySize();
+    // The hole inside the ring is its own region: only that one cell.
+    CHECK(editor::floodTiles(d, 2, 2, 0) == 1 && d.historySize() == h0 + 1);
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.at(2, 2) == 0 && t.at(0, 0) == -1 && t.at(3, 2) == 0);
+    }
+    // The outside empty region: bounded by the ring, not reaching the corner wall's far side.
+    CHECK(editor::floodTiles(d, 0, 0, 2) == 17 && d.historySize() == h0 + 2);
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.at(5, 3) == 2 && t.at(4, 4) == 2 && t.at(5, 4) == 1 && t.at(2, 2) == 0 && t.at(1, 1) == 1);
+    }
+    // The ring itself, by its value; erasing it leaves the room.
+    CHECK(editor::floodTiles(d, 1, 1, -1) == 10 && d.scene().tilemap->at(4, 3) == -1 && d.scene().tilemap->at(3, 2) == 0);
+    // The same brush as the region: nothing, and no undo step. Off the map: nothing.
+    const size_t h3 = d.historySize();
+    CHECK(editor::floodTiles(d, 3, 2, 0) == 0 && editor::floodTiles(d, 9, 9, 1) == 0 && editor::floodTiles(d, -1, 0, 1) == 0);
+    CHECK(d.historySize() == h3);
+    // Each flood goes back in one undo.
+    CHECK(d.undo() && d.scene().tilemap->at(1, 1) == 1 && d.scene().tilemap->at(4, 3) == 1);
+    CHECK(d.undo() && d.scene().tilemap->at(0, 0) == -1 && d.scene().tilemap->at(5, 3) == -1);
+    CHECK(d.undo() && d.scene().tilemap->cells == start);
+    // A whole 256 x 256 empty map in one go (iterative: no deep recursion).
+    CHECK(editor::resizeTilemap(d, 256, 256));
+    d.endMerge();
+    CHECK(editor::floodTiles(d, 128, 128, 0) == 256 * 256 - 13);  // all but the 12 painted and the enclosed hole
+}
+
 // Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
 // animation facingFromYaw(yaw, n) places after walk_s in the exported table,
 // so a set is n animations named in increasing-yaw order, one after another.
@@ -12314,6 +12362,7 @@ int main(int argc, char** argv) {
     testTilemapModel();
     testTilemapExport();
     testTilemapEdits();
+    testTilemapFlood();
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();

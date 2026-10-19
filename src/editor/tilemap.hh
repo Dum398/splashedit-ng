@@ -45,5 +45,10 @@ bool paintTiles(Document& doc, const std::vector<std::array<int, 2>>& cells, int
 // Fills the rectangle between two corners (inclusive, either order, clipped to
 // the map) with `brush` as one undo step. Returns how many cells changed.
 int fillTiles(Document& doc, int x0, int y0, int x1, int y1, int brush);
+// Bucket fill: the 4-connected region of cells equal to cell x,y (empty, -1,
+// included) becomes `brush` (-1 erases), as one undo step. Returns how many
+// cells changed: 0, with no undo step, off the map or when the region already
+// is `brush`.
+int floodTiles(Document& doc, int x, int y, int brush);
 
 }  // namespace editor

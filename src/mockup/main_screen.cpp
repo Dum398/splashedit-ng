@@ -5363,6 +5363,8 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
 static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    // The scene inspector's visible body: --scroll-to wheels it until a control is inside.
+    nameRect("scene.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
     const float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
     const splash::SceneSettings& set = doc.scene().settings;
     // Taller than the panel, it scrolls with the wheel.

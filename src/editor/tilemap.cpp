@@ -120,4 +120,35 @@ int fillTiles(Document& doc, int x0, int y0, int x1, int y1, int brush) {
     return changed;
 }
 
+int floodTiles(Document& doc, int x, int y, int brush) {
+    const std::optional<splash::Tilemap>& tm = doc.scene().tilemap;
+    if (!tm || x < 0 || y < 0 || x >= tm->width || y >= tm->height || size_t(y * tm->width + x) >= tm->cells.size() ||
+        tm->at(x, y) == brush)
+        return 0;
+    int changed = 0;
+    editTilemap(doc, [&](splash::Tilemap& t) {
+        const int from = t.at(x, y);
+        // Iterative (a 256 x 256 map is 65536 cells): each cell is set as it is
+        // pushed, so none is pushed twice.
+        std::vector<std::array<int, 2>> todo{{x, y}};
+        t.cells[size_t(y * t.width + x)] = brush;
+        changed = 1;
+        static const int step[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        while (!todo.empty()) {
+            const std::array<int, 2> c = todo.back();
+            todo.pop_back();
+            for (const auto& s : step) {
+                const int nx = c[0] + s[0], ny = c[1] + s[1];
+                if (nx < 0 || ny < 0 || nx >= t.width || ny >= t.height || size_t(ny * t.width + nx) >= t.cells.size()) continue;
+                int& v = t.cells[size_t(ny * t.width + nx)];
+                if (v != from) continue;
+                v = brush;
+                changed++;
+                todo.push_back({nx, ny});
+            }
+        }
+    });
+    return changed;
+}
+
 }  // namespace editor

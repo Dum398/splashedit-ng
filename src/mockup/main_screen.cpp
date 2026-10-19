@@ -5367,6 +5367,30 @@ static void tilemapSection(State& st, ImDrawList* dl, editor::Document& doc, flo
             nameRect("scene.tilebrushname", nameRow);
             if (textField("tilebrushname", nameRow, b.name, &typed, "Brush name", 32)) editBrush([&](splash::TileBrush& e) { e.name = typed; });
 
+            // The painter's tint: the palette swatch's frame and the object marker. One undo step an edit;
+            // dragging in the picker merges into one.
+            const ImRect colRow = row("ltilebrushcolor", "Colour", "Painter tint only; the game draws tiles untinted.");
+            nameRect("scene.tilebrushcolor", colRow);
+            const ColorFieldHit colHit = colorField("tilebrushcolor", colRow, b.color, "scene.tilebrushcolor");
+            if (colHit.clicked) ImGui::OpenPopup("##tilebrushcolpick");
+            if (colHit.pasted) editBrush([&](splash::TileBrush& e) { e.color = *colHit.pasted; });
+            ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            pushPopupStyle();
+            if (ImGui::BeginPopup("##tilebrushcolpick")) {
+                float c[3] = {b.color[0], b.color[1], b.color[2]};
+                ImGui::SetNextItemWidth(220);
+                if (ImGui::ColorPicker3("##tilebrushcolwheel", c,
+                                        ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex | ImGuiColorEditFlags_NoAlpha))
+                    editBrush([&](splash::TileBrush& e) { e.color = {c[0], c[1], c[2]}; }, "tilebrushcolor");
+                if (ImGui::IsItemDeactivated()) doc.endMerge();
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(4);
+            ImGui::PopStyleColor(2);
+            if (namedRectsOn())  // the edit above may have replaced `b`'s tilemap
+                scriptLine("tilebrushcolor", "scene: tilemap brush " + std::to_string(selBrush) + " color " +
+                                                 colourHex(doc.scene().tilemap->brushes[size_t(selBrush)].color));
+
             // The cell: a thumbnail that opens the tileset to pick from, and its number.
             const ImRect cellRow = row("ltilebrushcell", "Tile", "The tileset cell it draws, row by row from 0 at the top left; -1 draws nothing (a hole).");
             const ImRect thumb(cellRow.Min + ImVec2(0, 1), ImVec2(cellRow.Min.x + cellRow.GetHeight() - 2, cellRow.Max.y - 1));

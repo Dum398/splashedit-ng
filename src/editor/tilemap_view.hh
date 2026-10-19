@@ -40,13 +40,21 @@ public:
     void draw(ImDrawList* dl, ImRect r, editor::Document& doc);
     // The brush that paints (-1: the eraser).
     int brush() const { return m_brush; }
+    // What a left click on the map does. Shift (a rectangle) and Alt (pick)
+    // work in every tool; the right button erases in every tool.
+    enum class Tool { Paint, Rect, Fill, Pick };
+    Tool tool() const { return m_tool; }
 
 private:
+    void tools(ImDrawList* dl, ImRect r);
     void palette(ImDrawList* dl, ImRect r, editor::Document& doc);
     void map(ImDrawList* dl, ImRect r, editor::Document& doc);
     void endStroke(editor::Document& doc);
 
     int m_brush = 0;
+    Tool m_tool = Tool::Paint;
+    // Grid lines over the map: view state for the session, not in the scene.
+    bool m_grid = true;
     unsigned m_seenLoad = ~0u;
     // The view: zoom (screen pixels per map pixel, 0 = fit on the next frame) and pan from centred.
     float m_zoom = 0;

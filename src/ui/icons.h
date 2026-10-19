@@ -59,4 +59,8 @@ inline constexpr const char* arrowUp = "\xee\x81\x8a";         // e04a
 inline constexpr const char* arrowDown = "\xee\x81\x82";       // e042
 inline constexpr const char* trash = "\xee\x86\x8e";           // e18e
 inline constexpr const char* gauge = "\xee\x86\xbf";           // e1bf
+inline constexpr const char* pencil = "\xee\x87\xb9";          // e1f9
+inline constexpr const char* squareDashed = "\xee\x87\x8b";    // e1cb
+inline constexpr const char* paintBucket = "\xee\x8b\xa6";     // e2e6
+inline constexpr const char* pipette = "\xee\x84\xbb";         // e13b
 }  // namespace icon

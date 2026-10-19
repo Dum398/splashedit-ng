@@ -453,7 +453,13 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
 void CanvasView::upload(const editor::Document& doc, const std::vector<bool>& show) {
     if (m_tex && doc.revision() == m_texRev && doc.loadId() == m_texLoad && doc.assetsId() == m_texAssets && show == m_texShow) return;
     std::vector<uint8_t> covered;
-    std::vector<uint32_t> px = uic::render(doc.scene(), show, m_screen, m_assets, 0, &covered);
+    int tiles = -1;
+    std::vector<uint32_t> px = uic::render(doc.scene(), show, m_screen, m_assets, 0, &covered, &tiles);
+    if (namedRectsOn()) {
+        // Scripted runs: the tilemap layer under the canvases, each time it is built.
+        std::printf("ui: tilemap layer %s\n", tiles < 0 ? "none" : ("tiles " + std::to_string(tiles)).c_str());
+        std::fflush(stdout);
+    }
     if (!m_tex) glGenTextures(1, &m_tex);
     glBindTexture(GL_TEXTURE_2D, m_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);

@@ -1,11 +1,14 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_sdl3.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
+#include <cmath>
 #include <optional>
 #include <cctype>
 #include <cstdio>
@@ -31,6 +34,7 @@
 #include "ui/file_dialog.h"
 #include "ui/splash.h"
 #include "ui/theme.h"
+#include "ui/ui_scale.hh"
 #include "ui/widgets.h"
 #include "ui/window_chrome.hh"
 #include "viewport/ps1view.h"
@@ -40,8 +44,36 @@ namespace {
 struct HitTestState {
     ui::ChromeRect titleBar;
     std::vector<ui::ChromeRect> controls;  // title bar rectangles that take clicks
+    float scale = 1;                       // the UI scale they were drawn at
 };
 HitTestState g_hit;
+
+// UI coordinates per window coordinate, this frame (ui_scale.hh).
+float g_uiScale = 1;
+// Mouse positions queued from this event id on are still in window coordinates.
+ImU32 g_mouseUnscaledFrom = 0;
+
+// Brings the mouse positions queued since the last call (SDL events, the
+// backend's global mouse and scripted input alike) from window to UI
+// coordinates. Called just before ImGui::NewFrame.
+void scaleQueuedMouse(float c) {
+    ImGuiContext& g = *ImGui::GetCurrentContext();
+    for (ImGuiInputEvent& e : g.InputEventsQueue) {
+        if (e.EventId < g_mouseUnscaledFrom || e.Type != ImGuiInputEventType_MousePos) continue;
+        if (e.MousePos.PosX > -FLT_MAX) e.MousePos.PosX = ui::toUi(e.MousePos.PosX, c);
+        if (e.MousePos.PosY > -FLT_MAX) e.MousePos.PosY = ui::toUi(e.MousePos.PosY, c);
+    }
+    g_mouseUnscaledFrom = g.InputEventsNextEventId;
+}
+
+// The backend's IME hook, handed the text cursor in window coordinates.
+void (*g_backendSetImeData)(ImGuiContext*, ImGuiViewport*, ImGuiPlatformImeData*) = nullptr;
+void setImeDataScaled(ImGuiContext* ctx, ImGuiViewport* vp, ImGuiPlatformImeData* data) {
+    ImGuiPlatformImeData d = *data;
+    d.InputPos = ImVec2(ui::toWindow(d.InputPos.x, g_uiScale), ui::toWindow(d.InputPos.y, g_uiScale));
+    d.InputLineHeight = ui::toWindow(d.InputLineHeight, g_uiScale);
+    if (g_backendSetImeData) g_backendSetImeData(ctx, vp, &d);
+}
 
 ui::ChromeRect chromeRect(const ImRect& r) { return {r.Min.x, r.Min.y, r.Max.x, r.Max.y}; }
 
@@ -49,7 +81,7 @@ SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
     int w, h;
     SDL_GetWindowSize(win, &w, &h);
     const bool maximized = (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED) != 0;
-    switch (ui::chromeHitTest(w, h, maximized, p->x, p->y, g_hit.titleBar, g_hit.controls)) {
+    switch (ui::scaledChromeHitTest(w, h, maximized, p->x, p->y, g_hit.scale, g_hit.titleBar, g_hit.controls)) {
         case ui::ChromeHit::Normal: return SDL_HITTEST_NORMAL;
         case ui::ChromeHit::Draggable: return SDL_HITTEST_DRAGGABLE;
         case ui::ChromeHit::ResizeTopLeft: return SDL_HITTEST_RESIZE_TOPLEFT;
@@ -88,6 +120,8 @@ struct Action {
 struct Args {
     const char* screenshot = nullptr;
     int width = 1600, height = 960;
+    bool sized = false;  // --size given: exact window coordinates, not grown by the UI scale
+    float uiScale = 0;   // --ui-scale, or 0 for the display's own
     float mouseX = -1, mouseY = -1;
     int frames = 30;
     int shotAt = -1;  // screenshot frame, overriding the padding after actions
@@ -175,26 +209,46 @@ int actionFrames(const Action& a) {
     }
 }
 
+// A scripted pointer at x,y in UI coordinates, posted in window coordinates
+// like a real one so it takes the same path through scaleQueuedMouse.
+void postMousePos(ImGuiIO& io, float x, float y) {
+    const float c = g_uiScale;
+    const float wx = ui::scriptedWindowCoord(x, c), wy = ui::scriptedWindowCoord(y, c);
+    if (c != 1) {
+        // ImGui drops a position equal to the last one it has, comparing the
+        // window coordinate with a UI one; step aside first so this one lands.
+        ImVec2 last = io.MousePos;
+        const ImGuiContext& g = *ImGui::GetCurrentContext();
+        for (int i = g.InputEventsQueue.Size - 1; i >= 0; --i)
+            if (g.InputEventsQueue[i].Type == ImGuiInputEventType_MousePos) {
+                last = ImVec2(g.InputEventsQueue[i].MousePos.PosX, g.InputEventsQueue[i].MousePos.PosY);
+                break;
+            }
+        if (last.x == wx && last.y == wy) io.AddMousePosEvent(wx + 1, wy);
+    }
+    io.AddMousePosEvent(wx, wy);
+}
+
 // Feeds frame `f` (counted from the action's first frame) of `a` to ImGui.
 void playAction(ImGuiIO& io, const Action& a, int f) {
     switch (a.kind) {
         case Action::Click:
-            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 0) postMousePos(io, a.x0, a.y0);
             if (f == 1) io.AddMouseButtonEvent(a.button, true);
             if (f == 2) io.AddMouseButtonEvent(a.button, false);
             break;
         case Action::DoubleClick:
-            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 0) postMousePos(io, a.x0, a.y0);
             if (f == 1 || f == 3) io.AddMouseButtonEvent(0, true);
             if (f == 2 || f == 4) io.AddMouseButtonEvent(0, false);
             break;
         case Action::Drag: {
             const int steps = 12;
-            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 0) postMousePos(io, a.x0, a.y0);
             if (f == 1) io.AddMouseButtonEvent(a.button, true);
             if (f >= 2 && f < 2 + steps) {
                 float t = (float)(f - 1) / steps;
-                io.AddMousePosEvent(a.x0 + (a.x1 - a.x0) * t, a.y0 + (a.y1 - a.y0) * t);
+                postMousePos(io, a.x0 + (a.x1 - a.x0) * t, a.y0 + (a.y1 - a.y0) * t);
             }
             if (f == 2 + steps && !a.hold) io.AddMouseButtonEvent(a.button, false);
             break;
@@ -225,7 +279,7 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
             }
             break;
         case Action::MouseDown:
-            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 0) postMousePos(io, a.x0, a.y0);
             if (f == 1) io.AddMouseButtonEvent(a.button, true);
             break;
         case Action::MouseUp:
@@ -237,12 +291,12 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
             if (f >= 1 && f <= steps) {
                 ImVec2 from = io.MousePos;
                 float t = 1.0f / (steps - f + 1);
-                io.AddMousePosEvent(from.x + (a.x1 - from.x) * t, from.y + (a.y1 - from.y) * t);
+                postMousePos(io, from.x + (a.x1 - from.x) * t, from.y + (a.y1 - from.y) * t);
             }
             break;
         }
         case Action::Wheel:
-            if (f == 0) io.AddMousePosEvent(a.x0, a.y0);
+            if (f == 0) postMousePos(io, a.x0, a.y0);
             if (f == 1) io.AddMouseWheelEvent(0, a.wheel);
             break;
         case Action::Text:
@@ -255,18 +309,18 @@ void playAction(ImGuiIO& io, const Action& a, int f) {
             if (f == 0) SDL_RestoreWindow(SDL_GL_GetCurrentWindow());
             break;
         case Action::HitTest:
-            // What a press at x,y would hit (window coordinates), as the OS would ask.
+            // What a press at x,y (UI coordinates) would hit, as the OS would ask.
             if (f == 0) {
                 SDL_Window* win = SDL_GL_GetCurrentWindow();
-                const SDL_Point p{(int)a.x0, (int)a.y0};
+                const SDL_Point p{(int)std::floor(ui::toWindow(a.x0, g_uiScale)), (int)std::floor(ui::toWindow(a.y0, g_uiScale))};
                 static const char* names[] = {"normal", "draggable", "resize-topleft", "resize-top",
                                               "resize-topright", "resize-right", "resize-bottomright",
                                               "resize-bottom", "resize-bottomleft", "resize-left"};
                 const SDL_HitTestResult r = hitTest(win, &p, nullptr);
                 const int i = (int)r;
-                std::printf("hittest: %d,%d %s maximized=%d\n", p.x, p.y,
+                std::printf("hittest: %d,%d %s maximized=%d window=%d,%d\n", (int)a.x0, (int)a.y0,
                             i >= 0 && i < (int)(sizeof names / sizeof *names) ? names[i] : "?",
-                            (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED) ? 1 : 0);
+                            (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED) ? 1 : 0, p.x, p.y);
                 std::fflush(stdout);
             }
             break;
@@ -300,7 +354,11 @@ Args parse(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         auto next = [&] { return i + 1 < argc ? argv[++i] : ""; };
         if (!std::strcmp(argv[i], "--screenshot")) a.screenshot = next();
-        else if (!std::strcmp(argv[i], "--size")) std::sscanf(next(), "%dx%d", &a.width, &a.height);
+        else if (!std::strcmp(argv[i], "--size")) a.sized = std::sscanf(next(), "%dx%d", &a.width, &a.height) == 2;
+        else if (!std::strcmp(argv[i], "--ui-scale")) {
+            const char* v = next();
+            if (!ui::parseUiScale(v, a.uiScale)) std::fprintf(stderr, "--ui-scale %s: want a number from 0.5 to 4; using the display's scale\n", v);
+        }
         else if (!std::strcmp(argv[i], "--mouse")) std::sscanf(next(), "%f,%f", &a.mouseX, &a.mouseY);
         else if (!std::strcmp(argv[i], "--drag-over")) std::sscanf(next(), "%f,%f", &a.dragX, &a.dragY);
         else if (!std::strcmp(argv[i], "--drop")) {
@@ -572,6 +630,12 @@ int main(int argc, char** argv) {
     }
     if (argc >= 2 && !std::strcmp(argv[1], "--dump-texture-preview")) return dumpTexturePreview(argc, argv);
     Args args = parse(argc, argv);
+    // SPLASHEDIT_UI_SCALE when --ui-scale is not given.
+    if (args.uiScale <= 0) {
+        const char* env = std::getenv("SPLASHEDIT_UI_SCALE");
+        if (env && *env && !ui::parseUiScale(env, args.uiScale))
+            std::fprintf(stderr, "SPLASHEDIT_UI_SCALE=%s: want a number from 0.5 to 4; using the display's scale\n", env);
+    }
     if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -589,6 +653,22 @@ int main(int argc, char** argv) {
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
         return 1;
+    }
+    // Without --size the window grows with the UI scale of the display it
+    // opened on (asked of the window: only it knows its pixel density).
+    const auto uiScaleOf = [&](SDL_Window* w) {
+        return ui::contentScale(SDL_GetWindowDisplayScale(w), SDL_GetWindowPixelDensity(w), args.uiScale);
+    };
+    if (!args.sized) {
+        const float c = uiScaleOf(window);
+        if (c != 1) {
+            const SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+            SDL_Rect usable{};
+            if (!display || !SDL_GetDisplayUsableBounds(display, &usable)) usable = SDL_Rect{};
+            const ui::WindowSize size = ui::initialWindowSize(args.width, args.height, c, usable.w, usable.h);
+            SDL_SetWindowSize(window, size.w, size.h);
+            if (display) SDL_SetWindowPosition(window, SDL_WINDOWPOS_CENTERED_DISPLAY(display), SDL_WINDOWPOS_CENTERED_DISPLAY(display));
+        }
     }
     SDL_SetWindowHitTest(window, hitTest, nullptr);
     ui::setFileDialogWindow(window);  // file dialogs are modal to it
@@ -608,6 +688,12 @@ int main(int argc, char** argv) {
     brand::load(assetDir.c_str());
     if (!args.screenshot || args.splash) splash::load(assetDir.c_str(), !args.screenshot);
     ImGui_ImplSDL3_InitForOpenGL(window, ctx);
+    {
+        // The backend places the IME box in window coordinates.
+        ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
+        g_backendSetImeData = pio.Platform_SetImeDataFn;
+        pio.Platform_SetImeDataFn = setImeDataScaled;
+    }
     if (args.padButton >= 0) {
         SDL_VirtualJoystickDesc desc;
         SDL_INIT_INTERFACE(&desc);
@@ -683,6 +769,7 @@ int main(int argc, char** argv) {
 
     int frame = 0;
     bool running = true;
+    float printedScale = 0;  // the UI scale a screenshot run last reported
     // --wait-import holding the script, since when; and a --shot due after this frame renders.
     bool held = false;
     Action::Kind heldKind = Action::WaitImport;
@@ -709,13 +796,29 @@ int main(int argc, char** argv) {
             }
             // Files dragged in from the desktop: hover feedback, then import where released.
             if (e.type == SDL_EVENT_DROP_BEGIN) state.drop.hovering = true;
-            if (e.type == SDL_EVENT_DROP_POSITION) state.drop.pos = ImVec2(e.drop.x, e.drop.y);
+            // (SDL reports where in window coordinates.)
+            const ImVec2 dropAt(ui::toUi(e.drop.x, g_uiScale), ui::toUi(e.drop.y, g_uiScale));
+            if (e.type == SDL_EVENT_DROP_POSITION) state.drop.pos = dropAt;
             if (e.type == SDL_EVENT_DROP_FILE && e.drop.data && !ui::fileDialogOpen())
-                state.drop.files.push_back({e.drop.data, ImVec2(e.drop.x, e.drop.y)});
+                state.drop.files.push_back({e.drop.data, dropAt});
             if (e.type == SDL_EVENT_DROP_COMPLETE) state.drop.hovering = false;
         }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
+        // The UI lays out in UI coordinates: a smaller display, rendered at
+        // a higher density, so fonts rasterize sharp at the larger size. Read
+        // every frame, so a move to another monitor rescales.
+        {
+            const float c = uiScaleOf(window);
+            if (args.screenshot && c != printedScale) {
+                std::printf("ui: scale %g\n", c);
+                std::fflush(stdout);
+                printedScale = c;
+            }
+            g_uiScale = c;
+            io.DisplaySize = ImVec2(io.DisplaySize.x / c, io.DisplaySize.y / c);
+            io.DisplayFramebufferScale = ImVec2(io.DisplayFramebufferScale.x * c, io.DisplayFramebufferScale.y * c);
+        }
         bool aimHeld = false;
         if (args.screenshot) {
             io.DeltaTime = 1.0f / 60.0f;
@@ -769,7 +872,7 @@ int main(int argc, char** argv) {
                 held = false;
                 ++frame;  // past the --wait-import frame
             }
-            if (args.mouseX >= 0 && frame >= timelineEnd) io.AddMousePosEvent(args.mouseX, args.mouseY);
+            if (args.mouseX >= 0 && frame >= timelineEnd) postMousePos(io, args.mouseX, args.mouseY);
             if (args.dragX >= 0) {
                 state.drop.hovering = true;
                 state.drop.pos = ImVec2(args.dragX, args.dragY);
@@ -792,6 +895,7 @@ int main(int argc, char** argv) {
             state.drop.files.clear();
             state.drop.hovering = false;
         }
+        scaleQueuedMouse(g_uiScale);
         ImGui::NewFrame();
         ui::interactiveRects().clear();
         ui::namedRects().clear();
@@ -799,6 +903,7 @@ int main(int argc, char** argv) {
         const ImRect titleBar =
             splash::covering() ? ImRect() : mockup::drawMainScreen(state, doc, view, io.DisplaySize);
         g_hit.titleBar = chromeRect(titleBar);
+        g_hit.scale = g_uiScale;
         splash::draw(io.DisplaySize, args.screenshot ? frame * 1000.0 / 60.0 : double(SDL_GetTicks()));
         ui::drawFileDialogShade();
         g_hit.controls.clear();

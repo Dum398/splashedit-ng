@@ -11386,6 +11386,31 @@ void testTilemapFlood() {
     CHECK(editor::floodTiles(d, 128, 128, 0) == 256 * 256 - 13);  // all but the 12 painted and the enclosed hole
 }
 
+// The inspector's brush Colour (the painter's tint): a picker drag merges into
+// one undo step, a paste is one, and neither touches the cells.
+void testTileBrushColour() {
+    splash::Scene scene;
+    editor::Document d;
+    d.reset(scene, g_outDir);
+    CHECK(editor::addTilemap(d, "", 0) && editor::paintTiles(d, {{0, 0}}, 1, "s"));
+    d.endMerge();
+    const splash::Tilemap before = *d.scene().tilemap;
+    const size_t h0 = d.historySize();
+    auto setColour = [&](int i, std::array<float, 3> c, const std::string& key) {
+        return editor::editTilemap(d, [&](splash::Tilemap& t) { t.brushes[size_t(i)].color = c; }, key);
+    };
+    CHECK(setColour(1, {0.1f, 0.2f, 0.3f}, "tilebrushcolor") && setColour(1, {0.2f, 0.4f, 0.6f}, "tilebrushcolor") &&
+          setColour(1, {0.5f, 0.5f, 0.5f}, "tilebrushcolor"));
+    d.endMerge();
+    CHECK(d.historySize() == h0 + 1 && d.scene().tilemap->brushes[1].color == (std::array<float, 3>{0.5f, 0.5f, 0.5f}));
+    CHECK(d.scene().tilemap->cells == before.cells && d.scene().tilemap->brushes[0].color == before.brushes[0].color);
+    CHECK(!setColour(1, {0.5f, 0.5f, 0.5f}, {}) && d.historySize() == h0 + 1);  // the same colour: no step
+    CHECK(setColour(0, {1, 0, 0}, {}) && d.historySize() == h0 + 2);           // a paste
+    CHECK(d.undo() && d.scene().tilemap->brushes[0].color == before.brushes[0].color);
+    CHECK(d.undo() && *d.scene().tilemap == before);
+    CHECK(d.redo() && d.scene().tilemap->brushes[1].color == (std::array<float, 3>{0.5f, 0.5f, 0.5f}));
+}
+
 // Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
 // animation facingFromYaw(yaw, n) places after walk_s in the exported table,
 // so a set is n animations named in increasing-yaw order, one after another.
@@ -12363,6 +12388,7 @@ int main(int argc, char** argv) {
     testTilemapExport();
     testTilemapEdits();
     testTilemapFlood();
+    testTileBrushColour();
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();

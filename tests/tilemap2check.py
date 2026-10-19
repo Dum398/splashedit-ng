@@ -153,5 +153,26 @@ t, out = run(TAB + click('tiles.tool.pick') + rclick('tiles.cell.3.2'))
 check('right click in Pick erases', changed(t) == {(3, 2): -1} and lines('erase', out) == [('erase', 'cells 1 at 3,2..3,2')],
       f'{changed(t)} {lines("erase", out)}')
 
+# The inspector's brush Colour: the background colour copied from its field and
+# pasted on the water brush is one undo step; the cells and the other brushes
+# stay; a left click opens the picker.
+SCROLL = ['--wheel', '1420,500,-200', '--wait', '3']
+t, out = run(rclick('scene.fogcol') + click('scene.fogcol.menu/Copy') + SCROLL + click('scene.tilebrush.2') + SCROLL +
+             rclick('scene.tilebrushcolor') + click('scene.tilebrushcolor.menu/Paste') + SAVE_MID + UNDO)
+colours = re.findall(r'^scene: tilemap brush (\d+) color (#[0-9A-F]{6})$', out, re.M)
+check('the Colour row is drawn', 'scene.tilebrushcolor' in drawn, sorted(n for n in drawn if n.startswith('scene.tilebrush')))
+check('a scripted line for the selected brush\'s colour', colours == [('0', '#66CC73'), ('2', '#5999F2'), ('2', '#808099'),
+                                                                      ('2', '#5999F2')], colours)
+hexOf = lambda c: '#' + ''.join('%02X' % int(min(max(v, 0), 1) * 255 + 0.5) for v in c)
+check('the paste lands in the saved brush, nothing else changes',
+      mid and hexOf(mid['brushes'][2]['color']) == '#808099' and rows(mid) == MAP and mid['brushes'][:2] == TILEMAP['brushes'][:2],
+      mid and mid['brushes'])
+check('one Ctrl+Z takes it back', t and t['brushes'] == TILEMAP['brushes'], t and t['brushes'])
+check('the existing tilemap line is unchanged in form',
+      last(r'^scene: tilemap (tileset .*)$', out) == 'tileset tiles size 8x6 brushes floor:0W:0:-1 wall:1S:0:-1 water:3W:0:-1 kinds none '
+                                                     'selected 2', out[-400:])
+t, out = run(SCROLL + click('scene.tilebrushcolor'))
+check('a left click on the Colour opens the picker', 'popups open: yes' in out, out[-200:])
+
 print(f'{fails} failures')
 sys.exit(1 if fails else 0)

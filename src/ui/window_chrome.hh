@@ -32,12 +32,13 @@ enum class ChromeHit {
 constexpr int kResizeEdge = 6;
 
 // titleBar: the drawn title bar; controls: rectangles inside it that take
-// clicks (buttons, menus).
+// clicks (buttons, menus); edge: how deep the resize band is. All in window
+// coordinates (ui_scale.hh brings UI rectangles there).
 inline ChromeHit chromeHitTest(int w, int h, bool maximized, int x, int y, const ChromeRect& titleBar,
-                               const std::vector<ChromeRect>& controls) {
+                               const std::vector<ChromeRect>& controls, int edge = kResizeEdge) {
     if (!maximized) {
-        const bool l = x < kResizeEdge, r = x >= w - kResizeEdge;
-        const bool t = y < kResizeEdge, b = y >= h - kResizeEdge;
+        const bool l = x < edge, r = x >= w - edge;
+        const bool t = y < edge, b = y >= h - edge;
         if (t && l) return ChromeHit::ResizeTopLeft;
         if (t && r) return ChromeHit::ResizeTopRight;
         if (b && l) return ChromeHit::ResizeBottomLeft;

@@ -3907,7 +3907,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     Fonts& f = fonts();
     if (st.play.game.attached()) r = splitViewport(st, dl, r);
     view.clean = st.viewMode == 1;
-    unsigned tex = view.render((int)r.GetWidth(), (int)r.GetHeight(), 240);
+    // In pixels, so the clean view stays sharp at any UI scale or pixel density.
+    const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
+    unsigned tex = view.render((int)(r.GetWidth() * fb.x), (int)(r.GetHeight() * fb.y), 240);
     ui::addTextureImageRounded(dl, (ImTextureID)(intptr_t)tex, r.Min, r.Max, ImVec2(0, 1), ImVec2(1, 0), IM_COL32_WHITE, radius::window);
 
     ImVec2 mn = r.Min, sz = r.GetSize();

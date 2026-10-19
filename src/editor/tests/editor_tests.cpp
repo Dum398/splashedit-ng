@@ -54,6 +54,7 @@
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
+#include "ui/ui_scale.hh"
 #include "ui/scrub.hh"
 #include "budget.hh"
 #include "disc.hh"
@@ -11264,6 +11265,64 @@ void testWindowChrome() {
     CHECK(ui::chromeHitTest(1600, 960, true, 1500, 16, bar, buttons) == ChromeHit::Normal);
 }
 
+// UI scale on high-DPI monitors (#136): the part of the OS scale the window
+// does not already carry as pixel density, the override, and the window
+// chrome hit-tested in window coordinates for rectangles drawn in UI ones.
+void testUiScale() {
+    using ui::ChromeHit;
+    // Windows / X11 at 150%: pixel-sized window, display asks for 1.5.
+    CHECK(ui::contentScale(1.5f, 1.0f) == 1.5f);
+    // macOS retina, Wayland at 200%: the backend already renders at density 2.
+    CHECK(ui::contentScale(2.0f, 2.0f) == 1.0f);
+    // Wayland fractional 150% with a 2x buffer, then scaled by the compositor.
+    CHECK(ui::contentScale(3.0f, 2.0f) == 1.5f);
+    // SDL could not answer: 1, never a division by zero or NaN.
+    CHECK(ui::contentScale(0.0f, 1.0f) == 1.0f);
+    CHECK(ui::contentScale(1.5f, 0.0f) == 1.5f);
+    CHECK(ui::contentScale(std::nanf(""), 1.0f) == 1.0f);
+    CHECK(ui::contentScale(1.0f, std::nanf("")) == 1.0f);
+    CHECK(ui::contentScale(100.0f, 1.0f) == ui::kMaxUiScale);
+    // The override wins over the display.
+    CHECK(ui::contentScale(1.5f, 1.0f, 2.0f) == 2.0f);
+    CHECK(ui::contentScale(2.0f, 2.0f, 0.75f) == 0.75f);
+    float v = 1;
+    CHECK(ui::parseUiScale("2", v) && v == 2.0f);
+    CHECK(ui::parseUiScale("1.5", v) && v == 1.5f);
+    CHECK(ui::parseUiScale("0.5", v) && v == 0.5f);
+    CHECK(ui::parseUiScale("4", v) && v == 4.0f);
+    v = 1;
+    CHECK(!ui::parseUiScale("0.4", v) && v == 1);
+    CHECK(!ui::parseUiScale("4.5", v) && v == 1);
+    CHECK(!ui::parseUiScale("", v) && !ui::parseUiScale(nullptr, v) && !ui::parseUiScale("2x", v));
+    CHECK(!ui::parseUiScale("nan", v) && !ui::parseUiScale("inf", v) && v == 1);
+    CHECK(ui::toUi(300, 2) == 150 && ui::toWindow(150, 2) == 300);
+    // A scripted point survives ImGui's floor in window coordinates and the
+    // UI pass's division, landing on the same UI pixel.
+    for (float c : {1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 3.0f})
+        for (int x = 0; x < 400; ++x) CHECK(std::floor(std::floor(ui::scriptedWindowCoord((float)x, c)) / c) == x);
+    // The window chrome at 2x: a 40-unit title bar is 80 pixels, the close
+    // button's rectangle doubles, and the resize band is 12 pixels deep.
+    const ui::ChromeRect bar{0, 0, 800, 40};
+    const std::vector<ui::ChromeRect> buttons{{740, 0, 800, 40}};
+    CHECK(ui::resizeEdge(1) == ui::kResizeEdge && ui::resizeEdge(2) == 2 * ui::kResizeEdge && ui::resizeEdge(0.1f) == 1);
+    CHECK(ui::scaledChromeHitTest(1600, 960, false, 800, 60, 2, bar, buttons) == ChromeHit::Draggable);
+    CHECK(ui::scaledChromeHitTest(1600, 960, false, 800, 85, 2, bar, buttons) == ChromeHit::Normal);
+    CHECK(ui::scaledChromeHitTest(1600, 960, false, 1550, 40, 2, bar, buttons) == ChromeHit::Normal);
+    CHECK(ui::scaledChromeHitTest(1600, 960, false, 1400, 40, 2, bar, buttons) == ChromeHit::Draggable);
+    CHECK(ui::scaledChromeHitTest(1600, 960, false, 800, 10, 2, bar, buttons) == ChromeHit::ResizeTop);
+    CHECK(ui::scaledChromeHitTest(1600, 960, false, 400, 10, 1, bar, buttons) == ChromeHit::Draggable);
+    CHECK(ui::scaledChromeHitTest(1600, 960, true, 800, 10, 2, bar, buttons) == ChromeHit::Draggable);
+    // Unscaled, the same point past the UI rectangles is the plain client area.
+    CHECK(ui::scaledChromeHitTest(1600, 960, false, 400, 60, 1, bar, buttons) == ChromeHit::Normal);
+    // The default window grows with the scale, but not past the usable area.
+    const ui::WindowSize grown = ui::initialWindowSize(1600, 960, 1.5f, 3840, 2100);
+    CHECK(grown.w == 2400 && grown.h == 1440);
+    const ui::WindowSize capped = ui::initialWindowSize(1600, 960, 2.0f, 2560, 1400);
+    CHECK(capped.w == 2560 && capped.h == 1400);
+    const ui::WindowSize unknown = ui::initialWindowSize(1600, 960, 2.0f, 0, 0);
+    CHECK(unknown.w == 3200 && unknown.h == 1920);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -11415,6 +11474,7 @@ int main(int argc, char** argv) {
     testNumberScrub();
     testDialogGate();
     testWindowChrome();
+    testUiScale();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -38,6 +38,7 @@
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/sprites.hh"
+#include "editor/tilemap.hh"
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
@@ -11248,6 +11249,77 @@ void testTilemapExport() {
     }
 }
 
+// The inspector's and the Tilemap tab's edits (editor/tilemap.hh), each one undo step.
+void testTilemapEdits() {
+    splash::Scene scene;
+    splash::SpriteSheet sheet;
+    sheet.name = "tiles";
+    sheet.texture = "tiles.png";
+    scene.spriteSheets = {sheet};
+    editor::Document d;
+    d.reset(scene, g_outDir);
+    const size_t h0 = d.historySize();
+    CHECK(editor::addTilemap(d, "tiles", 8) && d.historySize() == h0 + 1);
+    CHECK(!editor::addTilemap(d, "tiles", 8));  // one a scene
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.tileset == "tiles" && t.width == 20 && t.height == 15 && t.cells.size() == 300 &&
+              std::all_of(t.cells.begin(), t.cells.end(), [](int c) { return c == -1; }));
+        CHECK(t.brushes.size() == 2 && t.brushes[0].name == "floor" && t.brushes[0].cell == 0 && t.brushes[0].walkable &&
+              t.brushes[1].name == "wall" && t.brushes[1].cell == 1 && !t.brushes[1].walkable);
+    }
+    // A stroke: several paints under one key are one undo step; the next stroke is another.
+    CHECK(editor::paintTiles(d, {{0, 0}}, 0, "s1"));
+    CHECK(editor::paintTiles(d, editor::tileLine(0, 0, 3, 0), 0, "s1"));
+    CHECK(!editor::paintTiles(d, {{2, 0}}, 0, "s1"));  // nothing changed
+    d.endMerge();
+    CHECK(d.historySize() == h0 + 2 && d.scene().tilemap->at(3, 0) == 0 && d.scene().tilemap->at(4, 0) == -1);
+    CHECK(editor::paintTiles(d, {{1, 0}, {1, 1}, {-1, 0}, {99, 99}}, 1, "s2"));  // off-map cells skipped
+    d.endMerge();
+    CHECK(d.historySize() == h0 + 3 && d.scene().tilemap->at(1, 0) == 1 && d.scene().tilemap->at(1, 1) == 1);
+    CHECK(d.undo() && d.scene().tilemap->at(1, 0) == 0 && d.scene().tilemap->at(1, 1) == -1);
+    CHECK(d.undo() && d.scene().tilemap->at(0, 0) == -1 && d.redo() && d.scene().tilemap->at(3, 0) == 0);
+    // A rectangle, either corner first, clipped to the map.
+    CHECK(editor::fillTiles(d, 2, 3, 0, 1, 1) == 9 && d.scene().tilemap->at(0, 1) == 1 && d.scene().tilemap->at(2, 3) == 1);
+    CHECK(editor::fillTiles(d, 18, 13, 25, 25, 0) == 4 && d.scene().tilemap->at(19, 14) == 0);
+    CHECK(editor::fillTiles(d, 18, 13, 25, 25, 0) == 0);
+    // The line has no gaps, either way round.
+    CHECK(editor::tileLine(0, 0, 3, 1).size() == 4 && editor::tileLine(3, 1, 0, 0).front() == (std::array<int, 2>{3, 1}));
+    CHECK(editor::tileLine(2, 2, 2, 2).size() == 1 && editor::tileLine(0, 0, 0, 5).size() == 6);
+    // Resize keeps the overlap; a typed size merges under its key.
+    CHECK(editor::resizeTilemap(d, 4, 2, "w") && editor::resizeTilemap(d, 3, 2, "w"));
+    d.endMerge();
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.width == 3 && t.height == 2 && t.cells == std::vector<int>({0, 0, 0, 1, 1, 1}));
+    }
+    CHECK(d.undo() && d.scene().tilemap->width == 20 && d.scene().tilemap->at(19, 14) == 0 && d.redo());
+    // Brushes: added after the last cell; deleting one empties its cells and moves the later ones down.
+    CHECK(editor::addTileBrush(d, 8) == 2 && d.scene().tilemap->brushes[2].name == "brush" && d.scene().tilemap->brushes[2].cell == 2);
+    CHECK(editor::addTileBrush(d, 3) == 3 && d.scene().tilemap->brushes[3].name == "brush (2)" && d.scene().tilemap->brushes[3].cell == 0);
+    CHECK(editor::paintTiles(d, {{2, 1}}, 3, "s3"));
+    d.endMerge();
+    CHECK(editor::deleteTileBrush(d, 1));
+    {
+        const splash::Tilemap& t = *d.scene().tilemap;
+        CHECK(t.brushes.size() == 3 && t.brushes[1].name == "brush" && t.cells == std::vector<int>({0, 0, 0, -1, -1, 2}));
+    }
+    CHECK(d.undo() && d.scene().tilemap->cells == std::vector<int>({0, 0, 0, 1, 1, 3}) && d.scene().tilemap->brushes.size() == 4);
+    CHECK(!editor::deleteTileBrush(d, 9));
+    // A sheet rename carries the tileset, in the same step.
+    CHECK(editor::editSpriteSheet(d, 0, [](splash::SpriteSheet& s) { s.name = "floor tiles"; }));
+    CHECK(d.scene().tilemap->tileset == "floor tiles");
+    CHECK(d.undo() && d.scene().spriteSheets[0].name == "tiles" && d.scene().tilemap->tileset == "tiles");
+    // Remove, and back.
+    const splash::Tilemap kept = *d.scene().tilemap;
+    CHECK(editor::removeTilemap(d) && !d.scene().tilemap && !editor::removeTilemap(d));
+    CHECK(!editor::paintTiles(d, {{0, 0}}, 0, "s4") && editor::fillTiles(d, 0, 0, 1, 1, 0) == 0);
+    CHECK(d.undo() && d.scene().tilemap && *d.scene().tilemap == kept);
+    while (d.undo()) {
+    }
+    CHECK(!d.scene().tilemap);
+}
+
 // Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
 // animation facingFromYaw(yaw, n) places after walk_s in the exported table,
 // so a set is n animations named in increasing-yaw order, one after another.
@@ -11807,6 +11879,7 @@ int main(int argc, char** argv) {
     testSpriteSheets();
     testTilemapModel();
     testTilemapExport();
+    testTilemapEdits();
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();

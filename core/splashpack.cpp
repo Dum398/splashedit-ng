@@ -3207,6 +3207,49 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     return res;
 }
 
+std::vector<ExportResult> exportBuild(const std::vector<const Scene*>& scenes, const fs::path& root,
+                                      const std::function<fs::path(size_t)>& out, const ExportOptions& options) {
+    std::vector<ExportResult> res(scenes.size());
+    // One scene, its render buffers set when `ot`/`bump` are not 0.
+    auto one = [&](size_t i, uint32_t ot, uint32_t bump) {
+        ExportResult r;
+        try {
+            Scene scene = *scenes[i];
+            r.errors = resolvePrefabs(scene, root);
+            if (!r.ok()) return r;
+            if (ot) scene.settings.orderingTableSize = int(ot);
+            if (bump) scene.settings.bumpAllocatorSize = int(bump);
+            const fs::path spk = out(i);
+            r = exportSplashpack(scene, root, spk, options);
+            if (r.ok() && !scene.settings.loadingCanvas.empty()) {
+                ExportResult lr = exportLoaderPack(scene, root, fs::path(spk).replace_extension(".loading"), options);
+                r.errors.insert(r.errors.end(), lr.errors.begin(), lr.errors.end());
+                r.warnings.insert(r.warnings.end(), lr.warnings.begin(), lr.warnings.end());
+            }
+        } catch (const std::exception& e) {
+            r.errors.push_back(e.what());
+        }
+        return r;
+    };
+    // The later scenes first: what they need is what scene 0 has to allocate.
+    uint32_t maxOt = 0, maxBump = 0;
+    for (size_t i = 1; i < scenes.size(); ++i) {
+        res[i] = one(i, 0, 0);
+        maxOt = std::max(maxOt, res[i].stats.orderingTableSize);
+        maxBump = std::max(maxBump, res[i].stats.bumpAllocatorSize);
+    }
+    if (scenes.empty()) return res;
+    res[0] = one(0, 0, 0);
+    const ExportStats& alone = res[0].stats;
+    if (res[0].ok() && (alone.orderingTableSize < maxOt || alone.bumpAllocatorSize < maxBump)) {
+        const uint32_t ownOt = alone.orderingTableSize, ownBump = alone.bumpAllocatorSize;
+        res[0] = one(0, std::max(ownOt, maxOt), std::max(ownBump, maxBump));
+        res[0].stats.ownOrderingTableSize = ownOt;
+        res[0].stats.ownBumpAllocatorSize = ownBump;
+    }
+    return res;
+}
+
 ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs::path& out,
                               const ExportOptions& options) {
     ExportResult res;

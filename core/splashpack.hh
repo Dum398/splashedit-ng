@@ -58,6 +58,11 @@ struct ExportStats {
     // the scene's override when it has one.
     uint32_t orderingTableNeed = 0, bumpAllocatorNeed = 0;
     uint32_t orderingTableSize = 0, bumpAllocatorSize = 0;
+    // Set by exportBuild on scene 0 when a later scene of the build needs
+    // more: the sizes the scene alone would have had (orderingTableSize and
+    // bumpAllocatorSize then being the build's largest). 0 = not raised.
+    uint32_t ownOrderingTableSize = 0, ownBumpAllocatorSize = 0;
+    bool renderBuffersRaised() const { return ownOrderingTableSize || ownBumpAllocatorSize; }
     // Bytes psxsplash allocates for them: two ordering tables of size + 1
     // four-byte entries and two bump allocators.
     size_t rendererBytes() const { return 2 * (size_t(orderingTableSize) + 1) * 4 + 2 * size_t(bumpAllocatorSize); }
@@ -377,6 +382,19 @@ std::array<int, 2> uiPositionTrackStart(const UIElement& e, const VramSettings& 
 // `out` is the .splashpack path; .vram and .spu are written next to it.
 ExportResult exportSplashpack(const Scene& scene, const std::filesystem::path& projectRoot,
                               const std::filesystem::path& out, const ExportOptions& options = {});
+
+// The scenes of one build, the game's scene_<i> (it boots in scene 0), each
+// written to out(i), a .splashpack path (.vram, .spu, .geo and .loading
+// beside it): prefab instances resolved from their files, the loader pack
+// written when the scene has a loading canvas. One result per scene, in order.
+// psxsplash allocates its render buffers once, from the first scene it loads
+// (scene 0: Renderer::Configure), and aborts on any later scene whose
+// splashpack asks for a larger ordering table or bump allocator. So with more
+// than one scene, scene 0 is written with the per-field largest of the build
+// (its stats' own* fields then say what it had alone); a single scene is
+// written as exportSplashpack writes it.
+std::vector<ExportResult> exportBuild(const std::vector<const Scene*>& scenes, const std::filesystem::path& projectRoot,
+                                      const std::function<std::filesystem::path(size_t)>& out, const ExportOptions& options = {});
 
 // The loader pack (psxsplash LoadingScreen, "LP" version 2): the canvas named
 // by scene.settings.loadingCanvas with its image atlases, CLUTs and font

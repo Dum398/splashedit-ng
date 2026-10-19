@@ -125,6 +125,7 @@ jobs:
           "$py" tests/uispritecheck.py "$cli"
           "$py" tests/importcheck.py "$cli"
           "$py" tests/unityimportcheck.py "$cli"
+          "$py" tests/renderbufferscheck.py "$cli"
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
           "$py" tests/cddacheck.py "$cli"

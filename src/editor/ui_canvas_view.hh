@@ -165,7 +165,7 @@ private:
     bool m_rowDragging = false;
     float m_listScroll = 0;
 
-    std::string m_reported, m_listLayout, m_menuReported, m_inspReported, m_headReported;
+    std::string m_reported, m_listLayout, m_menuReported, m_inspReported, m_headReported, m_drawnReported;
 
     // The canvas inspector scrolls (the Scene fonts section makes it tall);
     // another canvas starts back at the top.

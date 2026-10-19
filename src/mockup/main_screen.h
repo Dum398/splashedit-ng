@@ -230,6 +230,9 @@ struct State {
             bool exporter = true;    // holds a PSXSceneExporter
         };
         std::vector<Row> scenes;       // in the order they are imported (scenes.list)
+        // CD music files as typed or picked: [0] is disc track 2. Unity keeps
+        // this list in its editor preferences, not in the project.
+        std::vector<std::string> cdTracks;
         std::string listedFor;         // the source `scenes` was read for
         std::future<splash::unity::ImportReport> running;
         std::filesystem::path runningDest;

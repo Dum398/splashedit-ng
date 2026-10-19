@@ -1091,6 +1091,20 @@ void testBuildScenes() {
     CHECK(fs::file_size(dir / "scene_0.splashpack", ec) == r.stats.splashpackBytes);
     CHECK(!bytes("scene_1.splashpack").empty() && bytes("scene_1.splashpack") != bytes("scene_0.splashpack"));
 
+    // psxsplash allocates its render buffers once, from scene 0: Play gives it
+    // the largest of the build. Scene 1 asking for a bigger ordering table
+    // raises scene 0's; scene 0 alone keeps its own.
+    {
+        splash::Scene deep = b.scenes[1];
+        deep.settings.orderingTableSize = int(r.stats.orderingTableSize) + 1000;
+        const splash::ExportResult raised = editor::exportForPlay({&b.scenes[0], &deep}, project, g_outDir / "multiplay-buffers", b.names);
+        CHECK(raised.ok() && raised.stats.orderingTableSize == r.stats.orderingTableSize + 1000 && raised.stats.renderBuffersRaised());
+        CHECK(raised.stats.ownOrderingTableSize == r.stats.orderingTableSize && raised.stats.bumpAllocatorSize >= r.stats.bumpAllocatorSize);
+        CHECK(!r.stats.renderBuffersRaised() || r.stats.orderingTableSize >= r.stats.ownOrderingTableSize);
+        const splash::ExportResult alone = editor::exportForPlay(b.scenes[0], project, g_outDir / "multiplay-alone");
+        CHECK(alone.ok() && !alone.stats.renderBuffersRaised());
+    }
+
     // An error names the scene it is in.
     splash::Scene broken = b.scenes[1];
     splash::Object o = named("broken");
@@ -12373,8 +12387,10 @@ void testUnityHierarchy() {
     using namespace unitytest;
     splash::unity::ImportReport r;
     const splash::Scene s = mini(r, "unity-hier");
-    // Roots in file order (the exporter's own object and the canvas left out), not by fileID.
-    CHECK((names(s.objects) == std::vector<std::string>{"Parent", "Cube", "Quad", "RenamedLamp", "Main Camera", "Tri"}));
+    // Roots in file order (the exporter's own object left out, the canvas's 3D
+    // object where the canvas was), not by fileID.
+    CHECK((names(s.objects) ==
+           std::vector<std::string>{"Parent", "Cube", "Quad", "RenamedLamp", "Marker", "Main Camera", "Tri", "Tiles", "Beep", "Sprites"}));
     // Children in m_Children order, not file order.
     const splash::Object* parent = findObj(s.objects, "Parent");
     CHECK(parent && (names(parent->children) == std::vector<std::string>{"ChildB", "ChildA"}));
@@ -12460,6 +12476,21 @@ void testUnityPrimitives() {
     const std::optional<Primitive> plane = builtinMesh(10209);
     CHECK(plane && plane->exact && plane->mesh.positions.size() == 121 && plane->mesh.submeshes[0].size() == 600 && outward(plane->mesh));
     if (plane) CHECK(plane->mesh.bounds().size() == (splash::Vec3{10, 0, 10}));
+    // UVs as Unity 6000.3's own meshes have them (Mesh.uv dumped from the editor,
+    // and every triangle's UVs equal in a SplashEdit 2.4.0 splashpack).
+    auto uvAt = [](const splash::Mesh& m, splash::Vec3 p) -> std::optional<splash::Vec2> {
+        for (size_t i = 0; i < m.positions.size(); i++)
+            if (m.positions[i] == p) return m.uv[i];
+        return std::nullopt;
+    };
+    auto uvIs = [&](const std::optional<Primitive>& prim, splash::Vec3 p, float u, float v) {
+        const std::optional<splash::Vec2> got = prim ? uvAt(prim->mesh, p) : std::nullopt;
+        return got && std::fabs(got->x - u) < 1e-6f && std::fabs(got->y - v) < 1e-6f;
+    };
+    CHECK(uvIs(plane, {5, 0, 5}, 0, 0) && uvIs(plane, {-5, 0, 5}, 1, 0) && uvIs(plane, {5, 0, -5}, 0, 1) && uvIs(plane, {-5, 0, -5}, 1, 1));
+    CHECK(uvIs(plane, {4, 0, 5}, 0.1f, 0));
+    CHECK(uvIs(quad, {-0.5f, -0.5f, 0}, 0, 0) && uvIs(quad, {0.5f, -0.5f, 0}, 1, 0) && uvIs(quad, {-0.5f, 0.5f, 0}, 0, 1) &&
+          uvIs(quad, {0.5f, 0.5f, 0}, 1, 1));
     for (long long id : {10207LL, 10206LL, 10208LL}) {
         const std::optional<Primitive> p = builtinMesh(id);
         CHECK(p && !p->exact && outward(p->mesh));
@@ -12476,40 +12507,116 @@ void testUnityReport() {
     using K = splash::unity::ReportItem;
     splash::unity::ImportReport r;
     (void)mini(r, "unity-report");
-    // The canvas, as one line for its whole subtree.
-    CHECK(hasItem(r, K::Later, "HUD", "UI canvas with 1 element (1 Text)"));
-    for (const auto& it : r.items) CHECK(it.object != "HUD/Label");
+    // The canvas converts; its 3D object and the renamed loading canvas are noted.
+    for (const auto& it : r.items) CHECK(it.object != "HUD" && it.object != "HUD/Label");
+    CHECK(hasItem(r, K::Changed, "HUD/Marker", "a 3D object under the canvas HUD"));
+    CHECK(hasItem(r, K::Changed, "", "its canvas hud is named hud_loading here"));
     CHECK(hasItem(r, K::LeftOut, "Main Camera", "Camera, AudioListener"));
     CHECK(hasItem(r, K::LeftOut, "Cube", "script Spinner"));
     CHECK(hasItem(r, K::Changed, "RenamedLamp/Bulb", "sphere"));
-    CHECK(r.skipped() == 3);
-    CHECK(r.items.size() == 4);
+    CHECK(r.skipped() == 2);
+    CHECK(r.items.size() == 5);
     // The whole project: files, the summary, the report file.
     const fs::path dest = g_outDir / "unity-project";
     fs::remove_all(dest);
     const splash::unity::ImportReport p = splash::unity::importProject(kMini, dest);
     CHECK(p.ok());
     CHECK(p.scenes == std::vector<std::string>{"Mini.scene"});
-    CHECK(p.summary() == "imported scenes=1 objects=10 meshes=4 scripts=2 textures=1 skipped=3");
+    CHECK(p.summary() == "imported scenes=1 objects=14 meshes=4 scripts=2 textures=1 skipped=2");
     const std::string text = [&] {
         std::ifstream in(dest / "import-report.txt");
         return std::string(std::istreambuf_iterator<char>(in), {});
     }();
-    CHECK(text.find("[later] Mini / HUD: UI canvas with 1 element (1 Text) not imported yet") != std::string::npos);
+    CHECK(text.find("[left out] Mini / Main Camera: Camera, AudioListener (no PS1 equivalent)") != std::string::npos);
     CHECK(text.find(p.summary()) != std::string::npos);
     CHECK(editor::loadBuildList(dest).size() == 1);
     CHECK(splash::readVramSettings(dest / "vram.json").prohibited.size() == 1);
     const splash::Scene loaded = splash::loadScene(dest / "Mini.scene");
-    CHECK(loaded.objects.size() == 6);
+    CHECK(loaded.objects.size() == 10 && loaded.canvases.size() == 2 && loaded.tilemap && loaded.fonts.size() == 1);
     // A second import into the same folder is refused, the folder left as it was.
     const splash::unity::ImportReport again = splash::unity::importProject(kMini, dest);
     CHECK(!again.ok() && again.error.find("not empty") != std::string::npos);
     // A scene asked for by name that is not there; the default list when none is asked for.
-    const splash::unity::ImportReport none = splash::unity::importProject(kMini, g_outDir / "unity-none", {{"Nope"}});
+    splash::unity::ImportOptions nope;
+    nope.scenes = {"Nope"};
+    const splash::unity::ImportReport none = splash::unity::importProject(kMini, g_outDir / "unity-none", nope);
     CHECK(!none.ok() && !fs::exists(g_outDir / "unity-none"));
     // Never into the Unity project.
     const splash::unity::ImportReport inside = splash::unity::importProject(kMini, kMini / "Assets" / "out");
     CHECK(!inside.ok() && !fs::exists(kMini / "Assets" / "out"));
+}
+
+void testUnityUi() {
+    using namespace unitytest;
+    using splash::unity::parseFlow;
+    // PSXUILayout.Bake by hand. One anchor point, centre pivot, scale 0.5:
+    // x = 8*0.5 - 0.5*(32*0.5) = -4, y = -(-6*0.5) - (1-0.5)*16 = -5.
+    splash::UIElement e;
+    splash::unity::bakeLayout(parseFlow("{m_AnchorMin: {x: 0.5, y: 0.5}, m_AnchorMax: {x: 0.5, y: 0.5}, m_AnchoredPosition: {x: 8, y: -6}, "
+                                        "m_SizeDelta: {x: 32, y: 32}, m_Pivot: {x: 0.5, y: 0.5}}"),
+                              0.5f, 0.5f, e);
+    CHECK((e.rect == std::array<int, 4>{-4, -5, 16, 16}));
+    // Stretched along X at the bottom (Unity y 0 = 1 from the top): insets,
+    // offsetMin = (20, 20), offsetMax = (-20, 44) -> x 10, y -22, w -20, h 12.
+    splash::unity::bakeLayout(parseFlow("{m_AnchorMin: {x: 0, y: 0}, m_AnchorMax: {x: 1, y: 0}, m_AnchoredPosition: {x: 0, y: 20}, "
+                                        "m_SizeDelta: {x: -40, y: 24}, m_Pivot: {x: 0.5, y: 0}}"),
+                              0.5f, 0.5f, e);
+    CHECK((e.rect == std::array<int, 4>{10, -22, -20, 12}));
+    CHECK((e.anchorMin == std::array<float, 2>{0, 1}) && (e.anchorMax == std::array<float, 2>{1, 1}));
+    // Halves round to even (Mathf.RoundToInt), a size under half a pixel is 1.
+    splash::unity::bakeLayout(parseFlow("{m_AnchorMin: {x: 0, y: 1}, m_AnchorMax: {x: 0, y: 1}, m_AnchoredPosition: {x: 2.5, y: -3.5}, "
+                                        "m_SizeDelta: {x: 0.4, y: 4}, m_Pivot: {x: 0, y: 1}}"),
+                              1, 1, e);
+    CHECK((e.rect == std::array<int, 4>{2, 4, 1, 4}));
+    // The fixture's canvas, sheet, font, tilemap, audio and loading screen.
+    splash::unity::ImportReport r;
+    const splash::Scene s = mini(r, "unity-ui");
+    CHECK(s.canvases.size() == 2);
+    if (s.canvases.size() != 2) return;
+    const splash::UICanvas& hud = s.canvases[0];
+    CHECK(hud.name == "hud" && !hud.visible && hud.sortOrder == 3 && hud.defaultFont == "MiniFont");
+    CHECK(hud.elements.size() == 3);
+    if (hud.elements.size() == 3) {
+        CHECK(hud.elements[0].type == splash::UIElementType::Text && hud.elements[0].name == "label" && hud.elements[0].text == "Hello, world");
+        CHECK((hud.elements[0].rect == std::array<int, 4>{5, 10, 50, 15}) && hud.elements[0].font.empty());
+        CHECK(hud.elements[1].type == splash::UIElementType::Box && (hud.elements[1].rect == std::array<int, 4>{10, -22, -20, 12}));
+        // The inactive sprite is still an element; cell 9 clamped into the 4-cell sheet.
+        const splash::UIElement& icon = hud.elements[2];
+        CHECK(icon.type == splash::UIElementType::Image && icon.sheet == "icons" && icon.cell == 3 && icon.visible);
+        CHECK(icon.color[0] == 0.5f && (icon.rect == std::array<int, 4>{-4, -5, 16, 16}));
+    }
+    CHECK(s.canvases[1].name == "hud_loading" && s.settings.loadingCanvas == "hud_loading");
+    CHECK(s.canvases[1].elements.size() == 1 && s.canvases[1].elements[0].type == splash::UIElementType::Progress &&
+          s.canvases[1].elements[0].value == 40);
+    // One sheet, though the sprite, the UI sprite and the tilemap all use it.
+    CHECK(s.spriteSheets.size() == 1);
+    if (s.spriteSheets.size() == 1) {
+        const splash::SpriteSheet& sh = s.spriteSheets[0];
+        CHECK(sh.name == "icons" && sh.texture == "textures/checker.png" && sh.bitDepth == splash::BitDepth::Bpp8 && sh.cellW == 8);
+        CHECK(sh.anims.size() == 1 && sh.anims[0].name == "blink" && sh.anims[0].firstFrame == 1 && !sh.anims[0].loop);
+    }
+    CHECK(s.fonts.size() == 1 && s.fonts[0].bitmap == "fonts/minifont.png" && s.fonts[0].advances.size() == 96);
+    if (s.fonts.size() == 1 && s.fonts[0].advances.size() == 96) CHECK(s.fonts[0].advances[0] == 3 && s.fonts[0].advances[95] == 3);
+    CHECK(s.tilemap && s.tilemap->tileset == "icons" && s.tilemap->width == 3 && s.tilemap->height == 2);
+    if (s.tilemap) {
+        CHECK((s.tilemap->cells == std::vector<int>{0, 1, -1, 1, 1, 0}));
+        CHECK(s.tilemap->brushes.size() == 2 && s.tilemap->brushes[1].kind == 1 && s.tilemap->brushes[1].id == 7 && !s.tilemap->brushes[1].walkable);
+    }
+    const splash::Object* beep = findObj(s.objects, "Beep");
+    CHECK(beep && beep->audio && beep->audio->clip == "audio/beep.wav" && beep->audio->clipName == "beep" && beep->audio->loop &&
+          beep->audio->sampleRate == 11025 && beep->audio->defaultVolume == 90 && beep->audio->trimLeadingSilence);
+    // CD tracks: numbered from 2 without a gap; the list lands in disc.json.
+    const fs::path wav = kMini / "Assets" / "Audio" / "beep.wav";
+    splash::unity::ImportOptions gap;
+    gap.cdTracks = {{3, wav.string()}};
+    const splash::unity::ImportReport bad = splash::unity::importProject(kMini, g_outDir / "unity-cd-bad", gap);
+    CHECK(!bad.ok() && bad.error.find("not track 2") != std::string::npos && !fs::exists(g_outDir / "unity-cd-bad"));
+    splash::unity::ImportOptions two;
+    two.cdTracks = {{2, wav.string()}};
+    fs::remove_all(g_outDir / "unity-cd");
+    const splash::unity::ImportReport ok = splash::unity::importProject(kMini, g_outDir / "unity-cd", two);
+    CHECK(ok.ok());
+    CHECK((splash::readDiscSettings(g_outDir / "unity-cd" / "disc.json").tracks == std::vector<std::string>{"audio/beep.wav"}));
 }
 
 int main(int argc, char** argv) {
@@ -12684,6 +12791,7 @@ int main(int argc, char** argv) {
     testUnityPrefab();
     testUnityPrimitives();
     testUnityReport();
+    testUnityUi();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

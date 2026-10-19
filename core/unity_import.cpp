@@ -11,7 +11,10 @@
 #include <sstream>
 #include <system_error>
 
+#include "audio.hh"
+#include "disc.hh"
 #include "import.hh"
+#include "texture.hh"
 
 namespace splash::unity {
 
@@ -912,6 +915,48 @@ std::string ImportReport::text() const {
     return t;
 }
 
+// ---- UI ----
+
+namespace {
+
+struct V2 {
+    float x, y;
+};
+V2 v2Of(const YNode& n, float x, float y) { return {float(n["x"].num(x)), float(n["y"].num(y))}; }
+// Mathf.RoundToInt: to the nearest, halves to even.
+int roundEven(float f) { return int(std::nearbyint(double(f))); }
+// Mathf.Approximately.
+bool approx(float a, float b) {
+    return std::fabs(b - a) < std::max(1e-6f * std::max(std::fabs(a), std::fabs(b)), 1.401298e-45f * 8);
+}
+
+}  // namespace
+
+void bakeLayout(const YNode& rt, float scaleX, float scaleY, UIElement& e) {
+    // Unity's RectTransform defaults.
+    const V2 aMin = v2Of(rt["m_AnchorMin"], 0.5f, 0.5f), aMax = v2Of(rt["m_AnchorMax"], 0.5f, 0.5f);
+    const V2 pos = v2Of(rt["m_AnchoredPosition"], 0, 0), size = v2Of(rt["m_SizeDelta"], 100, 100);
+    const V2 pivot = v2Of(rt["m_Pivot"], 0.5f, 0.5f);
+    // Top-down anchors: the byte the exporter writes is round(a * 255) of these.
+    e.anchorMin = {aMin.x, 1.f - aMax.y};
+    e.anchorMax = {aMax.x, 1.f - aMin.y};
+    if (approx(aMin.x, aMax.x) && approx(aMin.y, aMax.y)) {
+        // One anchor point: anchoredPosition is the pivot's offset from it.
+        float px = pos.x * scaleX, py = -pos.y * scaleY;
+        const float pw = size.x * scaleX, ph = size.y * scaleY;  // rect.size = sizeDelta here
+        px -= pivot.x * pw;
+        py -= (1.f - pivot.y) * ph;
+        e.rect = {roundEven(px), roundEven(py), std::max(1, roundEven(pw)), std::max(1, roundEven(ph))};
+    } else {
+        // Stretched: RectTransform.offsetMin/offsetMax, then the insets.
+        const V2 offMin{pos.x - size.x * pivot.x, pos.y - size.y * pivot.y};
+        const V2 offMax{pos.x + size.x * (1.f - pivot.x), pos.y + size.y * (1.f - pivot.y)};
+        const float left = offMin.x * scaleX, right = offMax.x * scaleX;
+        const float top = -offMax.y * scaleY, bottom = -offMin.y * scaleY;
+        e.rect = {roundEven(left), roundEven(top), roundEven(right - left), roundEven(bottom - top)};
+    }
+}
+
 // ---- The importer ----
 
 namespace {
@@ -952,13 +997,7 @@ bool isUiClass(const std::string& c) {
 }
 
 // What one SplashEdit class becomes in a report line.
-std::string laterWhat(const std::string& c) {
-    if (c == "PSXAudioClip") return "audio clip (PSXAudioClip) not imported yet";
-    if (c == "PSXSprite" || c == "PSXSpriteExporter") return "sprite (" + c + ") not imported yet";
-    if (c == "PSXTilemapRenderer" || c == "PSXTilemapExporter") return "tilemap (" + c + ") not imported yet";
-    if (isUiClass(c)) return "UI element (" + c + ") outside a canvas, not imported yet";
-    return c + " not imported yet";
-}
+std::string laterWhat(const std::string& c) { return c + " not imported yet"; }
 
 std::string safeStem(const std::string& s) {
     std::string out;
@@ -985,6 +1024,9 @@ struct UObj {
     std::string modelMesh;
     std::vector<Material> modelMats;
     std::map<int, Ref> matOverrides;  // m_Materials.Array.data[i] overrides
+    // The RectTransform (class 224) body: m_AnchorMin/Max, m_AnchoredPosition,
+    // m_SizeDelta, m_Pivot. nullptr for a plain Transform.
+    const YNode* rect = nullptr;
 };
 
 struct ModelAsset {
@@ -1074,8 +1116,11 @@ class Importer {
     const MemCardSettings& memCard() const { return m_memCard; }
     const std::vector<VramSettings::Area>& vramAreas() const { return m_areas; }
     bool hasPsxData() const { return m_psxData; }
-    // Project-level notes once every scene is in (CD music).
-    void finish();
+    // A CD track's file copied into music/; its project path.
+    std::string copyMusic(const fs::path& file) { return copyAsset(file, "music", nullptr); }
+    // Project-level notes once every scene is in: CD music played from Lua
+    // when no tracks were given.
+    void finish(bool cdTracksGiven);
 
   private:
     struct Unit {
@@ -1092,8 +1137,22 @@ class Importer {
     }
     const std::vector<YDoc>& parsedFile(const fs::path& p);
 
-    std::optional<Object> convertObject(int idx, const std::string& parentPath);
-    void reportCanvas(int idx, const std::string& path);
+    // Appends what object `idx` becomes to `into`: an Object, or for a
+    // PSXCanvas a scene canvas and the 3D objects found under it.
+    void convertObject(int idx, const std::string& parentPath, std::vector<Object>& into);
+    // The canvas of the PSXCanvas object `idx`, added to the scene; its 3D
+    // objects (no RectTransform) go to `hoisted` when given, else are reported.
+    void convertCanvas(int idx, const std::string& path, std::vector<Object>* hoisted);
+    std::optional<UIElement> elementOf(const UObj& o, const std::string& path, float scaleX, float scaleY, bool& usesCanvasFont);
+    void loadingScreen(const Ref& prefab);
+    void tilemapOf(const YNode& renderer, const std::string& path);
+    // The scene's name for a PSXFontAsset / PSXSpriteSheet asset, converting it
+    // into the scene the first time; empty when it cannot be. `cells`: the
+    // sheet's cell count (0 when its texture's size is unknown).
+    std::string fontOf(const YNode& ref, const std::string& path);
+    std::string sheetOf(const YNode& ref, const std::string& path, int* cells = nullptr);
+    const YNode* assetBody(const Ref& r, const std::string& cls);
+    bool activeInHierarchy(int idx) const;
     void reportAssetsIn(const YNode& body);
     void sceneSettings(const YNode& exp, SceneSettings& st);
     std::optional<MeshComponent> meshOf(const UObj& o, const UComp* mf, const UComp* mr, const std::string& path);
@@ -1124,6 +1183,12 @@ class Importer {
     MemCardSettings m_memCard;
     std::vector<VramSettings::Area> m_areas;
     bool m_psxData = false;
+    // The scene being converted, and its fonts and sheets by asset path.
+    Scene* m_out = nullptr;
+    std::map<std::string, std::string> m_fonts, m_sheets;
+    std::map<std::string, int> m_sheetCells;
+    bool m_tilemapSeen = false;
+    Ref m_loading;
 };
 
 const std::vector<YDoc>& Importer::parsedFile(const fs::path& p) {
@@ -1187,6 +1252,7 @@ Importer::Unit Importer::buildUnit(std::vector<YDoc>& docs, int depth) {
         t.position = {float(p["x"].num(0)), float(p["y"].num(0)), float(p["z"].num(0))};
         t.rotation = {float(r["x"].num(0)), float(r["y"].num(0)), float(r["z"].num(0)), float(r["w"].num(1))};
         t.scale = {float(s["x"].num(1)), float(s["y"].num(1)), float(s["z"].num(1))};
+        m_objs[size_t(o)].rect = d.classId == 224 ? &d.body : nullptr;
         u.byFid[d.fileId] = o;
         transforms.push_back(&d);
     }
@@ -1616,36 +1682,425 @@ void Importer::reportAssetsIn(const YNode& body) {
     walk(body);
 }
 
-// A PSXCanvas's whole subtree: one report line, and the SplashEdit assets it uses.
-void Importer::reportCanvas(int idx, const std::string& path) {
-    std::map<std::string, int> counts;
-    int elements = 0;
-    std::function<void(int)> walk = [&](int i) {
-        for (const UComp& c : m_objs[size_t(i)].comps) {
-            if (c.classId != 114) continue;
-            if (isUiClass(c.cls)) {
-                ++elements;
-                ++counts[c.cls.substr(5)];
-            }
-            reportAssetsIn(*c.body);
-        }
-        for (int ch : m_objs[size_t(i)].children) walk(ch);
-    };
-    walk(idx);
-    std::string kinds;
-    for (const auto& [k, n] : counts) kinds += (kinds.empty() ? "" : ", ") + std::to_string(n) + " " + k;
-    item(ReportItem::Later, path,
-         "UI canvas with " + std::to_string(elements) + (elements == 1 ? " element" : " elements") +
-             (kinds.empty() ? "" : " (" + kinds + ")") + " not imported yet");
+bool Importer::activeInHierarchy(int idx) const {
+    for (int i = idx; i >= 0; i = m_objs[size_t(i)].parent)
+        if (!m_objs[size_t(i)].active) return false;
+    return true;
 }
 
-std::optional<Object> Importer::convertObject(int idx, const std::string& parentPath) {
+// The body of the `cls` MonoBehaviour in the asset `r` names (a ScriptableObject .asset).
+const YNode* Importer::assetBody(const Ref& r, const std::string& cls) {
+    if (r.null() || r.guid.empty()) return nullptr;
+    const fs::path f = m_index.file(r.guid);
+    std::error_code ec;
+    if (f.empty() || !fs::is_regular_file(f, ec)) return nullptr;
+    for (const YDoc& d : parsedFile(f))
+        if (d.classId == 114 && monoClass(d.body, m_index) == cls) return &d.body;
+    return nullptr;
+}
+
+namespace {
+std::string uniqueName(const std::string& want, const std::function<bool(const std::string&)>& taken) {
+    std::string n = want;
+    for (int k = 2; taken(n); ++k) n = want + "_" + std::to_string(k);
+    return n;
+}
+// Unity's byte[] fields: two hex digits a byte.
+std::vector<int> hexBytes(std::string_view hex) {
+    std::vector<int> out;
+    for (size_t i = 0; i + 2 <= hex.size(); i += 2) {
+        char* end = nullptr;
+        const std::string two(hex.substr(i, 2));
+        const long v = std::strtol(two.c_str(), &end, 16);
+        if (!end || *end) break;
+        out.push_back(int(v));
+    }
+    return out;
+}
+BitDepth depthOf(long long bpp) { return bpp == 4 ? BitDepth::Bpp4 : bpp == 15 || bpp == 16 ? BitDepth::Bpp16 : BitDepth::Bpp8; }
+}  // namespace
+
+// PSXFontAsset: its fontTexture bitmap (256 wide, glyph cells from 0x20, ink
+// = alpha above 0.5, as PSXFontAsset.ConvertTo4BPP reads it) and its stored
+// advance widths: what the exporter packs. The source TTF/OTF it was made
+// from is not used (a UIFont is either a bitmap or a TTF).
+std::string Importer::fontOf(const YNode& refNode, const std::string& path) {
+    const Ref r = refOf(refNode);
+    if (r.null()) return {};
+    const std::string asset = m_index.path(r.guid);
+    if (auto it = m_fonts.find(r.guid); it != m_fonts.end()) return it->second;
+    m_fonts[r.guid] = "";  // tried once per scene
+    const YNode* b = assetBody(r, "PSXFontAsset");
+    if (!b) {
+        item(ReportItem::Missing, path, "font (guid " + r.guid + ") is not in the project; its text uses the system font");
+        return {};
+    }
+    const fs::path tex = m_index.file(refOf((*b)["fontTexture"]).guid);
+    std::error_code ec;
+    if (tex.empty() || !fs::is_regular_file(tex, ec)) {
+        item(ReportItem::Missing, path, "font " + asset + " has no bitmap (fontTexture); its text uses the system font");
+        return {};
+    }
+    UIFont f;
+    f.name = uniqueName((*b)["m_Name"].str().empty() ? fs::path(asset).stem().string() : (*b)["m_Name"].str(), [&](const std::string& n) {
+        return std::any_of(m_out->fonts.begin(), m_out->fonts.end(), [&](const UIFont& x) { return x.name == n; });
+    });
+    f.glyphWidth = int((*b)["glyphWidth"].integer(8));
+    f.glyphHeight = int((*b)["glyphHeight"].integer(16));
+    // The bitmap as the exporter samples it: 256 texels wide, rows from the
+    // top, anything past the source's edge empty.
+    try {
+        const Image img = loadImage(tex);
+        if (img.width == 256) {
+            f.bitmap = copyAsset(tex, "fonts", nullptr);
+        } else {
+            const int perRow = std::max(1, 256 / std::max(1, f.glyphWidth));
+            const int h = (95 + perRow - 1) / perRow * std::max(1, f.glyphHeight);
+            Image out;
+            out.width = 256;
+            out.height = h;
+            out.pixels.assign(size_t(256 * h), Image::Px{0, 0, 0, 0});
+            for (int y = 0; y < h && y < img.height; ++y)
+                for (int x = 0; x < 256 && x < img.width; ++x)
+                    out.pixels[size_t((h - 1 - y) * 256 + x)] = img.pixels[size_t((img.height - 1 - y) * img.width + x)];
+            fs::create_directories(m_dest / "fonts", ec);
+            std::string rel = "fonts/" + safeStem(tex.stem().string()) + "_256.png";
+            for (int n = 2; m_taken.count(rel); ++n) rel = "fonts/" + safeStem(tex.stem().string()) + "_256_" + std::to_string(n) + ".png";
+            savePng(out, m_dest / fromUtf8(rel));
+            m_taken.insert(rel);
+            f.bitmap = rel;
+            item(ReportItem::Changed, path,
+                 "font " + asset + ": its bitmap is " + std::to_string(img.width) + " pixels wide; saved 256 wide as the exporter reads it");
+        }
+    } catch (const std::exception& e) {
+        item(ReportItem::Missing, path, "font " + asset + ": its bitmap cannot be read (" + e.what() + "); its text uses the system font");
+        return {};
+    }
+    // PSXUIExporter: the stored widths, else the cell width for every character.
+    const std::vector<int> adv = hexBytes((*b)["storedAdvanceWidths"].str());
+    if (adv.size() >= 96) f.advances.assign(adv.begin(), adv.begin() + 96);
+    else f.advances.assign(96, f.glyphWidth);
+    m_out->fonts.push_back(f);
+    return m_fonts[r.guid] = f.name;
+}
+
+// PSXSpriteSheet: added to the scene the first time something uses it (a
+// PSXSprite, a PSXUISprite, the tilemap's tileset), as the exporter packs it.
+std::string Importer::sheetOf(const YNode& refNode, const std::string& path, int* cells) {
+    if (cells) *cells = 0;
+    const Ref r = refOf(refNode);
+    if (r.null()) return {};
+    const std::string asset = m_index.path(r.guid);
+    if (auto it = m_sheets.find(r.guid); it != m_sheets.end()) {
+        if (cells) *cells = m_sheetCells[r.guid];
+        return it->second;
+    }
+    m_sheets[r.guid] = "";
+    const YNode* b = assetBody(r, "PSXSpriteSheet");
+    if (!b) {
+        item(ReportItem::Missing, path, "sprite sheet (guid " + r.guid + ") is not in the project");
+        return {};
+    }
+    SpriteSheet sh;
+    const YNode* nm = b->find("sheetName");
+    const std::string want = nm ? nm->str() : std::string("sheet");
+    sh.name = uniqueName(want, [&](const std::string& n) {
+        return std::any_of(m_out->spriteSheets.begin(), m_out->spriteSheets.end(), [&](const SpriteSheet& x) { return x.name == n; });
+    });
+    if (sh.name != want)
+        item(ReportItem::Changed, path, "sprite sheet " + asset + " is named " + sh.name + ": another sheet of this scene is named " + want);
+    const Ref tex = refOf((*b)["sourceTexture"]);
+    if (tex.null()) {
+        item(ReportItem::LeftOut, path, "sprite sheet " + asset + " has no texture, so there is nothing to pack");
+        return {};
+    }
+    sh.texture = textureOf(tex, path);
+    if (sh.texture.empty()) return {};
+    sh.bitDepth = depthOf((*b)["bitDepth"].integer(4));
+    sh.cellW = std::max(1, int((*b)["cellWidth"].integer(16)));
+    sh.cellH = std::max(1, int((*b)["cellHeight"].integer(16)));
+    for (const YNode& a : (*b)["animations"].seq) {
+        SpriteAnim an;
+        if (const YNode* n = a.find("animationName")) an.name = n->str();
+        an.firstFrame = int(a["firstFrame"].integer(0));
+        an.frameCount = int(a["frameCount"].integer(1));
+        an.frameDuration = int(a["frameDuration"].integer(6));
+        an.loop = a["loop"].flag(true);
+        sh.anims.push_back(an);
+    }
+    int count = 0;
+    try {
+        const Image img = loadImage(m_dest / fromUtf8(sh.texture));
+        count = std::max(1, img.width / sh.cellW) * std::max(1, img.height / sh.cellH);
+    } catch (const std::exception&) {
+    }
+    m_sheetCells[r.guid] = count;
+    if (cells) *cells = count;
+    m_out->spriteSheets.push_back(sh);
+    return m_sheets[r.guid] = sh.name;
+}
+
+// One UI element, as PSXUIExporter.CollectAllElementsInHierarchyOrder takes
+// it: the first of Sprite, Image, Box, Line, Text, ProgressBar on the object.
+std::optional<UIElement> Importer::elementOf(const UObj& o, const std::string& path, float scaleX, float scaleY, bool& usesCanvasFont) {
+    static const char* const order[] = {"PSXUISprite", "PSXUIImage", "PSXUIBox", "PSXUILine", "PSXUIText", "PSXUIProgressBar"};
+    const UComp* pick = nullptr;
+    int rank = 99;
+    for (const UComp& c : o.comps)
+        for (int k = 0; k < 6; ++k)
+            if (c.classId == 114 && c.cls == order[k] && k < rank) {
+                rank = k;
+                pick = &c;
+            }
+    if (!pick) return std::nullopt;
+    for (const UComp& c : o.comps)
+        if (&c != pick && c.classId == 114 && isUiClass(c.cls))
+            item(ReportItem::LeftOut, path, c.cls + " beside a " + pick->cls + ": Unity exports one UI element per object, the " + pick->cls);
+    if (!o.rect) {
+        item(ReportItem::LeftOut, path, pick->cls + " without a RectTransform: Unity does not export it either");
+        return std::nullopt;
+    }
+    const YNode& b = *pick->body;
+    auto col = [&](const char* key, std::array<float, 4> def) {
+        const auto c = colorOf(b[key], def);
+        return std::array<float, 3>{c[0], c[1], c[2]};
+    };
+    auto str = [&](const char* key, const char* def) {
+        const YNode* n = b.find(key);
+        return n ? n->str() : std::string(def);
+    };
+    UIElement e;
+    bakeLayout(*o.rect, scaleX, scaleY, e);
+    e.visible = b["startVisible"].flag(true);
+    const std::string& cls = pick->cls;
+    if (cls == "PSXUISprite") {
+        e.type = UIElementType::Image;
+        e.name = str("elementName", "sprite");
+        e.color = col("tint", {0.5f, 0.5f, 0.5f, 1});
+        int cells = 0;
+        e.sheet = sheetOf(b["sheet"], path, &cells);
+        // PSXUISprite.ResolvedCell: clamped into the sheet.
+        const int cell = int(b["cell"].integer(0));
+        e.cell = e.sheet.empty() ? 0 : cells > 0 ? std::clamp(cell, 0, cells - 1) : std::max(0, cell);
+        if (refOf(b["sheet"]).null())
+            item(ReportItem::LeftOut, path, "PSXUISprite without a sheet: it draws nothing recognisable in Unity's export either");
+    } else if (cls == "PSXUIImage") {
+        e.type = UIElementType::Image;
+        e.name = str("elementName", "image");
+        e.color = col("tintColor", {1, 1, 1, 1});
+        e.texture = textureOf(refOf(b["sourceTexture"]), path);
+        e.bitDepth = depthOf(b["bitDepth"].integer(8));
+        e.cutout = false;  // PSXTexture2D.CreateFromTexture2D's default for UI images
+    } else if (cls == "PSXUIBox") {
+        e.type = UIElementType::Box;
+        e.name = str("elementName", "box");
+        e.color = col("boxColor", {0, 0, 0, 1});
+    } else if (cls == "PSXUILine") {
+        e.type = UIElementType::Line;
+        e.name = str("elementName", "line");
+        e.color = col("lineColor", {0, 0, 0, 1});
+        // The exporter stores each endpoint coordinate as a byte.
+        const V2 p1 = v2Of(b["point1"], 0, 0), p2 = v2Of(b["point2"], 0, 0);
+        e.from = {int(uint8_t(roundEven(p1.x))), int(uint8_t(roundEven(p1.y)))};
+        e.to = {int(uint8_t(roundEven(p2.x))), int(uint8_t(roundEven(p2.y)))};
+    } else if (cls == "PSXUIText") {
+        e.type = UIElementType::Text;
+        e.name = str("elementName", "text");
+        e.color = col("textColor", {1, 1, 1, 1});
+        e.text = str("defaultText", "");
+        if (!refOf(b["fontOverride"]).null()) e.font = fontOf(b["fontOverride"], path);
+        else usesCanvasFont = true;
+    } else {
+        e.type = UIElementType::Progress;
+        e.name = str("elementName", "progress");
+        e.color = col("fillColor", {0, 1, 0, 1});
+        e.background = col("backgroundColor", {0.2f, 0.2f, 0.2f, 1});
+        e.value = std::clamp(int(b["initialValue"].integer(0)), 0, 100);
+    }
+    return e;
+}
+
+// A PSXCanvas: its settings, and every UI element below it depth-first in
+// sibling order, inactive objects too (PSXUIExporter.CollectCanvasesInternal).
+// Scale: the PS1 resolution over the canvas RectTransform's size.
+void Importer::convertCanvas(int idx, const std::string& path, std::vector<Object>* hoisted) {
+    const UObj& c = m_objs[size_t(idx)];
+    const UComp* pc = nullptr;
+    for (const UComp& k : c.comps)
+        if (k.classId == 114 && k.cls == "PSXCanvas") pc = &k;
+    if (!pc) return;
+    const YNode& b = *pc->body;
+    UICanvas cv;
+    const YNode* nm = b.find("canvasName");
+    cv.name = nm ? nm->str() : std::string("canvas");
+    cv.visible = b["startVisible"].flag(true);
+    cv.sortOrder = std::clamp(int(b["sortOrder"].integer(0)), 0, 255);
+    float cw = 320, ch = 240;
+    if (c.rect) {
+        const V2 sd = v2Of((*c.rect)["m_SizeDelta"], 320, 240);
+        if (sd.x > 0) cw = sd.x;
+        if (sd.y > 0) ch = sd.y;
+    }
+    const float sx = 320.f / cw, sy = 240.f / ch;
+    bool usesDefault = false;
+    std::function<void(int, const std::string&)> walk = [&](int i, const std::string& p) {
+        for (int k : m_objs[size_t(i)].children) {
+            const UObj& o = m_objs[size_t(k)];
+            const std::string op = p + "/" + o.name;
+            if (!o.rect) {
+                // A 3D object under the canvas: converted where the canvas was.
+                if (hoisted) {
+                    const size_t before = hoisted->size();
+                    convertObject(k, p, *hoisted);
+                    bool on = true;
+                    for (int a = i; a >= 0 && a != idx; a = m_objs[size_t(a)].parent) on = on && m_objs[size_t(a)].active;
+                    if (hoisted->size() > before && !on) hoisted->back().active = false;
+                    item(ReportItem::Changed, op, "a 3D object under the canvas " + path + ": placed where the canvas was, without the UI objects' transforms");
+                } else {
+                    item(ReportItem::LeftOut, op, "a 3D object in a loading screen prefab: only its canvas is used");
+                }
+                continue;
+            }
+            bool uses = false;
+            if (std::optional<UIElement> e = elementOf(o, op, sx, sy, uses)) {
+                cv.elements.push_back(std::move(*e));
+                usesDefault = usesDefault || uses;
+            }
+            std::vector<std::string> other;
+            for (const UComp& k2 : o.comps) {
+                if (k2.classId == 222 || k2.classId == 223 || k2.classId == 225 || (k2.classId == 114 && isUiClass(k2.cls))) continue;
+                if (k2.classId == 114 && k2.cls == "PSXCanvas") {
+                    other.push_back("a PSXCanvas inside the canvas " + cv.name + " (its elements are in that canvas, as Unity exports them)");
+                    continue;
+                }
+                const char* n = builtinClassName(k2.classId);
+                other.push_back(k2.classId == 114 ? (k2.cls.empty() ? std::string("a script whose class is unknown") : k2.cls)
+                                                  : n ? std::string(n) : "Unity component #" + std::to_string(k2.classId));
+            }
+            if (!other.empty()) {
+                std::string list;
+                for (const std::string& s : other) list += (list.empty() ? "" : ", ") + s;
+                item(ReportItem::LeftOut, op, list + " on a UI object, not brought over");
+            }
+            walk(k, op);
+        }
+    };
+    walk(idx, path);
+    // Unity packs a canvas's default font only when one of its texts uses it.
+    if (usesDefault && !refOf(b["defaultFont"]).null()) cv.defaultFont = fontOf(b["defaultFont"], path);
+    m_out->canvases.push_back(std::move(cv));
+}
+
+// The scene's PSXTilemapRenderer: its PSXTilemap asset becomes Scene.tilemap.
+void Importer::tilemapOf(const YNode& rb, const std::string& path) {
+    if (m_tilemapSeen) {
+        item(ReportItem::LeftOut, path, "a second PSXTilemapRenderer: a scene has one tilemap (Unity refuses to export this scene)");
+        return;
+    }
+    m_tilemapSeen = true;
+    const Ref r = refOf(rb["tilemap"]);
+    if (r.null()) return;
+    const std::string asset = m_index.path(r.guid);
+    const YNode* b = assetBody(r, "PSXTilemap");
+    if (!b) {
+        item(ReportItem::Missing, path, "tilemap (guid " + r.guid + ") is not in the project");
+        return;
+    }
+    Tilemap t;
+    if (refOf((*b)["tileset"]).null()) item(ReportItem::LeftOut, path, "tilemap " + asset + " has no tileset (Unity refuses to export it)");
+    t.tileset = sheetOf((*b)["tileset"], path);
+    const int w = std::max(1, int((*b)["width"].integer(32))), h = std::max(1, int((*b)["height"].integer(32)));
+    t.width = std::min(w, Tilemap::kMaxSide);
+    t.height = std::min(h, Tilemap::kMaxSide);
+    if (t.width != w || t.height != h)
+        item(ReportItem::Changed, path, "tilemap " + asset + " is " + std::to_string(w) + "x" + std::to_string(h) + "; cut to " +
+                                            std::to_string(t.width) + "x" + std::to_string(t.height) + " (Unity refuses more than 256 a side)");
+    for (const YNode& bn : (*b)["brushes"].seq) {
+        TileBrush br;
+        if (const YNode* n = bn.find("name")) br.name = n->str();
+        br.cell = int(bn["tilesetCell"].integer(0));
+        br.walkable = bn["walkable"].flag(true);
+        br.kind = int(bn["objectKind"].integer(0));
+        br.id = int(bn["objectId"].integer(-1));
+        const auto c = colorOf(bn["editorColor"], {1, 1, 1, 1});
+        br.color = {c[0], c[1], c[2]};
+        t.brushes.push_back(br);
+    }
+    if (const YNode* k = b->find("objectKindNames"); k && k->kind == YNode::Seq) {
+        t.kindNames.clear();
+        for (const YNode& n : k->seq) t.kindNames.push_back(n.str());
+    }
+    // cells: little-endian int32s as hex, row by row; PSXTilemap.EnsureCells
+    // fills a short list with -1 and cuts a long one.
+    const std::string& hex = (*b)["cells"].str();
+    const std::vector<int32_t> cells = hexInts(hex);
+    const size_t need = size_t(w) * size_t(h);
+    if (hex.size() != need * 8)
+        item(ReportItem::Changed, path,
+             "tilemap " + asset + " stores " + std::to_string(hex.size() / 8) + " cells for its " + std::to_string(w) + "x" + std::to_string(h) +
+                 " map; the missing ones are empty and extra ones dropped, as Unity does");
+    t.cells.assign(size_t(t.width) * size_t(t.height), -1);
+    for (int y = 0; y < t.height; ++y)
+        for (int x = 0; x < t.width; ++x) {
+            const size_t i = size_t(y) * size_t(w) + size_t(x);
+            if (i < cells.size()) t.cells[size_t(y * t.width + x)] = cells[i];
+        }
+    m_out->tilemap = std::move(t);
+}
+
+// LoadingScreenPrefab: the first PSXCanvas in the prefab (the root first,
+// then depth-first, inactive ones too: GetComponentInChildren(true)) becomes
+// a canvas of the scene, named so it does not clash, and the scene's loading canvas.
+void Importer::loadingScreen(const Ref& prefab) {
+    const std::string p = m_index.path(prefab.guid);
+    const fs::path file = m_index.file(prefab.guid);
+    if (file.empty() || extOf(p) != ".prefab") {
+        item(ReportItem::Missing, "", "loading screen " + (p.empty() ? "(guid " + prefab.guid + ")" : p) + " is not a prefab in the project");
+        return;
+    }
+    std::vector<YDoc>& docs = keep(parsedFile(file));
+    const Unit u = buildUnit(docs, 1);
+    int found = -1;
+    std::function<void(int)> find = [&](int i) {
+        if (found >= 0) return;
+        for (const UComp& c : m_objs[size_t(i)].comps)
+            if (c.classId == 114 && c.cls == "PSXCanvas") {
+                found = i;
+                return;
+            }
+        for (int k : m_objs[size_t(i)].children) find(k);
+    };
+    for (int r : u.roots) find(r);
+    if (found < 0) {
+        item(ReportItem::LeftOut, "", "loading screen " + p + " holds no PSXCanvas, so Unity shows none either");
+        return;
+    }
+    const size_t before = m_out->canvases.size();
+    convertCanvas(found, fs::path(p).stem().string() + " (loading screen)/" + m_objs[size_t(found)].name, nullptr);
+    if (m_out->canvases.size() == before) return;
+    UICanvas& cv = m_out->canvases.back();
+    const std::string want = cv.name;
+    auto taken = [&](const std::string& n) {
+        for (size_t i = 0; i + 1 < m_out->canvases.size(); ++i)
+            if (m_out->canvases[i].name == n) return true;
+        return false;
+    };
+    if (taken(want)) {
+        cv.name = uniqueName(want + "_loading", taken);
+        item(ReportItem::Changed, "", "loading screen " + p + ": its canvas " + want + " is named " + cv.name + " here, the scene has a canvas " + want);
+    }
+    m_out->settings.loadingCanvas = cv.name;
+}
+
+void Importer::convertObject(int idx, const std::string& parentPath, std::vector<Object>& into) {
     const UObj& u = m_objs[size_t(idx)];
     const std::string path = parentPath.empty() ? u.name : parentPath + "/" + u.name;
     for (const UComp& c : u.comps)
-        if (c.cls == "PSXCanvas") {
-            reportCanvas(idx, path);
-            return std::nullopt;
+        if (c.classId == 114 && c.cls == "PSXCanvas") {
+            // FindObjectsByType<PSXCanvas> skips inactive objects.
+            if (!activeInHierarchy(idx)) item(ReportItem::LeftOut, path, "inactive UI canvas: Unity does not export it either");
+            else convertCanvas(idx, path, &into);
+            return;
         }
     Object o;
     o.name = u.name;
@@ -1678,6 +2133,34 @@ std::optional<Object> Importer::convertObject(int idx, const std::string& parent
             const long long mode = b["m_Lightmapping"].integer(4);
             l.runtime = l.kind == LightKind::Point && (mode == 4 || mode == 1);
             o.light = l;
+        } else if (c.classId == 114 && c.cls == "PSXAudioClip") {
+            const YNode& b = *c.body;
+            AudioComponent a;
+            a.clipName = b["ClipName"].str();
+            a.sampleRate = int(b["SampleRate"].integer(22050));
+            a.loop = b["Loop"].flag(false);
+            a.defaultVolume = int(b["DefaultVolume"].integer(100));
+            a.trimLeadingSilence = b["TrimLeadingSilence"].flag(false);
+            const Ref r = refOf(b["Clip"]);
+            const fs::path f = m_index.file(r.guid);
+            std::error_code ec;
+            if (r.null()) {
+            } else if (f.empty() || !fs::is_regular_file(f, ec)) {
+                item(ReportItem::Missing, path, "audio clip (guid " + r.guid + ") is not in the project");
+            } else if (!isAudioFile(f)) {
+                item(ReportItem::LeftOut, path, "audio clip " + m_index.path(r.guid) + " is not a WAV, AIFF, MP3, Ogg Vorbis or FLAC file");
+            } else {
+                a.clip = copyAsset(f, "audio", nullptr);
+            }
+            o.audio = a;
+        } else if (c.classId == 114 && (c.cls == "PSXSprite" || c.cls == "PSXTilemapRenderer")) {
+            // FindObjectsByType skips inactive objects: their sheet or map is not exported.
+            if (!activeInHierarchy(idx))
+                item(ReportItem::LeftOut, path, c.cls + " on an inactive object: Unity does not export its " + (c.cls == "PSXSprite" ? "sheet" : "tilemap") + " either");
+            else if (c.cls == "PSXSprite") sheetOf((*c.body)["sheet"], path);
+            else tilemapOf(*c.body, path);
+        } else if (c.classId == 114 && isUiClass(c.cls)) {
+            item(ReportItem::LeftOut, path, "UI element (" + c.cls + ") outside a canvas: Unity does not export it either");
         } else if (c.classId == 114 && c.cls.starts_with("PSX")) {
             item(ReportItem::Later, path, laterWhat(c.cls));
             reportAssetsIn(*c.body);
@@ -1734,9 +2217,8 @@ std::optional<Object> Importer::convertObject(int idx, const std::string& parent
         item(ReportItem::LeftOut, path, list + " (no PS1 equivalent)");
     }
     ++m_report.objects;
-    for (int ch : u.children)
-        if (std::optional<Object> c = convertObject(ch, path)) o.children.push_back(std::move(*c));
-    return o;
+    for (int ch : u.children) convertObject(ch, path, o.children);
+    into.push_back(std::move(o));
 }
 
 void Importer::sceneSettings(const YNode& b, SceneSettings& st) {
@@ -1750,11 +2232,7 @@ void Importer::sceneSettings(const YNode& b, SceneSettings& st) {
     st.networkId = b["SceneNetworkId"].str();
     st.streamWorld = b["StreamWorldGeometry"].flag(false);
     st.script = luaOf(b["SceneLuaFile"], "", "scene script");
-    const Ref loading = refOf(b["LoadingScreenPrefab"]);
-    if (!loading.null()) {
-        const std::string p = m_index.path(loading.guid);
-        item(ReportItem::Later, "", "loading screen " + (p.empty() ? "(guid " + loading.guid + ")" : p) + " not imported yet");
-    }
+    m_loading = refOf(b["LoadingScreenPrefab"]);  // converted once the scene's own canvases are in
     for (const char* what : {"Cutscenes", "Animations"}) {
         size_t n = 0;
         for (const YNode& c : b[what].seq) n += !refOf(c).null();
@@ -1769,7 +2247,13 @@ Scene Importer::convert(const fs::path& sceneFile, const std::string& sceneName)
     m_scene = sceneName;
     m_objs.clear();
     m_sceneAssetsReported.clear();
+    m_fonts.clear();
+    m_sheets.clear();
+    m_sheetCells.clear();
+    m_tilemapSeen = false;
+    m_loading = {};
     Scene scene;
+    m_out = &scene;
     std::vector<YDoc>& docs = keep(parseYaml(readText(sceneFile)));
     Unit u = buildUnit(docs, 0);
     // The scene exporter: its settings; its object goes when it holds nothing else.
@@ -1790,8 +2274,10 @@ Scene Importer::convert(const fs::path& sceneFile, const std::string& sceneName)
     if (m_psxData) scene.settings.memCard = m_memCard;
     for (int r : u.roots) {
         if (r == exporterObj && m_objs[size_t(r)].children.empty() && m_objs[size_t(r)].comps.size() == 1) continue;
-        if (std::optional<Object> o = convertObject(r, "")) scene.objects.push_back(std::move(*o));
+        convertObject(r, "", scene.objects);
     }
+    if (!m_loading.null()) loadingScreen(m_loading);
+    m_out = nullptr;
     return scene;
 }
 
@@ -1834,13 +2320,14 @@ void Importer::readPsxData() {
     m_scene = saved;
 }
 
-void Importer::finish() {
+void Importer::finish(bool cdTracksGiven) {
     m_scene.clear();
+    if (cdTracksGiven) return;
     for (const std::string& rel : m_luaFiles)
         if (readText(m_dest / fromUtf8(rel)).find("PlayCDDA") != std::string::npos) {
             item(ReportItem::Later, "",
                  "CD music: " + rel + " plays CD tracks, and Unity keeps its CD music list in the editor's preferences, "
-                 "not in the project; add the tracks under the Disc settings");
+                 "not in the project; give the tracks to the import (--cd-track) or add them under the Disc settings");
             break;
         }
 }
@@ -1909,6 +2396,32 @@ ImportReport importProject(const fs::path& unityProject, const fs::path& dest, c
             if (std::none_of(chosen.begin(), chosen.end(), [&](const SceneEntry& e) { return e.path == hit->path; })) chosen.push_back(*hit);
         }
     }
+    // CD tracks: numbered 2, 3, ... without a gap, each an audio file.
+    std::vector<std::pair<int, std::string>> tracks = options.cdTracks;
+    std::stable_sort(tracks.begin(), tracks.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (size_t i = 0; i < tracks.size(); ++i) {
+        const int want = int(i) + 2;
+        const auto& [n, file] = tracks[i];
+        if (n < 2) {
+            report.error = "CD track " + std::to_string(n) + ": music tracks start at 2 (track 1 is the data)";
+            return report;
+        }
+        if (n != want) {
+            report.error = n == want - 1 ? "CD track " + std::to_string(n) + " is given twice"
+                                         : "CD track " + std::to_string(n) + " is given but not track " + std::to_string(want) +
+                                               "; music tracks are numbered from 2 without a gap";
+            return report;
+        }
+        const fs::path f = fromUtf8(file);
+        if (!fs::is_regular_file(f, ec)) {
+            report.error = "CD track " + std::to_string(n) + ": " + file + " is not a file";
+            return report;
+        }
+        if (!isAudioFile(f)) {
+            report.error = "CD track " + std::to_string(n) + ": " + file + " is not a WAV, AIFF, MP3, Ogg Vorbis or FLAC file";
+            return report;
+        }
+    }
     fs::create_directories(dest, ec);
     if (ec) {
         report.error = "cannot create " + generic(dest) + ": " + ec.message();
@@ -1935,7 +2448,12 @@ ImportReport importProject(const fs::path& unityProject, const fs::path& dest, c
         report.scenes.push_back(file);
         list += file + "\n";
     }
-    imp.finish();
+    if (!tracks.empty()) {
+        DiscSettings disc;
+        for (const auto& t : tracks) disc.tracks.push_back(imp.copyMusic(fromUtf8(t.second)));
+        writeDiscSettings(dest / "disc.json", disc);
+    }
+    imp.finish(!tracks.empty());
     {
         std::ofstream out(dest / "scenes.list", std::ios::binary);
         out << list;

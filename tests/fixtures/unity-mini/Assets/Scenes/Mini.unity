@@ -33,7 +33,7 @@ MonoBehaviour:
   SceneType: 1
   SceneNetworkId: "mini/main"
   Cutscenes: []
-  LoadingScreenPrefab: {fileID: 0}
+  LoadingScreenPrefab: {fileID: 9101, guid: d1000000000000000000000000000002, type: 3}
 --- !u!1 &300
 GameObject:
   m_Component:
@@ -233,7 +233,15 @@ RectTransform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_Children:
   - {fileID: 411}
+  - {fileID: 421}
+  - {fileID: 431}
+  - {fileID: 441}
   m_Father: {fileID: 0}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
+  m_AnchoredPosition: {x: 0, y: 0}
+  m_SizeDelta: {x: 640, y: 480}
+  m_Pivot: {x: 0.5, y: 0.5}
 --- !u!223 &402
 Canvas:
   m_GameObject: {fileID: 400}
@@ -245,6 +253,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: dc481397cd94e03409e462478df09d58, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  canvasName: hud
+  startVisible: 0
+  sortOrder: 3
+  defaultFont: {fileID: 11400000, guid: 71000000000000000000000000000001, type: 2}
 --- !u!1 &410
 GameObject:
   m_Component:
@@ -260,6 +272,11 @@ RectTransform:
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_Children: []
   m_Father: {fileID: 401}
+  m_AnchorMin: {x: 0, y: 1}
+  m_AnchorMax: {x: 0, y: 1}
+  m_AnchoredPosition: {x: 10, y: -20}
+  m_SizeDelta: {x: 100, y: 30}
+  m_Pivot: {x: 0, y: 1}
 --- !u!114 &412
 MonoBehaviour:
   m_GameObject: {fileID: 410}
@@ -267,8 +284,88 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ca4c021b4490c8f4fb9de4e14055b9e3, type: 3}
   m_Name: 
   m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXUIText
+  elementName: label
   defaultText: "Hello,
     world"
+  textColor: {r: 1, g: 0.5, b: 0.25, a: 1}
+  startVisible: 1
+  fontOverride: {fileID: 0}
+--- !u!1 &420
+GameObject:
+  m_Component:
+  - component: {fileID: 421}
+  - component: {fileID: 422}
+  m_Name: Bar
+  m_IsActive: 1
+--- !u!224 &421
+RectTransform:
+  m_GameObject: {fileID: 420}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 401}
+  m_AnchorMin: {x: 0, y: 0}
+  m_AnchorMax: {x: 1, y: 0}
+  m_AnchoredPosition: {x: 0, y: 20}
+  m_SizeDelta: {x: -40, y: 24}
+  m_Pivot: {x: 0.5, y: 0}
+--- !u!114 &422
+MonoBehaviour:
+  m_GameObject: {fileID: 420}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 00000000000000000000000000000000, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXUIBox
+  elementName: bar
+  boxColor: {r: 0, g: 0.5, b: 1, a: 1}
+  startVisible: 1
+--- !u!1 &430
+GameObject:
+  m_Component:
+  - component: {fileID: 431}
+  - component: {fileID: 432}
+  m_Name: Icon
+  m_IsActive: 0
+--- !u!224 &431
+RectTransform:
+  m_GameObject: {fileID: 430}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 401}
+  m_AnchorMin: {x: 0.5, y: 0.5}
+  m_AnchorMax: {x: 0.5, y: 0.5}
+  m_AnchoredPosition: {x: 8, y: -6}
+  m_SizeDelta: {x: 32, y: 32}
+  m_Pivot: {x: 0.5, y: 0.5}
+--- !u!114 &432
+MonoBehaviour:
+  m_GameObject: {fileID: 430}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 00000000000000000000000000000000, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXUISprite
+  elementName: icon
+  sheet: {fileID: 11400000, guid: 71000000000000000000000000000003, type: 2}
+  cell: 9
+  tint: {r: 0.5, g: 0.5, b: 0.5, a: 1}
+  startVisible: 1
+--- !u!1 &440
+GameObject:
+  m_Component:
+  - component: {fileID: 441}
+  m_Name: Marker
+  m_IsActive: 1
+--- !u!4 &441
+Transform:
+  m_GameObject: {fileID: 440}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 1, y: 2, z: 3}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 401}
 --- !u!1 &600
 GameObject:
   m_Component:
@@ -328,3 +425,77 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXObjectExporter
   luaFile: {fileID: 0}
+--- !u!1 &900
+GameObject:
+  m_Component:
+  - component: {fileID: 901}
+  - component: {fileID: 902}
+  m_Name: Tiles
+  m_IsActive: 1
+--- !u!4 &901
+Transform:
+  m_GameObject: {fileID: 900}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!114 &902
+MonoBehaviour:
+  m_GameObject: {fileID: 900}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 00000000000000000000000000000000, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXTilemapRenderer
+  tilemap: {fileID: 11400000, guid: 71000000000000000000000000000004, type: 2}
+--- !u!1 &910
+GameObject:
+  m_Component:
+  - component: {fileID: 911}
+  - component: {fileID: 912}
+  m_Name: Beep
+  m_IsActive: 1
+--- !u!4 &911
+Transform:
+  m_GameObject: {fileID: 910}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!114 &912
+MonoBehaviour:
+  m_GameObject: {fileID: 910}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 00000000000000000000000000000000, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXAudioClip
+  ClipName: beep
+  Clip: {fileID: 8300000, guid: 71000000000000000000000000000005, type: 3}
+  SampleRate: 11025
+  Loop: 1
+  DefaultVolume: 90
+  TrimLeadingSilence: 1
+--- !u!1 &920
+GameObject:
+  m_Component:
+  - component: {fileID: 921}
+  - component: {fileID: 922}
+  m_Name: Sprites
+  m_IsActive: 1
+--- !u!4 &921
+Transform:
+  m_GameObject: {fileID: 920}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!114 &922
+MonoBehaviour:
+  m_GameObject: {fileID: 920}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 00000000000000000000000000000000, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXSprite
+  sheet: {fileID: 11400000, guid: 71000000000000000000000000000003, type: 2}

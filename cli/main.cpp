@@ -62,16 +62,25 @@ static int usage() {
                  "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
                  "  the settings start from <model>.import.json beside the model when there is one\n"
                  "usage: splashpack-cli import-unity <unityProject> <destDir> [--scenes Name1,Name2,...]\n"
+                 "    [--cd-track N=<audio file>]...\n"
                  "  makes a new project in <destDir> (new or empty) from the scenes of a Unity SplashEdit\n"
                  "  project, in the order given (default: every scene with a PSXSceneExporter, in Build\n"
                  "  Settings order, then by name); prints what it did not bring over and a summary line,\n"
                  "  and writes the same report to <destDir>/import-report.txt\n"
+                 "  --cd-track gives CD music track N (2 and up, no gaps; Audio.PlayCDDA(N) plays it): Unity\n"
+                 "    keeps that list in its editor preferences, not in the project; the files are copied\n"
+                 "    into <destDir>/music and listed in disc.json\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
                  "  compiles one Lua file to PS1 bytecode, as --lua-bytecode does\n"
                  "usage: splashpack-cli blocks <in.blocks>\n"
                  "  prints the Lua a block script exports as\n"
+                 "usage: splashpack-cli build <scene>... -o <dir> [--project <dir>] [--lua-bytecode]\n"
+                 "  exports the scenes as one build, <dir>/scene_<i>.{splashpack,vram,spu,loading}, the files\n"
+                 "  psxsplash's PCdrv loader opens (the game boots in scene 0), as Play does: scene 0 carries the\n"
+                 "  largest ordering table and bump allocator of the build, since psxsplash allocates them once,\n"
+                 "  from scene 0, and prints a render buffers line when it raised them\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
                  "    [--licence <file|psxsplash|none>] [--volume <name>] [--track <audio file>]...\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
@@ -208,6 +217,17 @@ static int importUnity(int argc, char** argv) {
                 if (c > p) opt.scenes.push_back(list.substr(p, c - p));
                 p = c + 1;
             }
+        } else if (a == "--cd-track" && i + 1 < argc) {
+            // N=path: disc track N (2 and up) plays that audio file.
+            const std::string v = argv[++i];
+            const size_t eq = v.find('=');
+            char* end = nullptr;
+            const long n = eq == std::string::npos ? 0 : std::strtol(v.substr(0, eq).c_str(), &end, 10);
+            if (eq == std::string::npos || eq == 0 || !end || *end || eq + 1 >= v.size()) {
+                std::fprintf(stderr, "error: --cd-track wants N=path (N the disc track, 2 and up), not %s\n", v.c_str());
+                return 2;
+            }
+            opt.cdTracks.push_back({int(n), v.substr(eq + 1)});
         } else return usage();
     }
     try {
@@ -372,6 +392,65 @@ static int font(int argc, char** argv) {
     }
 }
 
+// "render buffers: scene 0 raised to ..." when a build raised the boot scene's buffers.
+static void printRaised(const splash::ExportStats& st) {
+    if (!st.renderBuffersRaised()) return;
+    std::printf("render buffers: scene 0 raised to ordering_table=%u bump=%u (alone %u, %u): psxsplash allocates them "
+                "once, from scene 0, so it carries the largest of the build\n",
+                st.orderingTableSize, st.bumpAllocatorSize, st.ownOrderingTableSize, st.ownBumpAllocatorSize);
+}
+
+// splashpack-cli build <scene>... -o <dir> [--project <dir>] [--lua-bytecode]
+static int buildCmd(int argc, char** argv) {
+    std::vector<std::string> scenePaths;
+    std::string outDir, project;
+    bool bytecode = false;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "-o" && i + 1 < argc) outDir = argv[++i];
+        else if (a == "--project" && i + 1 < argc) project = argv[++i];
+        else if (a == "--lua-bytecode") bytecode = true;
+        else if (!a.empty() && a[0] != '-') scenePaths.push_back(a);
+        else return usage();
+    }
+    if (scenePaths.empty() || outDir.empty()) return usage();
+    std::vector<splash::Scene> scenes;
+    for (const std::string& path : scenePaths) {
+        try {
+            scenes.push_back(splash::loadScene(path));
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "error: %s: %s\n", path.c_str(), e.what());
+            return 1;
+        }
+    }
+    try {
+        std::vector<const splash::Scene*> ptrs;
+        for (const splash::Scene& s : scenes) ptrs.push_back(&s);
+        const fs::path root = project.empty() ? fs::path(scenePaths.front()).parent_path() : fs::path(project);
+        fs::create_directories(outDir);
+        splash::ExportOptions opt;
+        opt.luaBytecode = bytecode;
+        opt.vram = splash::readVramSettings(root / "vram.json");
+        auto spk = [&](size_t i) { return fs::path(outDir) / ("scene_" + std::to_string(i) + ".splashpack"); };
+        const std::vector<splash::ExportResult> all = splash::exportBuild(ptrs, root, spk, opt);
+        bool ok = true;
+        for (size_t i = 0; i < all.size(); i++) {
+            const std::string tag = "scene " + std::to_string(i) + " (" + fs::path(scenePaths[i]).stem().string() + "): ";
+            for (auto& m : all[i].warnings) std::fprintf(stderr, "warning: %s%s\n", tag.c_str(), m.c_str());
+            for (auto& m : all[i].errors) std::fprintf(stderr, "error: %s%s\n", tag.c_str(), m.c_str());
+            ok = ok && all[i].ok();
+            if (all[i].ok())
+                std::printf("%s ordering_table=%u bump=%u\n", spk(i).string().c_str(), all[i].stats.orderingTableSize,
+                            all[i].stats.bumpAllocatorSize);
+        }
+        if (!all.empty()) printRaised(all[0].stats);
+        return ok ? 0 : 1;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 static int discCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outPath, project, engine, licence, volume;
@@ -433,6 +512,7 @@ static int discCmd(int argc, char** argv) {
         for (auto& m : r.exported.errors) std::fprintf(stderr, "error: %s\n", m.c_str());
         if (!r.exported.ok()) return 1;
         std::printf("%s sectors=%u\n", outPath.c_str(), r.disc.sectors);
+        printRaised(r.exported.stats);
         for (size_t t = 0; t < r.disc.tracks.size(); t++)
             std::printf("track %zu lba=%u sectors=%u length=%s\n", t + 2, r.disc.tracks[t].start,
                         r.disc.tracks[t].sectors, splash::cueTime(r.disc.tracks[t].sectors).c_str());
@@ -445,6 +525,7 @@ static int discCmd(int argc, char** argv) {
 
 int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "disc") == 0) return discCmd(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "build") == 0) return buildCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "import") == 0) return importCmd(argc, argv);

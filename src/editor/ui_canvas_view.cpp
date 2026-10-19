@@ -260,6 +260,7 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
     ImRect eye(ImVec2(x1 - 26, y), ImVec2(x1, y + size::field));
     const UICanvas* cv = sel.canvas >= 0 ? &cvs[size_t(sel.canvas)] : nullptr;
     std::string shown = cv ? cv->name + (cv->name.empty() ? "(unnamed canvas)" : "") : std::string("No canvas");
+    nameRect("ui.canvas", pick);  // scripted tests: --click @ui.canvas, then @ui.canvas/<name>
     if (pickField("canvaspick", pick, icon::layoutTemplate, rgb(0x5ccfe0), shown.c_str())) ImGui::OpenPopup("##canvasmenu");
     tooltip("The canvas being edited. A scene can have up to 24; higher sort orders draw in front.");
     if (cv) {
@@ -275,9 +276,10 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
             ImGui::PushID(i);
             std::string meta = std::to_string(cvs[size_t(i)].elements.size()) + " el" + (cvs[size_t(i)].visible ? "" : ", hidden");
             if (!cvs[size_t(i)].name.empty() && cvs[size_t(i)].name == doc.scene().settings.loadingCanvas) meta += ", loading screen";
-            if (menuItem(i == sel.canvas ? icon::chevronRight : icon::layoutTemplate, rgb(0x5ccfe0), cvs[size_t(i)].name.c_str(),
-                         meta.c_str()))
-                doc.selectUi({i, -1});
+            const bool picked = menuItem(i == sel.canvas ? icon::chevronRight : icon::layoutTemplate, rgb(0x5ccfe0),
+                                         cvs[size_t(i)].name.c_str(), meta.c_str());
+            nameRect("ui.canvas/" + cvs[size_t(i)].name, ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+            if (picked) doc.selectUi({i, -1});
             ImGui::PopID();
         }
         if (!cvs.empty()) ImGui::Separator();
@@ -637,9 +639,27 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     const UICanvas& cv = cvs[size_t(sel.canvas)];
 
     // The screen: a checkerboard where nothing draws, then the canvases the
-    // game shows at the start, and the one being edited even when hidden.
+    // game shows at the start, and the one being edited even when hidden. The
+    // loading screen's canvas is not among them: the game draws it alone while
+    // the scene loads (the scene's splashpack leaves it out), so it is shown
+    // alone when it is the one being edited.
+    const std::string& loading = doc.scene().settings.loadingCanvas;
+    auto isLoading = [&](size_t i) { return !loading.empty() && cvs[i].name == loading; };
+    auto atStart = [&](size_t i) { return cvs[i].visible && !isLoading(i); };
+    const bool editingLoading = isLoading(size_t(sel.canvas));
     std::vector<bool> show(cvs.size());
-    for (size_t i = 0; i < cvs.size(); i++) show[i] = cvs[i].visible || int(i) == sel.canvas;
+    for (size_t i = 0; i < cvs.size(); i++) show[i] = int(i) == sel.canvas || (!editingLoading && atStart(i));
+    if (reportLayout) {
+        // The canvases on the screen, in the scene's order.
+        std::string line = "uicanvas: drawn";
+        for (size_t i = 0; i < cvs.size(); i++)
+            if (show[i]) line += " " + cvs[i].name;
+        if (m_drawnReported != line) {
+            m_drawnReported = line;
+            std::printf("%s\n", line.c_str());
+            std::fflush(stdout);
+        }
+    }
     upload(doc, show);
     ImGui::PushClipRect(area.Min, area.Max, true);
     const ImVec2 o = origin, end = origin + size;
@@ -654,8 +674,8 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     // Centre marks.
     dl->AddLine(ImVec2(o.x + size.x * 0.5f, o.y - 6), ImVec2(o.x + size.x * 0.5f, o.y - 1), color::textFaint);
     dl->AddLine(ImVec2(o.x - 6, o.y + size.y * 0.5f), ImVec2(o.x - 1, o.y + size.y * 0.5f), color::textFaint);
-    if (!cv.visible) {
-        const char* note = "Hidden at start: shown here to edit";
+    if (!atStart(size_t(sel.canvas))) {
+        const char* note = editingLoading ? "Loading screen: drawn alone while the scene loads" : "Hidden at start: shown here to edit";
         ImVec2 ns = measure(f.medium, type::caption, note);
         ImRect chip(ImVec2(o.x, end.y + 6), ImVec2(o.x + ns.x + space::md * 2, end.y + 6 + 20));
         dl->AddRectFilled(chip.Min, chip.Max, color::warnSoft, radius::pill);

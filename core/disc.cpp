@@ -674,24 +674,14 @@ DiscResult exportDisc(const std::vector<const Scene*>& scenes, const fs::path& p
         std::vector<DiscFile> files;
         files.push_back({"SYSTEM.CNF", std::vector<uint8_t>(cnf, cnf + std::strlen(cnf))});
         files.push_back({"PSX.EXE", std::move(exe)});
+        // Prefab instances filled in from their files as they are now; scene
+        // 0's render buffers the build's largest (exportBuild).
+        auto spkOf = [&](size_t i) { return tmp / ("scene_" + std::to_string(i) + ".splashpack"); };
+        std::vector<ExportResult> all = exportBuild(scenes, projectRoot, spkOf, opt);
         for (size_t i = 0; i < scenes.size(); ++i) {
             const std::string tag = sceneTag(i, scenes.size(), i < names.size() ? names[i] : std::string());
-            const fs::path spk = tmp / ("scene_" + std::to_string(i) + ".splashpack");
-            ExportResult one;
-            try {
-                // Prefab instances filled in from their files as they are now.
-                Scene scene = *scenes[i];
-                one.errors = resolvePrefabs(scene, projectRoot);
-                if (one.ok()) one = exportSplashpack(scene, projectRoot, spk, opt);
-                if (one.ok() && !scene.settings.loadingCanvas.empty()) {
-                    ExportResult lr = exportLoaderPack(scene, projectRoot,
-                                                       fs::path(spk).replace_extension(".loading"), opt);
-                    one.errors.insert(one.errors.end(), lr.errors.begin(), lr.errors.end());
-                    one.warnings.insert(one.warnings.end(), lr.warnings.begin(), lr.warnings.end());
-                }
-            } catch (const std::exception& e) {
-                one.errors.push_back(e.what());
-            }
+            const fs::path spk = spkOf(i);
+            ExportResult& one = all[i];
             for (const std::string& m : one.errors) r.exported.errors.push_back(tag + m);
             for (const std::string& m : one.warnings) r.exported.warnings.push_back(tag + m);
             if (i == 0) r.exported.stats = std::move(one.stats);

@@ -205,9 +205,11 @@ pt = sector(lt)
 check('path table root', struct.unpack_from('<I', pt, 2)[0] == root_lba)
 check('path table SCENE0', s0 and pt[18:24] == b'SCENE0' and struct.unpack_from('<I', pt, 12)[0] == s0[0], pt[:24])
 
-# Two scenes: each lands under SCENE<i>/SCENE_<i>, in the order given, and each
-# is the export of its own scene. The second is the courtyard with fog on, so
-# the two packs differ.
+# Two scenes: each lands under SCENE<i>/SCENE_<i>, in the order given, as one
+# build of the two (splashpack-cli build) writes them: scene 1 as its own
+# export, scene 0 as its own but for the render buffer sizes, raised to the
+# larger of the two. The second is the courtyard with fog on and a loading
+# screen, so the two packs differ (and scene 1 needs the bigger bump allocator).
 project = os.path.dirname(scene)
 cave = os.path.join(tmp, 'cave.scene')
 doc = json.load(open(scene, encoding='utf-8'))
@@ -222,6 +224,12 @@ json.dump(doc, open(cave, 'w', encoding='utf-8'))
 ref1 = os.path.join(tmp, 'ref1.splashpack')
 r5 = subprocess.run([cli, 'export', cave, '--project', project, '-o', ref1, '--lua-bytecode'], capture_output=True, text=True)
 check('reference export of the second scene', r5.returncode == 0, r5.stderr)
+# What the disc holds is one build of both scenes (splashpack-cli build, the
+# same splash::exportBuild): psxsplash allocates its render buffers once, from
+# scene 0, so scene 0 carries the largest of the build.
+built = os.path.join(tmp, 'built')
+r6 = subprocess.run([cli, 'build', scene, cave, '--project', project, '-o', built, '--lua-bytecode'], capture_output=True, text=True)
+check('reference build of both scenes', r6.returncode == 0, r6.stderr)
 two = os.path.join(tmp, 'two.bin')
 r4 = subprocess.run([cli, 'disc', scene, cave, '--project', project, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', two],
                     capture_output=True, text=True)
@@ -238,7 +246,7 @@ if r4.returncode == 0:
     root = records(root_lba, struct.unpack_from('<I', pvd, 166)[0])
     check('volume name from the first scene', pvd[40:49] == b'COURTYARD', pvd[40:72])
     packs = {}
-    for i, base in ((0, ref), (1, ref1)):
+    for i, base in ((0, os.path.join(built, 'scene_0.splashpack')), (1, os.path.join(built, 'scene_1.splashpack'))):
         d = root.get(b'SCENE%d' % i)
         check('SCENE%d is a directory' % i, d is not None and d[2] == 2, root.keys())
         if not d:
@@ -249,13 +257,25 @@ if r4.returncode == 0:
             e = sub.get(name)
             got = e and user[e[0] * 2048:e[0] * 2048 + e[1]]
             want = open(base[:-len('.splashpack')] + ext, 'rb').read()
-            check('SCENE%d/%s = export of scene %d' % (i, name.decode(), i), got == want, e)
+            check('SCENE%d/%s = the build\'s scene %d' % (i, name.decode(), i), got == want, e)
             if ext3 == 'SPK':
                 packs[i] = got
                 # Magic and version, as scene 0's pack has them.
                 check('SCENE%d/%s has the splashpack header' % (i, name.decode()), bool(got) and got[:2] == b'SP' and
                       got[:4] == open(ref, 'rb').read()[:4], got and got[:4])
     check('the two scenes are different packs', packs.get(0) and packs.get(1) and packs[0] != packs[1])
+    # Scene 0 is its own export but for the header's ordering table and bump
+    # allocator (bytes 148..155), which are the larger of the two scenes' own.
+    lone = [open(f, 'rb').read() for f in (ref, ref1)]
+    sizes = [struct.unpack_from('<II', p, 148) for p in lone]
+    most = tuple(max(a, b) for a, b in zip(*sizes))
+    p0 = packs.get(0) or b''
+    check('SCENE0 is scene 0 alone outside the render buffer fields', len(p0) == len(lone[0]) and
+          p0[:148] == lone[0][:148] and p0[156:] == lone[0][156:], [i for i in range(min(len(p0), len(lone[0])))
+                                                                    if p0[i] != lone[0][i]][:12])
+    check('SCENE0 carries the build\'s largest ordering table and bump allocator',
+          len(p0) >= 156 and struct.unpack_from('<II', p0, 148) == most, (p0[148:156] if p0 else None, sizes))
+    check('SCENE1 is scene 1 alone', packs.get(1) == lone[1])
     ldg = root.get(b'SCENE1') and records(root[b'SCENE1'][0], root[b'SCENE1'][1]).get(b'SCENE_1.LDG;1')
     want = open(ref1[:-len('.splashpack')] + '.loading', 'rb').read() if os.path.exists(
         ref1[:-len('.splashpack')] + '.loading') else None

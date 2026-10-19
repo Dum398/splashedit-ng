@@ -7,9 +7,13 @@
 // flag), PSXSceneExporter settings, PSXObjectExporter (mesh, collider,
 // script, start-active), built-in primitive and model meshes, material
 // textures and colours, Lua files, Lights, PSXData's memory card and VRAM
-// areas, prefab instances (unpacked, their overrides applied) and the scene
-// order. Everything else (UI canvases, fonts, sprites, tilemaps, audio,
-// loading screens, ...) is listed in the ImportReport, one item per thing.
+// areas, prefab instances (unpacked, their overrides applied), the scene
+// order, PSXCanvas UI (elements laid out as PSXUILayout.Bake does), the
+// PSXFontAssets and PSXSpriteSheets they and PSXSprites use, the
+// PSXTilemapRenderer's tilemap, PSXAudioClips, the loading screen prefab's
+// canvas and, when given, the CD music tracks. Everything else (cutscenes,
+// animations, user scripts, ...) is listed in the ImportReport, one item per
+// thing.
 #pragma once
 
 #include <cstdint>
@@ -121,6 +125,18 @@ struct Primitive {
 std::optional<Primitive> builtinMesh(long long fileId);
 constexpr const char* kBuiltinGuid = "0000000000000000e000000000000000";
 
+// ---- UI ----
+
+// A RectTransform body (m_AnchorMin/Max, m_AnchoredPosition, m_SizeDelta,
+// m_Pivot; Unity's defaults for any missing) laid out into `e`'s rect and
+// anchors as PSXUILayout.Bake does: the element's own RectTransform only (no
+// parent rect), scaled by the canvas scale (resolution / canvas size), Y
+// flipped (anchorMin.y = 1 - Unity's anchorMax.y), rounded half to even.
+// Both anchors on one point: x/y the top-left corner's offset from it, w/h
+// the size (at least 1). Else: x = offsetMin.x, y = -offsetMax.y, w/h the
+// right-minus-left and bottom-minus-top insets.
+void bakeLayout(const YNode& rectTransform, float scaleX, float scaleY, UIElement& e);
+
 // ---- Scenes ----
 
 struct SceneEntry {
@@ -139,8 +155,7 @@ std::vector<SceneEntry> defaultScenes(const std::vector<SceneEntry>& all);
 // ---- The import ----
 
 // One line of the report. `kind`: Later = a SplashEdit feature this importer
-// does not bring over yet (UI canvases, fonts, sprites, tilemaps, audio,
-// loading screens, ...); LeftOut = no psxsplash equivalent (a Camera, a user
+// does not bring over yet (cutscenes, animations, ...); LeftOut = no psxsplash equivalent (a Camera, a user
 // script); Changed = brought over, but not exactly (an approximated sphere);
 // Missing = a file the scene refers to is not in the project.
 struct ReportItem {
@@ -169,14 +184,21 @@ struct ImportOptions {
     // Scene names (file stems) or asset paths, in the build order wanted.
     // Empty: defaultScenes, in listScenes order.
     std::vector<std::string> scenes;
+    // CD-DA music: (disc track number, audio file) pairs. Unity keeps its CD
+    // music list in the editor's preferences, not in the project, so it is
+    // given here. Numbers start at 2 (track 1 is the data) and leave no gap;
+    // the files go into music/ and their list into disc.json.
+    std::vector<std::pair<int, std::string>> cdTracks;
 };
 
 // Imports into `dest`, a folder that does not exist yet or is empty (and is
 // not inside the Unity project): <scene>.scene per scene, meshes/,
-// textures/, scripts/, models/, scenes.list, vram.json when PSXData has
-// prohibited areas, and import-report.txt. On an error before anything is
-// written (no such project, a scene name not found, `dest` not empty) the
-// report's `error` says why and `dest` is untouched.
+// textures/, scripts/, models/, fonts/, audio/, scenes.list, vram.json when
+// PSXData has prohibited areas, music/ and disc.json when CD tracks are given,
+// and import-report.txt. On an error before anything is written (no such
+// project, a scene name not found, `dest` not empty, a CD track that is
+// misnumbered or not an audio file) the report's `error` says why and `dest`
+// is untouched.
 ImportReport importProject(const std::filesystem::path& unityProject, const std::filesystem::path& dest,
                            const ImportOptions& options = {});
 

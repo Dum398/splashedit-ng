@@ -211,6 +211,11 @@ static void reportBuild(State& st, const char* what, const State::Play::Launch& 
     scriptLine(nullptr, std::string("build report: ") + what + " scenes " + std::to_string(l.scenes) + " errors " +
                             std::to_string(st.play.built.errors.size()) + " warnings " +
                             std::to_string(st.play.built.warnings.size()));
+    // Scene 0 given the build's largest render buffers (splash::exportBuild).
+    if (r.stats.renderBuffersRaised())
+        scriptLine(nullptr, std::string("build buffers: ") + what + " scene 0 raised ot " + std::to_string(r.stats.ownOrderingTableSize) +
+                                " -> " + std::to_string(r.stats.orderingTableSize) + " bump " +
+                                std::to_string(r.stats.ownBumpAllocatorSize) + " -> " + std::to_string(r.stats.bumpAllocatorSize));
 }
 
 // F5 and the Play button: start, or stop what is running.
@@ -1917,8 +1922,8 @@ static void newProjectModal(State& st, editor::Document& doc, ImVec2 size) {
     ImGui::EndPopup();
 }
 
-// Import Unity Project's two Choose folder... buttons: 0 = the Unity
-// project, 1 = the new project's folder.
+// Import Unity Project's Choose folder... and Choose file... buttons: 0 = the
+// Unity project, 1 = the new project's folder, 2 + k = CD track k + 2's file.
 static std::mutex g_unityPickMutex;
 static std::optional<std::pair<int, std::string>> g_unityPicked;
 static void SDLCALL onUnityFolder(void* which, const char* const* files, int) {
@@ -1936,7 +1941,9 @@ static std::string trimmedPath(std::string v) {
 // Import Unity Project: the Unity project folder and the new project's
 // folder (typed, or picked with Choose folder...), the Unity project's scenes
 // (a switch each, in build order, moved with the arrows; the ones holding a
-// PSXSceneExporter on at first), then Import. The import runs on a worker
+// PSXSceneExporter on at first), the CD music tracks (Unity keeps them in its
+// editor preferences: a file each, typed or picked, from disc track 2), then
+// Import. The import runs on a worker
 // thread; when it is done the new project opens and the modal shows what was
 // not brought over (the report, also in import-report.txt). Scripted runs
 // print "unityimport: imported <summary>" or "unityimport: failed <reason>".
@@ -1946,7 +1953,9 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
     {
         std::lock_guard<std::mutex> lock(g_unityPickMutex);
         if (g_unityPicked) {
-            (g_unityPicked->first == 0 ? ui.source : ui.dest) = g_unityPicked->second;
+            const int which = g_unityPicked->first;
+            if (which < 2) (which == 0 ? ui.source : ui.dest) = g_unityPicked->second;
+            else if (size_t(which - 2) < ui.cdTracks.size()) ui.cdTracks[size_t(which - 2)] = g_unityPicked->second;
             g_unityPicked.reset();
         }
     }
@@ -2223,6 +2232,40 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
         if (move >= 0) std::swap(ui.scenes[size_t(move)], ui.scenes[size_t(move + moveBy)]);
         y += listH + space::md;
 
+        // CD music: not in the Unity project, so asked for here.
+        text(dl, ImVec2(o.x, y), f.medium, type::body, color::text, "CD music");
+        const char* cdNote = "Unity keeps these in its editor preferences, not in the project. Audio.PlayCDDA(2) plays track 2.";
+        const ImVec2 cdn = measure(f.regular, type::caption, cdNote);
+        text(dl, ImVec2(o.x + inner - cdn.x, y + 2), f.regular, type::caption, color::textFaint, cdNote);
+        y += 24;
+        const float fw2 = buttonWidth(icon::folderOpen, "Choose file..."), xw = 26;
+        int dropTrack = -1;
+        for (size_t k = 0; k < ui.cdTracks.size(); ++k) {
+            const std::string n = std::to_string(k + 2), label = "Track " + n;
+            field(label.c_str(), ("##unitycd" + n).c_str(), ("unity.cdtrack." + n).c_str(), "An audio file: WAV, AIFF, MP3, Ogg or FLAC",
+                  ("The file disc track " + n + " plays (Audio.PlayCDDA(" + n + ")). It is copied into the new project.").c_str(),
+                  &ui.cdTracks[k], fw2 + xw + space::sm * 2);
+            const float by = y + (rowH - size::field - 6) * 0.5f;
+            if (button(("unity.cdbrowse." + n).c_str(), ImVec2(o.x + inner - xw - space::sm - fw2, by), icon::folderOpen, "Choose file...",
+                       ButtonKind::Secondary, nullptr, "Pick the audio file for this track") &&
+                !busy) {
+                const std::string loc = trimmedPath(ui.cdTracks[k]);
+                ui::showOpenFileDialog("unity-cd", onUnityFolder, reinterpret_cast<void*>(intptr_t(2 + k)), kAudioFilter, 1,
+                                       loc.empty() ? nullptr : loc.c_str(), false);
+            }
+            const ImRect xr(ImVec2(o.x + inner - xw, by), ImVec2(o.x + inner, by + size::field + 6));
+            nameRect("unity.cdremove." + n, xr);
+            if (iconButton(("unity.cdremove." + n).c_str(), xr, icon::x, false, "Remove this track (the later ones move up)", color::textDim, !busy))
+                dropTrack = int(k);
+            y += rowH + space::xs;
+        }
+        if (dropTrack >= 0) ui.cdTracks.erase(ui.cdTracks.begin() + dropTrack);
+        if (button("unity.cdadd", ImVec2(o.x, y), icon::plus, ui.cdTracks.empty() ? "Add a CD track" : "Add another CD track", ButtonKind::Ghost,
+                   nullptr, "A music track for the disc, after the ones above") &&
+            !busy)
+            ui.cdTracks.emplace_back();
+        y += size::field + 6 + space::md;
+
         // What Import will do, or why it is off.
         std::vector<std::string> chosen;
         for (const auto& row : ui.scenes)
@@ -2234,6 +2277,12 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
         else if (dest.empty()) reason = "Choose a folder for the new project";
         else if (fs::exists(fromUtf8(dest), ec) && (!fs::is_directory(fromUtf8(dest), ec) || !fs::is_empty(fromUtf8(dest), ec)))
             reason = "The new project's folder is not empty; choose a new or empty one";
+        for (size_t k = 0; k < ui.cdTracks.size() && reason.empty(); ++k) {
+            const std::string t = trimmedPath(ui.cdTracks[k]), n = std::to_string(k + 2);
+            if (t.empty()) reason = "Choose a file for CD track " + n + ", or remove it";
+            else if (!fs::is_regular_file(fromUtf8(t), ec)) reason = "CD track " + n + ": there is no such file";
+            else if (!splash::isAudioFile(fromUtf8(t))) reason = "CD track " + n + " is not a WAV, AIFF, MP3, Ogg or FLAC file";
+        }
         const std::string where = busy ? "Importing " + std::to_string(chosen.size()) + (chosen.size() == 1 ? " scene..." : " scenes...")
                                   : reason.empty() ? "Imports " + std::to_string(chosen.size()) + (chosen.size() == 1 ? " scene" : " scenes") +
                                                          " into " + dest
@@ -2273,6 +2322,7 @@ static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
             ui.error.clear();
             splash::unity::ImportOptions opt;
             opt.scenes = chosen;
+            for (size_t k = 0; k < ui.cdTracks.size(); ++k) opt.cdTracks.push_back({int(k) + 2, trimmedPath(ui.cdTracks[k])});
             ui.runningDest = fromUtf8(dest);
             ui.running = std::async(std::launch::async, [src = fromUtf8(source), d = ui.runningDest, opt] {
                 try {
@@ -7048,6 +7098,30 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 buUsed && peak->bump > buUsed ? color::warn : color::accentHover);
     if (stats) caption(kb(stats->rendererBytes()) + " KB of RAM for both, double-buffered", color::textFaint);
     else caption("Sizes appear once the scene exports.", color::textFaint);
+    {
+        // psxsplash allocates the buffers once, from the scene it boots in, and
+        // Play/Export give that scene the build's largest (splash::exportBuild).
+        namespace fs = std::filesystem;
+        static fs::path cachedRoot, cachedOpen;
+        static std::vector<fs::path> build;
+        static double readAt = -1;
+        const double now = ImGui::GetTime();
+        const fs::path open = openSceneFile(doc);
+        if (doc.projectRoot() != cachedRoot || open != cachedOpen || now - readAt > 1.0) {
+            cachedRoot = doc.projectRoot();
+            cachedOpen = open;
+            readAt = now;
+            build = doc.projectRoot().empty() ? std::vector<fs::path>{} : editor::buildScenes(doc.projectRoot(), open);
+        }
+        if (build.size() > 1) {
+            const bool boot = !open.empty() && build.front().lexically_normal() == open.lexically_normal();
+            caption(boot ? "Boot scene: psxsplash allocates these once, from this scene, so Play and Export raise them to the "
+                           "largest any scene of the build needs."
+                         : "psxsplash keeps the boot scene's buffers for every scene; Play and Export raise those to fit "
+                           "this one.",
+                    color::textFaint);
+        }
+    }
     if (!renderOpen) {
         ImGui::PopClipRect();
         y = top + 34 + space::md;

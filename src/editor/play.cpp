@@ -247,31 +247,26 @@ static const char* const kSceneExts[] = {".splashpack", ".vram", ".spu", ".geo",
 
 static std::string sceneStem(size_t i) { return "scene_" + std::to_string(i); }
 
-// Exports `scene` as dir/scene_<i>.*, removing that scene's old files first so
-// a failed export leaves none of them to boot.
-static splash::ExportResult exportScene(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir,
-                                        size_t i) {
-    splash::ExportResult r;
-    std::error_code ec;
-    for (const char* ext : kSceneExts) fs::remove(dir / (sceneStem(i) + ext), ec);
+static splash::ExportOptions playOptions(const fs::path& projectRoot) {
     splash::ExportOptions opt;
     opt.luaBytecode = true;
     opt.vram = loadVramSettings(projectRoot);
-    try {
-        // Prefab instances filled in from their files as they are now.
-        splash::Scene resolved = scene;
-        r.errors = splash::resolvePrefabs(resolved, projectRoot);
-        if (!r.ok()) return r;
-        r = splash::exportSplashpack(resolved, projectRoot, dir / (sceneStem(i) + ".splashpack"), opt);
-        if (r.ok() && !resolved.settings.loadingCanvas.empty()) {
-            splash::ExportResult lr = splash::exportLoaderPack(resolved, projectRoot, dir / (sceneStem(i) + ".loading"), opt);
-            r.errors.insert(r.errors.end(), lr.errors.begin(), lr.errors.end());
-            r.warnings.insert(r.warnings.end(), lr.warnings.begin(), lr.warnings.end());
-        }
-    } catch (const std::exception& e) {
-        r.errors.push_back(e.what());
-    }
-    return r;
+    return opt;
+}
+
+static void removeSceneFiles(const fs::path& dir, size_t i) {
+    std::error_code ec;
+    for (const char* ext : kSceneExts) fs::remove(dir / (sceneStem(i) + ext), ec);
+}
+
+// Exports `scene` alone as dir/scene_<i>.*, removing that scene's old files
+// first so a failed export leaves none of them to boot.
+static splash::ExportResult exportScene(const splash::Scene& scene, const fs::path& projectRoot, const fs::path& dir,
+                                        size_t i) {
+    removeSceneFiles(dir, i);
+    return splash::exportBuild({&scene}, projectRoot, [&](size_t) { return dir / (sceneStem(i) + ".splashpack"); },
+                               playOptions(projectRoot))
+        .front();
 }
 
 splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scenes, const fs::path& projectRoot,
@@ -297,9 +292,13 @@ splash::ExportResult exportForPlay(const std::vector<const splash::Scene*>& scen
     }
     for (const fs::path& f : stale) fs::remove(f, ec);
     fs::remove(dir / "reload.flag", ec);
+    // Scene 0's render buffers come out as the build's largest (exportBuild).
+    for (size_t i = 0; i < scenes.size(); ++i) removeSceneFiles(dir, i);
+    std::vector<splash::ExportResult> all = splash::exportBuild(
+        scenes, projectRoot, [&](size_t i) { return dir / (sceneStem(i) + ".splashpack"); }, playOptions(projectRoot));
     for (size_t i = 0; i < scenes.size(); ++i) {
         const std::string tag = splash::sceneTag(i, scenes.size(), i < names.size() ? names[i] : std::string());
-        splash::ExportResult one = exportScene(*scenes[i], projectRoot, dir, i);
+        splash::ExportResult& one = all[i];
         for (const std::string& m : one.errors) r.errors.push_back(tag + m);
         for (const std::string& m : one.warnings) r.warnings.push_back(tag + m);
         if (i == 0) r.stats = std::move(one.stats);

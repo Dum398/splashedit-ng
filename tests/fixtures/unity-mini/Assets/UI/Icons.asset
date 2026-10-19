@@ -1,0 +1,21 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 59d9300751bf4164d845973ba2459642, type: 3}
+  m_Name: Icons
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXSpriteSheet
+  sheetName: icons
+  sourceTexture: {fileID: 2800000, guid: b1000000000000000000000000000001, type: 3}
+  bitDepth: 8
+  cellWidth: 8
+  cellHeight: 8
+  animations:
+  - animationName: blink
+    firstFrame: 1
+    frameCount: 2
+    frameDuration: 10
+    loop: 0

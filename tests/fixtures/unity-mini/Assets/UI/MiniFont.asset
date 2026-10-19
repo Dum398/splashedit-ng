@@ -1,0 +1,16 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: b5bc0d8f6252841439e81a8406c37859, type: 3}
+  m_Name: MiniFont
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXFontAsset
+  sourceFont: {fileID: 0}
+  fontSize: 12
+  fontTexture: {fileID: 2800000, guid: 71000000000000000000000000000002, type: 3}
+  glyphWidth: 8
+  glyphHeight: 8
+  storedAdvanceWidths: 030405060703040506070304050607030405060703040506070304050607030405060703040506070304050607030405060703040506070304050607030405060703040506070304050607030405060703040506070304050607030405060703

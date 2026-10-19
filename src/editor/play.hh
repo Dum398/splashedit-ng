@@ -18,15 +18,19 @@ namespace editor {
 // `disc` is the CD-ROM build of psxsplash that Export puts on the disc.
 // overlayPerf and overlayRooms pick the psxsplash build Play and Run on
 // hardware boot: one with the FPS counter and heap bar, the room wireframe,
-// or both (see overlayEngine). The disc never gets them.
+// or both (see overlayEngine). The disc never gets them. bootLogo off makes
+// them boot the build without psxsplash's boot logo (the -nologo one beside
+// it, see engineFor); the disc follows the project's own disc setting.
 struct PlayTools {
     std::filesystem::path redux, psxsplash, bios, disc;
     std::string port;  // Run on hardware: a serial port, or tcp:HOST:PORT
     bool overlayPerf = false, overlayRooms = false;
+    bool bootLogo = true;
 };
 
 // key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
-// overlay_rooms= (1 or 0). A missing file or key reads as empty or off.
+// overlay_rooms=, boot_logo= (1 or 0). A missing file or key reads as empty
+// or off, but boot_logo as on.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 
@@ -38,13 +42,28 @@ PlayTools withDefaults(PlayTools tools, const std::filesystem::path& bundle = {}
 
 // The psxsplash build with the overlays asked for, beside `engine`:
 // <stem>-perf, <stem>-rooms or <stem>-perf-rooms with engine's extension;
-// `engine` itself with neither.
-std::filesystem::path overlayEngine(const std::filesystem::path& engine, bool perf, bool rooms);
+// `engine` itself with neither. `nologo` adds -nologo last, the build
+// without the boot logo (psxsplash-perf-rooms-nologo.ps-exe). With any of
+// them asked for, a variant's name given as `engine` names the same family
+// as the plain build; with none, `engine` is returned as it is.
+std::filesystem::path overlayEngine(const std::filesystem::path& engine, bool perf, bool rooms, bool nologo = false);
+
+// The same for the disc build: <stem>-nologo beside `disc` with `nologo`
+// (psxsplash-cdrom-nologo.ps-exe, also for a -nologo `disc`), else `disc`.
+std::filesystem::path discEngine(const std::filesystem::path& disc, bool nologo);
 
 // The build Play and Run on hardware boot for `effective` (withDefaults'
 // result): overlayEngine of its psxsplash, whether or not that file exists,
-// so a missing overlay build is reported rather than booted without.
-std::filesystem::path engineFor(const PlayTools& effective);
+// so a missing overlay build is reported rather than booted without. With
+// bootLogo off it is the -nologo build when that file exists; when it does
+// not (a psxsplash picked by hand, without one beside it) the build with
+// the logo boots instead and `note`, when given, says why. `note` is
+// cleared otherwise.
+std::filesystem::path engineFor(const PlayTools& effective, std::string* note = nullptr);
+
+// The disc build Export writes for `disc` (withDefaults' disc) and the
+// project's DiscSettings::bootLogo, falling back to `disc` the same way.
+std::filesystem::path discEngineFor(const std::filesystem::path& disc, bool bootLogo, std::string* note = nullptr);
 
 // One line per thing Play still needs; empty when it can run.
 std::vector<std::string> missingTools(const PlayTools& tools);

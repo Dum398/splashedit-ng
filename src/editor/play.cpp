@@ -41,6 +41,7 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "port") t.port = value;
         else if (key == "overlay_perf") t.overlayPerf = value == "1";
         else if (key == "overlay_rooms") t.overlayRooms = value == "1";
+        else if (key == "boot_logo") t.bootLogo = value != "0";
     }
     return t;
 }
@@ -55,7 +56,8 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "disc=" << utf8(t.disc) << "\n"
         << "port=" << t.port << "\n"
         << "overlay_perf=" << (t.overlayPerf ? 1 : 0) << "\n"
-        << "overlay_rooms=" << (t.overlayRooms ? 1 : 0) << "\n";
+        << "overlay_rooms=" << (t.overlayRooms ? 1 : 0) << "\n"
+        << "boot_logo=" << (t.bootLogo ? 1 : 0) << "\n";
     return bool(out);
 }
 
@@ -136,24 +138,70 @@ PlayTools withDefaults(PlayTools t, const fs::path& bundle) {
     return t;
 }
 
-fs::path overlayEngine(const fs::path& engine, bool perf, bool rooms) {
-    if ((!perf && !rooms) || engine.empty()) return engine;
-    // A variant picked as the psxsplash build names the same family as the plain build.
-    std::string stem = utf8(engine.stem());
-    for (const char* suffix : {"-perf-rooms", "-perf", "-rooms"}) {
+// Drops the first of `suffixes` that `stem` ends with (and is more than).
+static void dropSuffix(std::string& stem, std::initializer_list<const char*> suffixes) {
+    for (const char* suffix : suffixes) {
         const std::string sfx = suffix;
         if (stem.size() > sfx.size() && stem.compare(stem.size() - sfx.size(), sfx.size(), sfx) == 0) {
             stem.resize(stem.size() - sfx.size());
-            break;
+            return;
         }
     }
-    fs::path name = fromUtf8(stem);
-    name += fromUtf8(perf && rooms ? "-perf-rooms" : perf ? "-perf" : "-rooms");
+}
+
+fs::path overlayEngine(const fs::path& engine, bool perf, bool rooms, bool nologo) {
+    if ((!perf && !rooms && !nologo) || engine.empty()) return engine;
+    // A variant picked as the psxsplash build names the same family as the plain build.
+    std::string stem = utf8(engine.stem());
+    const std::string plain = stem;
+    dropSuffix(stem, {"-nologo"});
+    dropSuffix(stem, {"-perf-rooms", "-perf", "-rooms"});
+    std::string want = stem;
+    if (perf && rooms) want += "-perf-rooms";
+    else if (perf) want += "-perf";
+    else if (rooms) want += "-rooms";
+    if (nologo) want += "-nologo";
+    if (want == plain) return engine;
+    fs::path name = fromUtf8(want);
     name += engine.extension();
     return engine.parent_path() / name;
 }
 
-fs::path engineFor(const PlayTools& t) { return overlayEngine(t.psxsplash, t.overlayPerf, t.overlayRooms); }
+fs::path discEngine(const fs::path& disc, bool nologo) {
+    if (!nologo || disc.empty()) return disc;
+    std::string stem = utf8(disc.stem());
+    const std::string plain = stem;
+    dropSuffix(stem, {"-nologo"});
+    if (nologo) stem += "-nologo";
+    if (stem == plain) return disc;
+    fs::path name = fromUtf8(stem);
+    name += disc.extension();
+    return disc.parent_path() / name;
+}
+
+// `nologo` when it is there, else `logo`, saying so in `note`.
+static fs::path logoFallback(const fs::path& logo, const fs::path& nologo, const char* what, std::string* note) {
+    std::error_code ec;
+    if (fs::is_regular_file(nologo, ec)) return nologo;
+    if (note)
+        *note = std::string(what) + " without the boot logo not found: " + utf8(nologo) + ". Booting " +
+                utf8(logo.filename()) + " instead, so the boot logo plays.";
+    return logo;
+}
+
+fs::path engineFor(const PlayTools& t, std::string* note) {
+    if (note) note->clear();
+    const fs::path logo = overlayEngine(t.psxsplash, t.overlayPerf, t.overlayRooms);
+    if (t.bootLogo || logo.empty()) return logo;
+    return logoFallback(logo, overlayEngine(t.psxsplash, t.overlayPerf, t.overlayRooms, true), "The psxsplash build", note);
+}
+
+fs::path discEngineFor(const fs::path& disc, bool bootLogo, std::string* note) {
+    if (note) note->clear();
+    const fs::path logo = discEngine(disc, false);
+    if (bootLogo || logo.empty()) return logo;
+    return logoFallback(logo, discEngine(disc, true), "The psxsplash disc build", note);
+}
 
 // "The psxsplash build", naming the overlays it is asked to have.
 static std::string engineWhat(const PlayTools& t) {

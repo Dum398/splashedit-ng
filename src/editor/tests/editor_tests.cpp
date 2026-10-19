@@ -1453,6 +1453,104 @@ void testPlayOverlays() {
     CHECK(editor::missingDiscTools(eff).empty());
 }
 
+// Build > Boot Logo in Test Runs and the Disc section's Boot logo: with the
+// logo off, Play, Run on hardware and Export boot the -nologo build beside
+// the chosen one, or the build with the logo when there is none (saying so).
+void testPlayBootLogo() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "play-bootlogo";
+    fs::remove_all(dir, ec);
+
+    // Names: overlays first, then -nologo; a -nologo or overlay name maps to its family.
+    const fs::path e = "/x/engine/psxsplash.ps-exe";
+    CHECK(editor::overlayEngine(e, false, false, true) == fs::path("/x/engine/psxsplash-nologo.ps-exe"));
+    CHECK(editor::overlayEngine(e, true, false, true) == fs::path("/x/engine/psxsplash-perf-nologo.ps-exe"));
+    CHECK(editor::overlayEngine(e, false, true, true) == fs::path("/x/engine/psxsplash-rooms-nologo.ps-exe"));
+    CHECK(editor::overlayEngine(e, true, true, true) == fs::path("/x/engine/psxsplash-perf-rooms-nologo.ps-exe"));
+    CHECK(editor::overlayEngine(fs::path("/x/engine/psxsplash-nologo.ps-exe"), false, false, true) ==
+          fs::path("/x/engine/psxsplash-nologo.ps-exe"));
+    CHECK(editor::overlayEngine(fs::path("/x/engine/psxsplash-perf-nologo.ps-exe"), false, true, false) ==
+          fs::path("/x/engine/psxsplash-rooms.ps-exe"));
+    CHECK(editor::overlayEngine(fs::path("/x/engine/psxsplash-rooms-nologo.ps-exe"), true, true, true) ==
+          fs::path("/x/engine/psxsplash-perf-rooms-nologo.ps-exe"));
+    CHECK(editor::overlayEngine("/y/my build.exe", false, false, true) == fs::path("/y/my build-nologo.exe"));
+    CHECK(editor::overlayEngine({}, false, false, true).empty());
+    const fs::path d = "/x/engine/psxsplash-cdrom.ps-exe";
+    CHECK(editor::discEngine(d, false) == d);
+    CHECK(editor::discEngine(d, true) == fs::path("/x/engine/psxsplash-cdrom-nologo.ps-exe"));
+    CHECK(editor::discEngine(fs::path("/x/engine/psxsplash-cdrom-nologo.ps-exe"), true) ==
+          fs::path("/x/engine/psxsplash-cdrom-nologo.ps-exe"));
+    CHECK(editor::discEngine({}, true).empty());
+
+    // boot_logo round-trips; a file written before it reads on.
+    const fs::path cfg = dir / "play.cfg";
+    for (bool logo : {false, true}) {
+        editor::PlayTools t;
+        t.psxsplash = e;
+        t.overlayRooms = true;
+        t.bootLogo = logo;
+        CHECK(editor::savePlayTools(cfg, t));
+        const editor::PlayTools l = editor::loadPlayTools(cfg);
+        CHECK(l.bootLogo == logo && l.overlayRooms && !l.overlayPerf);
+    }
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\npsxsplash=/p.ps-exe\noverlay_perf=1\n"; }
+    CHECK(editor::loadPlayTools(cfg).bootLogo);
+    CHECK(editor::PlayTools().bootLogo);
+
+    // A bundle carrying all ten builds: each combination boots its own.
+    setEnv("SPLASHEDIT_PSXSPLASH", "");
+    setEnv("SPLASHEDIT_DISC_ENGINE", "");
+    const fs::path bundle = dir / "bundle", eng = bundle / "engine";
+    fs::create_directories(eng);
+    for (const char* v : {"", "-cdrom", "-perf", "-rooms", "-perf-rooms"}) {
+        std::ofstream(eng / (std::string("psxsplash") + v + ".ps-exe")) << "x";
+        std::ofstream(eng / (std::string("psxsplash") + v + "-nologo.ps-exe")) << "x";
+    }
+    editor::PlayTools want;
+    want.redux = cfg;  // any existing file stands in for pcsx-redux
+    want.port = "COM3";
+    const char* stems[4] = {"psxsplash", "psxsplash-perf", "psxsplash-rooms", "psxsplash-perf-rooms"};
+    for (int k = 0; k < 8; ++k) {
+        want.overlayPerf = k & 1;
+        want.overlayRooms = k & 2;
+        want.bootLogo = !(k & 4);
+        const editor::PlayTools eff = editor::withDefaults(want, bundle);
+        const fs::path boots = eng / (std::string(stems[k & 3]) + (want.bootLogo ? "" : "-nologo") + ".ps-exe");
+        std::string note = "stale";
+        CHECK(editor::engineFor(eff, &note) == boots);
+        CHECK(note.empty());
+        CHECK(editor::missingTools(eff).empty() && editor::missingHardwareTools(eff).empty());
+        const std::vector<std::string> cmd = editor::reduxCommand(eff, "/b");
+        CHECK(std::find_if(cmd.begin(), cmd.end(), [&](const std::string& a) { return fs::path(a) == boots; }) != cmd.end());
+        // The toggle is Play's: the disc build stays the one with the logo.
+        CHECK(eff.disc == eng / "psxsplash-cdrom.ps-exe");
+    }
+    std::string note = "stale";
+    CHECK(editor::discEngineFor(eng / "psxsplash-cdrom.ps-exe", true, &note) == eng / "psxsplash-cdrom.ps-exe" && note.empty());
+    CHECK(editor::discEngineFor(eng / "psxsplash-cdrom.ps-exe", false, &note) == eng / "psxsplash-cdrom-nologo.ps-exe" && note.empty());
+
+    // A psxsplash picked by hand with no -nologo beside it: the logo build boots, and the note names the missing file.
+    fs::remove(eng / "psxsplash-rooms-nologo.ps-exe", ec);
+    fs::remove(eng / "psxsplash-cdrom-nologo.ps-exe", ec);
+    want.overlayPerf = false;
+    want.overlayRooms = true;
+    want.bootLogo = false;
+    const editor::PlayTools eff = editor::withDefaults(want, bundle);
+    CHECK(editor::engineFor(eff, &note) == eng / "psxsplash-rooms.ps-exe");
+    CHECK(note.find("without the boot logo not found") != std::string::npos &&
+          note.find("psxsplash-rooms-nologo.ps-exe") != std::string::npos && note.find("psxsplash-rooms.ps-exe instead") != std::string::npos);
+    CHECK(editor::engineFor(eff) == eng / "psxsplash-rooms.ps-exe");  // no note asked for
+    CHECK(editor::missingTools(eff).empty() && editor::missingHardwareTools(eff).empty());
+    CHECK(editor::discEngineFor(eng / "psxsplash-cdrom.ps-exe", false, &note) == eng / "psxsplash-cdrom.ps-exe");
+    CHECK(note.find("disc build without the boot logo not found") != std::string::npos &&
+          note.find("psxsplash-cdrom-nologo.ps-exe") != std::string::npos);
+    // With the logo build missing too, that one is what is reported missing.
+    fs::remove(eng / "psxsplash-rooms.ps-exe", ec);
+    const std::vector<std::string> miss = editor::missingTools(editor::withDefaults(want, bundle));
+    CHECK(miss.size() == 1 && miss[0].find("psxsplash-rooms.ps-exe") != std::string::npos);
+}
+
 // File menu: a new project on disk, Save As inside it, and the recent list.
 void testProject() {
     namespace fs = std::filesystem;
@@ -9876,6 +9974,32 @@ void testDiscSettings() {
     CHECK(editor::saveDiscSettings(dir, next));
     back = splash::readDiscSettings(dir / "disc.json");
     CHECK(back.volume.empty() && back.licence == "psxsplash");
+
+    // Boot logo: on unless the file says false; written only when off.
+    CHECK(back.bootLogo && splash::DiscSettings().bootLogo);
+    CHECK(splash::readDiscSettings(dir / "missing.json").bootLogo);
+    std::ofstream(dir / "logo.json", std::ios::binary) << R"({"volume": "", "licence": "", "bootLogo": "no"})";
+    CHECK(splash::readDiscSettings(dir / "logo.json").bootLogo);
+    std::ofstream(dir / "logo.json", std::ios::binary | std::ios::trunc) << R"({"bootLogo": false})";
+    CHECK(!splash::readDiscSettings(dir / "logo.json").bootLogo);
+    next.bootLogo = false;
+    next.volume = "LOGOLESS";
+    CHECK(editor::saveDiscSettings(dir, next));
+    back = editor::loadDiscSettings(dir);
+    CHECK(!back.bootLogo && back.volume == "LOGOLESS" && back.licence == "psxsplash");
+    {
+        std::ifstream in(dir / "disc.json");
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("\"bootLogo\": false") != std::string::npos);
+    }
+    next.bootLogo = true;
+    CHECK(editor::saveDiscSettings(dir, next));
+    {
+        std::ifstream in(dir / "disc.json");
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("bootLogo") == std::string::npos);
+    }
+    CHECK(editor::loadDiscSettings(dir).bootLogo);
 }
 
 // Sectors 0-15 of the written image: unchanged without a licence, the
@@ -11430,6 +11554,7 @@ int main(int argc, char** argv) {
     testBlendCancel();
     testPlay();
     testPlayOverlays();
+    testPlayBootLogo();
     testBuildScenes();
     testBuildReport();
     testVramLayout();

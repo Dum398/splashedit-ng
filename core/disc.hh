@@ -53,12 +53,16 @@ const std::vector<uint8_t>& psxsplashLicence();
 // against the project root with '/' separators: the first is disc track 2
 // (track 1 is the data), which psxsplash's Audio.PlayCDDA(2) plays. A missing
 // or unreadable file, or a value that is not a string, reads as the defaults;
-// a "tracks" entry that is not a string is skipped. writeDiscSettings returns
-// false when the file cannot be written.
+// a "tracks" entry that is not a string is skipped. "bootLogo": false = the
+// disc boots the psxsplash build without the boot logo (the editor picks
+// psxsplash-cdrom-nologo); missing or not a bool reads as true, and it is
+// written only when false. writeDiscSettings returns false when the file
+// cannot be written.
 struct DiscSettings {
     std::string volume;
     std::string licence;
     std::vector<std::string> tracks;
+    bool bootLogo = true;
 };
 DiscSettings readDiscSettings(const std::filesystem::path& file);
 bool writeDiscSettings(const std::filesystem::path& file, const DiscSettings& s);

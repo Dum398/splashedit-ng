@@ -294,11 +294,15 @@ static void updatePlay(State& st, const editor::Document& doc) {
     if (p.hwBuild.valid() && p.hwBuild.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
         splash::ExportResult r = p.hwBuild.get();
         const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
+        std::string logoNote;
+        const std::filesystem::path engine = editor::engineFor(eff, &logoNote);
+        if (r.ok() && !logoNote.empty()) r.warnings.push_back(logoNote);
         reportBuild(st, "Run on hardware", p.hwLaunch, r);
         if (!r.ok()) p.message = editor::buildFailure("Run on hardware", r);
         else {
             p.hwPort = eff.port;
-            p.hw.start(editor::HardwareRun::port(eff.port), editor::engineFor(eff), hardwareDir());
+            scriptLine(nullptr, "hardware: boots " + utf8(engine.filename()));
+            p.hw.start(editor::HardwareRun::port(eff.port), engine, hardwareDir());
             editor::restartLog(p.hwLog);
         }
     }
@@ -323,17 +327,22 @@ static void updatePlay(State& st, const editor::Document& doc) {
     }
     if (!p.build.valid() || p.build.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     splash::ExportResult r = p.build.get();
+    const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
+    std::string logoNote;
+    const std::filesystem::path engine = editor::engineFor(eff, &logoNote);
+    if (r.ok() && !logoNote.empty()) r.warnings.push_back(logoNote);
     reportBuild(st, "Play", p.playLaunch, r);
     if (!r.ok()) {
         p.message = editor::buildFailure("Play", r);
         return;
     }
     std::string err;
-    if (!p.emu.start(editor::reduxCommand(editor::withDefaults(p.tools, p.bundleDir), playDir()), &err))
+    if (!p.emu.start(editor::reduxCommand(eff, playDir()), &err))
         p.message = "Could not start pcsx-redux: " + err;
     else {
         p.startedAt = SDL_GetTicks();
         editor::restartLog(p.playLog);
+        scriptLine(nullptr, "play: boots " + utf8(engine.filename()));
         scriptLine(nullptr, "play: started");
     }
 }
@@ -427,7 +436,13 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
 
     const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
     // With an overlay on, Play and Run boot the build beside it that has it: that file is the one shown.
-    const std::filesystem::path engine = editor::engineFor(eff);
+    // With the boot logo off it is the -nologo build, or the one with the
+    // logo when there is none beside it: `logoNote` says so under the rows.
+    std::string logoNote, discNote;
+    const std::filesystem::path engine = editor::engineFor(eff, &logoNote);
+    const std::filesystem::path discExe =
+        editor::discEngineFor(eff.disc, editor::loadDiscSettings(doc.projectRoot()).bootLogo, &discNote);
+    if (mode == 1) logoNote = discNote;
     const char* engineLabel = eff.overlayPerf && eff.overlayRooms ? "psxsplash build (perf + rooms overlays)"
                               : eff.overlayPerf                   ? "psxsplash build (performance overlay)"
                               : eff.overlayRooms                  ? "psxsplash build (room debug overlay)"
@@ -440,7 +455,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
     } rows[] = {{"pcsx-redux", &eff.redux, false, nullptr},
                 {engineLabel, &engine, false, "ps-exe"},
                 {"BIOS", &eff.bios, true, "bin"},
-                {"psxsplash disc build", &eff.disc, false, "ps-exe"}};
+                {"psxsplash disc build", &discExe, false, "ps-exe"}};
     static const SDL_DialogFileFilter exeFilter[] = {{"PlayStation executable", "ps-exe;exe"}};
     static const SDL_DialogFileFilter biosFilter[] = {{"BIOS image", "bin;rom"}};
     // Each popup lists what its own action runs.
@@ -476,6 +491,11 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
         }
         ImGui::PopID();
         y += rowH + space::sm;
+    }
+    if (!logoNote.empty()) {
+        const ImVec4 clip(o.x, y, o.x + inner, y + 400);
+        dl->AddText(f.regular, type::caption, ImVec2(o.x, y), color::warn, logoNote.c_str(), nullptr, inner, &clip);
+        y += f.regular->CalcTextSizeA(type::caption, FLT_MAX, inner, logoNote.c_str()).y + space::sm;
     }
     if (mode == 2) {
         // The port: typed, or one of those found on this machine.
@@ -1439,8 +1459,12 @@ static void buildDisc(State& st, const editor::Document& doc, std::filesystem::p
             r.exported.errors = std::move(b.errors);
             return r;
         }
-        return splash::exportDisc(b.pointers(), root, engine, bin, title, b.names,
-                                  editor::loadVramSettings(root), editor::loadDiscSettings(root));
+        const splash::DiscSettings ds = editor::loadDiscSettings(root);
+        std::string logoNote;
+        const std::filesystem::path exe = editor::discEngineFor(engine, ds.bootLogo, &logoNote);
+        splash::DiscResult r = splash::exportDisc(b.pointers(), root, exe, bin, title, b.names, editor::loadVramSettings(root), ds);
+        if (r.exported.ok() && !logoNote.empty()) r.exported.warnings.push_back(logoNote);
+        return r;
     });
 }
 
@@ -1889,6 +1913,14 @@ static void setOverlays(State& st, bool perf, bool rooms) {
     if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
 }
 
+// Build > Boot Logo in Test Runs: off, Play and Run on hardware boot the
+// psxsplash build without the boot logo. Saved with the tools.
+static void setBootLogo(State& st, bool on) {
+    State::Play& p = st.play;
+    p.tools.bootLogo = on;
+    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+}
+
 static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document& doc, viewport::Ps1View& view) {
     const std::optional<editor::ObjectPath> sel = doc.selection();
     const bool hasSel = sel.has_value();
@@ -1968,6 +2000,8 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item("Room Debug Overlay", "", true,
                              [&] { setOverlays(st, st.play.tools.overlayPerf, !st.play.tools.overlayRooms); },
                              st.play.tools.overlayRooms));
+            m.push_back(item("Boot Logo in Test Runs", "", true, [&] { setBootLogo(st, !st.play.tools.bootLogo); },
+                             st.play.tools.bootLogo));
             break;
         case 4:  // View
             m.push_back(item("Hand", "Q", true, [&] { st.tool = 0; }, st.tool == 0));
@@ -5804,6 +5838,22 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                 tooltip(licenceError.c_str());
             }
             y += errH + space::xs;
+        }
+
+        // Boot logo: off, Export writes the psxsplash build without it.
+        {
+            const ImRect br = row("ldisclogo", "Boot logo",
+                                  "On: the disc plays the psxsplash logo and jingle before your first scene. Off: Export puts the "
+                                  "psxsplash build without them on the disc, so the game starts straight in scene 0.");
+            const ImRect sw(ImVec2(br.Min.x, br.GetCenter().y - 8), ImVec2(br.Min.x + 30, br.GetCenter().y + 8));
+            nameRect("disc.bootlogo", sw);
+            if (toggle("disclogo", sw, ds.bootLogo) && !root.empty()) {
+                splash::DiscSettings next = ds;
+                next.bootLogo = !ds.bootLogo;
+                save(std::move(next));
+            }
+            if (namedRectsOn() && ImGui::GetFrameCount() > 1 && !root.empty())
+                scriptLine("disclogo", std::string("disc logo: ") + (ds.bootLogo ? "on" : "off"));
         }
 
         // Music (CD-DA): the audio tracks Export writes as disc tracks 2 and

@@ -32,36 +32,35 @@
 #include "ui/splash.h"
 #include "ui/theme.h"
 #include "ui/widgets.h"
+#include "ui/window_chrome.hh"
 #include "viewport/ps1view.h"
 
 namespace {
 
 struct HitTestState {
-    ImRect titleBar;
-    std::vector<ImRect> controls;  // title bar rectangles that take clicks
+    ui::ChromeRect titleBar;
+    std::vector<ui::ChromeRect> controls;  // title bar rectangles that take clicks
 };
 HitTestState g_hit;
+
+ui::ChromeRect chromeRect(const ImRect& r) { return {r.Min.x, r.Min.y, r.Max.x, r.Max.y}; }
 
 SDL_HitTestResult hitTest(SDL_Window* win, const SDL_Point* p, void*) {
     int w, h;
     SDL_GetWindowSize(win, &w, &h);
-    const int edge = 6;
-    bool l = p->x < edge, r = p->x >= w - edge, t = p->y < edge, b = p->y >= h - edge;
-    if (t && l) return SDL_HITTEST_RESIZE_TOPLEFT;
-    if (t && r) return SDL_HITTEST_RESIZE_TOPRIGHT;
-    if (b && l) return SDL_HITTEST_RESIZE_BOTTOMLEFT;
-    if (b && r) return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
-    if (t) return SDL_HITTEST_RESIZE_TOP;
-    if (b) return SDL_HITTEST_RESIZE_BOTTOM;
-    if (l) return SDL_HITTEST_RESIZE_LEFT;
-    if (r) return SDL_HITTEST_RESIZE_RIGHT;
-    // Decided from geometry, not hover: on Windows the pointer over a draggable
-    // area produces no mouse motion, so the UI never learns it is over a button.
-    ImVec2 pt((float)p->x, (float)p->y);
-    if (!g_hit.titleBar.Contains(pt)) return SDL_HITTEST_NORMAL;
-    for (const ImRect& r : g_hit.controls)
-        if (r.Contains(pt)) return SDL_HITTEST_NORMAL;
-    return SDL_HITTEST_DRAGGABLE;
+    const bool maximized = (SDL_GetWindowFlags(win) & SDL_WINDOW_MAXIMIZED) != 0;
+    switch (ui::chromeHitTest(w, h, maximized, p->x, p->y, g_hit.titleBar, g_hit.controls)) {
+        case ui::ChromeHit::Normal: return SDL_HITTEST_NORMAL;
+        case ui::ChromeHit::Draggable: return SDL_HITTEST_DRAGGABLE;
+        case ui::ChromeHit::ResizeTopLeft: return SDL_HITTEST_RESIZE_TOPLEFT;
+        case ui::ChromeHit::ResizeTop: return SDL_HITTEST_RESIZE_TOP;
+        case ui::ChromeHit::ResizeTopRight: return SDL_HITTEST_RESIZE_TOPRIGHT;
+        case ui::ChromeHit::ResizeRight: return SDL_HITTEST_RESIZE_RIGHT;
+        case ui::ChromeHit::ResizeBottomRight: return SDL_HITTEST_RESIZE_BOTTOMRIGHT;
+        case ui::ChromeHit::ResizeBottom: return SDL_HITTEST_RESIZE_BOTTOM;
+        case ui::ChromeHit::ResizeBottomLeft: return SDL_HITTEST_RESIZE_BOTTOMLEFT;
+        case ui::ChromeHit::ResizeLeft: return SDL_HITTEST_RESIZE_LEFT;
+    }
     return SDL_HITTEST_NORMAL;
 }
 
@@ -766,12 +765,14 @@ int main(int argc, char** argv) {
         ui::interactiveRects().clear();
         ui::namedRects().clear();
         // The splash hides the editor until it starts fading out.
-        g_hit.titleBar = splash::covering() ? ImRect() : mockup::drawMainScreen(state, doc, view, io.DisplaySize);
+        const ImRect titleBar =
+            splash::covering() ? ImRect() : mockup::drawMainScreen(state, doc, view, io.DisplaySize);
+        g_hit.titleBar = chromeRect(titleBar);
         splash::draw(io.DisplaySize, args.screenshot ? frame * 1000.0 / 60.0 : double(SDL_GetTicks()));
         ui::drawFileDialogShade();
         g_hit.controls.clear();
         for (const ImRect& r : ui::interactiveRects())
-            if (r.Overlaps(g_hit.titleBar)) g_hit.controls.push_back(r);
+            if (r.Overlaps(titleBar)) g_hit.controls.push_back(chromeRect(r));
         ImGui::Render();
         if (state.quit) running = false;
 

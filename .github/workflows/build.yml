@@ -124,6 +124,7 @@ jobs:
           "$py" tests/spritecheck.py "$cli"
           "$py" tests/uispritecheck.py "$cli"
           "$py" tests/importcheck.py "$cli"
+          "$py" tests/unityimportcheck.py "$cli"
           "$py" tests/blendcheck.py "$cli"
           "$py" tests/disccheck.py "$cli"
           "$py" tests/cddacheck.py "$cli"
@@ -221,6 +222,9 @@ jobs:
       - name: New project templates
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/newprojectcheck.py build/splashedit
+      - name: Unity project import
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/unityimportguicheck.py build/splashedit
       - name: Build problems
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/buildproblemscheck.py build/splashedit

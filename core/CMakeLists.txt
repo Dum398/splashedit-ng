@@ -90,6 +90,7 @@ add_library(splashcore STATIC
     worldstream.cpp
     luacompile.cpp
     import.cpp
+    unity_import.cpp
     ${ufbx_SOURCE_DIR}/ufbx.c
     stb_impl.cpp)
 target_include_directories(splashcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

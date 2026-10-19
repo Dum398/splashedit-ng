@@ -65,6 +65,7 @@
 #include "rooms.hh"
 #include "splashpack.hh"
 #include "texture.hh"
+#include "unity_import.hh"
 #include "worldstream.hh"
 
 namespace {
@@ -12237,6 +12238,280 @@ void testPrefabDocument() {
     CHECK(saved.objects.size() == 3 && saved.objects[2].prefab == made && saved.objects[2].children.empty());
 }
 
+// ---- Unity project import ----
+
+namespace unitytest {
+namespace fs = std::filesystem;
+const fs::path kMini = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "fixtures" / "unity-mini";
+
+std::vector<std::string> names(const std::vector<splash::Object>& objs) {
+    std::vector<std::string> out;
+    for (const splash::Object& o : objs) out.push_back(o.name);
+    return out;
+}
+const splash::Object* findObj(const std::vector<splash::Object>& objs, const std::string& name) {
+    for (const splash::Object& o : objs)
+        if (o.name == name) return &o;
+    return nullptr;
+}
+bool hasItem(const splash::unity::ImportReport& r, splash::unity::ReportItem::Kind k, const std::string& object,
+             const std::string& part) {
+    for (const auto& it : r.items)
+        if (it.kind == k && it.object == object && it.what.find(part) != std::string::npos) return true;
+    return false;
+}
+splash::Scene mini(splash::unity::ImportReport& r, const char* out) {
+    const fs::path dest = g_outDir / out;
+    fs::remove_all(dest);
+    fs::create_directories(dest);
+    const splash::unity::GuidIndex idx = splash::unity::indexGuids(kMini);
+    return splash::unity::convertScene(kMini, idx, kMini / "Assets" / "Scenes" / "Mini.unity", dest, r);
+}
+}  // namespace unitytest
+
+void testUnityYaml() {
+    using namespace splash::unity;
+    const char* text =
+        "%YAML 1.1\n"
+        "%TAG !u! tag:unity3d.com,2011:\n"
+        "--- !u!1 &100\n"
+        "GameObject:\n"
+        "  m_Component:\n"
+        "  - component: {fileID: 101}\n"
+        "  - component: {fileID: 102}\n"
+        "  m_Name: 'It''s here'\n"
+        "  m_IsActive: 1\n"
+        "--- !u!4 &-7001 stripped\n"
+        "Transform:\n"
+        "  m_CorrespondingSourceObject: {fileID: 9002, guid: d1000000000000000000000000000001, type: 3}\n"
+        "  m_PrefabInstance: {fileID: 700}\n"
+        "--- !u!114 &102\n"
+        "MonoBehaviour:\n"
+        "  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}\n"
+        "  nested: {a: {x: 1, y: [2, 3]}, b: \"q, }\"}\n"
+        "  flatVertexColor:\n"
+        "    serializedVersion: 2\n"
+        "    rgba: 4278223103\n"
+        "  FogColor: {r: 0.25, g: 0.5, b: 0.75, a: 1}\n"
+        "  cells: 01000000ffffffff020000\n"
+        "  text: \"Hello,\n"
+        "    world\\n!\"\n"
+        "  list:\n"
+        "    - plain\n"
+        "    - - inner\n"
+        "  empty:\n"
+        "  after: 7\n";
+    const std::vector<YDoc> docs = parseYaml(text);
+    CHECK(docs.size() == 3);
+    if (docs.size() != 3) return;
+    // Headers: class, fileID (negative too), stripped.
+    CHECK(docs[0].classId == 1 && docs[0].fileId == 100 && !docs[0].stripped && docs[0].type == "GameObject");
+    CHECK(docs[1].classId == 4 && docs[1].fileId == -7001 && docs[1].stripped && docs[1].type == "Transform");
+    CHECK(docs[2].classId == 114 && docs[2].fileId == 102);
+    // A block sequence at the key's indent, of mappings holding flow maps.
+    const YNode& comps = docs[0].body["m_Component"];
+    CHECK(comps.kind == YNode::Seq && comps.seq.size() == 2);
+    CHECK(comps.seq.size() == 2 && refOf(comps.seq[1]["component"]).fileId == 102);
+    CHECK(docs[0].body["m_Name"].str() == "It's here");
+    CHECK(docs[0].body["m_IsActive"].flag(false));
+    // Flow maps: references, nesting, a quoted value holding , and }.
+    const Ref src = refOf(docs[1].body["m_CorrespondingSourceObject"]);
+    CHECK(src.fileId == 9002 && src.guid == "d1000000000000000000000000000001" && src.type == 3);
+    const Ref mesh = refOf(docs[2].body["m_Mesh"]);
+    CHECK(mesh.fileId == 10202 && mesh.guid == kBuiltinGuid && mesh.type == 0);
+    const YNode& nested = docs[2].body["nested"];
+    CHECK(nested["a"]["x"].integer() == 1 && nested["a"]["y"].seq.size() == 2 && nested["a"]["y"].seq[1].integer() == 3);
+    CHECK(nested["b"].str() == "q, }");
+    // Colours: packed rgba (r in the low byte) and {r, g, b, a}.
+    const auto rgba = unpackRgba(4278223103u);
+    CHECK(rgba[0] == 255 && rgba[1] == 128 && rgba[2] == 0 && rgba[3] == 255);
+    const auto packed = colorOf(docs[2].body["flatVertexColor"]);
+    CHECK(packed[0] == 1.f && std::fabs(packed[1] - 128 / 255.f) < 1e-6f && packed[2] == 0.f);
+    const auto fog = colorOf(docs[2].body["FogColor"]);
+    CHECK(fog[0] == 0.25f && fog[1] == 0.5f && fog[2] == 0.75f && fog[3] == 1.f);
+    CHECK(colorOf(docs[2].body["nothing"], {0.5f, 0.5f, 0.6f, 1})[2] == 0.6f);
+    // Hex int arrays: little-endian int32s, a partial group dropped.
+    const std::vector<int32_t> cells = hexInts(docs[2].body["cells"].str());
+    CHECK(cells.size() == 2 && cells[0] == 1 && cells[1] == -1);
+    // A double-quoted scalar over two lines: folded, escapes read.
+    CHECK(docs[2].body["text"].str() == "Hello, world\n!");
+    const YNode& list = docs[2].body["list"];
+    CHECK(list.seq.size() == 2 && list.seq[0].str() == "plain" && list.seq[1].kind == YNode::Seq && list.seq[1].seq[0].str() == "inner");
+    CHECK(docs[2].body["empty"].isNull() && docs[2].body["after"].integer() == 7);
+    // A file without headers (a .meta) is one document.
+    const std::vector<YDoc> meta = parseYaml("fileFormatVersion: 2\nguid: abc\n");
+    CHECK(meta.size() == 1 && meta[0].body["guid"].str() == "abc");
+    CHECK(parseFlow("[]").kind == YNode::Seq && parseFlow("{}").kind == YNode::Map);
+}
+
+void testUnityGuidIndex() {
+    using namespace splash::unity;
+    using unitytest::kMini;
+    const GuidIndex idx = indexGuids(kMini);
+    CHECK(idx.path("a1000000000000000000000000000001") == "Assets/Lua/cube.lua");
+    CHECK(idx.path("d1000000000000000000000000000001") == "Assets/Prefabs/Lamp.prefab");
+    CHECK(idx.path("ffffffffffffffffffffffffffffffff").empty());
+    CHECK(std::filesystem::is_regular_file(idx.file("b1000000000000000000000000000001")));
+    // Class: by m_EditorClassIdentifier, the known SplashEdit guids, then the project's .cs.
+    YNode byId = parseFlow("{m_EditorClassIdentifier: 'net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXRoom', "
+                           "m_Script: {fileID: 11500000, guid: 5c000000000000000000000000000001, type: 3}}");
+    CHECK(monoClass(byId, idx) == "PSXRoom");
+    YNode byGuid = parseFlow("{m_EditorClassIdentifier: , m_Script: {fileID: 11500000, guid: dc481397cd94e03409e462478df09d58, type: 3}}");
+    CHECK(monoClass(byGuid, idx) == "PSXCanvas");
+    YNode byFile = parseFlow("{m_Script: {fileID: 11500000, guid: 5c000000000000000000000000000001, type: 3}}");
+    CHECK(monoClass(byFile, idx) == "Spinner");
+    CHECK(knownScriptGuids().at("a192e0a30d827ba40be5c99d32a83a12") == "PSXObjectExporter");
+    // Scenes: Build Settings' first, then by name; only exporter scenes by default.
+    const std::vector<SceneEntry> all = listScenes(kMini, idx);
+    CHECK(all.size() == 2 && all[0].name == "Mini" && all[0].inBuildSettings && all[0].hasExporter);
+    CHECK(all.size() == 2 && all[1].name == "Empty" && !all[1].hasExporter);
+    const std::vector<SceneEntry> def = defaultScenes(all);
+    CHECK(def.size() == 1 && def[0].path == "Assets/Scenes/Mini.unity");
+}
+
+void testUnityHierarchy() {
+    using namespace unitytest;
+    splash::unity::ImportReport r;
+    const splash::Scene s = mini(r, "unity-hier");
+    // Roots in file order (the exporter's own object and the canvas left out), not by fileID.
+    CHECK((names(s.objects) == std::vector<std::string>{"Parent", "Cube", "Quad", "RenamedLamp", "Main Camera", "Tri"}));
+    // Children in m_Children order, not file order.
+    const splash::Object* parent = findObj(s.objects, "Parent");
+    CHECK(parent && (names(parent->children) == std::vector<std::string>{"ChildB", "ChildA"}));
+    if (parent && parent->children.size() == 2) {
+        CHECK(!parent->children[1].active && parent->children[0].active);
+        CHECK(parent->children[0].transform.position.y == 2);
+    }
+    // Scene settings from the PSXSceneExporter; FogDensity is missing, so 5.
+    CHECK(s.settings.gteScaling == 150 && s.settings.sceneType == splash::SceneType::Interior);
+    CHECK(s.settings.fog.enabled && s.settings.fog.color[2] == 0.75f && s.settings.fog.density == 5);
+    CHECK(s.settings.networkId == "mini/main" && s.settings.script == "scripts/scene.lua");
+    CHECK(s.settings.memCard.enabled && s.settings.memCard.region == "BE" && s.settings.memCard.product == "SLES-01234");
+    CHECK(s.settings.memCard.icons.size() == 1 && s.settings.memCard.icons[0] == "textures/checker.png");
+    // The object exporter: start-active, mesh fields, collider, script.
+    const splash::Object* cube = findObj(s.objects, "Cube");
+    CHECK(cube && !cube->startActive && cube->active);
+    CHECK(cube && cube->transform.rotation.y == 0.38268343f && cube->transform.rotation.w == 0.9238795f);
+    CHECK(cube && cube->mesh && cube->mesh->mesh == "meshes/unity_cube.mesh" && cube->mesh->bitDepth == splash::BitDepth::Bpp4);
+    CHECK(cube && cube->mesh && cube->mesh->vertexColors == splash::VertexColorMode::Flat &&
+          (cube->mesh->flatColor == std::array<uint8_t, 3>{255, 128, 0}) && !cube->mesh->smoothNormals &&
+          cube->mesh->dynamicLighting == splash::DynamicLighting::Off);
+    CHECK(cube && cube->collider && cube->collider->kind == splash::ColliderKind::Static);
+    CHECK(cube && cube->script && cube->script->lua == "scripts/cube.lua");
+    // A material's texture and colour.
+    const splash::Object* quad = findObj(s.objects, "Quad");
+    CHECK(quad && quad->mesh && quad->mesh->materials.size() == 1 && quad->mesh->materials[0].texture == "textures/checker.png" &&
+          quad->mesh->materials[0].color[1] == 0.5f);
+    CHECK(std::filesystem::is_regular_file(g_outDir / "unity-hier" / "textures" / "checker.png"));
+    // A model file the MeshFilter names: imported, its node's mesh used.
+    const splash::Object* tri = findObj(s.objects, "Tri");
+    CHECK(tri && tri->mesh && tri->mesh->mesh.rfind("models/", 0) == 0 && tri->mesh->materials.size() == 1);
+    CHECK(tri && tri->mesh && std::filesystem::is_regular_file(g_outDir / "unity-hier" / tri->mesh->mesh));
+}
+
+void testUnityPrefab() {
+    using namespace unitytest;
+    splash::unity::ImportReport r;
+    const splash::Scene s = mini(r, "unity-prefab");
+    // Unpacked: the root renamed and moved by the instance's overrides, the
+    // prefab's child, then the object the scene added under the root.
+    const splash::Object* lamp = findObj(s.objects, "RenamedLamp");
+    CHECK(lamp != nullptr);
+    if (!lamp) return;
+    CHECK(lamp->prefab.empty());
+    CHECK(lamp->transform.position.x == 3 && lamp->transform.position.y == 1.5f && lamp->transform.position.z == 0);
+    CHECK((names(lamp->children) == std::vector<std::string>{"Bulb", "Extra"}));
+    CHECK(lamp->light && lamp->light->kind == splash::LightKind::Point && lamp->light->range == 6 && lamp->light->runtime);
+    const splash::Object* bulb = findObj(lamp->children, "Bulb");
+    // A component field overridden on the instance (bitDepth 15 = 16 bpp).
+    CHECK(bulb && bulb->mesh && bulb->mesh->bitDepth == splash::BitDepth::Bpp16);
+    CHECK(bulb && bulb->transform.scale.x == 0.25f && bulb->transform.position.y == 0.5f);
+    CHECK(bulb && bulb->mesh && bulb->mesh->mesh == "meshes/unity_sphere.mesh");
+    // The prefab file itself is not touched by an instance's overrides: a second import of it is the same.
+    splash::unity::ImportReport r2;
+    const splash::Scene s2 = mini(r2, "unity-prefab2");
+    const splash::Object* lamp2 = findObj(s2.objects, "RenamedLamp");
+    CHECK(lamp2 && lamp2->children.size() == 2);
+}
+
+void testUnityPrimitives() {
+    using namespace splash::unity;
+    auto outward = [](const splash::Mesh& m) {
+        // Every triangle faces the way its corners' normals do (Unity: clockwise from the front).
+        for (size_t t = 0; t + 2 < m.submeshes[0].size(); t += 3) {
+            const int a = m.submeshes[0][t], b = m.submeshes[0][t + 1], c = m.submeshes[0][t + 2];
+            const splash::Vec3 n = splash::cross(m.positions[size_t(b)] - m.positions[size_t(a)], m.positions[size_t(c)] - m.positions[size_t(a)]);
+            const splash::Vec3 vn = m.normals[size_t(a)] + m.normals[size_t(b)] + m.normals[size_t(c)];
+            if (splash::dot(n, vn) <= 0) return false;
+        }
+        return true;
+    };
+    const std::optional<Primitive> cube = builtinMesh(10202);
+    CHECK(cube && cube->exact && cube->name == "cube");
+    if (cube) {
+        CHECK(cube->mesh.positions.size() == 24 && cube->mesh.normals.size() == 24 && cube->mesh.uv.size() == 24);
+        CHECK(cube->mesh.submeshes.size() == 1 && cube->mesh.submeshes[0].size() == 36);
+        const splash::Bounds b = cube->mesh.bounds();
+        CHECK(b.min() == (splash::Vec3{-0.5f, -0.5f, -0.5f}) && b.max() == (splash::Vec3{0.5f, 0.5f, 0.5f}));
+        CHECK(outward(cube->mesh));
+    }
+    const std::optional<Primitive> quad = builtinMesh(10210);
+    CHECK(quad && quad->exact && quad->mesh.positions.size() == 4 && quad->mesh.submeshes[0].size() == 6 && outward(quad->mesh));
+    const std::optional<Primitive> plane = builtinMesh(10209);
+    CHECK(plane && plane->exact && plane->mesh.positions.size() == 121 && plane->mesh.submeshes[0].size() == 600 && outward(plane->mesh));
+    if (plane) CHECK(plane->mesh.bounds().size() == (splash::Vec3{10, 0, 10}));
+    for (long long id : {10207LL, 10206LL, 10208LL}) {
+        const std::optional<Primitive> p = builtinMesh(id);
+        CHECK(p && !p->exact && outward(p->mesh));
+        if (!p) continue;
+        const splash::Vec3 size = p->mesh.bounds().size();
+        CHECK(std::fabs(size.x - 1) < 1e-3f && std::fabs(size.z - 1) < 1e-3f);
+        CHECK(std::fabs(size.y - (id == 10207 ? 1.f : 2.f)) < 1e-3f);
+    }
+    CHECK(!builtinMesh(10200));
+}
+
+void testUnityReport() {
+    using namespace unitytest;
+    using K = splash::unity::ReportItem;
+    splash::unity::ImportReport r;
+    (void)mini(r, "unity-report");
+    // The canvas, as one line for its whole subtree.
+    CHECK(hasItem(r, K::Later, "HUD", "UI canvas with 1 element (1 Text)"));
+    for (const auto& it : r.items) CHECK(it.object != "HUD/Label");
+    CHECK(hasItem(r, K::LeftOut, "Main Camera", "Camera, AudioListener"));
+    CHECK(hasItem(r, K::LeftOut, "Cube", "script Spinner"));
+    CHECK(hasItem(r, K::Changed, "RenamedLamp/Bulb", "sphere"));
+    CHECK(r.skipped() == 3);
+    CHECK(r.items.size() == 4);
+    // The whole project: files, the summary, the report file.
+    const fs::path dest = g_outDir / "unity-project";
+    fs::remove_all(dest);
+    const splash::unity::ImportReport p = splash::unity::importProject(kMini, dest);
+    CHECK(p.ok());
+    CHECK(p.scenes == std::vector<std::string>{"Mini.scene"});
+    CHECK(p.summary() == "imported scenes=1 objects=10 meshes=4 scripts=2 textures=1 skipped=3");
+    const std::string text = [&] {
+        std::ifstream in(dest / "import-report.txt");
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    }();
+    CHECK(text.find("[later] Mini / HUD: UI canvas with 1 element (1 Text) not imported yet") != std::string::npos);
+    CHECK(text.find(p.summary()) != std::string::npos);
+    CHECK(editor::loadBuildList(dest).size() == 1);
+    CHECK(splash::readVramSettings(dest / "vram.json").prohibited.size() == 1);
+    const splash::Scene loaded = splash::loadScene(dest / "Mini.scene");
+    CHECK(loaded.objects.size() == 6);
+    // A second import into the same folder is refused, the folder left as it was.
+    const splash::unity::ImportReport again = splash::unity::importProject(kMini, dest);
+    CHECK(!again.ok() && again.error.find("not empty") != std::string::npos);
+    // A scene asked for by name that is not there; the default list when none is asked for.
+    const splash::unity::ImportReport none = splash::unity::importProject(kMini, g_outDir / "unity-none", {{"Nope"}});
+    CHECK(!none.ok() && !fs::exists(g_outDir / "unity-none"));
+    // Never into the Unity project.
+    const splash::unity::ImportReport inside = splash::unity::importProject(kMini, kMini / "Assets" / "out");
+    CHECK(!inside.ok() && !fs::exists(kMini / "Assets" / "out"));
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -12403,6 +12678,12 @@ int main(int argc, char** argv) {
     testPrefabNameWarnings();
     testPrefabReferences();
     testPrefabDocument();
+    testUnityYaml();
+    testUnityGuidIndex();
+    testUnityHierarchy();
+    testUnityPrefab();
+    testUnityPrimitives();
+    testUnityReport();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

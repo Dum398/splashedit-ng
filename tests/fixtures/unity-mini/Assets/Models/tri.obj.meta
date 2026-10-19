@@ -1,0 +1,13 @@
+fileFormatVersion: 2
+guid: e1000000000000000000000000000001
+ModelImporter:
+  serializedVersion: 22200
+  internalIDToNameTable:
+  - first:
+      1: 100000
+    second: Tri
+  - first:
+      43: 4300000
+    second: Tri
+  meshes:
+    globalScale: 1

@@ -1620,6 +1620,12 @@ static void perform(State& st, editor::Document& doc, State::Pending what, const
         case State::Pending::Quit:
             st.quit = true;
             break;
+        case State::Pending::ImportUnity:
+            // The folders are kept from last time; the report page is gone.
+            st.unityImport.result.reset();
+            st.unityImport.error.clear();
+            st.unityImport.open = true;
+            break;
         case State::Pending::None:
             break;
     }
@@ -1911,6 +1917,384 @@ static void newProjectModal(State& st, editor::Document& doc, ImVec2 size) {
     ImGui::EndPopup();
 }
 
+// Import Unity Project's two Choose folder... buttons: 0 = the Unity
+// project, 1 = the new project's folder.
+static std::mutex g_unityPickMutex;
+static std::optional<std::pair<int, std::string>> g_unityPicked;
+static void SDLCALL onUnityFolder(void* which, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_unityPickMutex);
+    g_unityPicked = std::make_pair(int(reinterpret_cast<intptr_t>(which)), std::string(files[0]));
+}
+
+static std::string trimmedPath(std::string v) {
+    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+    const size_t a = v.find_first_not_of(" \t");
+    return a == std::string::npos ? std::string() : v.substr(a);
+}
+
+// Import Unity Project: the Unity project folder and the new project's
+// folder (typed, or picked with Choose folder...), the Unity project's scenes
+// (a switch each, in build order, moved with the arrows; the ones holding a
+// PSXSceneExporter on at first), then Import. The import runs on a worker
+// thread; when it is done the new project opens and the modal shows what was
+// not brought over (the report, also in import-report.txt). Scripted runs
+// print "unityimport: imported <summary>" or "unityimport: failed <reason>".
+static void unityImportModal(State& st, editor::Document& doc, ImVec2 size) {
+    namespace fs = std::filesystem;
+    State::UnityImportDialog& ui = st.unityImport;
+    {
+        std::lock_guard<std::mutex> lock(g_unityPickMutex);
+        if (g_unityPicked) {
+            (g_unityPicked->first == 0 ? ui.source : ui.dest) = g_unityPicked->second;
+            g_unityPicked.reset();
+        }
+    }
+    // The import finished: open the new project, then show the report.
+    if (ui.running.valid() && ui.running.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        splash::unity::ImportReport r = ui.running.get();
+        if (!r.ok()) {
+            ui.error = r.error;
+            scriptLine(nullptr, "unityimport: failed " + r.error);
+        } else {
+            scriptLine(nullptr, "unityimport: " + r.summary());
+            for (const splash::unity::ReportItem& it : r.items) scriptLine(nullptr, "unityimport: report " + it.line());
+            ui.resultDest = ui.runningDest;
+            if (!r.scenes.empty() && openScene(st, doc, ui.runningDest / fromUtf8(r.scenes.front())))
+                notify(st, "Imported " + std::to_string(r.scenes.size()) + (r.scenes.size() == 1 ? " scene" : " scenes") + " from Unity", false);
+            ui.result = std::move(r);
+        }
+    }
+    const char* id = "##unityimport";
+    if (ui.open) {
+        ui.open = false;
+        ImGui::OpenPopup(id);
+    }
+    const float w = 720;
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.45f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    ui.shown = open;
+    if (!open) return;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float inner = w - space::lg * 2;
+    float y = o.y;
+    bool close = false;
+
+    if (ui.result) {
+        // ---- The report page ----
+        const splash::unity::ImportReport& r = *ui.result;
+        text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, "Unity project imported");
+        y += 28;
+        auto count = [](int n, const char* one, const char* many) { return std::to_string(n) + " " + (n == 1 ? one : many); };
+        const std::string got = "Brought over " + count(int(r.scenes.size()), "scene", "scenes") + " with " +
+                                count(r.objects, "object", "objects") + ", " + count(r.meshes, "mesh", "meshes") + ", " +
+                                count(r.scripts, "script", "scripts") + " and " + count(r.textures, "texture", "textures") + ".";
+        text(dl, ImVec2(o.x, y), f.regular, type::body, color::text, got.c_str());
+        y += 22;
+        const int skipped = r.skipped();
+        const std::string rest = skipped ? count(skipped, "thing was", "things were") +
+                                               " not brought over; they are listed below and in import-report.txt in the new project."
+                                         : "Everything was brought over.";
+        text(dl, ImVec2(o.x, y), f.regular, type::caption, color::textDim, rest.c_str());
+        y += 26;
+        // What each tag means, in the tag's own colour.
+        static const char* const tags[] = {"Not yet", "Left out", "Changed", "Missing"};
+        static const char* const tips[] = {"A SplashEdit feature this import does not bring over yet: add it again in SplashEdit",
+                                           "Has no PS1 equivalent, so psxsplash has no use for it",
+                                           "Brought over, but not exactly as it was in Unity",
+                                           "A file the Unity project refers to is not in it"};
+        const ImU32 tones[] = {color::accent, color::textFaint, color::warn, color::bad};
+        float lx = o.x;
+        for (int k = 0; k < 4; ++k) {
+            const ImVec2 ts = measure(f.medium, type::caption, tags[k]);
+            const ImRect tr(ImVec2(lx, y), ImVec2(lx + ts.x + 16, y + 20));
+            dl->AddRectFilled(tr.Min, tr.Max, (tones[k] & 0x00FFFFFF) | 0x26000000, radius::pill);
+            text(dl, ImVec2(tr.Min.x + 8, centerY(f.medium, type::caption, tr.Min.y, tr.Max.y)), f.medium, type::caption, tones[k], tags[k]);
+            interact((std::string("legend") + tags[k]).c_str(), tr);
+            tooltip(tips[k]);
+            lx = tr.Max.x + space::sm;
+        }
+        y += 20 + space::sm;
+        // The items, scrolled when there are many.
+        const float listH = std::min(360.0f, std::max(60.0f, float(r.items.size()) * 24.0f + 16));
+        ImGui::SetCursorScreenPos(ImVec2(o.x, y));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, radius::card);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(space::sm, space::sm));
+        ImGui::BeginChild("##unityreport", ImVec2(inner, listH), ImGuiChildFlags_AlwaysUseWindowPadding);
+        nameRect("unity.report", ImRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + listH)));
+        if (r.items.empty()) {
+            ImGui::PushFont(f.regular, type::body);
+            ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
+            ImGui::TextUnformatted("Nothing to report.");
+            ImGui::PopStyleColor();
+            ImGui::PopFont();
+        }
+        ImDrawList* cl = ImGui::GetWindowDrawList();
+        float tagW = 0;
+        for (const char* t : tags) tagW = std::max(tagW, measure(f.medium, type::caption, t).x);
+        tagW += 12 + space::sm;
+        const float wrap = inner - space::sm * 2 - tagW - 8;
+        for (size_t i = 0; i < r.items.size(); ++i) {
+            const splash::unity::ReportItem& it = r.items[i];
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            std::string where = it.scene.empty() ? "Project" : it.scene;
+            if (!it.object.empty()) where += " / " + it.object;
+            const std::string body = where + ":  " + it.what;
+            const ImVec2 bs = f.regular->CalcTextSizeA(type::caption, FLT_MAX, wrap, body.c_str());
+            const float rowH = std::max(20.0f, bs.y + 4);
+            const ImU32 tone = tones[it.kind];
+            const ImVec2 ts = measure(f.medium, type::caption, tags[it.kind]);
+            cl->AddRectFilled(ImVec2(p.x, p.y + 1), ImVec2(p.x + ts.x + 12, p.y + 19), (tone & 0x00FFFFFF) | 0x26000000, radius::pill);
+            text(cl, ImVec2(p.x + 6, centerY(f.medium, type::caption, p.y + 1, p.y + 19)), f.medium, type::caption, tone, tags[it.kind]);
+            // The place in the text colour, what happened dimmer (one font, so the two line up).
+            const ImVec2 tp(p.x + tagW, p.y + 2);
+            cl->AddText(f.regular, type::caption, tp, color::textDim, body.c_str(), nullptr, wrap);
+            cl->AddText(f.regular, type::caption, tp, color::text, (where + ":").c_str());
+            ImGui::Dummy(ImVec2(inner - space::sm * 2, rowH));
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        y += listH + space::md;
+        const std::string where = "New project: " + utf8(ui.resultDest);
+        ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner - 120, y + 20), true);
+        text(dl, ImVec2(o.x, y + 6), f.regular, type::caption, color::textFaint, where.c_str());
+        ImGui::PopClipRect();
+        const float cw = buttonWidth(nullptr, "Close");
+        if (button("unity.close", ImVec2(o.x + inner - cw, y), nullptr, "Close", ButtonKind::Primary) ||
+            (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsAnyItemActive()) ||
+            (ImGui::IsKeyPressed(ImGuiKey_Enter, false) && !ImGui::IsAnyItemActive()))
+            close = true;
+        y += size::field + 6;
+    } else {
+        // ---- The form ----
+        const bool busy = ui.running.valid();
+        text(dl, ImVec2(o.x, y), f.semibold, type::title, color::text, "Import Unity Project");
+        y += 26;
+        text(dl, ImVec2(o.x, y), f.regular, type::label, color::textDim,
+             "Makes a new project from the scenes of a Unity SplashEdit project. The Unity project is only read, never changed.");
+        y += 30;
+        const float labelW = 120, rowH = size::field + 8;
+        auto field = [&](const char* label, const char* fieldId, const char* ctl, const char* hint, const char* tip, std::string* value,
+                         float right) {
+            text(dl, ImVec2(o.x, centerY(f.medium, type::body, y, y + rowH)), f.medium, type::body, color::text, label);
+            const float fx = o.x + labelW, fw = inner - labelW - right;
+            ImGui::SetCursorScreenPos(ImVec2(fx, y + (rowH - size::field) * 0.5f));
+            ImGui::SetNextItemWidth(fw);
+            ImGui::PushFont(f.regular, type::body);
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, color::field);
+            ImGui::PushStyleColor(ImGuiCol_Text, color::text);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(space::sm, (size::field - type::body) * 0.5f - 1));
+            ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, radius::field);
+            ImGui::BeginDisabled(busy);
+            ImGui::InputTextWithHint(fieldId, hint, value->data(), value->capacity() + 1,
+                                     ImGuiInputTextFlags_CallbackResize | ImGuiInputTextFlags_AutoSelectAll, resizePort, value);
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) tooltip(tip);
+            const ImRect fr(ImVec2(fx, y), ImVec2(fx + fw, y + rowH));
+            interactiveRects().push_back(fr);
+            nameRect(ctl, fr);
+            ImGui::PopStyleVar(2);
+            ImGui::PopStyleColor(2);
+            ImGui::PopFont();
+        };
+        const float bw = buttonWidth(icon::folderOpen, "Choose folder...");
+        field("Unity project", "##unitysource", "unity.source", "The folder holding Assets and ProjectSettings",
+              "The Unity project's own folder: the one that holds Assets and ProjectSettings. Nothing in it is changed.", &ui.source,
+              bw + space::sm);
+        if (button("unity.sourcebrowse", ImVec2(o.x + inner - bw, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Choose folder...",
+                   ButtonKind::Secondary, nullptr, "Pick the Unity project's folder") &&
+            !busy) {
+            const std::string loc = trimmedPath(ui.source);
+            ui::showOpenFolderDialog("unity-source", onUnityFolder, reinterpret_cast<void*>(intptr_t(0)), loc.empty() ? nullptr : loc.c_str(), false);
+        }
+        y += rowH + space::sm;
+        field("New project", "##unitydest", "unity.dest", "A new or empty folder",
+              "Where the new project goes: a folder that does not exist yet, or an empty one. Its scenes, meshes, textures "
+              "and scripts are written there.",
+              &ui.dest, bw + space::sm);
+        if (button("unity.destbrowse", ImVec2(o.x + inner - bw, y + (rowH - size::field - 6) * 0.5f), icon::folderOpen, "Choose folder...",
+                   ButtonKind::Secondary, nullptr, "Pick an empty folder for the new project") &&
+            !busy) {
+            const std::string loc = trimmedPath(ui.dest);
+            ui::showOpenFolderDialog("unity-dest", onUnityFolder, reinterpret_cast<void*>(intptr_t(1)), loc.empty() ? nullptr : loc.c_str(), false);
+        }
+        y += rowH + space::md;
+
+        // The scene list, read again whenever the Unity project folder changes.
+        const std::string source = trimmedPath(ui.source), dest = trimmedPath(ui.dest);
+        std::error_code ec;
+        const bool isProject = !source.empty() && fs::is_directory(fromUtf8(source) / "Assets", ec);
+        if (source != ui.listedFor) {
+            ui.listedFor = source;
+            ui.scenes.clear();
+            ui.error.clear();
+            if (isProject)
+                for (const splash::unity::SceneEntry& e : splash::unity::listScenes(fromUtf8(source)))
+                    ui.scenes.push_back({e.name, e.path, e.hasExporter, e.hasExporter});
+        }
+        text(dl, ImVec2(o.x, y), f.medium, type::body, color::text, "Scenes");
+        const char* order = "In build order: the game starts in the first one. Scene.Load(i) opens the i-th.";
+        const ImVec2 os = measure(f.regular, type::caption, order);
+        text(dl, ImVec2(o.x + inner - os.x, y + 2), f.regular, type::caption, color::textFaint, order);
+        y += 24;
+        const float sceneRowH = 30;
+        const int visible = std::clamp(int(ui.scenes.size()), 3, 8);
+        const float listH = visible * sceneRowH + space::sm * 2;
+        const ImRect box(ImVec2(o.x, y), ImVec2(o.x + inner, y + listH));
+        nameRect("unity.scenes", box);
+        ImGui::SetCursorScreenPos(box.Min);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, color::field);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, radius::card);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(space::sm, space::sm));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+        ImGui::BeginChild("##unityscenes", ImVec2(inner, listH), ImGuiChildFlags_AlwaysUseWindowPadding);
+        ImDrawList* cl = ImGui::GetWindowDrawList();
+        if (ui.scenes.empty()) {
+            const char* why = source.empty()  ? "Choose the Unity project above to list its scenes."
+                              : !isProject    ? "There is no Assets folder here. Choose the Unity project's own folder, the one holding Assets."
+                                              : "This Unity project has no scenes.";
+            const ImVec2 p = ImGui::GetCursorScreenPos();
+            cl->AddText(f.regular, type::body, ImVec2(p.x + space::xs, p.y + 6), source.empty() || isProject ? color::textDim : color::warn, why,
+                        nullptr, inner - space::md * 2);
+            ImGui::Dummy(ImVec2(inner - space::sm * 2, sceneRowH));
+        }
+        int move = -1, moveBy = 0, number = 0;
+        // Rows placed from the list's top: the switch and arrows move ImGui's cursor.
+        const ImVec2 base = ImGui::GetCursorScreenPos();
+        const ImRect clip(ImVec2(box.Min.x, box.Min.y + 2), ImVec2(box.Max.x, box.Max.y - 2));
+        for (size_t i = 0; i < ui.scenes.size(); ++i) {
+            State::UnityImportDialog::Row& row = ui.scenes[i];
+            const ImVec2 p(base.x, base.y + float(i) * sceneRowH);
+            // Only rows in view are named, so a scripted click lands on what it names.
+            const bool inView = p.y >= clip.Min.y - 1 && p.y + sceneRowH <= clip.Max.y + 1;
+            auto name = [&](const std::string& n, const ImRect& r) {
+                if (inView) nameRect(n, r);
+            };
+            const ImRect rr(p, ImVec2(p.x + inner - space::sm * 2, p.y + sceneRowH));
+            ImGui::PushID(int(i));
+            const ImRect sw(ImVec2(rr.Min.x + 30, rr.Min.y + 6), ImVec2(rr.Min.x + 30 + 34, rr.Max.y - 6));
+            name("unity.scene." + row.name, sw);
+            if (toggle("on", sw, row.on) && !busy) row.on = !row.on;
+            tooltip(row.on ? "Imported. Click to leave this scene out." : "Left out. Click to import this scene.");
+            // Its build number when it is imported.
+            const std::string num = row.on ? std::to_string(number++) : "-";
+            const float ty = centerY(f.regular, type::body, rr.Min.y, rr.Max.y);
+            text(cl, ImVec2(rr.Min.x + space::xs, ty), f.medium, type::body, color::textFaint, num.c_str());
+            const float nx = sw.Max.x + space::md;
+            text(cl, ImVec2(nx, ty), f.medium, type::body, row.on ? color::text : color::textDim, row.name.c_str());
+            const float px = nx + measure(f.medium, type::body, row.name.c_str()).x + space::md;
+            const float bw2 = 22, cy = centerY(f.regular, type::caption, rr.Min.y, rr.Max.y);
+            ImGui::PushClipRect(ImVec2(px, rr.Min.y), ImVec2(rr.Max.x - 2 * bw2 - space::md, rr.Max.y), true);
+            text(cl, ImVec2(px, cy), f.regular, type::caption, color::textFaint, row.path.c_str());
+            if (!row.exporter) {
+                const float nx2 = px + measure(f.regular, type::caption, row.path.c_str()).x + space::md;
+                text(cl, ImVec2(nx2, cy), f.regular, type::caption, color::warn, "no PSXSceneExporter: default scene settings");
+            }
+            ImGui::PopClipRect();
+            const ImRect up(ImVec2(rr.Max.x - 2 * bw2 - 2, rr.Min.y + 4), ImVec2(rr.Max.x - bw2 - 2, rr.Max.y - 4));
+            const ImRect down(ImVec2(rr.Max.x - bw2, rr.Min.y + 4), ImVec2(rr.Max.x, rr.Max.y - 4));
+            name("unity.up." + row.name, up);
+            name("unity.down." + row.name, down);
+            if (iconButton("up", up, icon::arrowUp, false, "Move up: earlier in the build", color::textDim, i > 0 && !busy)) {
+                move = int(i);
+                moveBy = -1;
+            }
+            if (iconButton("down", down, icon::arrowDown, false, "Move down: later in the build", color::textDim, i + 1 < ui.scenes.size() && !busy)) {
+                move = int(i);
+                moveBy = 1;
+            }
+            ImGui::PopID();
+        }
+        if (!ui.scenes.empty()) {
+            ImGui::SetCursorScreenPos(base);
+            ImGui::Dummy(ImVec2(inner - space::sm * 2, float(ui.scenes.size()) * sceneRowH));
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleVar(3);
+        ImGui::PopStyleColor();
+        if (move >= 0) std::swap(ui.scenes[size_t(move)], ui.scenes[size_t(move + moveBy)]);
+        y += listH + space::md;
+
+        // What Import will do, or why it is off.
+        std::vector<std::string> chosen;
+        for (const auto& row : ui.scenes)
+            if (row.on) chosen.push_back(row.path);
+        std::string reason;
+        if (source.empty()) reason = "Choose the Unity project";
+        else if (!isProject) reason = "That folder is not a Unity project (it has no Assets folder)";
+        else if (chosen.empty()) reason = "Switch on at least one scene";
+        else if (dest.empty()) reason = "Choose a folder for the new project";
+        else if (fs::exists(fromUtf8(dest), ec) && (!fs::is_directory(fromUtf8(dest), ec) || !fs::is_empty(fromUtf8(dest), ec)))
+            reason = "The new project's folder is not empty; choose a new or empty one";
+        const std::string where = busy ? "Importing " + std::to_string(chosen.size()) + (chosen.size() == 1 ? " scene..." : " scenes...")
+                                  : reason.empty() ? "Imports " + std::to_string(chosen.size()) + (chosen.size() == 1 ? " scene" : " scenes") +
+                                                         " into " + dest
+                                                   : reason;
+        ImGui::PushClipRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + 20), true);
+        text(dl, ImVec2(o.x, y), f.regular, type::caption, reason.empty() || busy ? color::textDim : color::warn, where.c_str());
+        ImGui::PopClipRect();
+        nameRect("unity.status", ImRect(ImVec2(o.x, y), ImVec2(o.x + inner, y + 20)));
+        y += 20;
+        if (!ui.error.empty()) {
+            const std::string e = "Could not import: " + ui.error;
+            const ImVec2 es = f.regular->CalcTextSizeA(type::caption, FLT_MAX, inner, e.c_str());
+            dl->AddText(f.regular, type::caption, ImVec2(o.x, y), color::bad, e.c_str(), nullptr, inner);
+            y += es.y;
+        }
+        y += space::sm;
+
+        const float iw = buttonWidth(icon::package, "Import"), cw = buttonWidth(icon::x, "Cancel");
+        const float bx = o.x + inner - iw;
+        bool go = false;
+        if (reason.empty() && !busy) {
+            go = button("unity.import", ImVec2(bx, y), icon::package, "Import", ButtonKind::Primary, nullptr,
+                        "Make the new project and open it") ||
+                 (ImGui::IsKeyPressed(ImGuiKey_Enter, false) && !ImGui::IsAnyItemActive());
+        } else {
+            const ImRect r(ImVec2(bx, y), ImVec2(bx + iw, y + size::field + 6));
+            nameRect("unity.import", r);
+            dl->AddRectFilled(r.Min, r.Max, color::raised, radius::button);
+            dl->AddRect(r.Min, r.Max, color::border, radius::button);
+            textCentered(dl, r, f.medium, type::body, color::textFaint, busy ? "Importing..." : "Import");
+        }
+        if (!busy && (button("unity.cancel", ImVec2(bx - cw - space::sm, y), icon::x, "Cancel", ButtonKind::Ghost) ||
+                      (ImGui::IsKeyPressed(ImGuiKey_Escape, false) && !ImGui::IsAnyItemActive())))
+            close = true;
+        y += size::field + 6;
+        if (go) {
+            ui.error.clear();
+            splash::unity::ImportOptions opt;
+            opt.scenes = chosen;
+            ui.runningDest = fromUtf8(dest);
+            ui.running = std::async(std::launch::async, [src = fromUtf8(source), d = ui.runningDest, opt] {
+                try {
+                    return splash::unity::importProject(src, d, opt);
+                } catch (const std::exception& e) {
+                    splash::unity::ImportReport r;
+                    r.error = e.what();
+                    return r;
+                }
+            });
+        }
+    }
+    ImGui::SetCursorScreenPos(o);
+    ImGui::Dummy(ImVec2(inner, y - o.y));
+    if (close) {
+        ImGui::CloseCurrentPopup();
+        ui.shown = false;
+        ui.result.reset();
+    }
+    ImGui::EndPopup();
+}
+
 // ---- Title-bar menus ----
 
 struct MenuEntry {
@@ -1966,6 +2350,7 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
         case 0:  // File
             m.push_back(item("New Project...", "Ctrl+N", true, [&] { request(st, doc, State::Pending::New); }));
             m.push_back(item("Open...", "Ctrl+O", true, [&] { request(st, doc, State::Pending::Open); }));
+            m.push_back(item("Import Unity Project...", "", true, [&] { request(st, doc, State::Pending::ImportUnity); }));
             m.push_back(separator());
             m.push_back(heading("Recent"));
             if (st.recent.items().empty()) m.push_back(item("No recent scenes", "", false, nullptr));
@@ -9508,12 +9893,12 @@ static void shortcuts(State& st, editor::Document& doc) {
     // The script editor keeps the keyboard, but Play and Run on hardware still answer.
     // Not gated on WantTextInput: the editor asks for text input itself, so it is set.
     if (st.scripts.hasKeyboard()) {
-        if (st.unsavedShown || st.newProject.shown || st.menuOpen >= 0) return;
+        if (st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.menuOpen >= 0) return;
         if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
         if (ctrl && shift && pressed(ImGuiKey_F5)) restartPlay(st, doc);
         return;
     }
-    if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.menuOpen >= 0) return;
+    if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.menuOpen >= 0) return;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
     if (st.play.gameFocus && st.play.game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
@@ -9792,6 +10177,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     unsavedPrompt(st, doc, size);
     newProjectModal(st, doc, size);
+    unityImportModal(st, doc, size);
     ImGui::End();
     return bar;
 }

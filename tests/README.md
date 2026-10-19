@@ -227,6 +227,40 @@ free name, outputs and node folder following it, and that the stale-folder sweep
 
     python3 asyncimportcheck.py <splashedit> [screenshot.png]
 
+## Unity project import
+
+`splashpack-cli import-unity <unityProject> <destDir> [--scenes Name1,Name2,...]` makes a new
+project from a Unity SplashEdit project (the editor's File > Import Unity Project... does the same
+from a dialog). Without `--scenes` it takes every scene holding a PSXSceneExporter, Build Settings'
+first, then by name; `--scenes` gives the build order (Unity keeps SplashEdit's own scene list in
+the editor preferences, not in the project). It prints one line per thing it did not bring over
+(`[later]` UI canvases, fonts, sprites, tilemaps, audio, loading screens and other SplashEdit
+components; `[left out]` what has no PS1 equivalent; `[changed]` approximations such as the
+built-in sphere; `[missing]` files the project refers to but lacks), then
+`imported scenes=N objects=N meshes=N scripts=N textures=N skipped=N`, and writes the same
+report to `<destDir>/import-report.txt`.
+
+`fixtures/unity-mini/` is a hand-written Unity project: one scene with a PSXSceneExporter, a parent
+whose `m_Children` order differs from the file order, a cube with a PSXObjectExporter and Lua, a
+quad with a material and PNG, a prefab instance with a renamed and moved root, an overridden child
+field and an object the scene added under it (through a stripped transform), a UI canvas, a camera
+and an OBJ model. `unityimportcheck.py` imports it and checks the tree, the copied files, the
+report, the summary and the refusals (a folder that is not empty, an unknown scene, a folder
+inside the Unity project), and exports the imported scene. When `/home/pixel/sources/psxsus` (or
+`$PSXSUS`) is there it also imports psxsus's five game scenes in the game's order and exports
+each; otherwise it prints SKIP for that part. The unit tests (`testUnity*` in
+`editor_tests.cpp`) cover the YAML reader, the guid index, the hierarchy order, prefab
+overrides, the built-in meshes and the report.
+
+    python3 unityimportcheck.py <splashpack-cli>
+
+`unityimportguicheck.py` drives the dialog by control name: the form's controls, Import off while
+the new project's folder is not empty, a scene switched on and moved first (it must come first in
+scenes.list), the report after an import, and the imported scene once the report is closed. Needs
+a display (CI runs it under xvfb on Linux).
+
+    python3 unityimportguicheck.py <splashedit> [screenshot dir]
+
 ## Lua compiler
 
 `luacheck.py` compiles every `lua/*.lua` with `splashpack-cli luac` and compares the result with

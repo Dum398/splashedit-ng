@@ -1,0 +1,330 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!29 &1
+OcclusionCullingSettings:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+--- !u!1 &500
+GameObject:
+  m_Component:
+  - component: {fileID: 501}
+  - component: {fileID: 502}
+  m_Name: _SceneExporter
+  m_IsActive: 1
+--- !u!4 &501
+Transform:
+  m_GameObject: {fileID: 500}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!114 &502
+MonoBehaviour:
+  m_GameObject: {fileID: 500}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 3efc1583a56e9024f8d08551ddfbea56, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXSceneExporter
+  GTEScaling: 150
+  SceneLuaFile: {fileID: 271950057456261835, guid: a1000000000000000000000000000002, type: 3}
+  FogColor: {r: 0.25, g: 0.5, b: 0.75, a: 1}
+  FogEnabled: 1
+  SceneType: 1
+  SceneNetworkId: "mini/main"
+  Cutscenes: []
+  LoadingScreenPrefab: {fileID: 0}
+--- !u!1 &300
+GameObject:
+  m_Component:
+  - component: {fileID: 301}
+  m_Name: Parent
+  m_IsActive: 1
+--- !u!4 &301
+Transform:
+  m_GameObject: {fileID: 300}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -2, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 311}
+  - {fileID: 321}
+  m_Father: {fileID: 0}
+--- !u!1 &320
+GameObject:
+  m_Component:
+  - component: {fileID: 321}
+  m_Name: ChildA
+  m_IsActive: 0
+--- !u!4 &321
+Transform:
+  m_GameObject: {fileID: 320}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 1, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 301}
+--- !u!1 &310
+GameObject:
+  m_Component:
+  - component: {fileID: 311}
+  m_Name: ChildB
+  m_IsActive: 1
+--- !u!4 &311
+Transform:
+  m_GameObject: {fileID: 310}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 2, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 301}
+--- !u!1 &100
+GameObject:
+  m_Component:
+  - component: {fileID: 101}
+  - component: {fileID: 102}
+  - component: {fileID: 103}
+  - component: {fileID: 104}
+  - component: {fileID: 105}
+  m_Name: Cube
+  m_IsActive: 1
+--- !u!4 &101
+Transform:
+  m_GameObject: {fileID: 100}
+  m_LocalRotation: {x: 0, y: 0.38268343, z: 0, w: 0.9238795}
+  m_LocalPosition: {x: 0, y: 0.5, z: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!33 &102
+MeshFilter:
+  m_GameObject: {fileID: 100}
+  m_Mesh: {fileID: 10202, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!23 &103
+MeshRenderer:
+  m_GameObject: {fileID: 100}
+  m_Enabled: 1
+  m_Materials:
+  - {fileID: 0}
+--- !u!114 &104
+MonoBehaviour:
+  m_GameObject: {fileID: 100}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: a192e0a30d827ba40be5c99d32a83a12, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXObjectExporter
+  isActive: 0
+  bitDepth: 4
+  luaFile: {fileID: 271950057456261835, guid: a1000000000000000000000000000001, type: 3}
+  collisionType: 1
+  vertexColorMode: 1
+  flatVertexColor:
+    serializedVersion: 2
+    rgba: 4278223103
+  smoothNormals: 0
+  dynamicLighting: 2
+--- !u!114 &105
+MonoBehaviour:
+  m_GameObject: {fileID: 100}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: 5c000000000000000000000000000001, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  speed: 1
+--- !u!1 &200
+GameObject:
+  m_Component:
+  - component: {fileID: 201}
+  - component: {fileID: 202}
+  - component: {fileID: 203}
+  - component: {fileID: 204}
+  m_Name: Quad
+  m_IsActive: 1
+--- !u!4 &201
+Transform:
+  m_GameObject: {fileID: 200}
+  m_LocalRotation: {x: 0.70710677, y: 0, z: 0, w: 0.70710677}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 4, y: 4, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!33 &202
+MeshFilter:
+  m_GameObject: {fileID: 200}
+  m_Mesh: {fileID: 10210, guid: 0000000000000000e000000000000000, type: 0}
+--- !u!23 &203
+MeshRenderer:
+  m_GameObject: {fileID: 200}
+  m_Enabled: 1
+  m_Materials:
+  - {fileID: 2100000, guid: c1000000000000000000000000000001, type: 2}
+--- !u!114 &204
+MonoBehaviour:
+  m_GameObject: {fileID: 200}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: a192e0a30d827ba40be5c99d32a83a12, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXObjectExporter
+  isActive: 1
+  bitDepth: 8
+  luaFile: {fileID: 0}
+  collisionType: 1
+--- !u!1001 &700
+PrefabInstance:
+  m_ObjectHideFlags: 0
+  serializedVersion: 2
+  m_Modification:
+    serializedVersion: 3
+    m_TransformParent: {fileID: 0}
+    m_Modifications:
+    - target: {fileID: 9001, guid: d1000000000000000000000000000001, type: 3}
+      propertyPath: m_Name
+      value: RenamedLamp
+      objectReference: {fileID: 0}
+    - target: {fileID: 9002, guid: d1000000000000000000000000000001, type: 3}
+      propertyPath: m_LocalPosition.x
+      value: 3
+      objectReference: {fileID: 0}
+    - target: {fileID: 9002, guid: d1000000000000000000000000000001, type: 3}
+      propertyPath: m_LocalPosition.y
+      value: 1.5
+      objectReference: {fileID: 0}
+    - target: {fileID: 9015, guid: d1000000000000000000000000000001, type: 3}
+      propertyPath: bitDepth
+      value: 15
+      objectReference: {fileID: 0}
+    m_RemovedComponents: []
+    m_RemovedGameObjects: []
+    m_AddedGameObjects: []
+    m_AddedComponents: []
+  m_SourcePrefab: {fileID: 100100000, guid: d1000000000000000000000000000001, type: 3}
+--- !u!4 &701 stripped
+Transform:
+  m_CorrespondingSourceObject: {fileID: 9002, guid: d1000000000000000000000000000001, type: 3}
+  m_PrefabInstance: {fileID: 700}
+  m_PrefabAsset: {fileID: 0}
+--- !u!1 &710
+GameObject:
+  m_Component:
+  - component: {fileID: 711}
+  m_Name: Extra
+  m_IsActive: 1
+--- !u!4 &711
+Transform:
+  m_GameObject: {fileID: 710}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 1}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 701}
+--- !u!1 &400
+GameObject:
+  m_Component:
+  - component: {fileID: 401}
+  - component: {fileID: 402}
+  - component: {fileID: 403}
+  m_Name: HUD
+  m_IsActive: 1
+--- !u!224 &401
+RectTransform:
+  m_GameObject: {fileID: 400}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children:
+  - {fileID: 411}
+  m_Father: {fileID: 0}
+--- !u!223 &402
+Canvas:
+  m_GameObject: {fileID: 400}
+  m_Enabled: 1
+--- !u!114 &403
+MonoBehaviour:
+  m_GameObject: {fileID: 400}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: dc481397cd94e03409e462478df09d58, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+--- !u!1 &410
+GameObject:
+  m_Component:
+  - component: {fileID: 411}
+  - component: {fileID: 412}
+  m_Name: Label
+  m_IsActive: 1
+--- !u!224 &411
+RectTransform:
+  m_GameObject: {fileID: 410}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 401}
+--- !u!114 &412
+MonoBehaviour:
+  m_GameObject: {fileID: 410}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: ca4c021b4490c8f4fb9de4e14055b9e3, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXUIText
+  defaultText: "Hello,
+    world"
+--- !u!1 &600
+GameObject:
+  m_Component:
+  - component: {fileID: 601}
+  - component: {fileID: 602}
+  - component: {fileID: 603}
+  m_Name: Main Camera
+  m_IsActive: 1
+--- !u!4 &601
+Transform:
+  m_GameObject: {fileID: 600}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 0, y: 1, z: -10}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!20 &602
+Camera:
+  m_GameObject: {fileID: 600}
+  m_Enabled: 1
+--- !u!81 &603
+AudioListener:
+  m_GameObject: {fileID: 600}
+  m_Enabled: 1
+--- !u!1 &800
+GameObject:
+  m_Component:
+  - component: {fileID: 801}
+  - component: {fileID: 802}
+  - component: {fileID: 803}
+  - component: {fileID: 804}
+  m_Name: Tri
+  m_IsActive: 1
+--- !u!4 &801
+Transform:
+  m_GameObject: {fileID: 800}
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 2, y: 0, z: 2}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+--- !u!33 &802
+MeshFilter:
+  m_GameObject: {fileID: 800}
+  m_Mesh: {fileID: 4300000, guid: e1000000000000000000000000000001, type: 3}
+--- !u!23 &803
+MeshRenderer:
+  m_GameObject: {fileID: 800}
+  m_Enabled: 1
+  m_Materials:
+  - {fileID: 2100000, guid: c1000000000000000000000000000001, type: 2}
+--- !u!114 &804
+MonoBehaviour:
+  m_GameObject: {fileID: 800}
+  m_Enabled: 1
+  m_Script: {fileID: 11500000, guid: a192e0a30d827ba40be5c99d32a83a12, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: net.psxsplash.splashedit.Runtime::SplashEdit.RuntimeCode.PSXObjectExporter
+  luaFile: {fileID: 0}

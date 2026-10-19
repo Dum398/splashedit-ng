@@ -15,6 +15,7 @@
 #include "blend.hh"
 #include "disc.hh"
 #include "unitymath.hh"
+#include "unity_import.hh"
 #include "editor/asset_browser_view.hh"
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
@@ -198,7 +199,7 @@ struct State {
     // Recently opened scenes (File menu), and an action held behind the
     // unsaved-changes prompt until the user saves, discards or cancels.
     editor::RecentScenes recent;
-    enum class Pending { None, New, Open, Recent, Quit };
+    enum class Pending { None, New, Open, Recent, Quit, ImportUnity };
     Pending pending = Pending::None;
     std::filesystem::path pendingPath;  // the scene for Pending::Recent
     bool openUnsaved = false;
@@ -216,6 +217,28 @@ struct State {
         bool open = false;   // open the modal next frame
         bool shown = false;  // the modal is up; document shortcuts wait
     } newProject;
+
+    // File > Import Unity Project...: the scenes of a Unity SplashEdit
+    // project made into a new project (splash::unity::importProject), run on
+    // a worker thread; then the same modal shows what was not brought over
+    // while the new project opens beneath it.
+    struct UnityImportDialog {
+        std::string source, dest;  // the Unity project folder and the new project's folder, as typed or picked
+        struct Row {
+            std::string name, path;  // "SCN_Menu", "Assets/Scenes/SCN_Menu.unity"
+            bool on = true;          // imported
+            bool exporter = true;    // holds a PSXSceneExporter
+        };
+        std::vector<Row> scenes;       // in the order they are imported (scenes.list)
+        std::string listedFor;         // the source `scenes` was read for
+        std::future<splash::unity::ImportReport> running;
+        std::filesystem::path runningDest;
+        std::optional<splash::unity::ImportReport> result;  // set: the report page
+        std::filesystem::path resultDest;
+        std::string error;    // why the last import failed, shown in the modal
+        bool open = false;    // open the modal next frame
+        bool shown = false;   // the modal is up; document shortcuts wait
+    } unityImport;
 
     // The inspector's Import settings: the model the shown object's mesh came
     // from and its sidecar, looked up again about once a second. `editing`

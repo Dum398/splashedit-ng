@@ -21,6 +21,7 @@
 #include "import.hh"
 #include "splashpack.hh"
 #include "texture.hh"
+#include "unity_import.hh"
 
 namespace fs = std::filesystem;
 
@@ -60,6 +61,11 @@ static int usage() {
                  "    [--scale <f>] [--up file|y|z] [--normals import|recompute] [--smoothing <deg>] [--merge]\n"
                  "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
                  "  the settings start from <model>.import.json beside the model when there is one\n"
+                 "usage: splashpack-cli import-unity <unityProject> <destDir> [--scenes Name1,Name2,...]\n"
+                 "  makes a new project in <destDir> (new or empty) from the scenes of a Unity SplashEdit\n"
+                 "  project, in the order given (default: every scene with a PSXSceneExporter, in Build\n"
+                 "  Settings order, then by name); prints what it did not bring over and a summary line,\n"
+                 "  and writes the same report to <destDir>/import-report.txt\n"
                  "usage: splashpack-cli resave <in.scene|in.mesh> <out>\n"
                  "  loads and saves a scene or mesh file\n"
                  "usage: splashpack-cli luac <in.lua> -o <out.luac>\n"
@@ -181,6 +187,38 @@ static int audio(int argc, char** argv) {
         if (!decodedOut.empty()) writeWav16(decodedOut, dec, rate);
         std::printf("%s rate=%d->%d samples=%zu bytes=%zu snr=%.2f\n", in.c_str(), src.rate, rate, pcm.size(),
                     adpcm.size(), err > 0 ? 10 * std::log10(sig / err) : 999.0);
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
+static int importUnity(int argc, char** argv) {
+    if (argc < 4) return usage();
+    splash::unity::ImportOptions opt;
+    for (int i = 4; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--scenes" && i + 1 < argc) {
+            std::string list = argv[++i];
+            size_t p = 0;
+            while (p <= list.size()) {
+                size_t c = list.find(',', p);
+                if (c == std::string::npos) c = list.size();
+                if (c > p) opt.scenes.push_back(list.substr(p, c - p));
+                p = c + 1;
+            }
+        } else return usage();
+    }
+    try {
+        const splash::unity::ImportReport r = splash::unity::importProject(argv[2], argv[3], opt);
+        if (!r.ok()) {
+            std::fprintf(stderr, "error: %s\n", r.error.c_str());
+            return 1;
+        }
+        for (const std::string& s : r.scenes) std::printf("scene %s\n", s.c_str());
+        for (const splash::unity::ReportItem& it : r.items) std::printf("%s\n", it.line().c_str());
+        std::printf("%s\n", r.summary().c_str());
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "error: %s\n", e.what());
@@ -410,6 +448,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "import") == 0) return importCmd(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "import-unity") == 0) return importUnity(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return audio(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "luac") == 0) return luac(argc, argv);

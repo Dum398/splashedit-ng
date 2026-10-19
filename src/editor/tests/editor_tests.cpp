@@ -53,6 +53,7 @@
 #include "luacompile.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
+#include "ui/window_chrome.hh"
 #include "ui/scrub.hh"
 #include "budget.hh"
 #include "disc.hh"
@@ -11235,6 +11236,34 @@ void testDialogGate() {
     CHECK(won == 1);
 }
 
+// Borderless window chrome (#162): a maximized window has no resize edges, so
+// the minimize/maximize/close buttons in the top band take their clicks, and
+// the title bar still drags.
+void testWindowChrome() {
+    using ui::ChromeHit;
+    const ui::ChromeRect bar{0, 0, 1600, 32};
+    const std::vector<ui::ChromeRect> buttons{{1480, 0, 1600, 32}};
+    // A point in the top band, over the close button.
+    CHECK(ui::chromeHitTest(1600, 960, false, 1597, 2, bar, buttons) == ChromeHit::ResizeTopRight);
+    CHECK(ui::chromeHitTest(1600, 960, true, 1597, 2, bar, buttons) == ChromeHit::Normal);
+    CHECK(ui::chromeHitTest(1600, 960, false, 1500, 2, bar, buttons) == ChromeHit::ResizeTop);
+    CHECK(ui::chromeHitTest(1600, 960, true, 1500, 2, bar, buttons) == ChromeHit::Normal);
+    // Every edge resizes only while restored.
+    CHECK(ui::chromeHitTest(1600, 960, false, 2, 500, bar, buttons) == ChromeHit::ResizeLeft);
+    CHECK(ui::chromeHitTest(1600, 960, false, 1597, 500, bar, buttons) == ChromeHit::ResizeRight);
+    CHECK(ui::chromeHitTest(1600, 960, false, 800, 957, bar, buttons) == ChromeHit::ResizeBottom);
+    CHECK(ui::chromeHitTest(1600, 960, false, 2, 957, bar, buttons) == ChromeHit::ResizeBottomLeft);
+    CHECK(ui::chromeHitTest(1600, 960, true, 2, 500, bar, buttons) == ChromeHit::Normal);
+    CHECK(ui::chromeHitTest(1600, 960, true, 1597, 500, bar, buttons) == ChromeHit::Normal);
+    CHECK(ui::chromeHitTest(1600, 960, true, 800, 957, bar, buttons) == ChromeHit::Normal);
+    // The title bar drags in both states, including its top band when maximized.
+    CHECK(ui::chromeHitTest(1600, 960, false, 800, 16, bar, buttons) == ChromeHit::Draggable);
+    CHECK(ui::chromeHitTest(1600, 960, true, 800, 16, bar, buttons) == ChromeHit::Draggable);
+    CHECK(ui::chromeHitTest(1600, 960, true, 800, 1, bar, buttons) == ChromeHit::Draggable);
+    CHECK(ui::chromeHitTest(1600, 960, true, 800, 500, bar, buttons) == ChromeHit::Normal);
+    CHECK(ui::chromeHitTest(1600, 960, true, 1500, 16, bar, buttons) == ChromeHit::Normal);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -11385,6 +11414,7 @@ int main(int argc, char** argv) {
     testUiSprite();
     testNumberScrub();
     testDialogGate();
+    testWindowChrome();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -11138,6 +11138,116 @@ void testTilemapModel() {
     CHECK(!splash::loadScene(dir / "rt3.scene").tilemap);
 }
 
+// The tilemap chunk, byte for byte as psxsplash's tilesystem.cpp reads it
+// (SplashEdit's PSXTilemapExporter.Flatten and PSXSceneWriter), and each
+// problem export refuses it for.
+void testTilemapExport() {
+    using namespace roomtest;
+    const fs::path src = SPLASHEDIT_SOURCE_DIR;
+    const fs::path project = g_outDir / "tilemap";
+    fs::remove_all(project);
+    fs::create_directories(project);
+    fs::copy(src / "tests" / "sprite", project, fs::copy_options::recursive);
+    splash::Scene scene = splash::loadScene(project / "sprite.scene");
+    for (splash::Object& o : scene.objects)
+        if (o.mesh) {
+            o.mesh->mesh = (src / "examples" / "courtyard" / "meshes" / "crate.mesh").string();
+            for (splash::Material& m : o.mesh->materials) m.texture = (src / "examples" / "courtyard" / "textures" / "crate.png").string();
+        }
+    // fx.png: 48x16 in 12x8 cells, so 8 cells; the second sheet, so index 1.
+    splash::Tilemap t;
+    t.tileset = "fx";
+    t.resize(4, 3);
+    auto brush = [](const char* name, int cell, bool walkable, int kind, int id) {
+        splash::TileBrush b;
+        b.name = name, b.cell = cell, b.walkable = walkable, b.kind = kind, b.id = id;
+        return b;
+    };
+    t.brushes = {brush("floor", 0, true, 0, -1), brush("wall", 1, false, 0, -1), brush("task", 2, true, 3, -1),
+                 brush("hole", -1, true, 5, -1), brush("vent", 7, false, 2, 9)};
+    t.cells = {0, 1, 2, -1,  //
+               2, 3, 4, 0,   //
+               1, 1, 2, -1};
+    scene.tilemap = t;
+
+    // Flatten: holes and empty cells draw nothing and are solid; a hole is no
+    // object; auto ids count each kind in reading order, a set id is kept.
+    {
+        const splash::FlatTilemap ft = splash::flattenTilemap(t);
+        const std::vector<uint8_t> cells = {0, 1, 1, 0, 2, 1, 0xFF, 0, 2, 1, 0xFF, 0, 7, 0, 0, 1, 1, 0, 1, 0, 2, 1, 0xFF, 0};
+        CHECK(ft.cells == cells);
+        const std::vector<splash::TileObjectRecord> objs = {{3, 1, 2, 0}, {3, 2, 0, 1}, {2, 9, 2, 1}, {3, 3, 2, 2}};
+        CHECK(ft.objects == objs);
+    }
+
+    splash::ExportResult r = splash::exportSplashpack(scene, project, project / "t.splashpack");
+    for (const std::string& e : r.errors) std::fprintf(stderr, "tilemap export: %s\n", e.c_str());
+    CHECK(r.ok());
+    const std::string b = readAll(project / "t.splashpack");
+    if (r.ok() && b.size() > 144) {
+        // The header word (v23's former reserved word, after the scene hash).
+        const size_t off = size_t(rd32(b, 140));
+        CHECK(off != 0 && off % 4 == 0 && b.size() >= off + 68);
+        CHECK(rd16(b, off) == 4 && rd16(b, off + 2) == 3);                          // width, height
+        CHECK(uint8_t(b[off + 4]) == 12 && uint8_t(b[off + 5]) == 8);                // tile size: the sheet's cell
+        CHECK(uint8_t(b[off + 6]) == 1 && uint8_t(b[off + 7]) == 0);                 // tileset sheet, pad
+        CHECK(rd16(b, off + 8) == 4 && rd16(b, off + 10) == 0);                      // object count, pad
+        CHECK(size_t(rd32(b, off + 12)) == off + 20 && size_t(rd32(b, off + 16)) == off + 44);  // absolute offsets
+        // A cell: (2,1) is the vent, tile 7, solid.
+        CHECK(uint8_t(b[off + 20 + (1 * 4 + 2) * 2]) == 7 && uint8_t(b[off + 20 + (1 * 4 + 2) * 2 + 1]) == 0);
+        // A wall cell, and an empty one.
+        CHECK(uint8_t(b[off + 20 + 2]) == 1 && uint8_t(b[off + 20 + 3]) == 0);
+        CHECK(uint8_t(b[off + 20 + 6]) == 0xFF && uint8_t(b[off + 20 + 7]) == 0);
+        // An object: the third, the vent with its own id 9 at 2,1.
+        const size_t o2 = off + 44 + 2 * 6;
+        CHECK(uint8_t(b[o2]) == 2 && uint8_t(b[o2 + 1]) == 9 && rd16(b, o2 + 2) == 2 && rd16(b, o2 + 4) == 1);
+        CHECK(r.stats.tilemap.width == 4 && r.stats.tilemap.height == 3 && r.stats.tilemap.tileW == 12 && r.stats.tilemap.tileH == 8 &&
+              r.stats.tilemap.sheet == 1 && r.stats.tilemap.objects == 4 && r.stats.tilemap.bytes == 20 + 24 + 24);
+    }
+    // Without objects the objects offset is 0; without a tilemap the word is.
+    {
+        splash::Scene s = scene;
+        for (splash::TileBrush& br : s.tilemap->brushes) br.kind = 0;
+        splash::ExportResult nr = splash::exportSplashpack(s, project, project / "noobj.splashpack");
+        const std::string nb = readAll(project / "noobj.splashpack");
+        const size_t off = nb.size() > 144 ? size_t(rd32(nb, 140)) : 0;
+        CHECK(nr.ok() && off && rd16(nb, off + 8) == 0 && rd32(nb, off + 16) == 0 && nr.stats.tilemap.bytes == 20 + 24);
+        s.tilemap.reset();
+        nr = splash::exportSplashpack(s, project, project / "none.splashpack");
+        const std::string zb = readAll(project / "none.splashpack");
+        CHECK(nr.ok() && zb.size() > 144 && rd32(zb, 140) == 0 && nr.stats.tilemap.bytes == 0);
+    }
+    // Each problem: export refuses, saying what to fix.
+    auto refused = [&](const std::function<void(splash::Tilemap&)>& edit, const std::string& part) {
+        splash::Scene s = scene;
+        edit(*s.tilemap);
+        const splash::ExportResult br = splash::exportSplashpack(s, project, project / "bad.splashpack");
+        if (!hasError(br, part))
+            for (const std::string& e : br.errors) std::fprintf(stderr, "tilemap error: %s\n", e.c_str());
+        return !br.ok() && hasError(br, part);
+    };
+    CHECK(refused([](splash::Tilemap& m) { m.tileset.clear(); }, "The tilemap has no tileset"));
+    CHECK(refused([](splash::Tilemap& m) { m.tileset = "gone"; }, "tileset 'gone' is not one of the scene's sprite sheets"));
+    CHECK(refused([](splash::Tilemap& m) { m.brushes[4].cell = 8; },
+                  "Tile brush 'vent' draws tileset cell 8, but 'fx' has 8 (0..7)"));
+    CHECK(refused([](splash::Tilemap& m) { m.brushes[0].cell = -2; }, "Tile brush 'floor' draws tileset cell -2: use -1 for a hole"));
+    CHECK(refused([](splash::Tilemap& m) { m.cells[3] = 5, m.cells[11] = 6; },
+                  "2 tilemap cells are painted with a brush that no longer exists"));
+    CHECK(refused(
+        [](splash::Tilemap& m) {
+            m.resize(16, 9);
+            std::fill(m.cells.begin(), m.cells.end(), 2);
+        },
+        "144 tilemap object tiles, psxsplash holds at most 128"));
+    {
+        // 128 is still fine.
+        splash::Scene s = scene;
+        s.tilemap->resize(16, 8);
+        std::fill(s.tilemap->cells.begin(), s.tilemap->cells.end(), 2);
+        CHECK(splash::exportSplashpack(s, project, project / "max.splashpack").stats.tilemap.objects == 128);
+    }
+}
+
 // Direction sets: Sprite.SetFacingFromYaw(sprite, "walk_s", n, yaw) plays the
 // animation facingFromYaw(yaw, n) places after walk_s in the exported table,
 // so a set is n animations named in increasing-yaw order, one after another.
@@ -11696,6 +11806,7 @@ int main(int argc, char** argv) {
     testSceneNetworkId();
     testSpriteSheets();
     testTilemapModel();
+    testTilemapExport();
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();

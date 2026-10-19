@@ -36,6 +36,7 @@
 
 #include "gl.h"
 #include "ui/brand.h"
+#include "ui/colour_hex.hh"
 #include "ui/file_dialog.h"
 #include "ui/icons.h"
 #include "ui/texture_image.h"
@@ -4270,18 +4271,6 @@ static splash::Quat quatFromEuler(splash::Vec3 deg) {
             static_cast<float>(cy * cx * sz - sy * sx * cz), static_cast<float>(cy * cx * cz + sy * sx * sz)};
 }
 
-static ImU32 toColor(const std::array<float, 3>& c) {
-    auto u = [](float v) { return static_cast<int>(splash::clampv(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-    return IM_COL32(u(c[0]), u(c[1]), u(c[2]), 255);
-}
-
-static std::string toHex(const std::array<float, 3>& c) {
-    auto u = [](float v) { return static_cast<unsigned>(splash::clampv(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-    char b[16];
-    std::snprintf(b, sizeof b, "#%02X%02X%02X", u(c[0]), u(c[1]), u(c[2]));
-    return b;
-}
-
 static const char* bppLabel(splash::BitDepth d) {
     switch (d) {
         case splash::BitDepth::Bpp4: return "4 bpp";
@@ -5083,7 +5072,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                                   "The screen clears to this colour every frame, fog on or off. With fog on, distant "
                                   "triangles also fade to it. Click to pick one.");
         nameRect("scene.fogcol", colRow);
-        if (colorField("fogcol", colRow, toColor(set.fog.color), toHex(set.fog.color).c_str())) ImGui::OpenPopup("##fogcolpick");
+        const ColorFieldHit fogHit = colorField("fogcol", colRow, set.fog.color, "scene.fogcol");
+        if (fogHit.clicked) ImGui::OpenPopup("##fogcolpick");
+        // Paste from the field's right-click menu: one undo step.
+        if (fogHit.pasted) doc.editSettings([&](splash::SceneSettings& s) { s.fog.color = *fogHit.pasted; });
         ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
         pushPopupStyle();
         if (ImGui::BeginPopup("##fogcolpick")) {
@@ -5157,7 +5149,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             // Scripted tests: the section's values when they change.
             char now[128];
             std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s culling %s", set.fog.enabled ? 1 : 0,
-                          set.fog.density, toHex(set.fog.color).c_str(), double(set.gteScaling), interior ? "interior" : "exterior",
+                          set.fog.density, colourHex(set.fog.color).c_str(), double(set.gteScaling), interior ? "interior" : "exterior",
                           roomCount ? ("rooms " + std::to_string(roomCount)).c_str() : "frustum");
             static std::string reported;
             if (reported != now) {
@@ -6994,7 +6986,15 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                       "Tints this untextured part of the model. Ignored while it has a texture.");
             nameRect("obj.matcol." + is, colRow);
             const std::string popup = "##matcolpick" + is;
-            if (colorField(("matcol." + is).c_str(), colRow, toColor(c3), toHex(c3).c_str())) ImGui::OpenPopup(popup.c_str());
+            const ColorFieldHit matHit = colorField(("matcol." + is).c_str(), colRow, c3, ("obj.matcol." + is).c_str());
+            if (matHit.clicked) ImGui::OpenPopup(popup.c_str());
+            // Paste from the field's right-click menu: one undo step.
+            if (matHit.pasted)
+                doc.edit(path, [&](splash::Object& ob) {
+                    if (!ob.mesh || i >= ob.mesh->materials.size()) return;
+                    std::array<float, 4>& col = ob.mesh->materials[i].color;
+                    col = {(*matHit.pasted)[0], (*matHit.pasted)[1], (*matHit.pasted)[2], col[3]};
+                });
             // Right-aligned under the field, so it stays inside the inspector.
             ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
             pushPopupStyle();
@@ -7023,7 +7023,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             const std::array<float, 4>& c4 = m.materials[i].color;
             matLines += "\nmaterial " + std::to_string(i) + ": texture " +
                         (m.materials[i].texture.empty() ? std::string("none") : fileName(m.materials[i].texture)) + " colour " +
-                        toHex({c4[0], c4[1], c4[2]});
+                        colourHex({c4[0], c4[1], c4[2]});
         }
         materialLines = matLines;
         if (nMat <= 1) {
@@ -7246,7 +7246,11 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             report("runtimelights", over.empty() ? std::string() : "light: " + over);
         }
         const ImRect colRow = row("llcol", "Colour", "The colour of the light. Click to pick one.");
-        if (colorField("lcol", colRow, toColor(l.color), toHex(l.color).c_str())) ImGui::OpenPopup("##lcolpick");
+        nameRect("obj.lcol", colRow);
+        const ColorFieldHit lHit = colorField("lcol", colRow, l.color, "obj.lcol");
+        if (lHit.clicked) ImGui::OpenPopup("##lcolpick");
+        // Paste from the field's right-click menu: one undo step.
+        if (lHit.pasted) doc.edit(path, [&](splash::Object& ob) { ob.light->color = *lHit.pasted; });
         // Right-aligned under the field, so it stays inside the inspector.
         ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
         pushPopupStyle();

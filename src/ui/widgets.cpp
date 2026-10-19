@@ -9,7 +9,11 @@
 #include <string>
 #include <unordered_map>
 
+#include <SDL3/SDL_clipboard.h>
+#include <SDL3/SDL_stdinc.h>
+
 #include "budget.hh"
+#include "ui/colour_hex.hh"
 #include "ui/icons.h"
 #include "ui/scrub.hh"
 
@@ -922,15 +926,67 @@ bool toggle(const char* id, ImRect r, bool on) {
     return h.clicked;
 }
 
-bool colorField(const char* id, ImRect r, ImU32 col, const char* hex) {
+ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name) {
     Fonts& f = fonts();
+    const std::string hex = colourHex(value);
+    auto u8 = [](float v) { return static_cast<int>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
     Hit h = interact(id, r);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     well(dl, r, h.hover);
     ImRect sw(r.Min + ImVec2(3, 3), ImVec2(r.Min.x + 34, r.Max.y - 3));
-    dl->AddRectFilled(sw.Min, sw.Max, col, radius::field - 1);
-    text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text, hex);
-    return h.clicked;
+    dl->AddRectFilled(sw.Min, sw.Max, IM_COL32(u8(value[0]), u8(value[1]), u8(value[2]), 255), radius::field - 1);
+    text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text,
+         hex.c_str());
+    ColorFieldHit out;
+    out.clicked = h.clicked;
+
+    // The right-click menu. Only one is open at a time, so its state is shared:
+    // where it opened and the clipboard's colour as it was then.
+    static ImVec2 menuPos;
+    static std::optional<std::array<float, 3>> clip;
+    static std::string clipHex;
+    ImGui::PushID(id);
+    const char* popup = "##colourmenu";
+    if (h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        clip.reset();
+        if (char* raw = SDL_GetClipboardText()) {
+            clip = parseColourHex(raw);
+            SDL_free(raw);
+        }
+        clipHex = clip ? colourHex(*clip) : std::string();
+        // Under the field, from the pointer across, so the field stays in view.
+        menuPos = ImVec2(ImGui::GetIO().MousePos.x, r.Max.y + space::xs);
+        ImGui::OpenPopup(popup);
+    }
+    if (ImGui::IsPopupOpen(popup)) {
+        std::vector<MenuItem> items;
+        items.push_back({"Copy", hex, true, [hex] { SDL_SetClipboardText(hex.c_str()); }});
+        items.push_back({"Paste", clipHex, clip.has_value(), [&out] { out.pasted = clip; }});
+        float w, mh;
+        menuSize(items, &w, &mh);
+        const ImVec2 d = ImGui::GetIO().DisplaySize;
+        ImVec2 pos = menuPos;
+        if (pos.x + w > d.x - space::xs) pos.x -= w;
+        if (pos.y + mh > d.y - space::xs) pos.y = r.Min.y - space::xs - mh;  // no room below: above it
+        pos.x = std::max(pos.x, space::xs);
+        pos.y = std::max(pos.y, space::xs);
+        ImGui::SetNextWindowPos(pos);
+        ImGui::SetNextWindowSize(ImVec2(w, mh));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 0.0f);
+        const bool shown = ImGui::BeginPopup(popup, ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoDecoration |
+                                                        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings);
+        ImGui::PopStyleVar(2);
+        if (shown) {
+            const std::string menuName = std::string(name ? name : id) + ".menu";
+            std::function<void()> run = menuRows(items, w, mh, menuName.c_str());
+            if (run || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+            if (run) run();
+        }
+    }
+    ImGui::PopID();
+    return out;
 }
 
 void slider(const char* id, ImRect r, float t, const char* value) {

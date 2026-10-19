@@ -3,9 +3,11 @@
 #include <imgui.h>
 #include <imgui_internal.h>
 
+#include <array>
 #include <functional>
 #include <initializer_list>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -157,8 +159,16 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
 bool assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
 // Returns true on the frame the switch is clicked.
 bool toggle(const char* id, ImRect r, bool on);
-// Returns true when clicked.
-bool colorField(const char* id, ImRect r, ImU32 col, const char* hex);
+// What a colour field did this frame.
+struct ColorFieldHit {
+    bool clicked = false;                         // left click: the caller opens its picker
+    std::optional<std::array<float, 3>> pasted;   // the colour Paste set, once (one undo step for the caller)
+};
+// A colour well showing `value` as #RRGGBB. A right click opens a Copy / Paste
+// menu of that hex value (#176); Paste is offered only while the clipboard
+// holds a colour. Scripted checks find its rows as <name>.menu/Copy and
+// <name>.menu/Paste (`name` defaults to `id`).
+ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name = nullptr);
 void slider(const char* id, ImRect r, float t, const char* value);
 
 // Problem card with an inline fix action (none when fixLabel is null).

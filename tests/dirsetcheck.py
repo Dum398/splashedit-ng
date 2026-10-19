@@ -21,11 +21,15 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 H = 960
-# Sprite sheets is the inspector's last section: the wheel over the inspector
-# scrolls to the bottom once the background export has landed; again after
-# each change that grows the section.
-SCROLL = ['--wheel', '1420,500,-200', '--wait', '3']
-START = ['--wait', '20', '--wait-export'] + SCROLL
+# Sprite sheets is the inspector's last section but for Tilemap. The wheel over
+# the inspector scrolls to the bottom once the background export has landed;
+# again after each change that grows the section. Tilemap is folded (FOLDS)
+# and the wheel goes back up one 48 px step, which its 46 px folded header and
+# gap take: the bottom of Sprite sheets lands where it did without Tilemap.
+# Open, Tilemap pushed Add direction set and the animation rows above the panel.
+SCROLL = ['--wheel', '1420,500,-200', '--wait', '3', '--wheel', '1420,500,1', '--wait', '3']
+FOLDS = ['--click', '@s_tilemap', '--wait', '3']
+START = ['--wait', '20', '--wait-export'] + SCROLL + FOLDS + SCROLL
 SUF8 = ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw']
 SUF4 = ['n', 'e', 's', 'w']
 mid = None

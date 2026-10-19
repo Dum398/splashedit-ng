@@ -6,6 +6,7 @@
 #include <exception>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <string>
 #include <system_error>
 
@@ -410,14 +411,47 @@ splash::ExportResult reloadForPlay(const splash::Scene& scene, const fs::path& p
     return r;
 }
 
-std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir) {
+std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir, const fs::path& captureScript) {
     std::vector<std::string> a = {utf8(t.redux), "-run", "-fastboot", "-no-ui", "-shmdisplay"};
     if (!t.bios.empty()) {
         a.push_back("-bios");
         a.push_back(utf8(t.bios));
     }
     a.insert(a.end(), {"-loadexe", utf8(engineFor(t)), "-pcdrv", "-pcdrvbase", utf8(dir)});
+    if (!captureScript.empty()) a.insert(a.end(), {"-dofile", utf8(captureScript)});
     return a;
+}
+
+bool requestCapture(const fs::path& dir, std::string* error) {
+    std::error_code ec;
+    for (const char* stale : {"capture.gpd", "capture.err", "capture.gpd.part"}) fs::remove(dir / stale, ec);
+    const fs::path tmp = dir / "capture.flag.tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        out << "1";
+        if (!out) {
+            if (error) *error = "Cannot write " + utf8(tmp);
+            return false;
+        }
+    }
+    fs::rename(tmp, dir / "capture.flag", ec);
+    if (ec) {
+        if (error) *error = "Cannot write capture.flag: " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+CaptureState pollCapture(const fs::path& dir, std::string* message) {
+    std::error_code ec;
+    if (fs::is_regular_file(dir / "capture.gpd", ec)) return CaptureState::Done;
+    if (fs::is_regular_file(dir / "capture.err", ec)) {
+        std::ifstream in(dir / "capture.err", std::ios::binary);
+        std::string why((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (message) *message = why.empty() ? std::string("the capture failed") : why;
+        return CaptureState::Failed;
+    }
+    return CaptureState::Waiting;
 }
 
 }  // namespace editor

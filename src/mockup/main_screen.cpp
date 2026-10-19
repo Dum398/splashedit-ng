@@ -136,6 +136,59 @@ static std::filesystem::path playDir() {
 }
 
 static void notify(State& st, std::string msg, bool bad);
+static void scriptLine(const char* tag, const std::string& line);
+
+// Capture frame (the Game view, Build menu): asks framecapture.lua in the
+// running redux for one GPU frame; pollFrameCapture opens it in the Frame tab.
+static bool canCaptureFrame(const State& st) {
+    return st.play.emu.running() && st.play.game.attached() && !st.play.capturing && !st.play.captureScript.empty();
+}
+
+static void captureFrame(State& st) {
+    if (!canCaptureFrame(st)) return;
+    std::string err;
+    if (!editor::requestCapture(playDir(), &err)) {
+        notify(st, "Capture frame: " + err, true);
+        return;
+    }
+    st.play.capturing = true;
+    st.play.captureAt = SDL_GetTicks();
+    notify(st, "Capturing a frame...", false);
+    scriptLine(nullptr, "frame: capture requested");
+}
+
+static void pollFrameCapture(State& st) {
+    State::Play& p = st.play;
+    if (!p.capturing) return;
+    if (!p.emu.running()) {
+        p.capturing = false;
+        return;
+    }
+    std::string why;
+    const editor::CaptureState cs = editor::pollCapture(playDir(), &why);
+    if (cs == editor::CaptureState::Waiting) {
+        if (SDL_GetTicks() - p.captureAt > 20000) {
+            p.capturing = false;
+            std::error_code ec;
+            std::filesystem::remove(playDir() / "capture.flag", ec);
+            notify(st, "No frame came back from pcsx-redux; Capture frame needs a pcsx-redux with the GPU dump recorder", true);
+            scriptLine(nullptr, "frame: capture timed out");
+        }
+        return;
+    }
+    p.capturing = false;
+    if (cs == editor::CaptureState::Failed) {
+        notify(st, "Capture frame: " + why, true);
+        scriptLine(nullptr, "frame: capture failed: " + why);
+        return;
+    }
+    std::string err;
+    if (!st.frame.load(playDir() / "capture.gpd", &err)) {
+        notify(st, "Capture frame: " + err, true);
+        return;
+    }
+    notify(st, "Captured a frame", false);
+}
 // What a click on an object in the viewport selects: a prefab instance as a
 // whole (its content is edited in the prefab), else the object itself.
 static editor::ObjectPath pickTarget(const editor::Document& doc, const editor::ObjectPath& path) {
@@ -353,6 +406,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
         p.game.detach();
         p.gameFocus = false;
     }
+    pollFrameCapture(st);
     if (!p.build.valid() || p.build.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
     splash::ExportResult r = p.build.get();
     const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
@@ -365,7 +419,7 @@ static void updatePlay(State& st, const editor::Document& doc) {
         return;
     }
     std::string err;
-    if (!p.emu.start(editor::reduxCommand(eff, playDir()), &err))
+    if (!p.emu.start(editor::reduxCommand(eff, playDir(), p.captureScript), &err))
         p.message = "Could not start pcsx-redux: " + err;
     else {
         p.startedAt = SDL_GetTicks();
@@ -605,8 +659,10 @@ static ImRect g_menuRects[6];
 // label, its release must not open the menu again.
 static int g_menuIgnoreClick = -1;
 
-// The bottom dock: the Timeline tab shows while it is open and is the one in front.
+// The bottom dock: the Timeline and Frame tabs show while they are open; the one in front draws.
 static bool timelineInFront(const State& st) { return st.timeline.open && st.bottomTab == State::BottomTab::Timeline; }
+static bool frameInFront(const State& st) { return st.frame.open && st.bottomTab == State::BottomTab::Frame; }
+static bool projectInFront(const State& st) { return !timelineInFront(st) && !frameInFront(st); }
 
 // Shows the Project tab in front, or folds it to its header when it already is and shows.
 static void toggleProjectTab(State& st) {
@@ -622,7 +678,9 @@ static void toggleProjectTab(State& st) {
 // is its label and icon with padding; `r` is the strip at the left of the
 // panel in front's header.
 static float dockTabWidth(const char* label) { return measure(fonts().semibold, type::body, label).x + 30 + space::md * 2; }
-static float dockTabsWidth(const State& st) { return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0); }
+static float dockTabsWidth(const State& st) {
+    return dockTabWidth("Project") + (st.timeline.open ? dockTabWidth("Timeline") : 0) + (st.frame.open ? dockTabWidth("Frame") : 0);
+}
 static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
     Fonts& f = fonts();
     float x = r.Min.x;
@@ -638,12 +696,14 @@ static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
         if (front && lit) dl->AddRectFilled(ImVec2(tr.Min.x + space::sm, tr.Max.y - 2), ImVec2(tr.Max.x - space::sm, tr.Max.y), color::accent, 1);
         return h.clicked;
     };
-    const bool projectFront = !timelineInFront(st);
+    const bool projectFront = projectInFront(st);
     if (tab("tab_project", "Project", st.assets.open && projectFront ? icon::folderOpen : icon::folder, rgb(0xd8b46a), projectFront,
             st.assets.open))
         toggleProjectTab(st);
-    if (st.timeline.open && tab("tab_timeline", "Timeline", icon::layers, color::accentHover, !projectFront, true))
+    if (st.timeline.open && tab("tab_timeline", "Timeline", icon::layers, color::accentHover, timelineInFront(st), true))
         st.bottomTab = State::BottomTab::Timeline;
+    if (st.frame.open && tab("tab_frame", "Frame", icon::image, rgb(0x5ccfe0), frameInFront(st), true))
+        st.bottomTab = State::BottomTab::Frame;
 }
 
 static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document& doc) {
@@ -2457,6 +2517,7 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
         case 3:  // Build
             m.push_back(item(st.play.emu.running() ? "Stop" : "Play", "F5", !st.play.build.valid(), [&] { togglePlay(st, doc); }));
             m.push_back(item("Restart", "Ctrl+Shift+F5", st.play.emu.running(), [&] { restartPlay(st, doc); }));
+            m.push_back(item("Capture Frame", "", canCaptureFrame(st), [&] { captureFrame(st); }));
             m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
                              [&] { toggleRun(st, doc); }));
             m.push_back(item("Export Disc Image...", "Ctrl+B", !st.play.disc.valid(), [&] { startExport(st, doc); }));
@@ -2507,7 +2568,15 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             }
             m.push_back(separator());
             m.push_back(heading("Panels"));
-            m.push_back(item("Project", "", true, [&] { toggleProjectTab(st); }, st.assets.open && !timelineInFront(st)));
+            m.push_back(item("Project", "", true, [&] { toggleProjectTab(st); }, st.assets.open && projectInFront(st)));
+            m.push_back(item("Frame Debugger", "", true, [&] {
+                if (frameInFront(st)) {
+                    st.frame.open = false;
+                } else {
+                    st.frame.open = true;
+                    st.bottomTab = State::BottomTab::Frame;
+                }
+            }, frameInFront(st)));
             m.push_back(separator());
             m.push_back(heading("Timeline"));
             m.push_back(item("Timeline", "", true, [&] { st.timeline.open = !st.timeline.open; }, st.timeline.open));
@@ -4242,6 +4311,16 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+    // Capture frame, at the top right: one GPU frame into the Frame tab.
+    if (!p.captureScript.empty()) {
+        const char* capLabel = p.capturing ? "Capturing..." : "Capture frame";
+        const float bw = buttonWidth(icon::camera, capLabel);
+        const ImVec2 at(r.Max.x - space::md - bw, r.Min.y + space::md - 3);
+        if (button("game.capture", at, icon::camera, capLabel, ButtonKind::Secondary, nullptr,
+                   "Record the next frame the game draws and open it in the Frame tab") &&
+            !p.capturing)
+            captureFrame(st);
+    }
     if (p.gameFocus) dl->AddRect(r.Min, r.Max, color::accent, radius::window, 0, 2.0f);
 }
 
@@ -9991,7 +10070,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     // Object commands on the selection; the UI tab takes these keys for its
     // elements, and while the Project panel has the keyboard, Delete and F2 are its own.
     const bool uiTab = st.scripts.uiShown();
-    const bool assetKeys = st.assets.focused() && !timelineInFront(st);
+    const bool assetKeys = st.assets.focused() && projectInFront(st);
     if (uiTab && !assetKeys && !ctrl && pressed(ImGuiKey_F2)) st.canvasView.rename(doc);
     if (const std::optional<editor::ObjectPath> sel = (uiTab || assetKeys) ? std::nullopt : doc.selection()) {
         if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
@@ -10088,9 +10167,15 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     // Whatever opened the timeline (the View menu, Edit in timeline) brings
     // its tab to the front; closing it shows the Project tab again.
     if (st.timeline.open && (!st.timelineWasOpen || st.timeline.shows != st.timelineShows)) st.bottomTab = State::BottomTab::Timeline;
-    if (!st.timeline.open) st.bottomTab = State::BottomTab::Project;
+    if (st.frame.open && (!st.frameWasOpen || st.frame.shows != st.frameShows)) st.bottomTab = State::BottomTab::Frame;
+    if (!st.timeline.open && st.bottomTab == State::BottomTab::Timeline)
+        st.bottomTab = st.frame.open ? State::BottomTab::Frame : State::BottomTab::Project;
+    if (!st.frame.open && st.bottomTab == State::BottomTab::Frame)
+        st.bottomTab = st.timeline.open ? State::BottomTab::Timeline : State::BottomTab::Project;
     st.timelineWasOpen = st.timeline.open;
     st.timelineShows = st.timeline.shows;
+    st.frameWasOpen = st.frame.open;
+    st.frameShows = st.frame.shows;
     // The timeline takes Delete and Space while it has focus, before the
     // scene's shortcuts see them; only while its tab is in front.
     if (timelineInFront(st)) st.timeline.takeKeys(doc);
@@ -10154,19 +10239,28 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     }
     // The bottom dock: the tab in front takes its height from the bottom of
     // the middle panel; the other is not drawn until it is picked.
-    const bool tl = timelineInFront(st);
+    const bool tl = timelineInFront(st), fr = frameInFront(st);
     const float tabsW = dockTabsWidth(st);
     auto tabs = [&st](ImDrawList* d, ImRect r) { dockTabs(st, d, r); };
     st.timeline.tabs = tabs;
     st.timeline.tabsWidth = tabsW;
+    st.frame.tabs = tabs;
+    st.frame.tabsWidth = tabsW;
     st.assets.tabs = tabs;
     st.assets.tabsWidth = tabsW;
     st.scripts.setTilesTab(doc.scene().tilemap.has_value());
-    const ImRect body = st.scripts.tabStrip(dl, tl ? st.timeline.dock(mid) : st.assets.dock(mid));
+    const ImRect body = st.scripts.tabStrip(dl, tl ? st.timeline.dock(mid) : fr ? st.frame.dock(mid) : st.assets.dock(mid));
     // The timeline takes this frame's scrub first, so the Scene draws the
     // pose at the new scrub head now rather than a frame late (empty when
     // closed or behind the Project tab).
     if (tl) st.timeline.draw(dl, doc);
+    if (fr) {
+        st.frame.draw(dl);
+        if (!st.frame.notice.empty()) {
+            notify(st, st.frame.notice, st.frame.noticeBad);
+            st.frame.notice.clear();
+        }
+    }
     view.setPreview(tl ? st.timeline.preview(doc) : editor::Preview{});
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
@@ -10199,7 +10293,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         if (!ec && !rel.empty()) savedScripts.push_back(utf8(rel.generic_u8string()));
     }
     if (!savedScripts.empty()) doc.refreshAssets(savedScripts);
-    if (!tl) st.assets.draw(dl, doc);
+    if (!tl && !fr) st.assets.draw(dl, doc);
     // Project files renamed, moved or deleted (or that undone): open script
     // tabs follow their file; a move an undo or redo could not make is said.
     // A blocks tab's menu asked for its script as Lua.

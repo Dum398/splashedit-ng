@@ -53,6 +53,8 @@ private:
 
     int m_brush = 0;
     Tool m_tool = Tool::Paint;
+    // Grid lines over the map: view state for the session, not in the scene.
+    bool m_grid = true;
     unsigned m_seenLoad = ~0u;
     // The view: zoom (screen pixels per map pixel, 0 = fit on the next frame) and pan from centred.
     float m_zoom = 0;

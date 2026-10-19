@@ -5,7 +5,7 @@
 # tool, and one Ctrl+Z a flood. Each lands in the saved scene and prints one
 # "tiles:" line. Controls and cells are clicked by name (--click @tiles.tool.fill).
 # usage: python3 tilemap2check.py <splashedit> [screenshot.png]   (needs a display: xvfb-run -a)
-import json, os, re, shutil, subprocess, sys, tempfile
+import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
 
 editor = os.path.abspath(sys.argv[1])
 shotOut = sys.argv[2] if len(sys.argv) > 2 else None
@@ -16,6 +16,7 @@ ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PS
 START = ['--wait', '20', '--wait-export']
 mid = None
 drawn = set()  # the controls the last run drew
+rects = {}  # their rectangles, x0, y0, x1, y1
 
 # A wall ring (brush 1) round a hole and a floor cell, a water pond (brush 2)
 # and a strip of floor along the bottom; the rest empty.
@@ -65,7 +66,7 @@ def run(args, shot=None, tilemap=TILEMAP):
     """Runs `args` on a fresh courtyard copy whose one sprite sheet is the
     tileset (and with `tilemap`), then Ctrl+S; returns the saved tilemap and
     the editor's output without its list of controls."""
-    global mid, drawn
+    global mid, drawn, rects
     project = os.path.join(tempfile.mkdtemp(), 'courtyard')
     shutil.copytree(example, project)
     shutil.copy(os.path.join(here, 'tilemap', 'tiles.png'), os.path.join(project, 'textures', 'tiles.png'))
@@ -85,9 +86,48 @@ def run(args, shot=None, tilemap=TILEMAP):
     missing = [l for l in lines if 'no such control drawn' in l]
     check('every control the script names was drawn', not missing, missing)
     mid = json.load(open(snap, encoding='utf-8')).get('tilemap') if os.path.exists(snap) else None
-    drawn = {m.group(1) for m in (re.match(r'control (\S+) at ', l) for l in lines) if m}
+    found = [m for m in (re.match(r'control (\S+) at (-?\d+),(-?\d+) (-?\d+),(-?\d+)$', l) for l in lines) if m]
+    drawn = {m.group(1) for m in found}
+    rects = {m.group(1): tuple(int(v) for v in m.groups()[1:]) for m in found}
     out = '\n'.join(l for l in lines if not l.startswith('control '))
     return json.load(open(scene, encoding='utf-8')).get('tilemap'), out
+
+
+def readpng(path):
+    """8-bit RGB or RGBA PNG: width, height, bytes per pixel, rows."""
+    d = open(path, 'rb').read()
+    p, idat = 8, b''
+    while p < len(d):
+        n, = struct.unpack_from('>I', d, p)
+        t = d[p + 4:p + 8]
+        if t == b'IHDR':
+            w, h, depth, ctype = struct.unpack_from('>IIBB', d, p + 8)
+            assert depth == 8 and ctype in (2, 6), (depth, ctype)
+            bpp = 3 if ctype == 2 else 4
+        if t == b'IDAT':
+            idat += d[p + 8:p + 8 + n]
+        p += 12 + n
+    raw, stride, rows, prev = zlib.decompress(idat), w * bpp, [], bytearray(w * bpp)
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - bpp] if i >= bpp else 0
+            b, c = prev[i], prev[i - bpp] if i >= bpp else 0
+            if f == 1: line[i] = (line[i] + a) & 255
+            elif f == 2: line[i] = (line[i] + b) & 255
+            elif f == 3: line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                p_ = a + b - c
+                pa, pb, pc = abs(p_ - a), abs(p_ - b), abs(p_ - c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        rows.append(bytes(line))
+        prev = line
+    return w, h, bpp, rows
+
+
+def pixel(png, x, y):
+    w, h, bpp, rows = png
+    return tuple(rows[y][x * bpp:x * bpp + 3])
 
 
 def rows(t):
@@ -152,6 +192,29 @@ check('the picked brush paints', last(r'^tiles: view .* brush (-?\d+) ', out) ==
 t, out = run(TAB + click('tiles.tool.pick') + rclick('tiles.cell.3.2'))
 check('right click in Pick erases', changed(t) == {(3, 2): -1} and lines('erase', out) == [('erase', 'cells 1 at 3,2..3,2')],
       f'{changed(t)} {lines("erase", out)}')
+
+# The Grid toggle: on to start with; off leaves the tile edges as the tiles
+# draw them, on draws a light line over a dark band there; the scene file
+# never hears of it.
+shots = tempfile.mkdtemp()
+GON, GOFF = os.path.join(shots, 'gridon.png'), os.path.join(shots, 'gridoff.png')
+t, out = run(TAB + ['--shot', GON] + click('tiles.grid') + ['--shot', GOFF] + click('tiles.grid') + click('tiles.grid'))
+check('the Grid toggle is drawn', 'tiles.grid' in drawn, sorted(n for n in drawn if n.startswith('tiles.') and 'cell' not in n))
+check('a scripted line each toggle', lines('grid', out) == [('grid', 'on'), ('grid', 'off'), ('grid', 'on'), ('grid', 'off')],
+      lines('grid', out))
+check('the toggle is not in the scene', t == TILEMAP and 'grid' not in json.dumps(t), t)
+if os.path.exists(GON) and os.path.exists(GOFF) and 'tiles.cell.3.1' in rects:
+    on, off = readpng(GON), readpng(GOFF)
+    x0, y0, x1, y1 = rects['tiles.cell.3.1']  # a wall between walls: the same tile each side of its left edge
+    ys = range(y0 + 3, y1 - 3)
+    edge = sum(pixel(on, x0, y) != pixel(off, x0, y) for y in ys)
+    band = sum(sum(pixel(on, x0 - 1, y)) < sum(pixel(off, x0 - 1, y)) for y in ys)
+    light = sum(sum(pixel(on, x0, y)) > sum(pixel(on, x0 - 1, y)) for y in ys)
+    inside = sum(pixel(on, (x0 + x1) // 2, y) != pixel(off, (x0 + x1) // 2, y) for y in ys)
+    check('grid on: the edge is drawn over, darker beside it and lighter on it; inside untouched',
+          edge == len(ys) and band == len(ys) and light == len(ys) and inside == 0, (edge, band, light, inside, len(ys)))
+else:
+    check('grid screenshots taken', False, (os.path.exists(GON), os.path.exists(GOFF), 'tiles.cell.3.1' in rects))
 
 # The inspector's brush Colour: the background colour copied from its field and
 # pasted on the water brush is one undo step; the cells and the other brushes

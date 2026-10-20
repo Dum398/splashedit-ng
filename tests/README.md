@@ -145,7 +145,9 @@ and `export --stats` prints the cell size it used.
 times: twice standing still (the shots must match) and once holding Up from frame 200 (`BOOT_HOLD`
 in `boot.lua`). Walking must change the shot and attach more streamed regions than standing still.
 The engine has to be a PCdrv build made with `make STREAMLOG=1`, which prints `WORLDSTREAM`
-attach/detach lines.
+attach/detach lines. It also prints, for the still and the walking boot, the engine's
+`psxsplash: render lost` reports summed per cause (triangles past the ordering table, skinned
+ones at the near plane, near-plane leaves, clamped ones); these are not checked yet.
 
     boot/walk.sh <splashpack-cli> <pcsx-redux> <openbios.bin> <psxsplash.ps-exe> [frame]
 

@@ -3,7 +3,8 @@
 # that walking loads regions standing still does not.
 # usage: walk.sh <splashpack-cli> <pcsx-redux> <bios> <psxsplash.ps-exe> [frame]
 # The engine must be a PCdrv build made with `make STREAMLOG=1`, which prints
-# "WORLDSTREAM attach/detach" lines.
+# "WORLDSTREAM attach/detach" lines. Its "psxsplash: render lost" lines, when
+# it prints them, are summed per cause for each boot.
 set -eu
 cli=$1; redux=$2; bios=$3; exe=$4; frame=${5:-3000}
 here=$(cd "$(dirname "$0")" && pwd)
@@ -50,6 +51,14 @@ done
 attach() { grep -c '^WORLDSTREAM attach' "$1/log.txt" || true; }
 s=$(attach "$work/still"); w=$(attach "$work/walk")
 echo "regions attached: still $s, walking $w; detached while walking $(grep -c '^WORLDSTREAM detach' "$work/walk/log.txt" || true)"
+# Triangles the engine lost or bent, summed over its "render lost" reports
+# (one per 60 frames with any): reported, not checked yet.
+lost() {
+    sed -n 's/.*psxsplash: render lost ot \([0-9]*\) skinnear \([0-9]*\) leaf \([0-9]*\) clamp \([0-9]*\) of \([0-9]*\) tris.*/\1 \2 \3 \4 \5/p' "$1/log.txt" |
+        awk '{o+=$1; s+=$2; l+=$3; c+=$4; t+=$5; n++} END {printf "%d reports: past the table %d, skinned at the near plane %d, near-plane leaves %d, clamped %d, of %d triangles\n", n, o, s, l, c, t}'
+}
+echo "render lost still: $(lost "$work/still")"
+echo "render lost walking: $(lost "$work/walk")"
 fail=0
 cmp -s "$work/still/shot.raw" "$work/still2/shot.raw" || { echo "FAIL: two still boots differ"; fail=1; }
 cmp -s "$work/still/shot.raw" "$work/walk/shot.raw" && { echo "FAIL: holding Up did not move the camera"; fail=1; }

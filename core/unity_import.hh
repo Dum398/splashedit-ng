@@ -125,6 +125,19 @@ struct Primitive {
 std::optional<Primitive> builtinMesh(long long fileId);
 constexpr const char* kBuiltinGuid = "0000000000000000e000000000000000";
 
+// ---- Model internal IDs ----
+
+// XXH64 of `bytes`.
+uint64_t xxh64(std::string_view bytes, uint64_t seed = 0);
+// The fileID Unity 2019.3+ gives an object inside a model it imported (its
+// .meta's internalIDToNameTable is then empty): XXH64 of the UTF-8
+// "Type:<type>-><path><n>" as a signed 64-bit value, <n> counting the
+// earlier objects of the model with the same type and path. The prefab
+// root's path is "//RootNode/root", a node's is its parent's + "/<name>"
+// (a model's single top-level node is the root), a component's is its
+// object's + "/<type>": "Type:Transform->//RootNode/root/Arm/Transform0".
+long long modelObjectId(std::string_view type, std::string_view path, int n = 0);
+
 // ---- UI ----
 
 // A RectTransform body (m_AnchorMin/Max, m_AnchoredPosition, m_SizeDelta,

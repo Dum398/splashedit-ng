@@ -40,6 +40,7 @@
 #include "ui/colour_hex.hh"
 #include "ui/file_dialog.h"
 #include "ui/icons.h"
+#include "ui/list_scroll.hh"
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
@@ -1044,6 +1045,10 @@ struct TreeCtx {
     editor::Document& doc;
     ImRect panel;
     float y;
+    ImRect list{};  // the visible part of the rows: a row outside it takes no drop
+    // The selected object's row, in px from the top of the scrolled rows, when drawn.
+    std::optional<float> selTop{};
+    float contentTop = 0;  // where the rows' top is drawn this frame (scrolled up past list.Min.y)
     bool renameShown = false;
     std::string filter{};  // lower case; empty = every object
     int shown = 0;       // object rows drawn
@@ -1079,6 +1084,7 @@ static bool isUnder(const editor::ObjectPath& p, const editor::ObjectPath& ances
 static void treeDropTarget(TreeCtx& c, ImRect rr, const editor::ObjectPath& path, const splash::Object& o, bool open) {
     const ImVec2 m = ImGui::GetIO().MousePos;
     if (!c.st.treeDragging || m.y < rr.Min.y || m.y >= rr.Max.y || m.x < c.panel.Min.x || m.x >= c.panel.Max.x) return;
+    if (!c.list.Contains(m)) return;  // the row is scrolled out from under the pointer
     if (isUnder(path, c.st.treeDragPath)) return;  // onto itself or inside it
     if (c.doc.inInstance(path)) return;            // an instance's content comes from its prefab
     const float t = (m.y - rr.Min.y) / rr.GetHeight();
@@ -1155,9 +1161,11 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
                                ". Open the prefab to change it (Inspector > Prefab > Open).").c_str());
         nameRect("tree." + o.name, rr);
         ++c.shown;
-        if (ImGui::IsRectVisible(rr.Min, rr.Max)) {
+        if (row.selected) c.selTop = rr.Min.y - c.contentTop;
+        if (rr.Overlaps(c.list)) {
+            // Only its visible part takes a dropped file.
             ImRect shown = rr;
-            shown.ClipWith(c.panel);
+            shown.ClipWith(c.list);
             c.st.treeRows.push_back({shown, path});
         }
         if (c.st.treeDragging) {
@@ -3387,10 +3395,38 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
 
     ImRect foot(ImVec2(r.Min.x, r.Max.y - 40), r.Max);
-    nameRect("treelist.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y)));  // the rows' visible part
-    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y), true);
+    // The rows scroll between the filter (or the prefab bar) and the footer.
+    // The wheel over them, the thumb, and a row dragged near an edge move them,
+    // clamped to last frame's rows before they are drawn and to this frame's after.
+    const ImRect list(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y));
+    nameRect("treelist.panel", list);  // for --scroll-to
+    const float listH = list.GetHeight();
+    const ImGuiIO& io = ImGui::GetIO();
+    float& scroll = st.treeScroll;
+    bool thumbHot = false;
+    if (ui::maxScroll(st.treeContent, listH) > 0) {
+        if (ImGui::IsMouseHoveringRect(list.Min, list.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+            scroll -= io.MouseWheel * 48.0f;
+        // Registered before the rows so it wins the press where they meet.
+        const ui::Thumb th = ui::thumb(scroll, st.treeContent, listH);
+        const ImRect thumbRect(ImVec2(r.Max.x - 7, list.Min.y + th.top), ImVec2(r.Max.x - 1, list.Min.y + th.top + th.height));
+        nameRect("treethumb", thumbRect);
+        Hit t = interact("treethumb", thumbRect);
+        st.treeThumbHeld = t.held;
+        thumbHot = t.hovered || t.held;
+        if (t.held) scroll += ui::thumbDragScroll(io.MouseDelta.y, st.treeContent, listH);
+        if (st.treeDragging && r.Contains(io.MousePos))
+            scroll += ui::edgeScrollSpeed(io.MousePos.y, list.Min.y, list.Max.y, size::row, 900.0f) * io.DeltaTime;
+    } else {
+        st.treeThumbHeld = false;
+    }
+    scroll = ui::clampScroll(scroll, st.treeContent, listH);
+    ImGui::PushClipRect(list.Min, list.Max, true);
+    y = list.Min.y - scroll;
     const editor::ObjectPath root;
     TreeCtx ctx{st, doc, r, y + size::row};
+    ctx.list = list;
+    ctx.contentTop = y;
     ctx.filter = lower(st.treeFilter);
     bool rootOpen = !ctx.filter.empty() || doc.expanded(root);
     TreeRow top{0, icon::layers, color::accentHover, doc.sceneStem().c_str(), nullptr, !doc.scene().objects.empty(), rootOpen};
@@ -3420,12 +3456,12 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // Dragging a row: the scene row or the empty space under the rows drops it at the top level, last.
     if (st.treeDragging) {
         const ImVec2 m = ImGui::GetIO().MousePos;
-        const bool inTree = m.x >= r.Min.x && m.x < r.Max.x && m.y >= y && m.y < foot.Min.y;
-        if (!ctx.hasDrop && inTree && (m.y < y + size::row || m.y >= ctx.y)) {
+        const bool inTree = list.Contains(m);
+        if (!ctx.hasDrop && inTree && (m.y < rr.Max.y || m.y >= ctx.y)) {
             ctx.hasDrop = true;
             ctx.dropParent.clear();
             ctx.dropIndex = static_cast<int>(doc.scene().objects.size());
-            ctx.dropInto = m.y < y + size::row;
+            ctx.dropInto = m.y < rr.Max.y;
             ctx.dropMark = ctx.dropInto ? rr : ImRect(ImVec2(rr.Min.x + space::xs + 16, ctx.y - 1), ImVec2(rr.Max.x, ctx.y + 1));
         }
         // A drop that leaves the object where it is shows nothing.
@@ -3440,6 +3476,23 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         }
     }
     ImGui::PopClipRect();
+
+    // The rows' height, with half a row under the last to drop at the end.
+    st.treeContent = ctx.y + size::row * 0.5f - ctx.contentTop;
+    // A selection made since last frame, here or anywhere else, or a new
+    // filter: its row is brought into view, once.
+    if (doc.selection() != st.treeSeenSelection || st.treeFilter != st.treeSeenFilter) {
+        if (ctx.selTop) scroll = ui::scrollToShow(scroll, *ctx.selTop, *ctx.selTop + size::row, listH);
+        st.treeSeenSelection = doc.selection();
+        st.treeSeenFilter = st.treeFilter;
+    }
+    scroll = ui::clampScroll(scroll, st.treeContent, listH);
+    if (ui::maxScroll(st.treeContent, listH) > 0) {
+        // A thin bar at the right edge, as in the inspector; it can be dragged.
+        const ui::Thumb th = ui::thumb(scroll, st.treeContent, listH);
+        dl->AddRectFilled(ImVec2(r.Max.x - 5, list.Min.y + th.top + 2), ImVec2(r.Max.x - 2, list.Min.y + th.top + th.height - 2),
+                          rgb(0xffffff, thumbHot ? 90 : 40), 2);
+    }
 
     if (st.treeDragging) {
         const splash::Object* dragged = doc.object(st.treeDragPath);

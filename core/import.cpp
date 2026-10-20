@@ -833,6 +833,7 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
             name = base.substr(0, 24 - suffix.size()) + suffix;
         }
         clipNames.insert(lower(name));
+        out.clipTakes.push_back(c.name);
         c.name = name;
         makeDir();
         const fs::path file = nodeDir / (name + ".anim");

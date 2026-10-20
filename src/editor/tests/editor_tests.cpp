@@ -12715,6 +12715,60 @@ void testUnityPrefab() {
     CHECK(lamp2 && lamp2->children.size() == 2);
 }
 
+// Exporters added to models placed in a scene (#223): Unity 6 leaves the
+// model's internalIDToNameTable empty, the scene names the model's objects
+// by hashed IDs. Fixture: tests/fixtures/unity-models, saved by Unity 6000.3.
+void testUnityModelIds() {
+    using namespace splash::unity;
+    using namespace unitytest;
+    CHECK(xxh64("") == 0xEF46DB3751D8E999ull);
+    CHECK(xxh64("abc") == 0x44BC2CF5AD770999ull);
+    // IDs Unity wrote: the root and its Transform, a node and its renderer
+    // (URP's SandBoxModel.fbx), nested, a lone top-level node's child, skinned.
+    CHECK(modelObjectId("GameObject", "//RootNode/root") == 919132149155446097LL);
+    CHECK(modelObjectId("Transform", "//RootNode/root/Transform") == -8679921383154817045LL);
+    CHECK(modelObjectId("GameObject", "//RootNode/root/Circle2") == 3650834566929780429LL);
+    CHECK(modelObjectId("MeshRenderer", "//RootNode/root/Circle2/MeshRenderer") == 5912129206897006233LL);
+    CHECK(modelObjectId("GameObject", "//RootNode/root/Base/Arm") == -1537605290578348017LL);
+    CHECK(modelObjectId("GameObject", "//RootNode/root/Tip") == -8469990867830010200LL);
+    CHECK(modelObjectId("SkinnedMeshRenderer", "//RootNode/root/Body/SkinnedMeshRenderer") == 1630794972795428178LL);
+
+    const fs::path proj = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "fixtures" / "unity-models";
+    const fs::path dest = g_outDir / "unity-model-ids";
+    fs::remove_all(dest);
+    fs::create_directories(dest);
+    ImportReport r;
+    const splash::Scene s = convertScene(proj, indexGuids(proj), proj / "Assets" / "Scenes" / "models.unity", dest, r);
+    std::function<const splash::Object*(const std::vector<splash::Object>&, const std::string&)> at =
+        [&](const std::vector<splash::Object>& objs, const std::string& path) -> const splash::Object* {
+        const size_t slash = path.find('/');
+        const splash::Object* o = findObj(objs, path.substr(0, slash));
+        return !o || slash == std::string::npos ? o : at(o->children, path.substr(slash + 1));
+    };
+    auto meshed = [&](const char* path) {
+        const splash::Object* o = at(s.objects, path);
+        return o && o->mesh && !o->mesh->mesh.empty();
+    };
+    const char* noExporter = "has a mesh but no PSXObjectExporter";
+    // solo.fbx: its one top-level node is the root, its child under it.
+    CHECK(meshed("solo") && meshed("solo/Tip"));
+    CHECK(at(s.objects, "solo") && at(s.objects, "solo")->children.size() == 1);
+    // multi.fbx: a nested node and a top-level one carry the added exporter.
+    CHECK(meshed("multi/Base/Arm") && meshed("multi/Lamp"));
+    CHECK(!meshed("multi/Base") && !meshed("multi/Base/Arm/Hand"));
+    CHECK(hasItem(r, ReportItem::LeftOut, "multi/Base", noExporter) && hasItem(r, ReportItem::LeftOut, "multi/Base/Arm/Hand", noExporter));
+    // rig.fbx: the skinned child holds its PSXSkinnedObjectExporter.
+    CHECK(meshed("rig/Prop") && at(s.objects, "rig/Body"));
+    CHECK(hasItem(r, ReportItem::Later, "rig/Body", "PSXSkinnedObjectExporter"));
+    for (const char* p : {"solo", "solo/Tip", "multi", "multi/Base/Arm", "multi/Lamp", "rig/Prop"})
+        CHECK(!hasItem(r, ReportItem::LeftOut, p, noExporter));
+    // The instances' root overrides land on the root.
+    CHECK(at(s.objects, "rig") && at(s.objects, "rig")->transform.position.x == 6);
+    CHECK(at(s.objects, "multi") && at(s.objects, "multi")->transform.position.x == 3);
+    if (g_failures)
+        for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
+}
+
 void testUnityPrimitives() {
     using namespace splash::unity;
     auto outward = [](const splash::Mesh& m) {
@@ -13310,6 +13364,7 @@ int main(int argc, char** argv) {
     testUnityGuidIndex();
     testUnityHierarchy();
     testUnityPrefab();
+    testUnityModelIds();
     testUnityPrimitives();
     testUnityReport();
     testUnityUi();

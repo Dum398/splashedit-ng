@@ -957,6 +957,50 @@ void bakeLayout(const YNode& rt, float scaleX, float scaleY, UIElement& e) {
     }
 }
 
+// ---- Model internal IDs ----
+
+uint64_t xxh64(std::string_view s, uint64_t seed) {
+    constexpr uint64_t P1 = 11400714785074694791ull, P2 = 14029467366897019727ull, P3 = 1609587929392839161ull,
+                       P4 = 9650029242287828579ull, P5 = 2870177450012600261ull;
+    auto rotl = [](uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+    auto le = [&](size_t at, int bytes) {
+        uint64_t v = 0;
+        for (int b = 0; b < bytes; ++b) v |= uint64_t(uint8_t(s[at + size_t(b)])) << (8 * b);
+        return v;
+    };
+    auto round = [&](uint64_t acc, uint64_t in) { return rotl(acc + in * P2, 31) * P1; };
+    const size_t n = s.size();
+    size_t p = 0;
+    uint64_t h;
+    if (n >= 32) {
+        uint64_t v[4] = {seed + P1 + P2, seed + P2, seed, seed - P1};
+        for (; p + 32 <= n; p += 32)
+            for (int k = 0; k < 4; ++k) v[k] = round(v[k], le(p + size_t(k) * 8, 8));
+        h = rotl(v[0], 1) + rotl(v[1], 7) + rotl(v[2], 12) + rotl(v[3], 18);
+        for (uint64_t x : v) h = (h ^ round(0, x)) * P1 + P4;
+    } else {
+        h = seed + P5;
+    }
+    h += n;
+    for (; p + 8 <= n; p += 8) h = rotl(h ^ round(0, le(p, 8)), 27) * P1 + P4;
+    if (p + 4 <= n) {
+        h = rotl(h ^ (le(p, 4) * P1), 23) * P2 + P3;
+        p += 4;
+    }
+    for (; p < n; ++p) h = rotl(h ^ (uint64_t(uint8_t(s[p])) * P5), 11) * P1;
+    h ^= h >> 33;
+    h *= P2;
+    h ^= h >> 29;
+    h *= P3;
+    h ^= h >> 32;
+    return h;
+}
+
+long long modelObjectId(std::string_view type, std::string_view path, int n) {
+    const std::string key = "Type:" + std::string(type) + "->" + std::string(path) + std::to_string(n);
+    return (long long)xxh64(key);
+}
+
 // ---- The importer ----
 
 namespace {
@@ -1034,6 +1078,7 @@ struct ModelAsset {
     std::string error;
     // internal fileID -> (class, name) from the model's .meta
     std::map<long long, std::pair<int, std::string>> ids;
+    bool preserveHierarchy = false;  // the .meta keeps a lone top-level node below the root
 };
 
 // The internal IDs of a model's .meta: internalIDToNameTable (Unity 2019.3+)
@@ -1401,11 +1446,14 @@ Importer::Unit Importer::instantiateModel(const Ref& source, const YNode& mod) {
     std::vector<int> nodeObj;
     if (ma && ma->error.empty()) {
         const ImportedModel& im = ma->model;
-        const bool single = im.nodes.size() == 1;
+        // Unity makes a lone top-level node the prefab root.
+        int tops = 0;
+        for (const ImportedNode& n : im.nodes) tops += n.parent < 0;
+        const bool single = tops == 1 && !ma->preserveHierarchy;
         for (size_t k = 0; k < im.nodes.size(); ++k) {
             const ImportedNode& n = im.nodes[k];
             int o = root;
-            if (!single) {
+            if (!single || n.parent >= 0) {
                 o = int(m_objs.size());
                 m_objs.emplace_back();
                 m_objs.back().name = n.name;
@@ -1436,6 +1484,26 @@ Importer::Unit Importer::instantiateModel(const Ref& source, const YNode& mod) {
                     u.byFid[fid] = nodeObj[k];
                     break;
                 }
+        }
+        // Unity 2019.3+ leaves that table empty: the IDs are hashes of each
+        // object's path in the model. Where the table names an ID, it wins.
+        std::map<std::string, int> taken;
+        auto hashed = [&](const std::string& path, int o) {
+            for (const char* t : {"GameObject", "Transform", "MeshFilter", "MeshRenderer", "SkinnedMeshRenderer"}) {
+                const std::string p = std::strcmp(t, "GameObject") == 0 ? path : path + "/" + t;
+                u.byFid.emplace(modelObjectId(t, p, taken[std::string(t) + "->" + p]++), o);
+            }
+        };
+        std::vector<std::string> paths(im.nodes.size());
+        hashed("//RootNode/root", root);
+        for (size_t k = 0; k < im.nodes.size(); ++k) {
+            const ImportedNode& n = im.nodes[k];
+            if (single && n.parent < 0) {
+                paths[k] = "//RootNode/root";
+                continue;
+            }
+            paths[k] = (n.parent >= 0 ? paths[size_t(n.parent)] : std::string("//RootNode/root")) + "/" + n.name;
+            hashed(paths[k], nodeObj[k]);
         }
     }
     for (const YNode& m : mod["m_Modifications"].seq) {
@@ -1555,7 +1623,10 @@ ModelAsset* Importer::model(const std::string& guid, const std::string& path) {
         // Unity's model import scale, when the .meta sets one.
         for (const YDoc& d : parseYaml(readText(fs::path(src) += ".meta")))
             if (const YNode* mi = d.body.find("ModelImporter"))
-                if (const YNode* meshes = mi->find("meshes")) s.scale = float((*meshes)["globalScale"].num(1));
+                if (const YNode* meshes = mi->find("meshes")) {
+                    s.scale = float((*meshes)["globalScale"].num(1));
+                    ma->preserveHierarchy = (*meshes)["preserveHierarchy"].flag(false);
+                }
         saveImportSettings(copy, s);
         ma->model = importModel(copy, m_dest, s);
         ma->ids = metaIds(fs::path(src) += ".meta");

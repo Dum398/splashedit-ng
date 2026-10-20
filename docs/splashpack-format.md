@@ -1,4 +1,4 @@
-# splashpack scene format (writer v25, reader accepts v20..v25)
+# splashpack scene format (writer v27 or v28, reader accepts v20..v28)
 
 Sources read (all via `git show origin/main:<path>`, never the working checkout):
 
@@ -26,9 +26,9 @@ A fifth, separate format `.loading` ("LP" magic, `PSXLoaderPackWriter`; ng `expo
 
 Version written (W:PSXSceneWriter.cs:233): `writer.Write((ushort)(hasLights ? 24 : 23));`
 So the writer emits exactly two versions: **23** when `pointLights.Length == 0`, **24** otherwise.
-Header size: **144 bytes (v23)**, **148 bytes (v24)**, **156 bytes (v25)**. The writer always emits v25.
+Header size: **144 bytes (v23)**, **148 bytes (v24)**, **156 bytes (v25..v27)**, **160 bytes (v28)**. The writer emits v28 only when the scene has blob shadows (sec. 2.22a), and v27 (156 bytes, byte for byte what it wrote before shadows existed) otherwise.
 Reader (R:splashpack.cpp): `static_assert(sizeof(SPLASHPACKFileHeader) == 156 ...)`, `assert(header->version >= 20, ...)`, and
-`splashpackHeaderSize`: `>=25 -> 156`, `>=24 -> 148`, `>=22 -> 144`, `>=21 -> 128`, else `120`. The reader assumes the header only ever grows by appending.
+`splashpackHeaderSize` (R:splashpackversion.hh): `>=28 -> 160`, `>=25 -> 156`, `>=24 -> 148`, `>=22 -> 144`, `>=21 -> 128`, else `120`. The reader assumes the header only ever grows by appending.
 The doc comment at the top of W says "splashpack v16"; the Write() doc says "v20". Both are stale. The emitted number is 23/24.
 
 Field table (writer order = reader struct order; `writer.Write('S')` writes the single byte 0x53 because BinaryWriter encodes a `char` as UTF-8):
@@ -96,8 +96,9 @@ Field table (writer order = reader struct order; `writer.Write('S')` writes the 
 | 144 | 4 | u32 | lightTableOffset | v24+; backfilled after the light chunk, 0 if no runtime lights |
 | 148 | 4 | u32 | orderingTableSize | v25+; ordering table buckets, 0 = engine default |
 | 152 | 4 | u32 | bumpAllocatorSize | v25+; bump allocator bytes per frame, 0 = engine default |
+| 156 | 4 | u32 | shadowTableOffset | v28 only; backfilled after the shadow chunk. Absent from a v27 header |
 
-Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`. The writer emits v27, so all gates are satisfied.
+Reader gating (R:splashpack.cpp): agentCount only used if `version>=22`; skin table `version>=18`; memcard `>=21`; sprite/sceneHash `>=22`; tilemap `>=23`; lights `>=24`; render buffer sizes `>=25`; skin bind positions and joint names `>=26`; interactable facing cosine (32-byte records) `>=27`; stream table `>=21`; per-cutscene/animation skin events `>=19`; shadow table `>=28` and offset != 0. The writer emits v27 (v28 with shadows), so all gates are satisfied.
 
 ---
 
@@ -341,6 +342,9 @@ This exporter (`core/splashpack.cpp`, `writeUi`) writes the same records with th
 
 ### 2.21 Point lights (v24; header lightTableOffset) - `AlignToFourBytes` first
 `{u16 count, u16 0}` then `count` x 28 B `{i32 x = fp12(pos.x/gte), y = fp12(-pos.y/gte), z; i32 radius = fp12(range/gte); u16 intensity = Clamp(RoundToInt(intensity*4096),0,65535); u8 r,g,b = ColorUnityToPSX; u8 flags (bit0 enabled); u16 pad; u32 nameOffset}`, then names (<=24 chars). Reader `SPLASHPACKPointLight` 28 B, `count` capped to `MAX_SCENE_LIGHTS = 16`, records at `table + 4`.
+
+### 2.22a Blob shadows (v28; header shadowTableOffset; only if at least one exported object's mesh has Shadow = Blob) - `AlignToFourBytes` first, right after the point lights
+`{u16 count, u16 0}` then `count` x 8 B `{u16 gameObjectIndex; u8 mode (1 = blob; 2 reserved for silhouettes; the reader skips any other mode); u8 darkness = round(percent * 2.55); u16 size = fp12(clamp(shadowSize, 0.05, 10) / gte); u16 fadeHeight = fp12(2.5 / gte)}`, in game object order, at most 32 (the rest are left out with a warning). `size` and `fadeHeight` are in the units of GameObject positions (4096 = one GTE unit = gte metres). A streamed object cut into parts gets one record, for its first part. The model (core/shadow.hh, R:shadowmath.hh): the blob sits on the nav region under the object (else the bottom of its world AABB, except that in a scene with nav an object that has moved at runtime and has no region under it gets no blob), radius and darkness scale by `max(0, 1 - h / fadeHeight)` with h the AABB bottom's height above that floor, and darkness fades to 0 as the centre comes within radius of one of the region's walk-off edges (`walkoffEdgeMask`; its other edges are eroded a player radius in from walls and drops). Reader `ShadowRecord` 8 B, `MAX_SCENE_SHADOWS = 32`. The render buffer estimate grows by 240 bytes per record.
 
 ### 2.22 Memory card (header memcardTableOffset; only if enabled) - `AlignToFourBytes` first; fixed 464 B
 `char region[2]; char product[10]; char title[32] (ASCII, `& 0x7F`, zero padded); u8 frameCount (1..3); u8 0; u16 0; u16 clut[16] (BGR555, from frame 0); u8 pixels[3][128] (16x16 4bpp, top row first, low nibble = left pixel)`. Icons are quantised with `PSXTexture2D.CreateFromTexture2D(tex, TEX_4BIT)`. Reader `SPLASHPACKMemcard`, 464 B.

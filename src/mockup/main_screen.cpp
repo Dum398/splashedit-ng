@@ -7208,9 +7208,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                     (buUsed ? " (" + std::to_string(int(100.0 * peak->bump / buUsed + 0.5)) + "%)" : std::string()),
                 buUsed && peak->bump > buUsed ? color::warn : color::accentHover);
     if (st.play.peakScene == doc.loadId() && st.play.lostMax.any()) {
-        // Worst 60 frames per cause, from psxsplash's render lost reports.
+        // Per cause, the most any one report (60 frames) had: the causes' maxima
+        // may come from different reports, so this is not one window's total.
         const editor::RenderLost& m = st.play.lostMax;
-        const std::string s = "In Play, worst 60 frames: " + editor::describeRenderLost(m) + ".";
+        const std::string s = "In Play, most in any 60 frames: " + editor::describeRenderLost(m) + ".";
         const float at = y;
         caption(s, m.ot || m.skinNear ? color::warn : color::accentHover);
         nameRect("render.lost", ImRect(ImVec2(x0, at), ImVec2(x1, y)));

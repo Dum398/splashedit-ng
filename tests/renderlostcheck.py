@@ -7,7 +7,7 @@
 # publishes an empty display block so the Game view opens. While they come,
 # the Game view shows the last one in plain words ("game: lost <words>" in a
 # scripted run) and the scene's Render buffers section the worst per cause
-# ("render: In Play, worst 60 frames: ..."), each cause's maximum over both
+# ("render: In Play, most in any 60 frames: ..."), each cause's maximum over both
 # reports; once they stop, the Game view line goes ("game: lost none") and
 # the Render buffers caption stays.
 # usage: python3 renderlostcheck.py <splashedit> [screenshot prefix]   (needs a display: xvfb-run -a)
@@ -42,7 +42,7 @@ ENV = dict(os.environ, SPLASHEDIT_REDUX=redux, SPLASHEDIT_PSXSPLASH=engine)
 
 WORDS_A = '5 triangles past the draw distance, 2 squashed at the screen edge, 30 near-camera pieces drawn rough'
 WORDS_B = '3 skinned triangles too close to the camera, 9 squashed at the screen edge, 10 near-camera pieces drawn rough'
-WORST = ('render: In Play, worst 60 frames: 5 triangles past the draw distance, 3 skinned too close to the camera, '
+WORST = ('render: In Play, most in any 60 frames: 5 triangles past the draw distance, 3 skinned too close to the camera, '
          '9 squashed at the screen edge, 30 near-camera pieces drawn rough.')
 
 

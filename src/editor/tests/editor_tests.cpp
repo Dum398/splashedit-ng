@@ -12757,14 +12757,71 @@ void testUnityModelIds() {
     CHECK(meshed("multi/Base/Arm") && meshed("multi/Lamp"));
     CHECK(!meshed("multi/Base") && !meshed("multi/Base/Arm/Hand"));
     CHECK(hasItem(r, ReportItem::LeftOut, "multi/Base", noExporter) && hasItem(r, ReportItem::LeftOut, "multi/Base/Arm/Hand", noExporter));
-    // rig.fbx: the skinned child holds its PSXSkinnedObjectExporter.
-    CHECK(meshed("rig/Prop") && at(s.objects, "rig/Body"));
-    CHECK(hasItem(r, ReportItem::Later, "rig/Body", "PSXSkinnedObjectExporter"));
+    // rig.fbx: the skinned child holds its PSXSkinnedObjectExporter, and
+    // draws; neither it nor its model has a clip, so it gets no skin.
+    CHECK(meshed("rig/Prop") && meshed("rig/Body"));
+    CHECK(!hasItem(r, ReportItem::Later, "rig/Body", "PSXSkinnedObjectExporter"));
+    CHECK(at(s.objects, "rig/Body") && !at(s.objects, "rig/Body")->skin);
+    CHECK(hasItem(r, ReportItem::LeftOut, "rig/Body", "no animation clip, and its model has none"));
     for (const char* p : {"solo", "solo/Tip", "multi", "multi/Base/Arm", "multi/Lamp", "rig/Prop", "rig/Body"})
         CHECK(!hasItem(r, ReportItem::LeftOut, p, noExporter));
     // The instances' root overrides land on the root.
     CHECK(at(s.objects, "rig") && at(s.objects, "rig")->transform.position.x == 6);
     CHECK(at(s.objects, "multi") && at(s.objects, "multi")->transform.position.x == 3);
+    if (g_failures)
+        for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
+}
+
+// PSXSkinnedObjectExporters (#223): the mesh of the SkinnedMeshRenderer on or
+// under the exporter, and a skin playing its AnimationClips. Fixture:
+// unity-models' skinned.unity and dancer.fbx (takes Walk, Wave), saved by Unity 6000.
+void testUnitySkinned() {
+    using namespace splash::unity;
+    using namespace unitytest;
+    // Clip IDs Unity wrote: per take, counting clips cut from the same take.
+    CHECK(modelObjectId("AnimationClip", "Walk") == 2667949614841947897LL);
+    CHECK(modelObjectId("AnimationClip", "Wave") == -57793324751458776LL);
+    CHECK(modelObjectId("AnimationClip", "Walk", 1) == 6027449108108357778LL);
+
+    const fs::path proj = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "fixtures" / "unity-models";
+    const fs::path dest = g_outDir / "unity-skinned";
+    fs::remove_all(dest);
+    fs::create_directories(dest);
+    ImportReport r;
+    const splash::Scene s = convertScene(proj, indexGuids(proj), proj / "Assets" / "Scenes" / "skinned.unity", dest, r);
+    auto clips = [&](const splash::Object* o) {
+        std::vector<std::string> out;
+        if (o && o->skin)
+            for (const std::string& c : o->skin->clips) {
+                const splash::AnimClip a = splash::loadAnim(dest / c);
+                out.push_back(a.name + (a.loop ? " loop" : ""));
+            }
+        return out;
+    };
+    for (const auto& it : r.items) CHECK(it.what.find("PSXSkinnedObjectExporter not imported") == std::string::npos);
+    // dancer: the exporter on the instance root draws its child Body's mesh;
+    // both clips resolve by fileID, with Unity's names and no loop (no clip settings).
+    const splash::Object* dancer = findObj(s.objects, "dancer");
+    CHECK(dancer && dancer->mesh && !dancer->mesh->mesh.empty() && dancer->skin);
+    if (!dancer || !dancer->mesh || !dancer->skin) return;
+    CHECK((clips(dancer) == std::vector<std::string>{"Wave", "Walk"}));
+    CHECK(dancer->skin->fps == 24 && dancer->mesh->bitDepth == splash::BitDepth::Bpp4);
+    CHECK(splash::loadMesh(dest / dancer->mesh->mesh).skin.has_value());
+    // Its child's PSXObjectExporter is skipped, as Unity skips it, with no item.
+    const splash::Object* body = findObj(dancer->children, "Body");
+    CHECK(body && !body->mesh && !body->skin);
+    for (const auto& it : r.items) CHECK(it.object != "dancer" && it.object != "dancer/Body");
+    // clipped: the .meta's clip settings rename the clips and loop them; the
+    // standalone .anim asset is named in the report.
+    const splash::Object* clipped = findObj(s.objects, "clipped");
+    CHECK((clips(clipped) == std::vector<std::string>{"WaveCut loop", "WalkCut loop"}));
+    CHECK(clipped && clipped->skin && clipped->skin->fps == 15);
+    CHECK(clipped && clipped->mesh && clipped->mesh->vertexColors == splash::VertexColorMode::Flat);
+    CHECK(hasItem(r, ReportItem::LeftOut, "clipped", "Assets/Anims/loose.anim"));
+    // idle: no clips listed, so the model's own play, and the report says so.
+    const splash::Object* idle = findObj(s.objects, "idle");
+    CHECK(idle && idle->mesh && idle->skin && idle->skin->clips.size() == 2);
+    CHECK(hasItem(r, ReportItem::Changed, "idle", "lists no animation clip"));
     if (g_failures)
         for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
 }
@@ -13365,6 +13422,7 @@ int main(int argc, char** argv) {
     testUnityHierarchy();
     testUnityPrefab();
     testUnityModelIds();
+    testUnitySkinned();
     testUnityPrimitives();
     testUnityReport();
     testUnityUi();

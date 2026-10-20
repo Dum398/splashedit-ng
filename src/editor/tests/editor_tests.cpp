@@ -24,7 +24,10 @@
 #ifndef _WIN32
 #include <csignal>
 #include <cstdlib>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <unistd.h>
 #endif
 
 #include "editor/asset_browser.hh"
@@ -42,6 +45,7 @@
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
+#include "editor/linkplay.hh"
 #include "editor/project.hh"
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
@@ -1503,6 +1507,108 @@ void testPlay() {
     t.bios = "/x/openbios.bin";
     cmd = editor::reduxCommand(t, "/b");
     CHECK(cmd.size() == want.size() + 2 && cmd[5] == "-bios" && cmd[6] == "/x/openbios.bin");
+}
+
+// Play with 2 linked consoles: each console's pcsx.json (the SIO1 keys redux
+// reads, Clienthost with its lowercase h), its directory and -portable
+// command, the capture redirect, the port helpers, the players setting and
+// the link reporter's lines.
+void testLinkPlay() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "link-play";
+    fs::remove_all(dir, ec);
+    const std::string server = editor::linkSettings(true, 41234), client = editor::linkSettings(false, 41234);
+    CHECK(server == "{\"emulator\":{\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":41234,\"SIO1Client\":false}}}\n");
+    CHECK(client == "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
+                    "\"SIO1ClientPort\":41234}}}\n");
+    CHECK(editor::consoleDir("/p", 0) == fs::path("/p") / "console1" && editor::consoleDir("/p", 1) == fs::path("/p") / "console2");
+
+    // Each console's directory: its settings, the capture redirect, no stale capture.
+    const fs::path c1 = editor::consoleDir(dir, 0);
+    fs::create_directories(c1, ec);
+    { std::ofstream(c1 / "capture.flag") << "1"; }
+    std::string err;
+    CHECK(editor::prepareConsole(c1, true, 41234, &err) && err.empty());
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    CHECK(slurp(c1 / "pcsx.json") == server);
+    CHECK(slurp(c1 / "capturedir.lua").find("SplashEditCaptureDir = [==[" + c1.generic_string() + "]==]") != std::string::npos);
+    CHECK(!fs::exists(c1 / "capture.flag"));
+    CHECK(!editor::prepareConsole(c1 / "pcsx.json" / "under-a-file", false, 1, &err) && !err.empty());
+
+    // Commands: 1 console exactly as before; a console adds -portable, and its
+    // capture redirect runs before framecapture.lua.
+    editor::PlayTools t;
+    t.redux = "/r/pcsx-redux";
+    t.psxsplash = "/x/psxsplash.ps-exe";
+    const std::vector<std::string> one = {"/r/pcsx-redux", "-run", "-fastboot", "-no-ui", "-shmdisplay", "-loadexe",
+                                          "/x/psxsplash.ps-exe", "-pcdrv", "-pcdrvbase", "/b"};
+    CHECK(editor::reduxCommand(t, "/b") == one);
+    std::vector<std::string> want = one;
+    want.insert(want.end(), {"-dofile", "/a/framecapture.lua"});
+    CHECK(editor::reduxCommand(t, "/b", "/a/framecapture.lua") == want);
+    want = one;
+    want.insert(want.end(), {"-portable", "/b/console2"});
+    CHECK(editor::reduxCommand(t, "/b", {}, "/b/console2") == want);
+    want.insert(want.end(), {"-dofile", "/b/console2/capturedir.lua", "-dofile", "/a/framecapture.lua"});
+    CHECK(editor::reduxCommand(t, "/b", "/a/framecapture.lua", "/b/console2") == want);
+
+    // Ports: a free one is not taken; one held by a listener is.
+    const uint16_t port = editor::pickLinkPort();
+    CHECK(port != 0);
+    CHECK(!editor::linkPortTaken(port));
+    CHECK(!editor::linkPortTaken(0));
+#ifndef _WIN32
+    {
+        const int s = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_ANY);
+        a.sin_port = htons(port);
+        const int one = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);  // as libuv binds redux's server
+        const bool listening = s >= 0 && bind(s, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0 && listen(s, 1) == 0;
+        CHECK(listening);
+        CHECK(!listening || editor::linkPortTaken(port));
+        if (s >= 0) close(s);
+    }
+#endif
+
+    // Players: round-trips, reads 1 when absent or anything but 2.
+    const fs::path cfg = dir / "play.cfg";
+    t.players = 2;
+    CHECK(editor::savePlayTools(cfg, t) && editor::loadPlayTools(cfg).players == 2);
+    t.players = 1;
+    CHECK(editor::savePlayTools(cfg, t) && editor::loadPlayTools(cfg).players == 1);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=3\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 1);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 1);
+
+    // The reporter: last object, script only; its lines parse and read as words.
+    splash::Scene sc;
+    sc.objects.resize(2);
+    sc.objects[0].name = "a";
+    const splash::Scene rep = editor::withLinkReporter(sc, "/b/splashedit_link.lua");
+    CHECK(rep.objects.size() == 3 && rep.objects[0].name == "a" && rep.objects[2].name == editor::kLinkReporter);
+    CHECK(rep.objects[2].script && rep.objects[2].script->lua == "/b/splashedit_link.lua" && !rep.objects[2].mesh);
+    const std::string lua = editor::linkReporterLua();
+    CHECK(lua.find("Net.State()") != std::string::npos && lua.find("splashedit-link: state ") != std::string::npos);
+    editor::LinkStatus ls;
+    CHECK(editor::parseLinkStatus("splashedit-link: state 2 host 1 slot 0 players 2", &ls) && ls.linked() && ls.host &&
+          ls.slot == 0 && ls.players == 2);
+    CHECK(editor::parseLinkStatus("[tty] splashedit-link: state 1 host 0 slot 1 players 0", &ls) && ls.state == 1 && !ls.host);
+    CHECK(!editor::parseLinkStatus("splashedit-link: state 2 host", &ls));
+    CHECK(!editor::parseLinkStatus("psxsplash: render peak depth 258 of 988, bump 11808 of 51656", &ls));
+    editor::LinkStatus host{2, true, 0, 2}, guest{2, false, 1, 2};
+    CHECK(editor::describeLinkStatus(host, true) == (const char*)u8"Linked · slot 0 · host · 2 players");
+    CHECK(editor::describeLinkStatus(guest, true) == (const char*)u8"Linked · slot 1 · not host · 2 players");
+    CHECK(editor::describeLinkStatus(guest, false).find("no Network id: set one in Scene > Network") != std::string::npos);
+    CHECK(editor::describeLinkStatus({0, false, 0, 0}, true).find("Net.Connect()") != std::string::npos);
+    CHECK(editor::describeLinkStatus({4, false, 0, 0}, true).find("another scene") != std::string::npos);
 }
 
 // Build > Performance / Room Debug Overlay: Play and Run on hardware boot the
@@ -13108,6 +13214,7 @@ int main(int argc, char** argv) {
     testBlendCancel();
     testPlay();
     testPlayOverlays();
+    testLinkPlay();
     testPlayBootLogo();
     testBuildScenes();
     testBuildReport();

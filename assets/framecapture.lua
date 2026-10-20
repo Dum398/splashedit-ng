@@ -14,6 +14,9 @@
 -- kMaxVsyncs intervals without any.
 
 local function base()
+    -- One of 2 linked consoles: capture files in its own directory
+    -- (capturedir.lua, run first), as both share the PCdrv one.
+    if type(SplashEditCaptureDir) == 'string' and SplashEditCaptureDir ~= '' then return SplashEditCaptureDir end
     local ok, dir = pcall(function() return PCSX.settings.emulator.Debug.PCdrvBase end)
     if not ok or type(dir) ~= 'string' or dir == '' then return nil end
     return dir

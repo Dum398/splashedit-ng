@@ -26,11 +26,13 @@ struct PlayTools {
     std::string port;  // Run on hardware: a serial port, or tcp:HOST:PORT
     bool overlayPerf = false, overlayRooms = false;
     bool bootLogo = true;
+    // Play boots 1 console, or 2 linked over SIO1 (editor/linkplay.hh).
+    int players = 1;
 };
 
 // key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
-// overlay_rooms=, boot_logo= (1 or 0). A missing file or key reads as empty
-// or off, but boot_logo as on.
+// overlay_rooms=, boot_logo= (1 or 0), players= (1 or 2). A missing file or
+// key reads as empty or off, but boot_logo as on and players as 1.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 
@@ -164,9 +166,13 @@ RenderLost maxRenderLost(const RenderLost& a, const RenderLost& b);
 
 // Program and arguments that boot psxsplash on the files in `dir`. With a
 // `captureScript` (the editor's assets/framecapture.lua) redux also runs it
-// (-dofile), which answers capture requests (requestCapture).
+// (-dofile), which answers capture requests (requestCapture). With a
+// `console` directory (one of 2 linked consoles, editor::consoleDir) redux
+// reads its settings there (-portable) and, with a captureScript, runs
+// console/capturedir.lua first, so the capture files live in `console`.
 std::vector<std::string> reduxCommand(const PlayTools& tools, const std::filesystem::path& dir,
-                                      const std::filesystem::path& captureScript = {});
+                                      const std::filesystem::path& captureScript = {},
+                                      const std::filesystem::path& console = {});
 
 // Frame capture while Play runs: the editor writes capture.flag in the Play
 // directory; framecapture.lua, polling for it every 10 vsyncs, records one

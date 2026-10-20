@@ -4641,16 +4641,30 @@ static void shadowOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
         bool ok = view.project(toGl(b.centre), mn, sz, &c);
         for (int k = 0; k < splash::shadow::kRimVerts && ok; k++) ok = view.project(toGl(b.rim[size_t(k)]), mn, sz, &rim[k]);
         if (!ok) continue;
-        const ImU32 cc = IM_COL32(0, 0, 0, int(std::lround(b.darkness * 255))), rc = IM_COL32(0, 0, 0, 0);
-        const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+        // The console's Gouraud fan, centre dark and rim clear, as nested
+        // octagons on the floor plane: ring m of kRings covers the inner
+        // (kRings - m + 1) / kRings of the radius, and its alpha brings the
+        // stacked opacity there to darkness * m / kRings / kFloor. The console
+        // subtracts the darkness, which on a floor of kFloor brightness takes
+        // away darkness / kFloor of it (and saturates to black), so an alpha
+        // of darkness alone reads far lighter than the console blob.
+        constexpr int kRings = 24;
+        constexpr float kFloor = 0.5f;
         ImVec2 lo = c, hi = c;
-        dl->PrimReserve(3 * splash::shadow::kRimVerts, 3 * splash::shadow::kRimVerts);
         for (int k = 0; k < splash::shadow::kRimVerts; k++) {
-            dl->PrimVtx(c, uv, cc);
-            dl->PrimVtx(rim[k], uv, rc);
-            dl->PrimVtx(rim[(k + 1) % splash::shadow::kRimVerts], uv, rc);
             lo = ImMin(lo, rim[k]);
             hi = ImMax(hi, rim[k]);
+        }
+        float below = 0;  // opacity the rings drawn so far give the inner area
+        for (int m = 1; m <= kRings; m++) {
+            const float want = std::min(0.97f, b.darkness * float(m) / kRings / kFloor);
+            const float a = below < 1 ? 1 - (1 - want) / (1 - below) : 0;
+            below = want;
+            const float t = float(kRings - m + 1) / kRings;
+            ImVec2 ring[splash::shadow::kRimVerts];
+            for (int k = 0; k < splash::shadow::kRimVerts; k++) ring[k] = c + (rim[k] - c) * t;
+            dl->AddConvexPolyFilled(ring, splash::shadow::kRimVerts,
+                                    IM_COL32(0, 0, 0, int(std::lround(std::clamp(a, 0.f, 1.f) * 255))));
         }
         if (namedRectsOn()) nameRect("vp.shadow." + fo.object->name, ImRect(lo, hi));
     }
@@ -4899,6 +4913,12 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         }
     }
 
+    // Blob shadows on the floor, under the selection outline and the gizmo.
+    if (st.gizmos) {
+        dl->ChannelsSetCurrent(kScene);
+        shadowOverlay(dl, view, mn, sz, doc, shown, st.live.result());
+    }
+
     // Selection outline and the tool's gizmo follow the selected object.
     if (sel) {
         for (size_t si = 0; si < flats.size(); ++si)
@@ -4966,7 +4986,6 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
 
     if (st.gizmos) {
         dl->ChannelsSetCurrent(kScene);
-        shadowOverlay(dl, view, mn, sz, doc, shown, st.live.result());
         sceneOverlays(dl, view, mn, sz, flats, shown, sel, st.live.result(), st);
     }
     // Scripted tests: the nav bake's counts and the selected region.

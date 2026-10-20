@@ -581,6 +581,16 @@ display (CI runs it under `xvfb-run`).
 
     python3 renderlostcheck.py <splashedit> [screenshot prefix]
 
+`linkplaycheck.py` plays a copy of the courtyard whose scripts call `Net.Connect()` and
+`Net.Send()` with 2 linked consoles, on a real pcsx-redux: both views must show frames, their
+status lines must reach Linked with exactly one host, slots 0 and 1 and the no-Network-id hint;
+a click on console 2 gives it the keyboard and Capture frame then records console 2 into its own
+directory; Stop ends both. Needs SPLASHEDIT_REDUX and SPLASHEDIT_PSXSPLASH (and SPLASHEDIT_BIOS
+when that redux has none) and a display; without them it says so and passes. Not in CI, which
+never gets a real pcsx-redux for its checks.
+
+    python3 linkplaycheck.py <splashedit> [screenshot prefix]
+
 `scripteditorcheck.py` opens the courtyard example's `game_logic.lua` with Edit script, types a
 line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the
 tab before building, so the file on disk starts with the typed line; typing alone must not. Then

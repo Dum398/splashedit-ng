@@ -44,6 +44,7 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "overlay_perf") t.overlayPerf = value == "1";
         else if (key == "overlay_rooms") t.overlayRooms = value == "1";
         else if (key == "boot_logo") t.bootLogo = value != "0";
+        else if (key == "players") t.players = value == "2" ? 2 : 1;
     }
     return t;
 }
@@ -59,7 +60,8 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "port=" << t.port << "\n"
         << "overlay_perf=" << (t.overlayPerf ? 1 : 0) << "\n"
         << "overlay_rooms=" << (t.overlayRooms ? 1 : 0) << "\n"
-        << "boot_logo=" << (t.bootLogo ? 1 : 0) << "\n";
+        << "boot_logo=" << (t.bootLogo ? 1 : 0) << "\n"
+        << "players=" << (t.players == 2 ? 2 : 1) << "\n";
     return bool(out);
 }
 
@@ -454,13 +456,16 @@ splash::ExportResult reloadForPlay(const splash::Scene& scene, const fs::path& p
     return r;
 }
 
-std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir, const fs::path& captureScript) {
+std::vector<std::string> reduxCommand(const PlayTools& t, const fs::path& dir, const fs::path& captureScript,
+                                      const fs::path& console) {
     std::vector<std::string> a = {utf8(t.redux), "-run", "-fastboot", "-no-ui", "-shmdisplay"};
     if (!t.bios.empty()) {
         a.push_back("-bios");
         a.push_back(utf8(t.bios));
     }
     a.insert(a.end(), {"-loadexe", utf8(engineFor(t)), "-pcdrv", "-pcdrvbase", utf8(dir)});
+    if (!console.empty()) a.insert(a.end(), {"-portable", utf8(console)});
+    if (!captureScript.empty() && !console.empty()) a.insert(a.end(), {"-dofile", utf8(console / "capturedir.lua")});
     if (!captureScript.empty()) a.insert(a.end(), {"-dofile", utf8(captureScript)});
     return a;
 }

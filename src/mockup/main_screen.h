@@ -25,6 +25,7 @@
 #include "editor/lua_editor_view.hh"
 #include "editor/tilemap_view.hh"
 #include "editor/ui_canvas_view.hh"
+#include "editor/linkplay.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
 #include "editor/frame_view.hh"
@@ -115,6 +116,23 @@ struct State {
         Emulator emu;
         GameView game;            // what redux shows, once it has published a frame
         bool gameFocus = false;   // the Game view has the keyboard (a click in either view moves it)
+        // Play with 2 linked consoles (tools.players): the session's console
+        // count, fixed when Play starts; console 2 (redux's SIO1 client),
+        // started once console 1's link port is up; which console has the
+        // keyboard and pad; each one's last link report; why console 2 did
+        // not start; and which console a capture in flight asked.
+        int players = 1;
+        Emulator emu2;
+        GameView game2;
+        int focus = 0;
+        uint16_t linkPort = 0;
+        bool linkWaiting = false;
+        uint64_t linkSince = 0;
+        std::optional<editor::LinkStatus> link[2];
+        bool networkId = false;  // the played scene has a Network id
+        std::string linkError;
+        int captureConsole = 0;
+        uint64_t linesSeen2 = 0;
         float split = 0.5f;       // share of the viewport the Scene view keeps while the game runs
         uint64_t startedAt = 0;   // SDL ticks when redux started, to notice it never publishing
         std::string message;  // why the last Play did not start, for the status bar
@@ -153,7 +171,7 @@ struct State {
         editor::RenderLost lostMax;
         uint64_t linesSeen = 0;
         // The output popups: filter, clear point and wrapping, for Play and Run on hardware.
-        editor::LogView playLog, hwLog;
+        editor::LogView playLog, hwLog, playLog2;
         // Live edits: the document revision the running game was last sent,
         // the revision seen last frame and since when, the export in flight,
         // the count written to reload.flag, and the open scene's place in the

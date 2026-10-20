@@ -1553,7 +1553,9 @@ void testLinkPlay() {
     want = one;
     want.insert(want.end(), {"-portable", "/b/console2"});
     CHECK(editor::reduxCommand(t, "/b", {}, "/b/console2") == want);
-    want.insert(want.end(), {"-dofile", "/b/console2/capturedir.lua", "-dofile", "/a/framecapture.lua"});
+    // The redirect path is joined natively (a backslash on Windows).
+    want.insert(want.end(), {"-dofile", (fs::path("/b/console2") / "capturedir.lua").string(), "-dofile",
+                             "/a/framecapture.lua"});
     CHECK(editor::reduxCommand(t, "/b", "/a/framecapture.lua", "/b/console2") == want);
 
     // Ports: a free one is not taken; one held by a listener is.

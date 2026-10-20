@@ -4,6 +4,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -752,6 +753,27 @@ void planStreaming(const Scene& scene, std::vector<ExpObject>& exporters, std::v
         warn(StreamProblem::TooManyNear, "Far scenery may appear late",
              "Up to " + std::to_string(plan.slotsWanted - 1) + " regions are near the camera at once, but psxsplash keeps " +
                  std::to_string(stream::kMaxSlots) + ". A shorter draw distance needs fewer.");
+    // Without fog the draw distance is a hard edge: scenery past it is not
+    // drawn at all, and appears whole as the camera comes within reach.
+    if (!(scene.settings.fog.enabled && scene.settings.fog.density > 0)) {
+        stream::Box w = plan.regions.front().bounds;
+        for (const stream::Region& r : plan.regions)
+            w = {std::min(w.minX, r.bounds.minX), std::min(w.minZ, r.bounds.minZ), std::max(w.maxX, r.bounds.maxX),
+                 std::max(w.maxZ, r.bounds.maxZ)};
+        const double across = std::hypot(double(w.maxX) - w.minX, double(w.maxZ) - w.minZ);
+        if (across > double(draw)) {
+            const int density = fogDensityWithin(uint32_t(draw));
+            auto metres = [&](double depth) {
+                char m[32];
+                std::snprintf(m, sizeof m, "%.1f m", depth * gte / 4096.0);
+                return std::string(m);
+            };
+            warn(StreamProblem::FarPopIn, "Far scenery pops in",
+                 "With fog off, nothing past the draw distance (" + metres(double(draw)) +
+                     " from the camera) is drawn, so far scenery appears all at once as the player walks. Turn fog on: density " +
+                     std::to_string(density) + " fades it out by " + metres(20000.0 / density) + ", before that edge.");
+        }
+    }
     if (st.streamRamSaved() <= 0)
         warn(StreamProblem::NoSaving, "Streaming does not save RAM here",
              "The scenery is " + std::to_string(st.streamedTriBytes / 1024) + " KB and streaming sets aside " +
@@ -1451,20 +1473,31 @@ constexpr uint32_t kFragGouraudTri = 28, kFragTexturedTri = 40, kFragRect = 16, 
 constexpr uint32_t kNearPlaneAllowance = 16 * 31 * (kFragGouraudTri + kFragTexturedTri);
 
 // Ordering table: the renderer uses a triangle's largest screen Z as its
-// bucket and drops it at or past the table size, so the table is the far clip
-// in GTE units (1 m = 4096 / gteScaling). The farthest any vertex can be from
-// the camera is the diagonal of everything in the scene; fog culls past
-// 20000 / density.
-static uint32_t orderingTableNeed(const Scene& scene, const std::vector<ExpObject>& objs, float gte) {
+// bucket and drops it once its nearest corner is at or past the table size, so
+// the table is the far clip in GTE units (1 m = 4096 / gteScaling). The
+// farthest a vertex can be from the camera is the diagonal of one box around
+// every vertex and every place the camera can be: the player's camera point
+// (`eyes`), `eyeAbove` over the highest surface (the player standing on it;
+// psxsplash keeps the camera playerHeight over the floor), and cutscene camera
+// keys (the camera moves along the lines between keys). A camera a script
+// moves elsewhere is not known here. Fog culls past 20000 / density.
+static uint32_t orderingTableNeed(const Scene& scene, const std::vector<ExpObject>& objs, float gte, const std::vector<Vec3>& eyes,
+                                  float eyeAbove) {
     bool any = false;
     Vec3 mn{}, mx{};
+    auto add = [&](const Vec3& p) {
+        mn = any ? vmin(mn, p) : p;
+        mx = any ? vmax(mx, p) : p;
+        any = true;
+    };
     for (const ExpObject& e : objs)
-        for (const Vec3& v : e.mesh->positions) {
-            Vec3 p = e.flat->localToWorld.point(v);
-            mn = any ? vmin(mn, p) : p;
-            mx = any ? vmax(mx, p) : p;
-            any = true;
-        }
+        for (const Vec3& v : e.mesh->positions) add(e.flat->localToWorld.point(v));
+    if (any && eyeAbove > 0) add(Vec3{mx.x, mx.y + eyeAbove, mx.z});
+    for (const Vec3& p : eyes) add(p);
+    for (const Cutscene& c : scene.cutscenes)
+        for (const CutsceneTrack& t : c.tracks)
+            if (t.type == TrackType::CameraPosition)
+                for (const Keyframe& k : t.keyframes) add(Vec3{k.value[0], k.value[1], k.value[2]});
     Vec3 d = mx - mn;
     double far = std::sqrt(double(d.x) * d.x + double(d.y) * d.y + double(d.z) * d.z) * 4096.0 / gte;
     if (scene.settings.fog.enabled && scene.settings.fog.density > 0)
@@ -2308,10 +2341,58 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     }
     if (!res.ok()) return res;
 
+    // PSXSceneExporter: the first active PSXPlayer and PSXNavigationSettings
+    // (FindObjectsByType skips inactive objects), in canonical order.
+    const FlatObject* playerObj = nullptr;
+    const FlatObject* navObj = nullptr;
+    for (const FlatObject& fo : flat) {
+        if (!fo.activeInHierarchy || !fo.object->active) continue;
+        if (fo.object->player && !playerObj) playerObj = &fo;
+        if (fo.object->navigation && !navObj) navObj = &fo;
+    }
+    Vec3 navSpawn{};
+    if (navObj) {
+        navSpawn = navObj->worldPosition;
+        const std::string& anchor = navObj->object->navigation->spawnAnchor;
+        if (!anchor.empty()) {
+            auto it = std::find_if(flat.begin(), flat.end(),
+                                   [&](const FlatObject& fo) { return fo.object->name == anchor; });
+            if (it == flat.end()) {
+                res.errors.push_back(navObj->object->name + ": spawnAnchor '" + anchor + "' not found");
+                return res;
+            }
+            navSpawn = it->worldPosition;
+        }
+    }
+    Vec3 playerPos{};
+    Quat playerRot{};
+    float playerHeight = 1.8f, playerRadius = 0.5f, moveSpeed = 3.f, sprintSpeed = 8.f, jumpHeight = 2.f,
+          gravity = 20.f;
+    if (playerObj) {
+        const PlayerComponent& pc = *playerObj->object->player;
+        playerPos = findCamPoint(playerObj->worldPosition, pc.playerHeight, exporters);
+        playerRot = playerObj->worldRotation;
+        playerHeight = pc.playerHeight;
+        playerRadius = pc.playerRadius;
+        moveSpeed = pc.moveSpeed;
+        sprintSpeed = pc.sprintSpeed;
+        jumpHeight = pc.jumpHeight;
+        gravity = pc.gravity;
+    } else if (navObj) {
+        playerPos = navSpawn;
+        playerHeight = navObj->object->navigation->agentHeight;
+        playerRadius = navObj->object->navigation->agentRadius;
+    }
+
     // Render buffer sizes go first: with streaming on, the ordering table is
     // the draw distance, which sets how near a region has to be loaded.
     ExportStats& st = res.stats;
-    st.orderingTableNeed = orderingTableNeed(scene, exporters, gte);
+    // Where the camera can be: the player's camera point, and as high above
+    // any floor as the player's eye (plus a jump), and every cutscene camera key.
+    std::vector<Vec3> eyes;
+    if (playerObj || navObj) eyes.push_back(playerPos);
+    const float eyeAbove = playerObj ? playerHeight + std::max(0.f, playerObj->object->player->jumpHeight) : navObj ? playerHeight : 0.f;
+    st.orderingTableNeed = orderingTableNeed(scene, exporters, gte, eyes, eyeAbove);
     st.orderingTableSize = scene.settings.orderingTableSize > 0
                                ? uint32_t(std::clamp(scene.settings.orderingTableSize, int(kOtMin), int(kOtMax)))
                                : st.orderingTableNeed;
@@ -2377,48 +2458,6 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (ExpObject& e : exporters)
         if (e.obj->collider && e.obj->collider->kind == ColliderKind::Dynamic) colliderCount++;
 
-    // PSXSceneExporter: the first active PSXPlayer and PSXNavigationSettings
-    // (FindObjectsByType skips inactive objects), in canonical order.
-    const FlatObject* playerObj = nullptr;
-    const FlatObject* navObj = nullptr;
-    for (const FlatObject& fo : flat) {
-        if (!fo.activeInHierarchy || !fo.object->active) continue;
-        if (fo.object->player && !playerObj) playerObj = &fo;
-        if (fo.object->navigation && !navObj) navObj = &fo;
-    }
-    Vec3 navSpawn{};
-    if (navObj) {
-        navSpawn = navObj->worldPosition;
-        const std::string& anchor = navObj->object->navigation->spawnAnchor;
-        if (!anchor.empty()) {
-            auto it = std::find_if(flat.begin(), flat.end(),
-                                   [&](const FlatObject& fo) { return fo.object->name == anchor; });
-            if (it == flat.end()) {
-                res.errors.push_back(navObj->object->name + ": spawnAnchor '" + anchor + "' not found");
-                return res;
-            }
-            navSpawn = it->worldPosition;
-        }
-    }
-    Vec3 playerPos{};
-    Quat playerRot{};
-    float playerHeight = 1.8f, playerRadius = 0.5f, moveSpeed = 3.f, sprintSpeed = 8.f, jumpHeight = 2.f,
-          gravity = 20.f;
-    if (playerObj) {
-        const PlayerComponent& pc = *playerObj->object->player;
-        playerPos = findCamPoint(playerObj->worldPosition, pc.playerHeight, exporters);
-        playerRot = playerObj->worldRotation;
-        playerHeight = pc.playerHeight;
-        playerRadius = pc.playerRadius;
-        moveSpeed = pc.moveSpeed;
-        sprintSpeed = pc.sprintSpeed;
-        jumpHeight = pc.jumpHeight;
-        gravity = pc.gravity;
-    } else if (navObj) {
-        playerPos = navSpawn;
-        playerHeight = navObj->object->navigation->agentHeight;
-        playerRadius = navObj->object->navigation->agentRadius;
-    }
 
     // Nav regions. Agent size comes from the player (or its defaults); the
     // navigation settings override everything when present.

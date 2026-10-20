@@ -931,6 +931,80 @@ void testExportStats() {
                                                  splash::objectLoadBytes(o.stats) + splash::kEngineLoadBytes);
 }
 
+// The ordering table is the far clip, so it must reach from wherever the
+// camera can be to the farthest vertex. The courtyard floor alone
+// (x -9..9, y -0.2..0, z -9..6 in the world) with the Player Start above one
+// corner, a high eye: the far corner is farther from the camera than the
+// floor's own diagonal. Then the player off the floor (the camera outside
+// every mesh), and a cutscene camera key far away.
+void testOrderingTableReach() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const splash::Scene base = splash::loadScene(project / "courtyard.scene");
+    splash::Scene scene = base;
+    scene.objects.clear();
+    for (const splash::Object& o : base.objects) {
+        if (o.name == "Environment") {
+            splash::Object env = o;
+            env.children.erase(std::remove_if(env.children.begin(), env.children.end(),
+                                              [](const splash::Object& c) { return c.name != "Floor"; }),
+                               env.children.end());
+            scene.objects.push_back(env);
+        }
+        if (o.name == "Player Start") scene.objects.push_back(o);
+    }
+    CHECK(scene.objects.size() == 2 && scene.objects[0].children.size() == 1);
+    splash::Object& player = scene.objects[1];
+    CHECK(player.player.has_value());
+    if (scene.objects.size() != 2 || !player.player) return;
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    const fs::path out = g_outDir / "otreach" / "scene.splashpack";
+    auto need = [&]() {
+        splash::ExportResult r = splash::exportSplashpack(scene, project, out, dry);
+        CHECK(r.ok());
+        return r.stats.orderingTableNeed;
+    };
+    const double perMetre = 4096.0 / 100.0;  // gteScaling 100
+    auto reach = [&](double x, double y, double z) {  // camera to the farthest floor corner, in GTE units
+        double far = 0;
+        for (double cx : {-9.0, 9.0})
+            for (double cy : {-0.2, 0.0})
+                for (double cz : {-9.0, 6.0})
+                    far = std::max(far, std::sqrt((cx - x) * (cx - x) + (cy - y) * (cy - y) + (cz - z) * (cz - z)));
+        return far * perMetre;
+    };
+    const double floorDiagonal = std::sqrt(18.0 * 18.0 + 0.2 * 0.2 + 15.0 * 15.0) * perMetre;
+
+    // Over a corner, the eye 10 m over the floor (the camera sits playerHeight over the floor it stands on).
+    player.transform.position = {-8.95f, 0.5f, -8.95f};
+    player.player->playerHeight = 10.f;
+    const uint32_t high = need();
+    CHECK(reach(-8.95, 10.0, -8.95) > floorDiagonal + 50);  // the case is real: the diagonal falls short
+    CHECK(high >= reach(-8.95, 10.0, -8.95));
+
+    // Off the floor: no floor under it, so the camera is the Player Start raised by its height.
+    player.player->playerHeight = 1.8f;
+    player.transform.position = {0.f, 0.f, -60.f};
+    const uint32_t outside = need();
+    CHECK(outside >= reach(0.0, 1.8, -60.0));
+    CHECK(outside > floorDiagonal * 2);
+
+    // A cutscene camera key farther still.
+    player.transform.position = {0.f, 0.5f, 0.f};
+    const uint32_t onFloor = need();
+    splash::Cutscene cs;
+    cs.name = "flyby";
+    splash::CutsceneTrack cam;
+    cam.type = splash::TrackType::CameraPosition;
+    cam.keyframes.push_back({});
+    cam.keyframes.back().value = {0.f, 20.f, 100.f};
+    cs.tracks.push_back(cam);
+    scene.cutscenes.push_back(cs);
+    const uint32_t flyby = need();
+    CHECK(onFloor < flyby && flyby >= reach(0.0, 20.0, 100.0));
+}
+
 // RAM per game object: the engine's agent state and Lua's tables, measured on
 // psxsplash (budget.hh). A scene of many small props fails on the object count
 // and says so with its fix; the same geometry in few objects fits.
@@ -4185,6 +4259,56 @@ void testWorldStreamPlan() {
     st::Plan all = st::plan(in, 1 << 20);
     CHECK(all.slotCount == std::min(int(all.regions.size()) + 1, st::kMaxSlots));
     CHECK(st::plan({}, 4096).regions.empty());
+}
+
+// A streamed world wider than the draw distance with fog off: the draw
+// distance is a hard edge, said so with the fog that hides it. The courtyard
+// floor 25 times larger (tests/boot/walk.sh's world); the stock courtyard fits
+// inside the draw distance and gets no such warning, nor does the walk world
+// with the suggested fog on, whose far wall is then inside the table.
+void testStreamFarPopIn() {
+    namespace fs = std::filesystem;
+    CHECK(splash::fogDensityWithin(8192) == 3 && 20000 / 3 <= 8192 && 20000 / 2 > 8192);
+    CHECK(splash::fogDensityWithin(20000) == 1 && splash::fogDensityWithin(2000) == 10);
+    CHECK(splash::fogDensityWithin(100) == 10 && splash::fogDensityWithin(0) == 10);
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    scene.settings.streamWorld = true;
+    scene.settings.fog.enabled = false;
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    const fs::path out = g_outDir / "farpop" / "scene.splashpack";
+    auto popWarning = [](const splash::ExportResult& r) -> const splash::StreamWarning* {
+        for (const splash::StreamWarning& w : r.stats.streamWarnings)
+            if (w.kind == splash::StreamProblem::FarPopIn) return &w;
+        return nullptr;
+    };
+    splash::ExportResult small = splash::exportSplashpack(scene, project, out, dry);
+    CHECK(small.ok() && small.stats.streamRegions >= 1 && !popWarning(small));
+
+    for (splash::Object& o : scene.objects)
+        for (splash::Object& c : o.children)
+            if (c.name == "Floor") c.transform.scale = {25, 1, 25};
+    splash::ExportResult walk = splash::exportSplashpack(scene, project, out, dry);
+    CHECK(walk.ok() && walk.stats.orderingTableSize == splash::kStreamDrawDistance + 1);
+    const splash::StreamWarning* w = popWarning(walk);
+    CHECK(w != nullptr);
+    if (w) {
+        CHECK(w->title == "Far scenery pops in");
+        // 8193 depth units at gteScaling 100; density 3 ends at 6666.
+        CHECK(w->body.find("(200.0 m from the camera)") != std::string::npos);
+        CHECK(w->body.find("density 3 fades it out by 162.8 m") != std::string::npos);
+        CHECK(std::any_of(walk.warnings.begin(), walk.warnings.end(),
+                          [](const std::string& s) { return s.find("Far scenery pops in. ") != std::string::npos; }));
+    }
+
+    // The fix: fog on at the density the warning names.
+    scene.settings.fog.enabled = true;
+    scene.settings.fog.density = splash::fogDensityWithin(walk.stats.orderingTableSize);
+    CHECK(scene.settings.fog.density == 3);
+    splash::ExportResult fogged = splash::exportSplashpack(scene, project, out, dry);
+    CHECK(fogged.ok() && !popWarning(fogged));
+    CHECK(20000 / scene.settings.fog.density <= int(fogged.stats.orderingTableSize));
 }
 
 // Streaming on the courtyard: the scenery streams, the scripted Game Logic
@@ -12926,10 +13050,12 @@ int main(int argc, char** argv) {
     testGizmoUndo();
     testCatalog();
     testExportStats();
+    testOrderingTableReach();
     testObjectRamBudget();
     testScriptWithoutMesh();
     testWorldStreamPlan();
     testWorldStreamExport();
+    testStreamFarPopIn();
     testTriangleBudget();
     testNavBigWorld();
     testRoomsExport();

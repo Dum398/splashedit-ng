@@ -4,6 +4,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -752,6 +753,27 @@ void planStreaming(const Scene& scene, std::vector<ExpObject>& exporters, std::v
         warn(StreamProblem::TooManyNear, "Far scenery may appear late",
              "Up to " + std::to_string(plan.slotsWanted - 1) + " regions are near the camera at once, but psxsplash keeps " +
                  std::to_string(stream::kMaxSlots) + ". A shorter draw distance needs fewer.");
+    // Without fog the draw distance is a hard edge: scenery past it is not
+    // drawn at all, and appears whole as the camera comes within reach.
+    if (!(scene.settings.fog.enabled && scene.settings.fog.density > 0)) {
+        stream::Box w = plan.regions.front().bounds;
+        for (const stream::Region& r : plan.regions)
+            w = {std::min(w.minX, r.bounds.minX), std::min(w.minZ, r.bounds.minZ), std::max(w.maxX, r.bounds.maxX),
+                 std::max(w.maxZ, r.bounds.maxZ)};
+        const double across = std::hypot(double(w.maxX) - w.minX, double(w.maxZ) - w.minZ);
+        if (across > double(draw)) {
+            const int density = fogDensityWithin(uint32_t(draw));
+            auto metres = [&](double depth) {
+                char m[32];
+                std::snprintf(m, sizeof m, "%.1f m", depth * gte / 4096.0);
+                return std::string(m);
+            };
+            warn(StreamProblem::FarPopIn, "Far scenery pops in",
+                 "With fog off, nothing past the draw distance (" + metres(double(draw)) +
+                     " from the camera) is drawn, so far scenery appears all at once as the player walks. Turn fog on: density " +
+                     std::to_string(density) + " fades it out by " + metres(20000.0 / density) + ", before that edge.");
+        }
+    }
     if (st.streamRamSaved() <= 0)
         warn(StreamProblem::NoSaving, "Streaming does not save RAM here",
              "The scenery is " + std::to_string(st.streamedTriBytes / 1024) + " KB and streaming sets aside " +

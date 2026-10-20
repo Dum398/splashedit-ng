@@ -28,7 +28,7 @@ struct ExportOptions {
 };
 
 // A world streaming problem, for the editor to show with its fix.
-enum class StreamProblem : uint8_t { NothingStreams, TooManyObjects, LargeRegion, UnevenRegions, TooManyNear, NoSaving, CdMusic };
+enum class StreamProblem : uint8_t { NothingStreams, TooManyObjects, LargeRegion, UnevenRegions, TooManyNear, NoSaving, CdMusic, FarPopIn };
 struct StreamWarning {
     StreamProblem kind;
     std::string title, body;
@@ -248,6 +248,14 @@ struct ExportStats {
 // With streaming on and no fog, the automatic draw distance (ordering table
 // size), in GTE units: SplashEdit 2.4's default ordering table.
 constexpr uint32_t kStreamDrawDistance = 8192;
+
+// The fog density (1..10, whole numbers) whose far wall, 20000 / density depth
+// units, is at or nearer than `distance`: the thinnest fog that hides the edge
+// of the draw distance. Below 2000 even density 10 ends past it.
+inline int fogDensityWithin(uint32_t distance) {
+    if (distance == 0) return 10;
+    return std::clamp(int((20000 + distance - 1) / distance), 1, 10);
+}
 
 struct ExportResult {
     std::vector<std::string> errors;

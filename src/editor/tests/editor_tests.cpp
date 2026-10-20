@@ -4261,6 +4261,56 @@ void testWorldStreamPlan() {
     CHECK(st::plan({}, 4096).regions.empty());
 }
 
+// A streamed world wider than the draw distance with fog off: the draw
+// distance is a hard edge, said so with the fog that hides it. The courtyard
+// floor 25 times larger (tests/boot/walk.sh's world); the stock courtyard fits
+// inside the draw distance and gets no such warning, nor does the walk world
+// with the suggested fog on, whose far wall is then inside the table.
+void testStreamFarPopIn() {
+    namespace fs = std::filesystem;
+    CHECK(splash::fogDensityWithin(8192) == 3 && 20000 / 3 <= 8192 && 20000 / 2 > 8192);
+    CHECK(splash::fogDensityWithin(20000) == 1 && splash::fogDensityWithin(2000) == 10);
+    CHECK(splash::fogDensityWithin(100) == 10 && splash::fogDensityWithin(0) == 10);
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    scene.settings.streamWorld = true;
+    scene.settings.fog.enabled = false;
+    splash::ExportOptions dry;
+    dry.dryRun = true;
+    const fs::path out = g_outDir / "farpop" / "scene.splashpack";
+    auto popWarning = [](const splash::ExportResult& r) -> const splash::StreamWarning* {
+        for (const splash::StreamWarning& w : r.stats.streamWarnings)
+            if (w.kind == splash::StreamProblem::FarPopIn) return &w;
+        return nullptr;
+    };
+    splash::ExportResult small = splash::exportSplashpack(scene, project, out, dry);
+    CHECK(small.ok() && small.stats.streamRegions >= 1 && !popWarning(small));
+
+    for (splash::Object& o : scene.objects)
+        for (splash::Object& c : o.children)
+            if (c.name == "Floor") c.transform.scale = {25, 1, 25};
+    splash::ExportResult walk = splash::exportSplashpack(scene, project, out, dry);
+    CHECK(walk.ok() && walk.stats.orderingTableSize == splash::kStreamDrawDistance + 1);
+    const splash::StreamWarning* w = popWarning(walk);
+    CHECK(w != nullptr);
+    if (w) {
+        CHECK(w->title == "Far scenery pops in");
+        // 8193 depth units at gteScaling 100; density 3 ends at 6666.
+        CHECK(w->body.find("(200.0 m from the camera)") != std::string::npos);
+        CHECK(w->body.find("density 3 fades it out by 162.8 m") != std::string::npos);
+        CHECK(std::any_of(walk.warnings.begin(), walk.warnings.end(),
+                          [](const std::string& s) { return s.find("Far scenery pops in. ") != std::string::npos; }));
+    }
+
+    // The fix: fog on at the density the warning names.
+    scene.settings.fog.enabled = true;
+    scene.settings.fog.density = splash::fogDensityWithin(walk.stats.orderingTableSize);
+    CHECK(scene.settings.fog.density == 3);
+    splash::ExportResult fogged = splash::exportSplashpack(scene, project, out, dry);
+    CHECK(fogged.ok() && !popWarning(fogged));
+    CHECK(20000 / scene.settings.fog.density <= int(fogged.stats.orderingTableSize));
+}
+
 // Streaming on the courtyard: the scenery streams, the scripted Game Logic
 // does not, a .geo file sits next to the pack, and turning it off removes it.
 void testWorldStreamExport() {
@@ -13005,6 +13055,7 @@ int main(int argc, char** argv) {
     testScriptWithoutMesh();
     testWorldStreamPlan();
     testWorldStreamExport();
+    testStreamFarPopIn();
     testTriangleBudget();
     testNavBigWorld();
     testRoomsExport();

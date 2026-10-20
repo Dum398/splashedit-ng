@@ -7465,12 +7465,21 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                     caption(sw.title + ": " + sw.body, color::warn);
                     continue;
                 }
+                const bool fog = sw.kind == splash::StreamProblem::FarPopIn;
                 bool fix = false;
                 std::string id = "streamwarn" + std::to_string(i);
+                scriptLine(id.c_str(), "stream: " + id + " " + sw.title);
                 float h = problemCard(id.c_str(), ImVec2(x0, y), x1 - x0, sw.title.c_str(), sw.body.c_str(),
-                                      shorter ? "Shorten draw distance" : "Turn streaming off", &fix);
+                                      fog ? "Turn fog on" : shorter ? "Shorten draw distance" : "Turn streaming off", &fix);
                 y += h + space::sm;
-                if (fix && shorter) {
+                if (fix && fog) {
+                    // The thinnest fog whose far wall is within the draw distance.
+                    const uint32_t now = otUsed ? otUsed : splash::kStreamDrawDistance;
+                    doc.editSettings([&](splash::SceneSettings& s) {
+                        s.fog.enabled = true;
+                        s.fog.density = splash::fogDensityWithin(now);
+                    });
+                } else if (fix && shorter) {
                     const int now = int(otUsed ? otUsed : splash::kStreamDrawDistance);
                     doc.editSettings([&](splash::SceneSettings& s) { s.orderingTableSize = std::max(int(splash::kOtMin), now * 3 / 4); });
                 } else if (fix) {

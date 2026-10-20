@@ -64,6 +64,7 @@
 #include "navregion.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
+#include "shadow.hh"
 #include "texture.hh"
 #include "unity_import.hh"
 #include "worldstream.hh"
@@ -12911,6 +12912,156 @@ void testGpuDecode() {
     CHECK(last.offsetX == 12 && last.offsetY == -10 && last.setMask && last.checkMask && last.texWindow == 0x12345);
 }
 
+// ---- Blob shadows (core/shadow.hh): the mesh fields round-trip through the
+// scene file, written only when not the default; a scene without a Blob
+// exports v27 bytes whatever its shadow settings; with one it exports v28,
+// the header 4 bytes longer and its shadowTableOffset at 156 pointing at
+// {u16 count, u16 0, {u16 object, u8 mode, u8 darkness, u16 size, u16 fade}}.
+void testShadows() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "shadows";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const splash::Scene base = splash::loadScene(project / "courtyard.scene");
+    auto find = [](splash::Scene& sc, const std::string& name) -> splash::Object* {
+        std::function<splash::Object*(std::vector<splash::Object>&)> walk = [&](std::vector<splash::Object>& v) -> splash::Object* {
+            for (splash::Object& o : v) {
+                if (o.name == name) return &o;
+                if (splash::Object* c = walk(o.children)) return c;
+            }
+            return nullptr;
+        };
+        return walk(sc.objects);
+    };
+    auto slurp = [](const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    using roomtest::rd16;
+    using roomtest::rd32;
+
+    // JSON: defaults leave no key; anything else round-trips.
+    {
+        splash::Scene sc = base;
+        splash::Object* crate = find(sc, "Crate");
+        CHECK(crate && crate->mesh && crate->mesh->shadow == splash::ShadowMode::Off);
+        splash::saveScene(sc, dir / "plain.scene");
+        CHECK(slurp(dir / "plain.scene").find("shadow") == std::string::npos);
+        crate->mesh->shadow = splash::ShadowMode::Blob;
+        crate->mesh->shadowSize = 0.75f;
+        crate->mesh->shadowDarkness = 40;
+        splash::saveScene(sc, dir / "blob.scene");
+        const std::string text = slurp(dir / "blob.scene");
+        CHECK(text.find("\"shadow\": \"blob\"") != std::string::npos);
+        splash::Scene back = splash::loadScene(dir / "blob.scene");
+        splash::Object* bc = find(back, "Crate");
+        CHECK(bc && bc->mesh && bc->mesh->shadow == splash::ShadowMode::Blob && bc->mesh->shadowSize == 0.75f &&
+              bc->mesh->shadowDarkness == 40);
+        // Shadow keys are fields, not extras: saving again gives the same text.
+        splash::saveScene(back, dir / "blob2.scene");
+        CHECK(slurp(dir / "blob2.scene") == text);
+        // Off with a size kept: "shadow" goes, the size stays.
+        bc->mesh->shadow = splash::ShadowMode::Off;
+        splash::saveScene(back, dir / "off.scene");
+        const std::string off = slurp(dir / "off.scene");
+        CHECK(off.find("\"shadow\":") == std::string::npos && off.find("\"shadowSize\": 0.75") != std::string::npos);
+    }
+
+    // Export: settings on an Off shadow change nothing; the pack stays v27.
+    splash::Scene plain = base;
+    CHECK(splash::exportSplashpack(plain, project, dir / "plain.splashpack").ok());
+    const std::string a = slurp(dir / "plain.splashpack");
+    CHECK(a.size() > 160 && rd16(a, 2) == 27);
+    {
+        splash::Scene sc = base;
+        find(sc, "Crate")->mesh->shadowSize = 2.f;
+        find(sc, "Crate")->mesh->shadowDarkness = 10;
+        CHECK(splash::exportSplashpack(sc, project, dir / "offset.splashpack").ok());
+        CHECK(slurp(dir / "offset.splashpack") == a);
+    }
+    // One Blob: v28.
+    splash::Scene sc = base;
+    find(sc, "Crate")->mesh->shadow = splash::ShadowMode::Blob;
+    splash::ExportResult r = splash::exportSplashpack(sc, project, dir / "blob.splashpack");
+    CHECK(r.ok() && r.stats.shadows == 1);
+    const std::string b = slurp(dir / "blob.splashpack");
+    CHECK(b.size() > 160 && rd16(b, 2) == 28);
+    // The header matches but for the version, the table offsets (the tables
+    // sit 4 bytes later, or for a 0 offset not at all) and the bump allocator
+    // estimate, which grows by one blob.
+    const std::set<size_t> offsets = {60, 68, 88, 96, 100, 108, 116, 120, 124, 128, 140, 144};
+    for (size_t at = 4; at < 148; at += 4) {
+        if (offsets.count(at)) {
+            const uint32_t oa = uint32_t(rd32(a, at)), ob = uint32_t(rd32(b, at));
+            // The memory card and stream tables come after the shadow table.
+            CHECK((oa == 0 && ob == 0) || ob == oa + 4 || ((at == 120 || at == 124) && ob > oa + 4));
+        } else {
+            CHECK(a.compare(at, 4, b, at, 4) == 0);
+        }
+    }
+    CHECK(a.compare(0, 2, b, 0, 2) == 0);
+    CHECK(rd32(a, 148) == rd32(b, 148));
+    CHECK(uint32_t(rd32(b, 152)) == uint32_t(rd32(a, 152)) + splash::shadow::kBumpBytes);
+    // Lua metadata and game objects start 4 bytes later and are otherwise the
+    // same apart from their data offsets.
+    const size_t nlua = rd16(a, 4), ngo = rd16(a, 6);
+    for (size_t i = 0; i < ngo; i++) {
+        const size_t pa = 156 + 8 * nlua + 92 * i, pb = 160 + 8 * nlua + 92 * i;
+        CHECK(a.compare(pa + 4, 88, b, pb + 4, 88) == 0);
+    }
+    const uint32_t table = uint32_t(rd32(b, 156));
+    CHECK(table != 0 && table % 4 == 0 && table + 12 <= b.size());
+    if (table == 0 || table + 12 > b.size()) return;
+    CHECK(rd16(b, table) == 1 && rd16(b, table + 2) == 0);
+    const size_t obj = rd16(b, table + 4);
+    CHECK(uint8_t(b[table + 6]) == splash::shadow::kModeBlob);
+    CHECK(uint8_t(b[table + 7]) == 153);  // 60 % of 255
+    const float gte = sc.settings.gteScaling;
+    CHECK(rd16(b, table + 8) == uint16_t(std::lround(0.5f / gte * 4096.f)));
+    CHECK(rd16(b, table + 10) == uint16_t(std::lround(splash::shadow::kFadeHeight / gte * 4096.f)));
+    // The record's object is the Crate: its position, at (0, 0.5, 1).
+    CHECK(obj < ngo);
+    if (obj < ngo) {
+        const size_t at = 160 + 8 * nlua + 92 * obj;
+        CHECK(rd32(b, at + 4) == splash::toWorldFixed12(0.f) && rd32(b, at + 8) == splash::toWorldFixed12(-0.5f / gte) &&
+              rd32(b, at + 12) == splash::toWorldFixed12(1.f / gte));
+    }
+
+    // The model: on the nav floor under the Crate, radius and darkness whole;
+    // 1.25 m up, half of each; 2.5 m up, gone.
+    const splash::ExportStats& st = r.stats;
+    CHECK(!st.navOutlines.empty() && st.navInfo.size() == st.navOutlines.size());
+    splash::shadow::Blob g = splash::shadow::blobFor({0.6f, 0.f, -1.f}, 0.f, 1.f, 0.5f, 60, st.navOutlines, st.navInfo);
+    CHECK(g.region >= 0 && std::fabs(g.height) < 0.05f && std::fabs(g.radius - 0.5f * (1 - g.height / 2.5f)) < 1e-4f);
+    const float floorY = g.centre.y;
+    splash::shadow::Blob half =
+        splash::shadow::blobFor({0.6f, 0.f, -1.f}, floorY + 1.25f, floorY + 2.25f, 0.5f, 60, st.navOutlines, st.navInfo);
+    CHECK(half.region == g.region && std::fabs(half.radius - 0.25f) < 1e-4f &&
+          std::fabs(half.darkness - 153.f / 255.f * 0.5f) < 1e-3f);
+    splash::shadow::Blob gone =
+        splash::shadow::blobFor({0.6f, 0.f, -1.f}, floorY + 2.5f, floorY + 3.5f, 0.5f, 60, st.navOutlines, st.navInfo);
+    CHECK(!gone.visible);
+    // A walk-off edge fades the blob over its radius; other edges do not. A
+    // 4 m square tilted along X (Y = 0.25 X), edge 0 (z = 0) walk-off.
+    {
+        std::vector<std::vector<splash::Vec3>> sq = {{{0, 0, 0}, {4, 1, 0}, {4, 1, 4}, {0, 0, 4}}};
+        std::vector<splash::ExportStats::NavRegionInfo> in(1);
+        in[0].planeA = 0.25f;
+        in[0].walkoffEdges = 1;
+        splash::shadow::Blob mid = splash::shadow::blobFor({2, 0.5f, 2}, 0.5f, 1.5f, 0.5f, 100, sq, in);
+        CHECK(mid.region == 0 && mid.darkness == 1.f && std::fabs(mid.rim[0].y - (0.5f + 0.125f)) < 1e-5f &&
+              std::fabs(mid.rim[4].y - (0.5f - 0.125f)) < 1e-5f);
+        splash::shadow::Blob nearWalkoff = splash::shadow::blobFor({2, 0.5f, 0.25f}, 0.5f, 1.5f, 0.5f, 100, sq, in);
+        CHECK(std::fabs(nearWalkoff.darkness - 0.5f) < 1e-4f);
+        splash::shadow::Blob nearOther = splash::shadow::blobFor({0.25f, 0.0625f, 2}, 0.0625f, 1.f, 0.5f, 100, sq, in);
+        CHECK(nearOther.region == 0 && nearOther.darkness == 1.f);
+    }
+    // No nav: flat under the bounds, whole.
+    splash::shadow::Blob flat = splash::shadow::blobFor({0, 0, 0}, 3.f, 4.f, 0.5f, 100, {}, {});
+    CHECK(flat.region < 0 && flat.centre.y == 3.f && flat.radius == 0.5f && flat.darkness == 1.f && flat.visible);
+}
+
 void testGpuRaster() {
     using gpuraster::Gpu;
     auto px = [](const Gpu& g, int x, int y) { return g.at(x, y); };
@@ -13207,6 +13358,7 @@ int main(int argc, char** argv) {
     testGpuDumpParse();
     testGpuDecode();
     testGpuRaster();
+    testShadows();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -548,6 +548,18 @@ no caption, red in the middle, no word 0). Needs a display (CI runs it under `xv
 
     python3 meshalphacheck.py <splashedit> <splashpack-cli> [screenshot.png]
 
+`shadowcheck.py` checks blob shadows in the editor on a copy of the third-person template. With Player
+Body selected it picks Blob from the mesh inspector's Shadow menu (`--click @obj.shadow/Blob`): the
+inspector must print `shadow: blob size 0.5 darkness 60 Player Body` and show the `obj.shadowsize`
+and `obj.shadowdark` rows, and the scene view must print `shadow preview: Player Body floor R<k>
+height 0.00 radius 0.50 darkness 153` (on the live export's nav floor, whole) and draw the blob
+(`vp.shadow.Player Body`) darker than the same pixels in the screenshot taken before. The scene saved
+with Ctrl+S must carry `"shadow": "blob"` and no default size or darkness, and `splashpack-cli export`
+must write a v28 pack with one blob record at 153 darkness. Needs a display (CI runs it under
+`xvfb-run`).
+
+    python3 shadowcheck.py <splashedit> [screenshot.png]
+
 `statusbudgetcheck.py` checks the status bar's Triangles meter and what the meters show when the
 live export fails. It builds a temp project with one flat grid mesh: 1700 triangles must print
 `statusbar: tris 1700/2000 warn` (the most triangles in view against the psxsplash docs' 2000 per

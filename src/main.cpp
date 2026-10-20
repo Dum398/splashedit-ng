@@ -710,6 +710,11 @@ int main(int argc, char** argv) {
     brand::load(assetDir.c_str());
     if (!args.screenshot || args.splash) splash::load(assetDir.c_str(), !args.screenshot);
     ImGui_ImplSDL3_InitForOpenGL(window, ctx);
+    // The SDL3 backend turns SDL_BORDERLESS_WINDOWED_STYLE off for its own
+    // viewport windows. SDL reads that hint whenever it rebuilds this window's
+    // style (restore does). On Windows a maximized window without WS_CAPTION
+    // covers the taskbar. The editor opens no viewport windows.
+    SDL_SetHint("SDL_BORDERLESS_WINDOWED_STYLE", "1");
     {
         // The backend places the IME box in window coordinates.
         ImGuiPlatformIO& pio = ImGui::GetPlatformIO();

@@ -3358,8 +3358,9 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         st.treeMenuPos = ImVec2(menuBtn.Max.x, menuBtn.Max.y + space::xs);
         st.treeMenuRight = true;
     }
-    searchField("treesearch", ImRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28)), "Filter objects", "Ctrl F",
-                &st.treeFilter, st.focusTreeFilter);
+    const ImRect searchRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28));
+    nameRect("treesearch", searchRect);
+    searchField("treesearch", searchRect, "Filter objects", "Ctrl F", &st.treeFilter, st.focusTreeFilter);
     st.focusTreeFilter = false;
     y += 28 + space::sm;
 
@@ -3386,6 +3387,7 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
 
     ImRect foot(ImVec2(r.Min.x, r.Max.y - 40), r.Max);
+    nameRect("treelist.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y)));  // the rows' visible part
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y), true);
     const editor::ObjectPath root;
     TreeCtx ctx{st, doc, r, y + size::row};

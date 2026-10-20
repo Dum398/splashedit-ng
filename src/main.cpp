@@ -1033,6 +1033,10 @@ int main(int argc, char** argv) {
             std::printf("game attached: %s\n", state.play.cons[0].game.attached() ? "yes" : "no");
             std::printf("status: %s\n", state.notice.c_str());
             std::printf("unsaved changes: %s\n", doc.dirty() ? "yes" : "no");
+            {
+                const splash::Object* sel = doc.selection() ? doc.object(*doc.selection()) : nullptr;
+                std::printf("selected: %s\n", sel ? sel->name.c_str() : "(none)");
+            }
             std::printf("inspector import warnings: %zu\n", state.importPanel.shown.size());
             for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
             std::printf("project panel open: %s\n", state.assets.open ? "yes" : "no");

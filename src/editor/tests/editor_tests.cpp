@@ -12760,7 +12760,7 @@ void testUnityModelIds() {
     // rig.fbx: the skinned child holds its PSXSkinnedObjectExporter.
     CHECK(meshed("rig/Prop") && at(s.objects, "rig/Body"));
     CHECK(hasItem(r, ReportItem::Later, "rig/Body", "PSXSkinnedObjectExporter"));
-    for (const char* p : {"solo", "solo/Tip", "multi", "multi/Base/Arm", "multi/Lamp", "rig/Prop"})
+    for (const char* p : {"solo", "solo/Tip", "multi", "multi/Base/Arm", "multi/Lamp", "rig/Prop", "rig/Body"})
         CHECK(!hasItem(r, ReportItem::LeftOut, p, noExporter));
     // The instances' root overrides land on the root.
     CHECK(at(s.objects, "rig") && at(s.objects, "rig")->transform.position.x == 6);

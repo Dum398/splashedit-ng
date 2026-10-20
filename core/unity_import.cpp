@@ -2178,8 +2178,10 @@ void Importer::convertObject(int idx, const std::string& parentPath, std::vector
     o.active = u.active;
     o.transform = u.t;
     const UComp *exp = nullptr, *mf = nullptr, *mr = nullptr;
+    bool skinExp = false;  // its mesh is reported as not imported yet
     std::vector<std::string> leftOut;
     for (const UComp& c : u.comps) {
+        skinExp |= c.classId == 114 && c.cls == "PSXSkinnedObjectExporter";
         if (c.classId == 33) mf = &c;
         else if (c.classId == 23) mr = &c;
         else if (c.classId == 114 && c.cls == "PSXObjectExporter") exp = &c;
@@ -2279,7 +2281,7 @@ void Importer::convertObject(int idx, const std::string& parentPath, std::vector
         }
         const std::string lua = luaOf(field("luaFile", "LuaFile"), path, "script");
         if (!lua.empty()) o.script = ScriptComponent{lua, {}};
-    } else if ((mf && !refOf((*mf->body)["m_Mesh"]).null()) || !u.modelMesh.empty()) {
+    } else if (!skinExp && ((mf && !refOf((*mf->body)["m_Mesh"]).null()) || !u.modelMesh.empty())) {
         item(ReportItem::LeftOut, path, "has a mesh but no PSXObjectExporter, so Unity did not export it either; it is kept without its mesh");
     }
     if (!leftOut.empty()) {

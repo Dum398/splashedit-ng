@@ -145,6 +145,12 @@ struct State {
         // (Document::loadId), kept after it stops.
         std::optional<editor::RenderPeak> peak;
         unsigned peakScene = 0;
+        // Its triangles lost or bent (editor::RenderLost): the last report,
+        // when it came (ImGui time) and how long after the one before, for
+        // the Game view while it runs; and the worst per cause, kept like peak.
+        std::optional<editor::RenderLost> lost;
+        double lostAt = 0, lostGap = 0;
+        editor::RenderLost lostMax;
         uint64_t linesSeen = 0;
         // The output popups: filter, clear point and wrapping, for Play and Run on hardware.
         editor::LogView playLog, hwLog;

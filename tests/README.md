@@ -570,6 +570,15 @@ open afterwards. Needs a display (CI runs it under `xvfb-run`).
 
     sh gamekeys.sh <splashedit> <emulator_tests>
 
+`renderlostcheck.py` starts Play against a stand-in pcsx-redux (a shell script that prints two
+`psxsplash: render lost` reports in turn, then stops, and runs `emulator_tests` from beside the
+editor for an empty display block). While they come the Game view must show the
+last one in plain words, and the scene's Render buffers section the worst count per cause over
+both; once they stop the Game view line must go and the Render buffers caption stay. Needs a
+display (CI runs it under `xvfb-run`).
+
+    python3 renderlostcheck.py <splashedit> [screenshot prefix]
+
 `scripteditorcheck.py` opens the courtyard example's `game_logic.lua` with Edit script, types a
 line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the
 tab before building, so the file on disk starts with the typed line; typing alone must not. Then

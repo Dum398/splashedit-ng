@@ -283,6 +283,8 @@ static void togglePlay(State& st, const editor::Document& doc) {
     if (p.reload.valid()) p.reload.wait();  // a live edit still writing the folder
     p.message.clear();
     p.peak.reset();
+    p.lost.reset();
+    p.lostMax = editor::RenderLost();
     p.peakScene = doc.loadId();
     if (!editor::missingTools(editor::withDefaults(p.tools, p.bundleDir)).empty()) {
         p.openSetup = true;
@@ -394,7 +396,15 @@ static void updatePlay(State& st, const editor::Document& doc) {
     const uint64_t first = p.emu.lineCount() - out.size();
     for (uint64_t i = std::max(p.linesSeen, first); i < p.emu.lineCount(); ++i) {
         editor::RenderPeak rp;
+        editor::RenderLost rl;
         if (editor::parseRenderPeak(out[size_t(i - first)], &rp)) p.peak = rp;
+        else if (editor::parseRenderLost(out[size_t(i - first)], &rl)) {
+            const double now = ImGui::GetTime();
+            p.lostGap = p.lost ? now - p.lostAt : 0;
+            p.lostAt = now;
+            p.lost = rl;
+            p.lostMax = editor::maxRenderLost(p.lostMax, rl);
+        }
     }
     p.linesSeen = p.emu.lineCount();
     if (p.emu.running()) {
@@ -4312,6 +4322,27 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     ImRect chip(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24), ImVec2(r.Min.x + space::md + is.x + 20, r.Max.y - space::md));
     dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+    // Triangles the engine lost or bent lately, above that. It reports only
+    // when there are some, every 60 frames, so a report much older than the
+    // gap between the last two means there are none now.
+    const bool lostNow = p.emu.running() && p.lost && p.lost->any() &&
+                         ImGui::GetTime() - p.lostAt <= std::max(3.0, 1.5 * p.lostGap);
+    if (lostNow) {
+        const std::string lost = "Last 60 frames: " + editor::describeRenderLost(*p.lost);
+        const float wrap = std::max(120.0f, r.GetWidth() - space::md * 2 - 20);
+        const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, wrap, lost.c_str());
+        ImRect lr(ImVec2(r.Min.x + space::md, chip.Min.y - space::xs - ts.y - 10),
+                  ImVec2(r.Min.x + space::md + ts.x + 20, chip.Min.y - space::xs));
+        dl->AddRectFilled(lr.Min, lr.Max, rgb(0x0e1014, 210), ts.y > 24 ? radius::window : radius::pill);
+        dl->AddText(f.regular, type::caption, ImVec2(lr.Min.x + 10, lr.Min.y + 5), color::warn, lost.c_str(), nullptr, wrap);
+        interact("game.lost", lr);
+        nameRect("game.lost", lr);
+        tooltip("Triangles this scene's geometry makes the console drop or draw wrong, counted by the development engine "
+                "Play runs. Past the draw distance: raise the ordering table (scene, Render buffers) or add fog. Too close "
+                "to the camera, squashed at the screen edge, drawn rough: large triangles near the camera; split big faces "
+                "into smaller ones.");
+    }
+    scriptLine("game.lost", "game: lost " + (lostNow ? editor::describeRenderLost(*p.lost) : std::string("none")));
     // Capture frame, at the top right: one GPU frame into the Frame tab.
     if (!p.captureScript.empty()) {
         const char* capLabel = p.capturing ? "Capturing..." : "Capture frame";
@@ -7176,6 +7207,15 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         caption("In Play: busiest frame used " + std::to_string(peak->bump) + " bytes" +
                     (buUsed ? " (" + std::to_string(int(100.0 * peak->bump / buUsed + 0.5)) + "%)" : std::string()),
                 buUsed && peak->bump > buUsed ? color::warn : color::accentHover);
+    if (st.play.peakScene == doc.loadId() && st.play.lostMax.any()) {
+        // Worst 60 frames per cause, from psxsplash's render lost reports.
+        const editor::RenderLost& m = st.play.lostMax;
+        const std::string s = "In Play, worst 60 frames: " + editor::describeRenderLost(m) + ".";
+        const float at = y;
+        caption(s, m.ot || m.skinNear ? color::warn : color::accentHover);
+        nameRect("render.lost", ImRect(ImVec2(x0, at), ImVec2(x1, y)));
+        scriptLine("render.lost", "render: " + s);
+    }
     if (stats) caption(kb(stats->rendererBytes()) + " KB of RAM for both, double-buffered", color::textFaint);
     else caption("Sizes appear once the scene exports.", color::textFaint);
     {

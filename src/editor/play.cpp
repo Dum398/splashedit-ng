@@ -1,5 +1,6 @@
 #include "editor/play.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -373,6 +374,48 @@ bool parseRenderPeak(const std::string& line, RenderPeak* out) {
         return false;
     *out = p;
     return true;
+}
+
+bool parseRenderLost(const std::string& line, RenderLost* out) {
+    const char* tag = "psxsplash: render lost ot ";
+    size_t at = line.find(tag);
+    if (at == std::string::npos) return false;
+    RenderLost l;
+    if (std::sscanf(line.c_str() + at + std::strlen(tag), "%u skinnear %u leaf %u clamp %u of %u tris", &l.ot, &l.skinNear,
+                    &l.leaf, &l.clamp, &l.tris) != 5)
+        return false;
+    *out = l;
+    return true;
+}
+
+std::string describeRenderLost(const RenderLost& lost) {
+    // "triangles" once, on the first cause that counts triangles: "5 triangles
+    // past the draw distance, 9 squashed at the screen edge".
+    std::string s;
+    bool named = false;
+    auto add = [&](uint32_t n, const char* kind, const char* what, bool triangles) {
+        if (!n) return;
+        if (!s.empty()) s += ", ";
+        s += std::to_string(n) + kind;
+        if (!triangles || !named) s += n == 1 ? (triangles ? " triangle" : " piece") : (triangles ? " triangles" : " pieces");
+        named = named || triangles;
+        s += what;
+    };
+    add(lost.ot, "", " past the draw distance", true);
+    add(lost.skinNear, " skinned", " too close to the camera", true);
+    add(lost.clamp, "", " squashed at the screen edge", true);
+    add(lost.leaf, " near-camera", " drawn rough", false);
+    return s;
+}
+
+RenderLost maxRenderLost(const RenderLost& a, const RenderLost& b) {
+    RenderLost m;
+    m.ot = std::max(a.ot, b.ot);
+    m.skinNear = std::max(a.skinNear, b.skinNear);
+    m.leaf = std::max(a.leaf, b.leaf);
+    m.clamp = std::max(a.clamp, b.clamp);
+    m.tris = std::max(a.tris, b.tris);
+    return m;
 }
 
 bool writeReloadFlag(const fs::path& dir, unsigned generation) {

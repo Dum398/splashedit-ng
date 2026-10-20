@@ -145,7 +145,9 @@ and `export --stats` prints the cell size it used.
 times: twice standing still (the shots must match) and once holding Up from frame 200 (`BOOT_HOLD`
 in `boot.lua`). Walking must change the shot and attach more streamed regions than standing still.
 The engine has to be a PCdrv build made with `make STREAMLOG=1`, which prints `WORLDSTREAM`
-attach/detach lines.
+attach/detach lines. It also prints, for the still and the walking boot, the engine's
+`psxsplash: render lost` reports summed per cause (triangles past the ordering table, skinned
+ones at the near plane, near-plane leaves, clamped ones); these are not checked yet.
 
     boot/walk.sh <splashpack-cli> <pcsx-redux> <openbios.bin> <psxsplash.ps-exe> [frame]
 
@@ -569,6 +571,15 @@ the Game view. They must reach the game only: the check fails if an editor menu 
 open afterwards. Needs a display (CI runs it under `xvfb-run`).
 
     sh gamekeys.sh <splashedit> <emulator_tests>
+
+`renderlostcheck.py` starts Play against a stand-in pcsx-redux (a shell script that prints two
+`psxsplash: render lost` reports in turn, then stops, and runs `emulator_tests` from beside the
+editor for an empty display block). While they come the Game view must show the
+last one in plain words, and the scene's Render buffers section the worst count per cause over
+both; once they stop the Game view line must go and the Render buffers caption stay. Needs a
+display (CI runs it under `xvfb-run`).
+
+    python3 renderlostcheck.py <splashedit> [screenshot prefix]
 
 `scripteditorcheck.py` opens the courtyard example's `game_logic.lua` with Edit script, types a
 line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the

@@ -140,6 +140,28 @@ struct RenderPeak {
 // Parses one output line; false if it is not a peak report.
 bool parseRenderPeak(const std::string& line, RenderPeak* out);
 
+// What a development psxsplash reports losing or bending over its last 60
+// frames, from its line "psxsplash: render lost ot O skinnear S leaf L clamp C
+// of T tris", printed only when one of them is not 0: triangles not drawn
+// because they are past the ordering table (the draw distance), skinned
+// triangles not drawn because a corner is too close to the camera, pieces of
+// near-camera triangles drawn from rough corners after splitting gave up, and
+// triangles whose corners were pulled in to the rasterizer's screen-edge
+// limit; out of `tris` triangles considered.
+struct RenderLost {
+    uint32_t ot = 0, skinNear = 0, leaf = 0, clamp = 0, tris = 0;
+    bool any() const { return ot || skinNear || leaf || clamp; }
+};
+// Parses one output line; false if it is not a render lost report.
+bool parseRenderLost(const std::string& line, RenderLost* out);
+// The causes that are not 0, in plain words, most harmful first, e.g.
+// "40 triangles past the draw distance, 3 skinned too close to the camera,
+// 12 near-camera pieces drawn rough"; empty when none is.
+std::string describeRenderLost(const RenderLost& lost);
+// Each field the larger of a's and b's: the worst report per cause, as a
+// Play session's maxima.
+RenderLost maxRenderLost(const RenderLost& a, const RenderLost& b);
+
 // Program and arguments that boot psxsplash on the files in `dir`. With a
 // `captureScript` (the editor's assets/framecapture.lua) redux also runs it
 // (-dofile), which answers capture requests (requestCapture).

@@ -357,6 +357,37 @@ void testRenderPeak() {
     CHECK(!editor::parseRenderPeak("Loading scene 0", &p));
 }
 
+void testRenderLost() {
+    editor::RenderLost l;
+    CHECK(editor::parseRenderLost("psxsplash: render lost ot 5340 skinnear 2 leaf 5940 clamp 7080 of 34560 tris", &l));
+    CHECK(l.ot == 5340 && l.skinNear == 2 && l.leaf == 5940 && l.clamp == 7080 && l.tris == 34560 && l.any());
+    CHECK(editor::parseRenderLost("[tty] psxsplash: render lost ot 0 skinnear 0 leaf 0 clamp 1 of 9 tris", &l) && l.clamp == 1);
+    CHECK(!editor::parseRenderLost("psxsplash: render lost ot 1 skinnear", &l));
+    CHECK(!editor::parseRenderLost("psxsplash: render peak depth 258 of 988, bump 11808 of 51656", &l));
+    // A peak line is not a lost one, nor the other way round.
+    editor::RenderPeak p;
+    CHECK(!editor::parseRenderPeak("psxsplash: render lost ot 1 skinnear 0 leaf 0 clamp 0 of 9 tris", &p));
+    CHECK(!editor::RenderLost().any());
+
+    editor::RenderLost a;
+    a.ot = 40;
+    a.skinNear = 3;
+    CHECK(editor::describeRenderLost(a) == "40 triangles past the draw distance, 3 skinned too close to the camera");
+    editor::RenderLost b;
+    b.clamp = 1;
+    b.leaf = 12;
+    CHECK(editor::describeRenderLost(b) == "1 triangle squashed at the screen edge, 12 near-camera pieces drawn rough");
+    editor::RenderLost c;
+    c.skinNear = 1;
+    c.leaf = 1;
+    CHECK(editor::describeRenderLost(c) == "1 skinned triangle too close to the camera, 1 near-camera piece drawn rough");
+    CHECK(editor::describeRenderLost(editor::RenderLost()).empty());
+    b.ot = 7;
+    b.tris = 100;
+    const editor::RenderLost m = editor::maxRenderLost(a, b);
+    CHECK(m.ot == 40 && m.skinNear == 3 && m.clamp == 1 && m.leaf == 12 && m.tris == 100);
+}
+
 void testDirtyAndSave() {
     std::error_code ec;
     std::filesystem::path dir = g_outDir;
@@ -12882,6 +12913,7 @@ int main(int argc, char** argv) {
     testSettings();
     testSceneRendering();
     testRenderPeak();
+    testRenderLost();
     testMemCard();
     testDirtyAndSave();
     testComponentFieldsSaveUndo();

@@ -1,9 +1,11 @@
 # Blob shadows in the editor. The third-person template with Player Body
 # selected: Shadow starts Off (no shadow lines, no blob). Picking Blob from the
-# mesh inspector's Shadow menu prints `shadow: blob size 0.5 darkness 60
-# Player Body`, shows the Size and Darkness rows, and draws the blob in the
-# scene view on the nav floor under the body (`shadow preview: Player Body
-# floor R<k> height 0.00 radius 0.50 darkness 153`, its screen box
+# mesh inspector's Shadow menu sizes the blob from the body's footprint (its
+# 0.6 m width: `shadow: blob size 0.6 darkness 60 Player Body`), shows the Size
+# and Darkness rows, and draws the blob in the scene view on the nav floor
+# under the body (`shadow preview: Player Body floor R<k> height 0.00 radius
+# 0.60 darkness 153`). Typing 0.75 into Size takes (`size 0.75`, radius 0.75,
+# "shadowSize": 0.75 saved). The blob's screen box is
 # vp.shadow.Player Body darker than the same pixels before). The scene saved
 # with Ctrl+S carries "shadow": "blob", and splashpack-cli exports it as a v28
 # pack with one shadow record for the body.
@@ -77,6 +79,7 @@ W = lambda n: ['--wait', str(n)]
 cmd = [editor, '--size', '1600x960', '--project', proj, '--scene', scene, '--select', 'Player Body'] + W(30) + \
       ['--wait-export', '--move', '800,400'] + W(3) + ['--key', 'f'] + W(20) + ['--scroll-to', '@obj.shadow'] + W(5) + \
       ['--shot', before, '--click', '@obj.shadow'] + W(5) + ['--click', '@obj.shadow/Blob'] + W(10) + \
+      ['--dblclick', '@obj.shadowsize'] + W(3) + ['--key', 'ctrl+a', '--text', '0.75', '--key', 'enter'] + W(5) + \
       ['--key', 'ctrl+s'] + W(10) + ['--wait-export'] + W(20) + ['--move', '800,400'] + W(5) + ['--screenshot', shot]
 r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=600)
 lines = (r.stdout + r.stderr).splitlines()
@@ -88,14 +91,16 @@ out = [l for l in lines if not l.startswith('control ')]
 
 check('the editor ran to its screenshot', r.returncode == 0 and os.path.exists(shot), (r.returncode, out[-10:]))
 inspector = [l for l in out if l.startswith('shadow: ')]
-check('the inspector reports the blob', inspector == ['shadow: blob size 0.5 darkness 60 Player Body'], inspector)
+check('Blob takes its size from the footprint, then the typed size',
+      inspector == ['shadow: blob size 0.6 darkness 60 Player Body', 'shadow: blob size 0.75 darkness 60 Player Body'],
+      inspector)
 check('Size and Darkness rows show for a blob', 'obj.shadowsize' in rects and 'obj.shadowdark' in rects,
       [k for k in rects if k.startswith('obj.shadow')])
 preview = [l for l in out if l.startswith('shadow preview: ')]
-m = re.match(r'shadow preview: Player Body floor R(\d+) height (\S+) radius (\S+) darkness (\d+)$', preview[-1]) if preview else None
-check('the scene view previews it on the nav floor, whole',
-      bool(m) and float(m.group(2)) == 0 and float(m.group(3)) == 0.5 and m.group(4) == '153', preview)
-check('there was no preview before Blob was picked', len(preview) == 1, preview)
+pm = [re.match(r'shadow preview: Player Body floor R(\d+) height (\S+) radius (\S+) darkness (\d+)$', l) for l in preview]
+check('the scene view previews it on the nav floor, whole, at each size',
+      len(pm) == 2 and all(pm) and [float(x.group(3)) for x in pm] == [0.6, 0.75] and
+      all(float(x.group(2)) == 0 and x.group(4) == '153' for x in pm), preview)
 box = rects.get('vp.shadow.Player Body')
 view = rects.get('vp.view')
 check('the blob is drawn inside the scene view',
@@ -109,8 +114,8 @@ if box and os.path.exists(before) and os.path.exists(shot):
 saved = json.load(open(scene))
 body = next(o for o in saved['objects'] if o['name'] == 'Player Body')
 mesh = next(c for c in body['components'] if c['type'] == 'mesh')
-check('the saved scene has shadow blob and no default size or darkness',
-      mesh.get('shadow') == 'blob' and 'shadowSize' not in mesh and 'shadowDarkness' not in mesh, mesh)
+check('the saved scene has shadow blob, the typed size and no default darkness',
+      mesh.get('shadow') == 'blob' and abs(mesh.get('shadowSize', 0) - 0.75) < 1e-6 and 'shadowDarkness' not in mesh, mesh)
 pack = os.path.join(root, 'out.splashpack')
 e = subprocess.run([cli, 'export', scene, '-o', pack], capture_output=True, text=True)
 d = open(pack, 'rb').read() if e.returncode == 0 else b''
@@ -118,7 +123,7 @@ if len(d) >= 160:
     version, table = struct.unpack_from('<H', d, 2)[0], struct.unpack_from('<I', d, 156)[0]
     count = struct.unpack_from('<H', d, table)[0] if table else 0
     rec = struct.unpack_from('<HBBHH', d, table + 4) if count else None
-    check('the export is v28 with one blob record', version == 28 and count == 1 and rec and rec[1] == 1 and rec[2] == 153,
+    check('the export is v28 with one blob record', version == 28 and count == 1 and rec and rec[1] == 1 and rec[2] == 153 and rec[3] == round(0.75 / 100 * 4096),
           (version, table, count, rec))
 else:
     check('the export is v28 with one blob record', False, e.stdout + e.stderr)

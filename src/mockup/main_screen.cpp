@@ -8559,10 +8559,30 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     "32 per scene.");
             nameRect("obj.shadow", shRow);
             const int shPick = dropdownMenu("obj.shadow", shRow, nullptr, blob ? "Blob" : "Off", {"Off", "Blob"}, blob ? 1 : 0);
-            if (shPick >= 0 && (shPick == 1) != blob)
-                doc.edit(path, [shPick](splash::Object& ob) {
+            if (shPick >= 0 && (shPick == 1) != blob) {
+                // Switched to Blob with the size never set: fit it to the
+                // object's footprint (splash::shadow::sizeForFootprint).
+                float size = m.shadowSize;
+                if (shPick == 1 && size == splash::MeshComponent{}.shadowSize && !m.mesh.empty())
+                    if (const std::optional<splash::Bounds>& lb = localBounds(doc, m.mesh))
+                        for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+                            if (fo.object != o) continue;
+                            const splash::Vec3 lo = lb->min(), hi = lb->max();
+                            splash::Vec3 wmin, wmax;
+                            for (int c = 0; c < 8; ++c) {
+                                const splash::Vec3 w =
+                                    fo.localToWorld.point({c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y, c & 4 ? hi.z : lo.z});
+                                wmin = c == 0 ? w : splash::vmin(wmin, w);
+                                wmax = c == 0 ? w : splash::vmax(wmax, w);
+                            }
+                            size = splash::shadow::sizeForFootprint(wmax.x - wmin.x, wmax.z - wmin.z);
+                            break;
+                        }
+                doc.edit(path, [shPick, size](splash::Object& ob) {
                     ob.mesh->shadow = shPick == 1 ? splash::ShadowMode::Blob : splash::ShadowMode::Off;
+                    if (shPick == 1) ob.mesh->shadowSize = size;
                 });
+            }
             if (blob) {
                 float sv = m.shadowSize;
                 const ImRect sizeRow = row("lshsize", "Size",

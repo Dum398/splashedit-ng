@@ -48,6 +48,17 @@ inline uint8_t darknessByte(float percent) {
     return uint8_t(std::lround(std::clamp(percent, 0.f, 100.f) * 2.55f));
 }
 
+// The Size a blob gets when Shadow is switched to Blob, from the object's
+// world bounds' X and Z extents (full widths, metres): the larger one, so the
+// radius is twice the object's half-width. The fan fades linearly to the rim,
+// so at the object's edge it is then half its centre darkness and shows around
+// the feet; at 1.3 half-widths it would be a quarter and hide behind the body.
+// Clamped to 0.25..4 m and rounded to 0.05 m.
+inline float sizeForFootprint(float extentX, float extentZ) {
+    const float r = std::clamp(std::max(extentX, extentZ), 0.25f, 4.f);
+    return std::round(r / 0.05f) * 0.05f;
+}
+
 struct Blob {
     bool visible = false;
     Vec3 centre;                     // on the floor

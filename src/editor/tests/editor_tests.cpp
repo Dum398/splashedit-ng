@@ -13057,6 +13057,12 @@ void testShadows() {
         splash::shadow::Blob nearOther = splash::shadow::blobFor({0.25f, 0.0625f, 2}, 0.0625f, 1.f, 0.5f, 100, sq, in);
         CHECK(nearOther.region == 0 && nearOther.darkness == 1.f);
     }
+    // Size from the footprint: the larger full extent, clamped, to 0.05 m.
+    CHECK(std::fabs(splash::shadow::sizeForFootprint(0.6f, 0.44f) - 0.6f) < 1e-5f);
+    CHECK(std::fabs(splash::shadow::sizeForFootprint(1.0f, 1.0f) - 1.0f) < 1e-5f);
+    CHECK(std::fabs(splash::shadow::sizeForFootprint(0.73f, 0.2f) - 0.75f) < 1e-5f);
+    CHECK(std::fabs(splash::shadow::sizeForFootprint(0.01f, 0.02f) - 0.25f) < 1e-5f);
+    CHECK(std::fabs(splash::shadow::sizeForFootprint(20.f, 3.f) - 4.f) < 1e-5f);
     // No nav: flat under the bounds, whole.
     splash::shadow::Blob flat = splash::shadow::blobFor({0, 0, 0}, 3.f, 4.f, 0.5f, 100, {}, {});
     CHECK(flat.region < 0 && flat.centre.y == 3.f && flat.radius == 0.5f && flat.darkness == 1.f && flat.visible);

@@ -112,7 +112,7 @@ bool FramePanel::load(const std::filesystem::path& file, std::string* error) {
     m_listScroll = 0;
     // The frame image: the drawing area of the frame's last primitive (a game
     // draws into the buffer it shows next), else the display area.
-    const gpudump::DrawState* st = nullptr;
+    const gpudump::GpuState* st = nullptr;
     if (!m_list.drawn.empty()) st = &m_list.commands[size_t(m_list.drawn.back())].state;
     else if (!m_list.commands.empty()) st = &m_list.commands.back().state;
     if (st && !m_list.drawn.empty() && st->areaX2 >= st->areaX1 && st->areaY2 >= st->areaY1) {
@@ -476,7 +476,7 @@ void FramePanel::details(ImDrawList* dl, ImRect r) {
         std::snprintf(b, sizeof b, "#%d, %zu words (file words %u..%u)", m_list.drawn[size_t(m_selected)], c->words.size(), c->firstWord,
                       c->lastWord);
         row("Command", b, color::textDim);
-        const gpudump::DrawState& st = c->state;
+        const gpudump::GpuState& st = c->state;
         row("Blend", c->semiTransparent() ? std::string(blendName(st.blendMode())) + " (mode " + std::to_string(st.blendMode()) + ")"
                                           : std::string("opaque"));
         if (c->textured()) {

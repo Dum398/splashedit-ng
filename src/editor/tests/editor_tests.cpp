@@ -12752,7 +12752,7 @@ void testGpuDecode() {
     // A copy size of 0 is the maximum.
     const auto& copy = l.commands[size_t(d[11])];
     CHECK(copy.kind == Kind::CopyVram && copy.srcX == 1 && copy.dstY == 4 && copy.width == 1024 && copy.height == 512);
-    const gpudump::DrawState& last = l.commands.back().state;
+    const gpudump::GpuState& last = l.commands.back().state;
     CHECK(last.offsetX == 12 && last.offsetY == -10 && last.setMask && last.checkMask && last.texWindow == 0x12345);
 }
 

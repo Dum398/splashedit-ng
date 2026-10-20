@@ -51,7 +51,7 @@ bool load(const std::filesystem::path& file, Dump& out, std::string* error);
 bool save(const std::filesystem::path& file, const Dump& dump, std::string* error);
 
 // The draw state GP0(E1h..E6h) sets, and the display state from GP1(05h..08h).
-struct DrawState {
+struct GpuState {
     uint32_t texpage = 0;  // E1 bits 0-13: page x/y, blend mode, depth, dither, draw to display, flips
     uint32_t texWindow = 0;  // E2 bits 0-19
     int areaX1 = 0, areaY1 = 0, areaX2 = 0, areaY2 = 0;  // E3 / E4, inclusive
@@ -105,7 +105,7 @@ struct Command {
     uint32_t firstWord = 0, lastWord = 0;  // where its first and last words sit in Dump::words
     bool live = false;             // after TraceBegin: part of the captured traffic
     int frame = 0;                 // VSync packets before it (after TraceBegin)
-    DrawState state;               // in effect when it runs (a textured polygon's page applied)
+    GpuState state;               // in effect when it runs (a textured polygon's page applied)
     // Drawing commands, decoded.
     std::vector<Vertex> vertices;
     uint16_t clut = 0;              // textured: CLUT attribute

@@ -74,13 +74,13 @@ bool save(const std::filesystem::path& file, const Dump& dump, std::string* erro
     return true;
 }
 
-int DrawState::displayWidth() const {
+int GpuState::displayWidth() const {
     if (displayMode & 0x40) return 368;
     static const int widths[4] = {256, 320, 512, 640};
     return widths[displayMode & 3];
 }
 
-int DrawState::displayHeight() const {
+int GpuState::displayHeight() const {
     int h = int((vRange >> 10) & 0x3ff) - int(vRange & 0x3ff);
     if (h <= 0) h = 240;
     if ((displayMode & 0x24) == 0x24) h *= 2;  // interlaced 480-line mode
@@ -160,7 +160,7 @@ public:
         const uint32_t cmd = (word >> 24) & 0x3f;
         if (cmd == 0x00) {  // reset: state cleared, command buffer dropped
             m_words.clear();
-            m_state = DrawState();
+            m_state = GpuState();
             m_state.hRange = 0x200 | 0xc00u << 12;  // GP1(00h) defaults (psx-spx GP1 list)
             m_state.vRange = 0x010 | 0x100u << 10;
         } else if (cmd == 0x01) {
@@ -395,7 +395,7 @@ private:
     }
 
     CommandList& m_out;
-    DrawState m_state;
+    GpuState m_state;
     std::vector<uint32_t> m_words;
     uint32_t m_first = 0, m_last = 0;
     bool m_live = false;

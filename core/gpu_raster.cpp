@@ -7,7 +7,7 @@
 namespace gpuraster {
 
 using gpudump::Command;
-using gpudump::DrawState;
+using gpudump::GpuState;
 using gpudump::Kind;
 
 namespace {
@@ -29,7 +29,7 @@ int clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 struct Painter {
     Gpu& gpu;
     const Command& cmd;
-    const DrawState& st;
+    const GpuState& st;
     int32_t id;
     bool textured, raw, semi, dither;
     int clutX, clutY, pageX, pageY, depth;
@@ -281,7 +281,7 @@ void fill(Gpu& gpu, const Command& c, int32_t id) {
 }
 
 // Copies honour the mask settings, per halfword.
-void store(Gpu& gpu, const DrawState& st, int x, int y, uint16_t value, int32_t id) {
+void store(Gpu& gpu, const GpuState& st, int x, int y, uint16_t value, int32_t id) {
     const size_t at = size_t(y & 511) * kVramWidth + size_t(x & 1023);
     if (st.checkMask && (gpu.vram[at] & 0x8000)) return;
     gpu.vram[at] = value | (st.setMask ? 0x8000 : 0);

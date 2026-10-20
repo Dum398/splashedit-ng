@@ -22,6 +22,7 @@
 #include "disc.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
+#include "shadow.hh"
 #include "import.hh"
 #include "editor/catalog.hh"
 #include "editor/document.hh"
@@ -4600,6 +4601,67 @@ static void agentMarkers(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImV
     }
 }
 
+// Every Blob shadow as the console draws it (core/shadow.hh): a fan of eight
+// triangles on the last export's nav floor (else under the object's bounds),
+// black at the centre's darkness and clear at the rim, shrinking and fading
+// with height. Drawn over the scene rather than depth tested, and without the
+// console's fog fade. Scripted tests get one "shadow preview:" line per blob
+// and its screen box as vp.shadow.<name>.
+static void shadowOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const editor::Document& doc,
+                          const std::vector<splash::FlatObject>& shown, const std::optional<splash::ExportResult>& res) {
+    static const std::vector<std::vector<splash::Vec3>> noOutlines;
+    static const std::vector<splash::ExportStats::NavRegionInfo> noInfo;
+    const bool nav = res && res->ok();
+    const std::vector<std::vector<splash::Vec3>>& outlines = nav ? res->stats.navOutlines : noOutlines;
+    const std::vector<splash::ExportStats::NavRegionInfo>& info = nav ? res->stats.navInfo : noInfo;
+    std::string lines;
+    for (const splash::FlatObject& fo : shown) {
+        if (!fo.activeInHierarchy || !fo.object->startActive || !fo.object->mesh) continue;
+        const splash::MeshComponent& mc = *fo.object->mesh;
+        if (mc.shadow != splash::ShadowMode::Blob) continue;
+        // The world bounds' bottom and top, as the exporter's world AABB.
+        const splash::Vec3 pos = fo.localToWorld.position();
+        float bottom = pos.y, top = pos.y;
+        if (!mc.mesh.empty())
+            if (const std::optional<splash::Bounds>& lb = localBounds(doc, mc.mesh)) {
+                const splash::Vec3 lo = lb->min(), hi = lb->max();
+                for (int c = 0; c < 8; ++c) {
+                    const float y = fo.localToWorld.point({c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y, c & 4 ? hi.z : lo.z}).y;
+                    bottom = c == 0 ? y : std::min(bottom, y);
+                    top = c == 0 ? y : std::max(top, y);
+                }
+            }
+        const splash::shadow::Blob b =
+            splash::shadow::blobFor(pos, bottom, top, mc.shadowSize, mc.shadowDarkness, outlines, info);
+        lines += "shadow preview: " + fo.object->name + " floor " +
+                 (b.region >= 0 ? "R" + std::to_string(b.region) : std::string("bounds")) + " height " + fmtFixed(b.height) +
+                 " radius " + fmtFixed(b.radius) + " darkness " + std::to_string(int(std::lround(b.darkness * 255))) + "\n";
+        if (!b.visible) continue;
+        ImVec2 c, rim[splash::shadow::kRimVerts];
+        bool ok = view.project(toGl(b.centre), mn, sz, &c);
+        for (int k = 0; k < splash::shadow::kRimVerts && ok; k++) ok = view.project(toGl(b.rim[size_t(k)]), mn, sz, &rim[k]);
+        if (!ok) continue;
+        const ImU32 cc = IM_COL32(0, 0, 0, int(std::lround(b.darkness * 255))), rc = IM_COL32(0, 0, 0, 0);
+        const ImVec2 uv = ImGui::GetFontTexUvWhitePixel();
+        ImVec2 lo = c, hi = c;
+        dl->PrimReserve(3 * splash::shadow::kRimVerts, 3 * splash::shadow::kRimVerts);
+        for (int k = 0; k < splash::shadow::kRimVerts; k++) {
+            dl->PrimVtx(c, uv, cc);
+            dl->PrimVtx(rim[k], uv, rc);
+            dl->PrimVtx(rim[(k + 1) % splash::shadow::kRimVerts], uv, rc);
+            lo = ImMin(lo, rim[k]);
+            hi = ImMax(hi, rim[k]);
+        }
+        if (namedRectsOn()) nameRect("vp.shadow." + fo.object->name, ImRect(lo, hi));
+    }
+    static std::string reported;
+    if (namedRectsOn() && ImGui::GetFrameCount() > 1 && lines != reported) {
+        reported = lines;
+        std::printf("%s", lines.c_str());
+        std::fflush(stdout);
+    }
+}
+
 static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const std::vector<splash::FlatObject>& flats,
                           const std::vector<splash::FlatObject>& shown, const splash::Object* sel,
                           const std::optional<splash::ExportResult>& res, State& st) {
@@ -4904,6 +4966,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
 
     if (st.gizmos) {
         dl->ChannelsSetCurrent(kScene);
+        shadowOverlay(dl, view, mn, sz, doc, shown, st.live.result());
         sceneOverlays(dl, view, mn, sz, flats, shown, sel, st.live.result(), st);
     }
     // Scripted tests: the nav bake's counts and the selected region.
@@ -8466,6 +8529,44 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                         : "Not used: only Baked vertex lighting uses it. Bakes the lighting as if the surface were smoothly curved.",
                   m.smoothNormals, [](splash::Object& ob) { ob.mesh->smoothNormals = !ob.mesh->smoothNormals; });
         if (!baked) dimFrom(smoothTop);
+        // A blob shadow on the floor under the object (core/shadow.hh), drawn
+        // by the console and previewed in the scene view.
+        {
+            const bool blob = m.shadow == splash::ShadowMode::Blob;
+            const ImRect shRow =
+                row("lshadow", "Shadow",
+                    "Blob draws a soft dark disc on the floor under this object on the console: on the nav floor, or under the "
+                    "object's bounds when it has none. It shrinks and fades as the object rises and is gone 2.5 m up. At most "
+                    "32 per scene.");
+            nameRect("obj.shadow", shRow);
+            const int shPick = dropdownMenu("obj.shadow", shRow, nullptr, blob ? "Blob" : "Off", {"Off", "Blob"}, blob ? 1 : 0);
+            if (shPick >= 0 && (shPick == 1) != blob)
+                doc.edit(path, [shPick](splash::Object& ob) {
+                    ob.mesh->shadow = shPick == 1 ? splash::ShadowMode::Blob : splash::ShadowMode::Off;
+                });
+            if (blob) {
+                float sv = m.shadowSize;
+                const ImRect sizeRow = row("lshsize", "Size",
+                                           "Radius of the blob on the floor while the object stands on it. The console "
+                                           "draws it as an eight-sided fan, so very large blobs show their corners.");
+                nameRect("obj.shadowsize", sizeRow);
+                commit(numberField("shsize", sizeRow, fmtShort(m.shadowSize).c_str(), "m", 0, nullptr, &sv), "shsize",
+                       [&](splash::Object& ob) {
+                           ob.mesh->shadowSize = splash::clampv(sv, splash::shadow::kMinSize, splash::shadow::kMaxSize);
+                       });
+                float dv = m.shadowDarkness;
+                const ImRect darkRow = row("lshdark", "Darkness",
+                                           "How much the blob darkens the floor at its centre: 0 leaves it as it is, 100 "
+                                           "turns it black. The console subtracts this from the floor's colour, fading "
+                                           "to nothing at the rim.");
+                nameRect("obj.shadowdark", darkRow);
+                commit(numberField("shdark", darkRow, fmtShort(m.shadowDarkness).c_str(), "%", 0, nullptr, &dv), "shdark",
+                       [&](splash::Object& ob) { ob.mesh->shadowDarkness = splash::clampv(dv, 0.f, 100.f); });
+            }
+            report("shadow", blob ? "shadow: blob size " + fmtShort(m.shadowSize) + " darkness " +
+                                        fmtShort(m.shadowDarkness) + " " + o->name
+                                  : std::string());
+        }
         sectionEnd(top);
     }
 

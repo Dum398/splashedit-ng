@@ -187,6 +187,9 @@ jobs:
       - name: Timeline preview
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/timelinepreviewcheck.py build/splashedit
+      - name: Frame debugger
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/framedebugcheck.py build/splashedit
       - name: Paste offset
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/pasteoffsetcheck.py build/splashedit

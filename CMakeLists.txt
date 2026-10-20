@@ -207,6 +207,7 @@ add_executable(splashedit
     src/editor/lua_editor_view.cpp
     src/editor/blocks_view.cpp
     src/editor/timeline_view.cpp
+    src/editor/frame_view.cpp
     src/editor/asset_browser_view.cpp
     src/editor/ui_canvas_view.cpp
     src/editor/texture_preview_view.cpp

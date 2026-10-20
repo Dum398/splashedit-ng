@@ -131,6 +131,7 @@ struct Args {
     const char* scene = nullptr;    // relative to the project; default: first *.scene in it
     const char* select = nullptr;   // object name to select at startup
     const char* timeline = nullptr; // cutscene or animation to open in the Timeline at startup
+    const char* frame = nullptr;    // GPU dump (.gpd) to open in the Frame tab at startup
     bool ui = false;                // --ui: start on the UI tab and print its layout (scripted tests)
     // --assume-maximized: draw the chrome as if maximized. Under xvfb there is
     // no window manager, so SDL_MaximizeWindow never sets the flag.
@@ -382,6 +383,7 @@ Args parse(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--scene")) a.scene = next();
         else if (!std::strcmp(argv[i], "--select")) a.select = next();
         else if (!std::strcmp(argv[i], "--timeline")) a.timeline = next();
+        else if (!std::strcmp(argv[i], "--frame")) a.frame = next();
         else if (!std::strcmp(argv[i], "--ui")) a.ui = true;
         else if (!std::strcmp(argv[i], "--export-to")) a.exportTo = next();
         else if (!std::strcmp(argv[i], "--play-settings")) a.playSettings = next();
@@ -737,6 +739,12 @@ int main(int argc, char** argv) {
     state.gizmos = args.overlays;
     state.play.bundleDir = baseDir();
     {
+        // Capture frame: redux runs this beside the game (editor::reduxCommand).
+        std::error_code ec;
+        const std::filesystem::path script = std::filesystem::path(std::u8string(assetDir.begin(), assetDir.end())) / "framecapture.lua";
+        if (std::filesystem::is_regular_file(script, ec)) state.play.captureScript = script;
+    }
+    {
         const std::string templates = resourceDir("templates", SPLASHEDIT_TEMPLATE_DIR);
         state.newProject.templatesDir = std::filesystem::path(std::u8string(templates.begin(), templates.end()));
     }
@@ -761,6 +769,13 @@ int main(int argc, char** argv) {
         for (const editor::SeqRef ref : editor::allSequences(doc))
             if (!state.timeline.open && *editor::seqName(doc, ref) == args.timeline) state.timeline.show(doc, ref);
         if (!state.timeline.open) std::fprintf(stderr, "no cutscene or animation named '%s' in the scene\n", args.timeline);
+    }
+    if (args.frame) {
+        ui::namedRectsOn() = args.screenshot != nullptr;  // its scripted lines print from the load
+        std::string err;
+        const std::string f = args.frame;
+        if (!state.frame.load(std::filesystem::path(std::u8string(f.begin(), f.end())), &err))
+            std::fprintf(stderr, "--frame %s: %s\n", args.frame, err.c_str());
     }
     if (args.ui) {
         state.scripts.showUi();

@@ -140,7 +140,20 @@ struct RenderPeak {
 // Parses one output line; false if it is not a peak report.
 bool parseRenderPeak(const std::string& line, RenderPeak* out);
 
-// Program and arguments that boot psxsplash on the files in `dir`.
-std::vector<std::string> reduxCommand(const PlayTools& tools, const std::filesystem::path& dir);
+// Program and arguments that boot psxsplash on the files in `dir`. With a
+// `captureScript` (the editor's assets/framecapture.lua) redux also runs it
+// (-dofile), which answers capture requests (requestCapture).
+std::vector<std::string> reduxCommand(const PlayTools& tools, const std::filesystem::path& dir,
+                                      const std::filesystem::path& captureScript = {});
+
+// Frame capture while Play runs: the editor writes capture.flag in the Play
+// directory; framecapture.lua, polling for it every 10 vsyncs, records one
+// frame with redux's GPU dump recorder into capture.gpd (written whole, then
+// renamed into place) and deletes the flag, or writes why it could not to
+// capture.err. requestCapture() clears any earlier answer and writes the flag.
+bool requestCapture(const std::filesystem::path& dir, std::string* error);
+enum class CaptureState { Waiting, Done, Failed };
+// Done: the capture is `dir`/capture.gpd. Failed: `message` says why.
+CaptureState pollCapture(const std::filesystem::path& dir, std::string* message);
 
 }  // namespace editor

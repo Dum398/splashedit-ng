@@ -18,6 +18,8 @@
 #include "budget.hh"
 #include "disc.hh"
 #include "font.hh"
+#include "gpu_raster.hh"
+#include "gpudump.hh"
 #include "import.hh"
 #include "splashpack.hh"
 #include "texture.hh"
@@ -97,8 +99,66 @@ static int usage() {
                  "    first); any --track replaces disc.json's list\n"
                  "usage: splashpack-cli font <font.ttf> --size <px> -o <sheet.png>\n"
                  "       splashpack-cli font <bitmap.png> --cell <w>x<h> -o <sheet.png>\n"
-                 "  builds one UI font sheet the way export does and prints its cell size and height\n");
+                 "  builds one UI font sheet the way export does and prints its cell size and height\n"
+                 "usage: splashpack-cli gpudump <capture.gpd> [--vram <out.raw>] [--owner <out.raw>] [--list] [--redux]\n"
+                 "  replays a GPU dump in the frame debugger's rasterizer and prints its packet, command and\n"
+                 "  primitive counts; --vram writes the final 1024x512 VRAM (16-bit little endian),\n"
+                 "  --owner the command index that last wrote each pixel (32-bit), --list prints one line per\n"
+                 "  drawing command, --redux renders as pcsx-redux's software GPU does (no dithering, textured\n"
+                 "  gouraud shaded a pixel pair at a time) instead of as psx-spx describes the hardware\n");
     return 2;
+}
+
+static int gpudumpCmd(int argc, char** argv) {
+    std::string in, vramOut, ownerOut;
+    bool list = false, redux = false;
+    for (int i = 2; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--vram" && i + 1 < argc) vramOut = argv[++i];
+        else if (a == "--owner" && i + 1 < argc) ownerOut = argv[++i];
+        else if (a == "--list") list = true;
+        else if (a == "--redux") redux = true;
+        else if (in.empty() && a[0] != '-') in = a;
+        else return usage();
+    }
+    if (in.empty()) return usage();
+    gpudump::Dump dump;
+    std::string err;
+    if (!gpudump::load(fs::path(in), dump, &err)) {
+        std::fprintf(stderr, "%s: %s\n", in.c_str(), err.c_str());
+        return 1;
+    }
+    const gpudump::CommandList cl = gpudump::decode(dump);
+    std::printf("packets %zu commands %zu primitives %zu frames %d%s%s\n", dump.packets.size(), cl.commands.size(),
+                cl.drawn.size(), cl.frames, dump.truncated ? " truncated" : "", cl.incomplete ? " incomplete" : "");
+    if (list)
+        for (size_t i = 0; i < cl.drawn.size(); i++) {
+            const gpudump::Command& c = cl.commands[size_t(cl.drawn[i])];
+            std::printf("#%zu cmd %d %s %08x\n", i, cl.drawn[i], gpudump::typeName(c).c_str(), c.op);
+        }
+    gpuraster::Gpu gpu;
+    if (redux) gpu.options = gpuraster::Options::redux();
+    gpuraster::replay(cl, cl.commands.size(), gpu);
+    if (!vramOut.empty()) {
+        std::ofstream out(fs::path(vramOut), std::ios::binary);
+        for (uint16_t p : gpu.vram) {
+            const char b[2] = {char(p & 0xff), char(p >> 8)};
+            out.write(b, 2);
+        }
+        if (!out) {
+            std::fprintf(stderr, "cannot write %s\n", vramOut.c_str());
+            return 1;
+        }
+    }
+    if (!ownerOut.empty()) {
+        std::ofstream out(fs::path(ownerOut), std::ios::binary);
+        for (int32_t o : gpu.owner) {
+            const uint32_t u = uint32_t(o);
+            const char b[4] = {char(u & 0xff), char(u >> 8 & 0xff), char(u >> 16 & 0xff), char(u >> 24)};
+            out.write(b, 4);
+        }
+    }
+    return 0;
 }
 
 static int texstats(int argc, char** argv) {
@@ -528,6 +588,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "build") == 0) return buildCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "font") == 0) return font(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "texstats") == 0) return texstats(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "gpudump") == 0) return gpudumpCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "import") == 0) return importCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "import-unity") == 0) return importUnity(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);

@@ -27,6 +27,7 @@
 #include "editor/ui_canvas_view.hh"
 #include "editor/play.hh"
 #include "editor/project.hh"
+#include "editor/frame_view.hh"
 #include "editor/timeline_view.hh"
 #include "emulator.h"
 #include "game_view.h"
@@ -107,6 +108,9 @@ struct State {
         std::filesystem::path settingsFile;  // where tools are saved; empty = not saved (screenshot mode)
         editor::PlayTools tools;             // as set by the user; withDefaults() fills the rest
         std::filesystem::path bundleDir;     // where the editor lives; redux/ and engine/ ship there
+        std::filesystem::path captureScript;  // assets/framecapture.lua, passed to redux for Capture frame
+        bool capturing = false;               // a capture.flag is out, waiting for capture.gpd
+        uint64_t captureAt = 0;               // SDL ticks when it was written
         std::future<splash::ExportResult> build;
         Emulator emu;
         GameView game;            // what redux shows, once it has published a frame
@@ -337,10 +341,15 @@ struct State {
     ui::TexturePreviewView texPreview;
 
     // The bottom dock under the middle panel holds the Project panel and,
-    // while it is open, the Timeline as tabs; one shows at a time.
-    enum class BottomTab { Project, Timeline } bottomTab = BottomTab::Project;
+    // while they are open, the Timeline and the Frame debugger as tabs; one
+    // shows at a time.
+    enum class BottomTab { Project, Timeline, Frame } bottomTab = BottomTab::Project;
     bool timelineWasOpen = false;  // to raise the Timeline tab when something opens it
     unsigned timelineShows = 0;
+    // The Frame tab: a captured GPU frame, replayed and inspected.
+    ui::FramePanel frame;
+    bool frameWasOpen = false;
+    unsigned frameShows = 0;
     // The Project panel under the middle panel, and the inspector's asset
     // fields drawn this frame, clipped to what shows: an asset dragged from
     // the panel and released on one of them is assigned to it.

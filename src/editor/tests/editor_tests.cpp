@@ -67,6 +67,8 @@
 #include "texture.hh"
 #include "unity_import.hh"
 #include "worldstream.hh"
+#include "gpu_raster.hh"
+#include "gpudump.hh"
 
 namespace {
 
@@ -12619,6 +12621,258 @@ void testUnityUi() {
     CHECK((splash::readDiscSettings(g_outDir / "unity-cd" / "disc.json").tracks == std::vector<std::string>{"audio/beep.wav"}));
 }
 
+// ---- Frame debugger: GPU dumps (core/gpudump) and the rasterizer (core/gpu_raster).
+
+std::vector<uint32_t> gpdPacket(uint8_t type, std::vector<uint32_t> words) {
+    std::vector<uint32_t> out = {uint32_t(type) << 24 | uint32_t(words.size())};
+    out.insert(out.end(), words.begin(), words.end());
+    return out;
+}
+
+// The magic, then `packets` (already framed), as file bytes.
+std::vector<uint8_t> gpdBytes(const std::vector<std::vector<uint32_t>>& packets) {
+    const char magic[16] = {'P', 'S', 'X', 'G', 'P', 'U', 'D', 'U', 'M', 'P', 'v', '1', 'r', '1', 0, 0};
+    std::vector<uint8_t> b(magic, magic + 16);
+    for (const auto& p : packets)
+        for (uint32_t w : p)
+            for (int i = 0; i < 4; ++i) b.push_back(uint8_t(w >> (8 * i)));
+    return b;
+}
+
+uint32_t gpdXY(int x, int y) { return uint32_t(y & 0xffff) << 16 | uint32_t(x & 0xffff); }
+
+// A dump whose restore part resets the GPU and opens the whole of VRAM as
+// the drawing area, then `frame` as the live GP0 traffic and a VSync.
+gpudump::CommandList gpdFrame(const std::vector<uint32_t>& frame, std::vector<uint32_t> state = {}) {
+    if (state.empty()) state = {0xe1000000, 0xe2000000, 0xe3000000, 0xe4000000 | 511u << 10 | 1023u, 0xe5000000, 0xe6000000};
+    gpudump::Dump d;
+    std::string err;
+    const bool ok = gpudump::parse(gpdBytes({gpdPacket(1, {0}), gpdPacket(0, state), gpdPacket(5, {}), gpdPacket(0, frame),
+                                             gpdPacket(2, {0, 0})}),
+                                   d, &err);
+    CHECK(ok);
+    return gpudump::decode(d);
+}
+
+gpuraster::Gpu gpdRender(const std::vector<uint32_t>& frame, std::vector<uint32_t> state = {},
+                         gpuraster::Options options = gpuraster::Options()) {
+    const gpudump::CommandList list = gpdFrame(frame, std::move(state));
+    gpuraster::Gpu gpu;
+    gpu.options = options;
+    gpuraster::replay(list, list.commands.size(), gpu);
+    return gpu;
+}
+
+void testGpuDumpParse() {
+    namespace fs = std::filesystem;
+    // A polygon that starts in one GP0 packet and ends in the next, a GP1 word between them.
+    const std::vector<uint8_t> bytes = gpdBytes({
+        gpdPacket(6, {2}),                                    // GPUVersion
+        gpdPacket(0x12, {0x00006968}),                        // Comment "hi"
+        gpdPacket(1, {0x00000000}),                           // reset
+        gpdPacket(5, {}),                                     // TraceBegin
+        gpdPacket(0, {0x200000ff, gpdXY(10, 20)}),            // flat triangle, first two words
+        gpdPacket(1, {0x05000000 | 256u << 10}),              // display start 0,256
+        gpdPacket(0, {gpdXY(30, 40), gpdXY(-5, 60), 0xe1000005}),  // the rest, then E1
+        gpdPacket(2, {0, 0}),                                 // VSync
+    });
+    gpudump::Dump d;
+    std::string err;
+    CHECK(gpudump::parse(bytes, d, &err));
+    CHECK(d.packets.size() == 8 && d.version == 2 && d.comment == "hi" && !d.truncated);
+    const gpudump::CommandList list = gpudump::decode(d);
+    CHECK(list.commands.size() == 5);  // reset, display start, triangle, E1, vsync
+    CHECK(list.drawn.size() == 1 && list.frames == 1 && !list.incomplete);
+    if (list.commands.size() == 5 && list.drawn.size() == 1) {
+        const gpudump::Command& gp1 = list.commands[1];
+        CHECK(gp1.kind == gpudump::Kind::Gp1 && gp1.state.displayY() == 256 && gp1.live);
+        const gpudump::Command& tri = list.commands[size_t(list.drawn[0])];
+        CHECK(list.drawn[0] == 2 && tri.kind == gpudump::Kind::Polygon && !tri.quad() && !tri.textured() && tri.live);
+        CHECK(tri.words.size() == 4 && tri.vertices.size() == 3);
+        CHECK(tri.vertices[2].x == -5 && tri.vertices[2].y == 60 && tri.vertices[0].r == 0xff);
+        // Its words: two in the first GP0 packet, two in the second, a GP1 packet between.
+        CHECK(tri.firstWord == 12 && tri.lastWord == 18);
+        CHECK(gpudump::typeName(tri) == "tri-flat");
+        CHECK(list.commands[3].kind == gpudump::Kind::DrawMode && list.commands[3].state.pageX() == 5 * 64);
+        CHECK(list.commands[4].kind == gpudump::Kind::VSync);
+    }
+    // Saved back byte for byte.
+    fs::create_directories(g_outDir);
+    const fs::path file = g_outDir / "frame.gpd";
+    CHECK(gpudump::save(file, d, &err));
+    gpudump::Dump again;
+    CHECK(gpudump::load(file, again, &err) && again.words == d.words);
+    // Not a dump; a last packet cut short; a command cut short.
+    std::vector<uint8_t> bad = bytes;
+    bad[3] = 'X';
+    CHECK(!gpudump::parse(bad, d, &err) && !err.empty());
+    std::vector<uint8_t> cut(bytes.begin(), bytes.end() - 4);
+    CHECK(gpudump::parse(cut, d, &err) && d.truncated && d.packets.size() == 7);
+    CHECK(gpudump::parse(gpdBytes({gpdPacket(0, {0x200000ff, gpdXY(1, 1)})}), d, &err) && gpudump::decode(d).incomplete);
+}
+
+void testGpuDecode() {
+    using gpudump::Kind;
+    const std::vector<uint32_t> frame = {
+        0x4800ff00, gpdXY(0, 0), gpdXY(10, 0), gpdXY(10, 10), 0x55555555,                      // flat polyline, 3 points
+        0x58ff0000, gpdXY(0, 0), 0x0000ff00, gpdXY(5, 5), 0x000000ff, gpdXY(9, 0), 0x50005000,  // gouraud polyline
+        0x40ffffff, gpdXY(1, 2), gpdXY(3, 4),                                                    // line
+        0x60102030, gpdXY(4, 4), gpdXY(20, 10),                                                  // variable rect
+        0x68000000, gpdXY(1, 1), 0x70000000, gpdXY(2, 2), 0x78000000, gpdXY(3, 3),               // 1x1, 8x8, 16x16
+        0xa0000000, gpdXY(100, 0), gpdXY(3, 1), 0x00020001, 0x00000003,                          // 3 pixels: two data words
+        0x2c808080, gpdXY(0, 0), 0x7d000000, gpdXY(8, 0), 0x00850008, gpdXY(0, 8), 0x0800, gpdXY(8, 8), 0x0808,  // textured quad
+        0x7c808080, gpdXY(0, 0), 0x7d000000,                                                     // textured rect16 after it
+        0x02ffffff, gpdXY(0x13, 7), gpdXY(0x3f1, 9),                                             // fill
+        0x80000000, gpdXY(1, 2), gpdXY(3, 4), gpdXY(0, 0),                                       // VRAM copy, size 0 = max
+        0xe2012345, 0xe5000000 | (0x7ffu - 9) << 11 | 12u, 0xe6000003,
+    };
+    const gpudump::CommandList l = gpdFrame(frame);
+    std::vector<int> d = l.drawn;
+    CHECK(d.size() == 12);
+    if (d.size() != 12) return;
+    const auto& pl = l.commands[size_t(d[0])];
+    CHECK(pl.kind == Kind::Line && pl.vertices.size() == 3 && pl.words.size() == 5 && gpudump::typeName(pl) == "polyline");
+    const auto& pg = l.commands[size_t(d[1])];
+    CHECK(pg.kind == Kind::Line && pg.gouraud() && pg.vertices.size() == 3 && pg.vertices[1].g == 0xff && pg.words.size() == 7);
+    CHECK(l.commands[size_t(d[2])].vertices.size() == 2 && gpudump::typeName(l.commands[size_t(d[2])]) == "line");
+    const auto& rv = l.commands[size_t(d[3])];
+    CHECK(rv.kind == Kind::Rect && rv.width == 20 && rv.height == 10 && rv.vertices[0].r == 0x30);
+    CHECK(l.commands[size_t(d[4])].width == 1 && l.commands[size_t(d[5])].width == 8 && l.commands[size_t(d[6])].height == 16);
+    const auto& up = l.commands[size_t(d[7])];
+    CHECK(up.kind == Kind::CopyIn && up.width == 3 && up.height == 1 && up.words.size() == 5);
+    const auto& quad = l.commands[size_t(d[8])];
+    CHECK(quad.quad() && quad.textured() && quad.clut == 0x7d00 && quad.vertices[1].u == 8 && quad.vertices[3].v == 8);
+    CHECK(quad.state.pageX() == 5 * 64 && quad.state.depth() == 1 && quad.state.blendMode() == 0);
+    CHECK(gpudump::typeName(quad) == "quad-flat-tex");
+    // The quad's page attribute stays for the rect after it.
+    const auto& rt = l.commands[size_t(d[9])];
+    CHECK(rt.kind == Kind::Rect && rt.textured() && rt.state.pageX() == 5 * 64 && rt.clutY() == 0x7d00 >> 6);
+    const auto& fill = l.commands[size_t(d[10])];
+    CHECK(fill.kind == Kind::Fill && fill.dstX == 0x10 && fill.dstY == 7 && fill.width == 0x400 && fill.height == 9);
+    // A copy size of 0 is the maximum.
+    const auto& copy = l.commands[size_t(d[11])];
+    CHECK(copy.kind == Kind::CopyVram && copy.srcX == 1 && copy.dstY == 4 && copy.width == 1024 && copy.height == 512);
+    const gpudump::GpuState& last = l.commands.back().state;
+    CHECK(last.offsetX == 12 && last.offsetY == -10 && last.setMask && last.checkMask && last.texWindow == 0x12345);
+}
+
+void testGpuRaster() {
+    using gpuraster::Gpu;
+    auto px = [](const Gpu& g, int x, int y) { return g.at(x, y); };
+    auto count = [](const Gpu& g, int x0, int y0, int x1, int y1, uint16_t v) {
+        int n = 0;
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) n += g.at(x, y) == v;
+        return n;
+    };
+    // Fill rule: (0,0) (4,0) (0,4) covers x + y < 4: 4 + 3 + 2 + 1 pixels; its mirror across the
+    // shared diagonal takes the other 6 of the 4x4 square, neither overlapping nor leaving a gap.
+    {
+        const Gpu g = gpdRender({0x200000f8, gpdXY(0, 0), gpdXY(4, 0), gpdXY(0, 4), 0x2000f800, gpdXY(4, 0), gpdXY(0, 4), gpdXY(4, 4)});
+        CHECK(count(g, 0, 0, 7, 7, 0x001f) == 10);
+        CHECK(count(g, 0, 0, 7, 7, 0x03e0) == 6);
+        CHECK(px(g, 3, 0) == 0x001f && px(g, 0, 3) == 0x001f && px(g, 3, 1) == 0x03e0 && px(g, 3, 3) == 0x03e0);
+        CHECK(px(g, 4, 0) == 0 && px(g, 0, 4) == 0 && px(g, 4, 4) == 0);  // lower-right edges excluded
+        // The quad 0,0 4,0 0,4 4,4 as one command: the same 16 pixels, owned by it.
+        const gpudump::CommandList l = gpdFrame({0x280000f8, gpdXY(0, 0), gpdXY(4, 0), gpdXY(0, 4), gpdXY(4, 4)});
+        Gpu q;
+        gpuraster::replay(l, l.commands.size(), q);
+        CHECK(count(q, 0, 0, 7, 7, 0x001f) == 16 && q.owner[0] == l.drawn[0] && q.owner[3 * 1024 + 3] == l.drawn[0] && q.owner[4] == -1);
+    }
+    // 4-bit CLUT lookup: texel u takes nibble u & 3 of its halfword, the low nibble first.
+    const std::vector<uint32_t> clutAndTex = {
+        0xa0000000, gpdXY(0, 500), gpdXY(16, 1),  // CLUT at 0,500: entry i = 0x0100 + i
+        0x01010100, 0x01030102, 0x01050104, 0x01070106, 0x01090108, 0x010b010a, 0x010d010c, 0x010f010e,
+        0xa0000000, gpdXY(64, 0), gpdXY(2, 1), 0x76543210,  // texels 0..7 at page 64,0
+    };
+    {
+        std::vector<uint32_t> f = clutAndTex;
+        f.insert(f.end(), {0xe1000001, 0x65000000, gpdXY(0, 10), (500u << 6) << 16, gpdXY(8, 1)});  // raw textured rect 8x1
+        const Gpu g = gpdRender(f);
+        bool ok = true;
+        for (int u = 0; u < 8; ++u) ok = ok && px(g, u, 10) == 0x0100 + u;
+        CHECK(ok);
+    }
+    // 8-bit: texel u takes byte u & 1.
+    {
+        std::vector<uint32_t> f = clutAndTex;
+        f.insert(f.end(), {0xa0000000, gpdXY(64, 1), gpdXY(1, 1), 0x00000705,  // texels 5 and 7 on row 1
+                           0xe1000081, 0x65000000, gpdXY(0, 11), (500u << 6) << 16 | 0x0100, gpdXY(2, 1)});
+        const Gpu g = gpdRender(f);
+        CHECK(px(g, 0, 11) == 0x0105 && px(g, 1, 11) == 0x0107);
+    }
+    // Semi-transparency: back (16,16,16), front (8,8,8) in each mode; opaque beside it.
+    {
+        const uint32_t back = 0x02808080, frontC = 0x00404040;
+        std::vector<uint32_t> f = {back, gpdXY(0, 0), gpdXY(64, 8)};
+        for (uint32_t mode = 0; mode < 4; ++mode)
+            f.insert(f.end(), {0xe1000000 | mode << 5, 0x62000000 | frontC, gpdXY(int(mode) * 8, 0), gpdXY(4, 4)});
+        f.insert(f.end(), {0x60000000 | frontC, gpdXY(40, 0), gpdXY(4, 4)});
+        const Gpu g = gpdRender(f);
+        auto grey = [](int v) { return uint16_t(v | v << 5 | v << 10); };
+        CHECK(px(g, 1, 1) == grey(12));   // B/2 + F/2
+        CHECK(px(g, 9, 1) == grey(24));   // B + F
+        CHECK(px(g, 17, 1) == grey(8));   // B - F
+        CHECK(px(g, 25, 1) == grey(18));  // B + F/4
+        CHECK(px(g, 41, 1) == grey(8));   // opaque
+        CHECK(px(g, 5, 5) == grey(16));   // untouched back
+    }
+    // Textured semi-transparency only where the texel has bit 15; a texel of 0 is not drawn.
+    {
+        const Gpu g = gpdRender({0x02808080, gpdXY(0, 0), gpdXY(16, 4), 0xa0000000, gpdXY(128, 0), gpdXY(4, 1), 0xa1080000, 0x21080000,
+                                 0xe1000102 | 1u << 5, 0x67000000, gpdXY(0, 0), 0, gpdXY(4, 1)});  // 15-bit page 128,0, B+F, raw semi rect
+        auto grey = [](int v) { return uint16_t(v | v << 5 | v << 10); };
+        CHECK(px(g, 0, 0) == grey(16));                   // texel 0: transparent
+        CHECK(px(g, 1, 0) == (grey(24) | 0x8000));        // bit 15: blended, keeps its mask bit
+        CHECK(px(g, 2, 0) == grey(16) && px(g, 3, 0) == grey(8));  // 0 transparent; 0x2108 opaque
+    }
+    // Mask: check protects pixels with bit 15; set marks what is drawn.
+    {
+        const Gpu g = gpdRender({0xa0000000, gpdXY(0, 0), gpdXY(2, 1), 0x00018001, 0xe6000003, 0x6000001f, gpdXY(0, 0), gpdXY(2, 1)});
+        CHECK(px(g, 0, 0) == 0x8001);           // protected
+        CHECK(px(g, 1, 0) == (0x8000 | 0x0003));  // drawn ((0x1f >> 3) = 3 red), mask set
+    }
+    // Texture window: mask x 1 (8 texels), offset 0: u 8..15 read u 0..7.
+    {
+        std::vector<uint32_t> f = {0xa0000000, gpdXY(256, 0), gpdXY(16, 1)};
+        for (int i = 0; i < 16; i += 2) f.push_back(uint32_t(0x100 + i) | uint32_t(0x100 + i + 1) << 16);
+        f.insert(f.end(), {0xe1000104, 0xe2000001, 0x65000000, gpdXY(0, 0), 0, gpdXY(16, 1)});
+        const Gpu g = gpdRender(f);
+        bool ok = true;
+        for (int u = 0; u < 8; ++u) ok = ok && px(g, u, 0) == 0x100 + u && px(g, u + 8, 0) == 0x100 + u;
+        CHECK(ok);
+    }
+    // Drawing area and offset: a 10x10 rect at -1,-1 with offset 1,1 lands at 0,0; only 2..5 x 2..5 is drawn.
+    {
+        const Gpu g = gpdRender({0x600000f8, gpdXY(-1, -1), gpdXY(10, 10)},
+                                {0xe1000000, 0xe2000000, 0xe3000000 | 2u << 10 | 2u, 0xe4000000 | 5u << 10 | 5u, 0xe5000000 | 1u << 11 | 1u, 0xe6000000});
+        CHECK(count(g, 0, 0, 15, 15, 0x001f) == 16 && px(g, 2, 2) == 0x001f && px(g, 5, 5) == 0x001f && px(g, 6, 5) == 0 && px(g, 1, 2) == 0);
+    }
+    // Dither: a gouraud triangle of constant 104 (13 * 8) dithers by position on the hardware, not in redux mode.
+    {
+        const std::vector<uint32_t> tri = {0x30686868, gpdXY(0, 0), 0x686868, gpdXY(16, 0), 0x686868, gpdXY(0, 16)};
+        const std::vector<uint32_t> st = {0xe1000200, 0xe2000000, 0xe3000000, 0xe4000000 | 511u << 10 | 1023u, 0xe5000000, 0xe6000000};
+        const Gpu hw = gpdRender(tri, st), rx = gpdRender(tri, st, gpuraster::Options::redux());
+        CHECK((px(hw, 0, 0) & 31) == 12 && (px(hw, 1, 0) & 31) == 13 && (px(hw, 0, 1) & 31) == 13 && (px(hw, 1, 1) & 31) == 12);
+        CHECK((px(rx, 0, 0) & 31) == 13 && (px(rx, 1, 1) & 31) == 13);
+    }
+    // Modulation: 0x80 is neutral, 0x40 halves.
+    {
+        const Gpu g = gpdRender({0xa0000000, gpdXY(256, 0), gpdXY(2, 1), 0x00140014, 0xe1000104, 0x64808080, gpdXY(0, 0), 0, gpdXY(1, 1),
+                                 0x64404040, gpdXY(1, 0), 0, gpdXY(1, 1)});
+        CHECK(px(g, 0, 0) == 0x14 && px(g, 1, 0) == 0x0a);
+    }
+    // Replay to a step and back: the owner of a pixel follows.
+    {
+        const gpudump::CommandList l = gpdFrame({0x600000f8, gpdXY(0, 0), gpdXY(4, 4), 0x6000f800, gpdXY(2, 2), gpdXY(4, 4)});
+        Gpu g;
+        gpuraster::replay(l, size_t(l.drawn[1]) + 1, g);
+        CHECK(g.owner[3 * 1024 + 3] == l.drawn[1] && g.owner[0] == l.drawn[0]);
+        gpuraster::replay(l, size_t(l.drawn[0]) + 1, g);
+        CHECK(g.owner[3 * 1024 + 3] == l.drawn[0] && g.at(3, 3) == 0x001f);
+    }
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -12792,6 +13046,9 @@ int main(int argc, char** argv) {
     testUnityPrimitives();
     testUnityReport();
     testUnityUi();
+    testGpuDumpParse();
+    testGpuDecode();
+    testGpuRaster();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

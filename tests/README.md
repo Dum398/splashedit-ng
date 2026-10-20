@@ -888,6 +888,16 @@ and the same drag writes nothing. Needs a display.
 
     python3 timelinepreviewcheck.py <splashedit>
 
+`framedebugcheck.py` checks the Frame tab (the frame debugger) on `fixtures/frame/frame.gpd`, a
+408-byte GPU dump `fixtures/frame/make_fixture.py` builds by hand (a fill, a triangle, a gouraud
+quad, a 4-bit textured rect, a semi-transparent rect sent across two GP0 packets, a line): it opens
+it with `--frame`, clicks pixels of the image at 4x and expects the primitive that last wrote each
+(`frame: pick x,y -> #i <type>`), steps back, to the first primitive and to a list row
+(`frame: step s/N`), and reads the screenshot: exact colours at texel centres, sharp 4x4 blocks,
+the selected primitive outlined. Needs a display.
+
+    python3 framedebugcheck.py <splashedit> [keep.png]
+
 `pasteoffsetcheck.py` copies the courtyard example's Crate and pastes it three times: each copy
 must land one grid step (0.25 m) further along X, none on the original. A pasted group steps off
 its original with its children in place; Cut then Paste keeps the object where it was; Ctrl+Z

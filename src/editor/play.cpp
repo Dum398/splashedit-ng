@@ -44,7 +44,11 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "overlay_perf") t.overlayPerf = value == "1";
         else if (key == "overlay_rooms") t.overlayRooms = value == "1";
         else if (key == "boot_logo") t.bootLogo = value != "0";
-        else if (key == "players") t.players = value == "2" ? 2 : 1;
+        else if (key == "players") {
+            char* end = nullptr;
+            const long n = std::strtol(value.c_str(), &end, 10);
+            t.players = value.empty() || *end ? 1 : int(std::clamp<long>(n, 1, kMaxPlayers));
+        } else if (key == "relay") t.relay = value == "1";
     }
     return t;
 }
@@ -61,7 +65,8 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "overlay_perf=" << (t.overlayPerf ? 1 : 0) << "\n"
         << "overlay_rooms=" << (t.overlayRooms ? 1 : 0) << "\n"
         << "boot_logo=" << (t.bootLogo ? 1 : 0) << "\n"
-        << "players=" << (t.players == 2 ? 2 : 1) << "\n";
+        << "players=" << std::clamp(t.players, 1, kMaxPlayers) << "\n"
+        << "relay=" << (t.relay ? 1 : 0) << "\n";
     return bool(out);
 }
 

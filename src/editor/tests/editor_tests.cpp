@@ -1,6 +1,7 @@
 // Headless tests for the editor's document model: the undo history and the
 // viewport's ray picker and gizmo maths. No SDL, no GL. Run through CTest (`ctest`).
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -25,6 +26,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -46,6 +48,7 @@
 #include "editor/pick.hh"
 #include "editor/play.hh"
 #include "editor/linkplay.hh"
+#include "editor/relay.hh"
 #include "editor/project.hh"
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
@@ -1579,16 +1582,37 @@ void testLinkPlay() {
     }
 #endif
 
-    // Players: round-trips, reads 1 when absent or anything but 2.
+    // Players: 1 to 10 round-trip with the relay toggle; out of range clamps;
+    // absent or not a number reads 1, relay off.
     const fs::path cfg = dir / "play.cfg";
-    t.players = 2;
-    CHECK(editor::savePlayTools(cfg, t) && editor::loadPlayTools(cfg).players == 2);
-    t.players = 1;
-    CHECK(editor::savePlayTools(cfg, t) && editor::loadPlayTools(cfg).players == 1);
+    for (int n = 1; n <= editor::kMaxPlayers; ++n) {
+        t.players = n;
+        t.relay = n % 2;
+        const editor::PlayTools back = editor::savePlayTools(cfg, t) ? editor::loadPlayTools(cfg) : editor::PlayTools{};
+        CHECK(back.players == n && back.relay == bool(n % 2));
+    }
+    t.relay = false;
     { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=3\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 3 && !editor::loadPlayTools(cfg).relay);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=40\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == editor::kMaxPlayers);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=0\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 1);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=two\n"; }
     CHECK(editor::loadPlayTools(cfg).players == 1);
     { std::ofstream(cfg, std::ios::trunc) << "redux=/r\n"; }
     CHECK(editor::loadPlayTools(cfg).players == 1);
+    // 2 link directly unless the relay is asked for; 3 or more always use it.
+    editor::PlayTools u;
+    u.players = 1;
+    CHECK(!editor::usesRelay(u));
+    u.players = 2;
+    CHECK(!editor::usesRelay(u));
+    u.relay = true;
+    CHECK(editor::usesRelay(u));
+    u.relay = false;
+    u.players = 3;
+    CHECK(editor::usesRelay(u));
 
     // The reporter: last object, script only; its lines parse and read as words.
     splash::Scene sc;
@@ -1611,6 +1635,401 @@ void testLinkPlay() {
     CHECK(editor::describeLinkStatus(guest, false).find("no Network id: set one in Scene > Network") != std::string::npos);
     CHECK(editor::describeLinkStatus({0, false, 0, 0}, true).find("Net.Connect()") != std::string::npos);
     CHECK(editor::describeLinkStatus({4, false, 0, 0}, true).find("another scene") != std::string::npos);
+}
+
+// ---- Play's relay (editor/relay.hh) ----
+
+namespace rl = editor::relay;
+
+std::vector<uint8_t> fromHex(const std::string& h) {
+    std::vector<uint8_t> b;
+    for (size_t i = 0; i + 1 < h.size(); i += 2) b.push_back(uint8_t(std::stoi(h.substr(i, 2), nullptr, 16)));
+    return b;
+}
+
+// The frames the hub sent since the last call, per connection.
+std::map<int, std::vector<rl::Frame>> hubSent(rl::Hub& h) {
+    std::map<int, std::vector<rl::Frame>> m;
+    for (auto& [conn, bytes] : h.takeOutput()) {
+        rl::FrameParser p;
+        p.feed(bytes.data(), bytes.size(), m[conn]);
+    }
+    return m;
+}
+
+std::vector<uint8_t> helloFrame(uint32_t scene, uint16_t seq = 1, uint32_t magic = rl::kMagic) {
+    rl::HelloPayload hp;
+    hp.sceneHash = scene;
+    hp.tiebreak = 0x1234;
+    hp.magic = magic;
+    return rl::encodeFrame(rl::Hello, rl::packHello(hp), rl::kNoSlot, seq);
+}
+
+void hubSend(rl::Hub& h, int conn, const std::vector<uint8_t>& frame, double now) { h.receive(conn, frame.data(), frame.size(), now); }
+
+// The HelloAcks among `frames`.
+std::vector<rl::HelloAckPayload> acksIn(const std::vector<rl::Frame>& frames) {
+    std::vector<rl::HelloAckPayload> v;
+    for (const rl::Frame& f : frames)
+        if (f.type == rl::HelloAck)
+            if (std::optional<rl::HelloAckPayload> a = rl::parseHelloAck(f.payload)) v.push_back(*a);
+    return v;
+}
+
+// CRC, frames and the parser's resync, against psnl's own bytes.
+void testRelayFrames() {
+    const char* nine = "123456789";
+    CHECK(rl::crc16(reinterpret_cast<const uint8_t*>(nine), 9) == 0x29B1);
+    // The same frame psnl's encode_frame builds (ng-deps/relay/snapgen.py).
+    rl::Avatar a{1, 2, 3, 4, 1};
+    const std::vector<uint8_t> frame = rl::encodeFrame(rl::Snapshot, rl::buildSnapshot({{1, a}}), rl::kHostSlot, 0);
+    CHECK(frame == fromHex("a50300000000001800010000000101000001000000020000000300000004000000943e"));
+
+    const std::vector<uint8_t> f1 = rl::encodeFrame(rl::Event, {1, 2, 3, 4, 5, 6, 7, 8}, 2, 77);
+    const std::vector<uint8_t> f2 = rl::encodeFrame(rl::AppData, {9, 9}, 3, 78, 1);
+    std::vector<rl::Frame> got;
+    {
+        rl::FrameParser p;
+        p.feed(f1.data(), f1.size(), got);
+        CHECK(got.size() == 1 && got[0].type == rl::Event && got[0].srcSlot == 2 && got[0].seq == 77 && got[0].payload.size() == 8 &&
+              got[0].payload[7] == 8 && p.frames == 1);
+    }
+    // Garbage (with a false sync in it), a frame, a frame with a flipped byte,
+    // a header claiming 600 bytes, then a frame: the good ones come through.
+    std::vector<uint8_t> stream = {0x00, 0x13, 0xA5, 0x01, 0x02, 0xFF};
+    stream.insert(stream.end(), f1.begin(), f1.end());
+    std::vector<uint8_t> bad = f2;
+    bad[5] ^= 0x40;
+    stream.insert(stream.end(), bad.begin(), bad.end());
+    const std::vector<uint8_t> huge = {0xA5, 4, 1, 0, 0, 0, 0, 0x58, 0x02};
+    stream.insert(stream.end(), huge.begin(), huge.end());
+    stream.insert(stream.end(), f2.begin(), f2.end());
+    for (int chunk : {1, 3, 1000}) {
+        rl::FrameParser p;
+        got.clear();
+        for (size_t at = 0; at < stream.size(); at += size_t(chunk))
+            p.feed(stream.data() + at, std::min(size_t(chunk), stream.size() - at), got);
+        CHECK(got.size() == 2 && got[0].seq == 77 && got[1].type == rl::AppData && got[1].seq == 78 && got[1].flags == 1 &&
+              got[1].payload == std::vector<uint8_t>({9, 9}));
+        CHECK(p.crcErrors >= 1 && p.resyncs >= 1);
+    }
+    CHECK(rl::packetTypeName(rl::HelloAck) == "HelloAck" && rl::packetTypeName(rl::Pong) == "Pong" &&
+          rl::packetTypeName(42) == "Type 42");
+}
+
+// Redux's SIO1 client wire: messages of at most 245 data bytes, and the
+// stream Redux itself sends (a FlowControl, then one byte per message).
+void testRelayProtobuf() {
+    std::vector<uint8_t> out;
+    const std::vector<uint8_t> ten = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    rl::encodeSio(ten.data(), ten.size(), out);
+    std::vector<uint8_t> want = {14, 0x0A, 12, 0x0A, 10};
+    want.insert(want.end(), ten.begin(), ten.end());
+    CHECK(out == want);
+    // 245 bytes fit one message (its length byte 251); 246 need two; 600 three.
+    for (size_t n : {size_t(245), size_t(246), size_t(600)}) {
+        std::vector<uint8_t> data(n);
+        for (size_t i = 0; i < n; ++i) data[i] = uint8_t(i * 7);
+        out.clear();
+        rl::encodeSio(data.data(), n, out);
+        size_t msgs = 0, maxLen = 0;
+        for (size_t at = 0; at < out.size(); at += 1 + out[at]) {
+            ++msgs;
+            maxLen = std::max<size_t>(maxLen, out[at]);
+        }
+        CHECK(msgs == (n + rl::kMaxSioData - 1) / rl::kMaxSioData && maxLen <= 251);
+        if (n == 245) CHECK(out[0] == 251 && out.size() == 252);
+        rl::SioDecoder d;
+        std::vector<uint8_t> back;
+        for (size_t at = 0; at < out.size(); at += 5) d.feed(out.data() + at, std::min<size_t>(5, out.size() - at), back);
+        CHECK(back == data && d.messages == msgs && d.decodeErrors == 0);
+    }
+    // As Redux sends: FlowControl{dxr, xts}, then DataTransfer{data: 1 byte}
+    // with an empty FlowControl beside it; a broken message between is skipped.
+    std::vector<uint8_t> redux = {6, 0x12, 4, 0x08, 1, 0x10, 1};
+    for (uint8_t b : {uint8_t(0xA5), uint8_t(0x00), uint8_t(0x42)}) {
+        const std::vector<uint8_t> m = {7, 0x0A, 3, 0x0A, 1, b, 0x12, 0};
+        redux.insert(redux.end(), m.begin(), m.end());
+        if (b == 0x00) redux.insert(redux.end(), {3, 0x0A, 0xFF, 0xFF});  // a length running past its message
+    }
+    rl::SioDecoder d;
+    std::vector<uint8_t> back;
+    d.feed(redux.data(), redux.size(), back);
+    CHECK(back == std::vector<uint8_t>({0xA5, 0x00, 0x42}) && d.flowControls == 1 && d.decodeErrors == 1 && d.messages == 5);
+}
+
+// Rooms: join by scene, lowest free slot, re-Hello keeps the slot, leaving
+// and silence free it, and every member hears of each change.
+void testRelayRooms() {
+    rl::Hub h;
+    const uint32_t A = 0xAAAA0001, B = 0xBBBB0002;
+    const int c1 = h.connect(0), c2 = h.connect(0), c3 = h.connect(0);
+    CHECK(c1 == 1 && c2 == 2 && c3 == 3);
+    hubSend(h, c1, helloFrame(A), 0.1);
+    auto sent = hubSent(h);
+    std::vector<rl::HelloAckPayload> a1 = acksIn(sent[c1]);
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].hostSlot == rl::kHostSlot && a1[0].playerCount == 1 &&
+          a1[0].sceneHash == A && a1[0].magic == rl::kMagic && a1[0].protoVersion == rl::kProtoVersion);
+    CHECK(sent[c1].size() == 1 && sent[c1][0].srcSlot == rl::kHostSlot);
+    // A second console in the same scene: slot 2, and console 1 is told there are 2 now.
+    hubSend(h, c2, helloFrame(A), 0.2);
+    sent = hubSent(h);
+    std::vector<rl::HelloAckPayload> a2 = acksIn(sent[c2]);
+    CHECK(a2.size() == 1 && a2[0].yourSlot == 2 && a2[0].playerCount == 2);
+    a1 = acksIn(sent[c1]);
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].playerCount == 2);
+    // Another scene: a room of its own, nobody else hears of it.
+    hubSend(h, c3, helloFrame(B), 0.3);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c3]).size() == 1 && acksIn(sent[c3])[0].yourSlot == 1 && acksIn(sent[c3])[0].playerCount == 1);
+    CHECK(sent.count(c1) == 0 && sent.count(c2) == 0);
+    // Hello again (a scene reload, or a lost ack): same slot, acked again; no change for the others.
+    hubSend(h, c2, helloFrame(A, 2), 0.4);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].yourSlot == 2 && acksIn(sent[c2])[0].playerCount == 2);
+    CHECK(sent.count(c1) == 0);
+    // A foreign Hello is ignored.
+    const int cx = h.connect(0.5);
+    hubSend(h, cx, helloFrame(A, 1, 0x12345678), 0.5);
+    sent = hubSent(h);
+    CHECK(sent.count(cx) == 0 && !h.connections().at(cx).joined);
+    // Console 4 takes slot 3; console 1 leaves with Bye; 2 and 4 hear there are 2.
+    const int c4 = h.connect(0.6);
+    hubSend(h, c4, helloFrame(A), 0.6);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c4]).size() == 1 && acksIn(sent[c4])[0].yourSlot == 3 && acksIn(sent[c4])[0].playerCount == 3);
+    CHECK(acksIn(sent[c1]).size() == 1 && acksIn(sent[c1])[0].playerCount == 3 && acksIn(sent[c2]).size() == 1);
+    hubSend(h, c1, rl::encodeFrame(rl::Bye, {}, 1, 3), 0.7);
+    sent = hubSent(h);
+    CHECK(h.takeClosed() == std::vector<int>({c1}) && !h.connections().at(c1).open);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && acksIn(sent[c4]).size() == 1 &&
+          acksIn(sent[c4])[0].playerCount == 2 && acksIn(sent[c4])[0].yourSlot == 3);
+    // The lowest free slot again: 1.
+    const int c5 = h.connect(0.8);
+    hubSend(h, c5, helloFrame(A), 0.8);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c5]).size() == 1 && acksIn(sent[c5])[0].yourSlot == 1 && acksIn(sent[c5])[0].playerCount == 3);
+    CHECK(h.connections().at(c5).slot == 1 && h.connections().at(c5).index == c5);
+    // A socket that closes leaves too.
+    h.disconnect(c5, 0.9);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && h.takeClosed().empty());
+    // 20 s of silence ends a member; one that spoke stays.
+    hubSend(h, c2, rl::encodeFrame(rl::Ping, std::vector<uint8_t>(12, 0), 2, 4), 15.0);
+    h.tick(21.0);
+    std::vector<int> closed = h.takeClosed();
+    std::sort(closed.begin(), closed.end());
+    CHECK(closed == std::vector<int>({c3, cx, c4}));
+    CHECK(h.connections().at(c2).open && h.connections().at(c2).joined && !h.connections().at(c4).joined);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 1);
+
+    // Ten fill a room; the eleventh starts a new one.
+    rl::Hub full;
+    std::vector<int> ids;
+    for (int i = 0; i < 11; ++i) {
+        ids.push_back(full.connect(0));
+        hubSend(full, ids.back(), helloFrame(A), 0);
+    }
+    CHECK(full.connections().at(ids[9]).slot == 10 && full.connections().at(ids[10]).slot == 1 &&
+          full.connections().at(ids[10]).room != full.connections().at(ids[0]).room && full.visiblePlayers(ids[0]) == 10 &&
+          full.visiblePlayers(ids[10]) == 1);
+}
+
+// Events: acked (duplicates too), deduped on the last seq, fanned out to the
+// rest of the room as their 8 bytes; ObjectState and AppData relayed; Ping
+// answered with its echo; and the log lists who got what.
+void testRelayReliable() {
+    rl::Hub h;
+    const uint32_t A = 7;
+    int c[3];
+    for (int i = 0; i < 3; ++i) {
+        c[i] = h.connect(0);
+        hubSend(h, c[i], helloFrame(A), 0);
+    }
+    hubSent(h);
+    std::vector<uint8_t> ev = {7, 0, 0, 0, 0xE9, 3, 0, 0, 0xEE, 0xEE};  // id 7, arg 1001, and 2 more bytes
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, ev, 1, 5), 1.0);
+    auto sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::EventAck && sent[c[0]][0].seq == 5 && sent[c[0]][0].payload.empty());
+    for (int i : {1, 2})
+        CHECK(sent[c[i]].size() == 1 && sent[c[i]][0].type == rl::Event && sent[c[i]][0].srcSlot == rl::kHostSlot &&
+              sent[c[i]][0].payload == std::vector<uint8_t>(ev.begin(), ev.begin() + 8));
+    const uint16_t seqTo2 = sent[c[1]][0].seq;
+    // The retransmission: acked again, not delivered again.
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, ev, 1, 5), 1.1);
+    sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::EventAck && sent[c[0]][0].seq == 5);
+    CHECK(sent.count(c[1]) == 0 && sent.count(c[2]) == 0);
+    // The next one goes through, with the next seq on each recipient's own count.
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, ev, 1, 6), 1.2);
+    sent = hubSent(h);
+    CHECK(sent[c[1]].size() == 1 && sent[c[1]][0].seq == uint16_t(seqTo2 + 1));
+    // From console 3: to 1 and 2.
+    hubSend(h, c[2], rl::encodeFrame(rl::AppData, {'h', 'i'}, 3, 40), 1.3);
+    sent = hubSent(h);
+    CHECK(sent[c[2]].size() == 1 && sent[c[2]][0].type == rl::EventAck && sent[c[2]][0].seq == 40);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::AppData && sent[c[0]][0].payload == std::vector<uint8_t>({'h', 'i'}));
+    CHECK(sent[c[1]].size() == 1 && sent[c[1]][0].type == rl::AppData);
+    hubSend(h, c[1], rl::encodeFrame(rl::ObjectState, {1, 2, 3}, 2, 9), 1.4);
+    sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::ObjectState && sent[c[2]].size() == 1 && sent[c[1]][0].type == rl::EventAck);
+    // A short Event is acked and dropped, as psnl does.
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, {1, 2}, 1, 7), 1.5);
+    sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent.count(c[1]) == 0);
+    // Ping: a Pong with the echo, the rest zero.
+    std::vector<uint8_t> ping = {0xEF, 0xBE, 0xAD, 0xDE, 1, 2, 3, 4, 5, 6, 0, 0};
+    hubSend(h, c[1], rl::encodeFrame(rl::Ping, ping, 2, 10), 1.6);
+    hubSend(h, c[1], rl::encodeFrame(rl::Ping, ping, 2, 11), 1.7);
+    sent = hubSent(h);
+    CHECK(sent[c[1]].size() == 2 && sent[c[1]][0].type == rl::Pong &&
+          sent[c[1]][0].payload == std::vector<uint8_t>({0xEF, 0xBE, 0xAD, 0xDE, 0, 0, 0, 0, 0, 0, 0, 0}));
+
+    // The log: the first Event from slot 1 to slots 2 and 3, its ack to slot 1;
+    // the duplicate stopped at the relay; the two Pings one entry.
+    const std::deque<rl::Packet>& log = h.packets();
+    std::vector<const rl::Packet*> events, pings;
+    for (const rl::Packet& p : log) {
+        if (p.type == rl::Event) events.push_back(&p);
+        if (p.type == rl::Ping) pings.push_back(&p);
+    }
+    CHECK(events.size() == 4);
+    if (events.size() == 4) {
+        CHECK(events[0]->from == 1 && events[0]->to == std::vector<uint8_t>({2, 3}) && events[0]->seq == 5 && events[0]->size == 21);
+        CHECK(events[1]->to == std::vector<uint8_t>({rl::kHostSlot}));
+        CHECK(rl::describeTo(events[0]->to) == "slots 2, 3" && rl::describeTo(events[1]->to) == "relay");
+    }
+    CHECK(pings.size() == 1 && pings[0]->count == 2 && pings[0]->from == 2);
+    bool hello = false;
+    for (const rl::Packet& p : log)
+        if (p.type == rl::Hello && p.from == rl::kNoSlot && p.conn == c[0]) hello = true;
+    CHECK(hello && rl::describeEnd(rl::kNoSlot, 3) == "conn 3" && rl::describeEnd(0, 0) == "relay" && rl::describeEnd(4, 1) == "slot 4");
+    // The Network view's filter: by type, and by slot either end.
+    rl::PacketFilter only;
+    only.types = 1u << rl::Event;
+    CHECK(only.shows(*events[0]) && !only.shows(*pings[0]));
+    only.types = ~0u;
+    only.slot = 3;
+    CHECK(only.shows(*events[0]) && !only.shows(*pings[0]));
+    only.slot = 2;
+    CHECK(only.shows(*pings[0]));
+}
+
+// Snapshots: byte for byte what psnl's Room.build_snapshot makes
+// (ng-deps/relay/snapgen.py), and what the hub sends each room at 30 Hz.
+void testRelaySnapshot() {
+    struct Case {
+        const char* name;
+        std::vector<std::pair<uint8_t, std::array<int32_t, 5>>> members;
+        const char* hex;
+    };
+    // Generated by /home/pixel/sources/ng-deps/relay/snapgen.py from psnl_server/rooms.py Room.build_snapshot.
+    const Case cases[] = {
+        {"one", {{1, {100, -200, 300, 50, 1}}}, "01000000010100006400000038ffffff2c01000032000000"},
+        {"two_close", {{2, {1000, 0, -1000, 4096, 1}}, {1, {1100, 50, -900, -10, 1}}},
+         "02000100e80300000000000018fcffff01016400320064007e6402010000000000000010"},
+        {"three_shift", {{3, {0, 0, 0, 0, 1}}, {1, {200000, -5, 7, 30000, 1}}, {2, {-100000, 9, 70000, 25736, 0}}},
+         "030001036079fefffbffffff0000000001017c9200000000a8100200000001002e2200000301d430000000000000"},
+        {"far", {{1, {-2000000000, 0, 0, 1, 1}}, {2, {2000000000, 0, 0, 2, 1}}},
+         "0200000001010000006cca880000000000000000010000000201000000943577000000000000000002000000"},
+        {"zero_avatars", {{1, {0, 0, 0, 0, 1}}, {2, {0, 0, 0, 0, 1}}, {3, {0, 0, 0, 0, 1}}},
+         "03000100000000000000000000000000010100000000000000000201000000000000000003010000000000000000"},
+        {"ten",
+         {{10, {40960, -7770, 113466, 21000, 1}}, {9, {36864, -6993, 114465, 18000, 1}}, {8, {32768, -6216, 115464, 15000, 1}},
+          {7, {28672, -5439, 116463, 12000, 1}}, {6, {24576, -4662, 117462, 9000, 1}}, {5, {20480, -3885, 118461, 6000, 1}},
+          {4, {16384, -3108, 119460, 3000, 1}}, {3, {12288, -2331, 120459, 0, 1}}, {2, {8192, -1554, 121458, -3000, 1}},
+          {1, {4096, -777, 122457, -6000, 1}}},
+         "0a00010000100000a6e1ffff3abb010001010000511b1f23184d020100104818381fd058030100203f15511b00000401003036126a17b80b05010040"
+         "2d0f8313701706010050240c9c0f2823070100601b09b50be02e080100701206ce07983a090100800903e70350460a010090000000000852"},
+    };
+    for (const Case& c : cases) {
+        std::vector<std::pair<uint8_t, rl::Avatar>> m;
+        for (const auto& [slot, v] : c.members) m.push_back({slot, rl::Avatar{v[0], v[1], v[2], v[3], uint8_t(v[4])}});
+        const bool same = rl::buildSnapshot(m) == fromHex(c.hex);
+        if (!same) std::fprintf(stderr, "relay snapshot case %s differs from psnl\n", c.name);
+        CHECK(same);
+    }
+
+    // The hub: each member's own legacy record (a record for another slot is
+    // ignored), sent to the room as one snapshot every 1/30 s.
+    rl::Hub h;
+    const int a = h.connect(0), b = h.connect(0);
+    hubSend(h, a, helloFrame(9), 0);
+    hubSend(h, b, helloFrame(9), 0);
+    hubSent(h);
+    std::vector<uint8_t> snap = {2, 0, 0, 0};
+    for (uint8_t slot : {uint8_t(1), uint8_t(2)}) {
+        const int32_t v[4] = {slot == 1 ? 5000 : 99, -20, 30, 1000};
+        snap.insert(snap.end(), {slot, 1, 0, 0});
+        for (int32_t x : v)
+            for (int k = 0; k < 4; ++k) snap.push_back(uint8_t(uint32_t(x) >> (8 * k)));
+    }
+    hubSend(h, a, rl::encodeFrame(rl::Snapshot, snap, 1, 0), 0.5);
+    h.tick(1.0);
+    auto sent = hubSent(h);
+    const std::vector<uint8_t> want = rl::buildSnapshot({{1, rl::Avatar{5000, -20, 30, 1000, 1}}, {2, rl::Avatar{}}});
+    for (int c : {a, b})
+        CHECK(sent[c].size() == 1 && sent[c][0].type == rl::Snapshot && sent[c][0].seq == 0 && sent[c][0].srcSlot == rl::kHostSlot &&
+              sent[c][0].payload == want);
+    h.tick(1.01);
+    CHECK(hubSent(h).empty());
+    h.tick(1.0 + rl::kSnapshotSeconds + 0.001);
+    CHECK(hubSent(h).size() == 2);
+}
+
+// The server on a socket: three clients speaking redux's wire get slots 1, 2
+// and 3 in the order they connected.
+void testRelaySocket() {
+#ifndef _WIN32
+    rl::Relay relay;
+    std::string err;
+    CHECK(relay.start(&err) && relay.port() != 0 && relay.running());
+    int socks[3] = {-1, -1, -1};
+    for (int i = 0; i < 3; ++i) {
+        socks[i] = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons(relay.port());
+        CHECK(connect(socks[i], reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+        // Accepted in order before the next connects, as Play waits for console k.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (relay.accepted() < i + 1 && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        CHECK(relay.accepted() == i + 1);
+        // As redux: a FlowControl, then one DataTransfer per byte.
+        std::vector<uint8_t> wire = {6, 0x12, 4, 0x08, 1, 0x10, 1};
+        for (uint8_t b : helloFrame(0xC0FFEE)) wire.insert(wire.end(), {5, 0x0A, 3, 0x0A, 1, b});
+        CHECK(send(socks[i], wire.data(), wire.size(), 0) == ssize_t(wire.size()));
+    }
+    for (int i = 0; i < 3; ++i) {
+        rl::SioDecoder d;
+        rl::FrameParser p;
+        std::vector<rl::Frame> frames;
+        std::optional<rl::HelloAckPayload> ack;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!ack && std::chrono::steady_clock::now() < until) {
+            pollfd pf{socks[i], POLLIN, 0};
+            if (poll(&pf, 1, 50) <= 0) continue;
+            uint8_t buf[2048];
+            const ssize_t n = recv(socks[i], buf, sizeof buf, 0);
+            if (n <= 0) break;
+            std::vector<uint8_t> data;
+            d.feed(buf, size_t(n), data);
+            p.feed(data.data(), data.size(), frames);
+            if (std::vector<rl::HelloAckPayload> acks = acksIn(frames); !acks.empty()) ack = acks.front();
+        }
+        CHECK(ack && ack->yourSlot == i + 1 && d.decodeErrors == 0);
+    }
+    const std::vector<rl::Connection> conns = relay.connections();
+    CHECK(conns.size() == 3);
+    for (size_t i = 0; i < conns.size(); ++i) CHECK(conns[i].index == int(i + 1) && conns[i].slot == i + 1 && conns[i].joined);
+    CHECK(relay.packetCount() >= 6);
+    for (int s : socks) close(s);
+    relay.stop();
+    CHECK(!relay.running() && relay.packets().size() >= 6);  // kept for the Network view
+#endif
 }
 
 // Build > Performance / Room Debug Overlay: Play and Run on hardware boot the
@@ -13328,6 +13747,12 @@ int main(int argc, char** argv) {
     testPlay();
     testPlayOverlays();
     testLinkPlay();
+    testRelayFrames();
+    testRelayProtobuf();
+    testRelayRooms();
+    testRelayReliable();
+    testRelaySnapshot();
+    testRelaySocket();
     testPlayBootLogo();
     testBuildScenes();
     testBuildReport();

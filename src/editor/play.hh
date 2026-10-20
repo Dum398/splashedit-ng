@@ -26,13 +26,20 @@ struct PlayTools {
     std::string port;  // Run on hardware: a serial port, or tcp:HOST:PORT
     bool overlayPerf = false, overlayRooms = false;
     bool bootLogo = true;
-    // Play boots 1 console, or 2 linked over SIO1 (editor/linkplay.hh).
+    // Play boots 1 console, or 2 to kMaxPlayers linked ones. 2 are linked
+    // to each other over SIO1 (editor/linkplay.hh) unless `relay` is on;
+    // 3 or more always go through the editor's relay (editor/relay.hh).
     int players = 1;
+    bool relay = false;
 };
+inline constexpr int kMaxPlayers = 10;
+// Whether a Play with these tools runs its consoles through the relay.
+inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players == 2 && t.relay); }
 
 // key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
-// overlay_rooms=, boot_logo= (1 or 0), players= (1 or 2). A missing file or
-// key reads as empty or off, but boot_logo as on and players as 1.
+// overlay_rooms=, boot_logo= (1 or 0), players= (1 to kMaxPlayers, clamped),
+// relay= (1 or 0). A missing file or key reads as empty or off, but boot_logo
+// as on and players as 1 (also for a value that is not a number).
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 

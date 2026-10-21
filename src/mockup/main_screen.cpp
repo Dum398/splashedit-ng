@@ -2596,6 +2596,7 @@ struct MenuEntry {
     enum Kind { Item, Separator, Heading } kind = Item;
     std::string label, shortcut;
     bool enabled = true, checked = false;
+    bool choice = false;  // one of a group: the picked one shows a dot, an on/off item a check mark
     std::function<void()> run;
 };
 
@@ -2606,6 +2607,12 @@ static MenuEntry item(std::string label, std::string shortcut, bool enabled, std
     e.enabled = enabled;
     e.checked = checked;
     e.run = std::move(run);
+    return e;
+}
+// One option of a group (tool, look, console count): the picked one shows a dot.
+static MenuEntry choice(std::string label, std::string shortcut, std::function<void()> run, bool picked) {
+    MenuEntry e = item(std::move(label), std::move(shortcut), true, std::move(run), picked);
+    e.choice = true;
     return e;
 }
 static MenuEntry separator() {
@@ -2742,19 +2749,19 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
         case 6:  // the Players button's list
             m.push_back(heading("Consoles Play boots"));
             for (int n = 1; n <= editor::kMaxPlayers; ++n)
-                m.push_back(item(n == 1 ? std::string("1 Console") : n == 2 ? std::string("2 Linked Consoles") : std::to_string(n) + " Consoles",
-                                 "", true, [&st, n] { setPlayers(st, n); }, st.play.tools.players == n));
+                m.push_back(choice(n == 1 ? std::string("1 Console") : n == 2 ? std::string("2 Linked Consoles") : std::to_string(n) + " Consoles",
+                                   "", [&st, n] { setPlayers(st, n); }, st.play.tools.players == n));
             m.push_back(separator());
             m.push_back(item("Use the Relay for 2 Consoles", "", true, [&] { setRelay(st, !st.play.tools.relay); }, st.play.tools.relay));
             break;
         case 4:  // View
-            m.push_back(item("Hand", "Q", true, [&] { st.tool = 0; }, st.tool == 0));
-            m.push_back(item("Move", "W", true, [&] { st.tool = 1; }, st.tool == 1));
-            m.push_back(item("Rotate", "E", true, [&] { st.tool = 2; }, st.tool == 2));
-            m.push_back(item("Scale", "R", true, [&] { st.tool = 3; }, st.tool == 3));
+            m.push_back(choice("Hand", "Q", [&] { st.tool = 0; }, st.tool == 0));
+            m.push_back(choice("Move", "W", [&] { st.tool = 1; }, st.tool == 1));
+            m.push_back(choice("Rotate", "E", [&] { st.tool = 2; }, st.tool == 2));
+            m.push_back(choice("Scale", "R", [&] { st.tool = 3; }, st.tool == 3));
             m.push_back(separator());
-            m.push_back(item("PS1 Look", "", true, [&] { st.viewMode = 0; }, st.viewMode == 0));
-            m.push_back(item("Clean Look", "", true, [&] { st.viewMode = 1; }, st.viewMode == 1));
+            m.push_back(choice("PS1 Look", "", [&] { st.viewMode = 0; }, st.viewMode == 0));
+            m.push_back(choice("Clean Look", "", [&] { st.viewMode = 1; }, st.viewMode == 1));
             m.push_back(separator());
             m.push_back(item("Snap", "", true, [&] { st.snap = !st.snap; }, st.snap));
             m.push_back(item("Orthographic", "", true, [&] { view.setOrtho(!view.ortho()); }, view.ortho()));
@@ -2852,7 +2859,19 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
             if (!menu.empty()) nameRect(menu + "/" + e.label, ir);
             const bool on = e.enabled && hit.hover > 0;
             if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
-            if (e.checked) dl->AddCircleFilled(ImVec2(ir.Min.x + space::md, ir.GetCenter().y), 3.5f, color::accent, 12);
+            if (e.checked) {
+                // Scripted checks find the mark as <menu>/<label>/dot or /check.
+                const ImVec2 c(ir.Min.x + space::md, ir.GetCenter().y);
+                if (e.choice) {
+                    dl->AddCircleFilled(c, 3.5f, color::accent, 12);
+                    if (!menu.empty()) nameRect(menu + "/" + e.label + "/dot", ImRect(c - ImVec2(4, 4), c + ImVec2(4, 4)));
+                } else {
+                    const ImVec2 cs = measure(f.medium, type::label, icon::check);
+                    const ImVec2 at(c.x - cs.x * 0.5f, centerY(f.medium, type::label, ir.Min.y, ir.Max.y));
+                    text(dl, at, f.medium, type::label, color::accent, icon::check);
+                    if (!menu.empty()) nameRect(menu + "/" + e.label + "/check", ImRect(at, at + cs));
+                }
+            }
             const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
             text(dl, ImVec2(ir.Min.x + 28, centerY(f.regular, type::body, ir.Min.y, ir.Max.y)), f.regular, type::body, tc, e.label.c_str());
             if (!e.shortcut.empty()) {

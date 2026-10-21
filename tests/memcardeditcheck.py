@@ -10,15 +10,15 @@ here = os.path.dirname(os.path.abspath(__file__))
 example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
-# At 1600x960 with nothing selected the inspector shows the scene, and Memory
-# card is its last section. Once the background export has landed (its sizes
-# change the height of the sections above), the wheel over the inspector
-# scrolls it to the bottom, which brings Memory card into view however many
-# sections sit above it. Each run checks that both controls ended up on screen.
+# At 1600x960 with nothing selected the inspector shows the scene. Once the
+# background export has landed (its sizes change the height of the sections
+# above), --scroll-to wheels the inspector until the Save title field, then
+# the Enable saves switch above it, is inside it, wherever Memory card sits
+# among the sections. Each run checks that both controls ended up on screen.
 # Controls are clicked by name (--click @scene.mcenable): the editor aims at
 # where the frame before drew them, so no pixel positions live here.
 H = 960
-SCROLL = ['--wait', '20', '--wait-export', '--wheel', '1420,500,-200', '--wait', '3']
+SCROLL = ['--wait', '20', '--wait-export', '--scroll-to', '@scene.mctitle', '--scroll-to', '@scene.mcenable', '--wait', '3']
 ENABLE = '@scene.mcenable'  # the Enable saves switch
 TITLE = '@scene.mctitle'  # the Save title field
 TYPED = 'MY GAME 1'

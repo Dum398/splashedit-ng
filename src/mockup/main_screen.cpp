@@ -10321,7 +10321,7 @@ static void networkView(State& st) {
                 ImGui::TableNextColumn();
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%s", tbuf);
                 ImGui::TableNextColumn();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.from == rl::kHostSlot ? color::textDim : color::text), "%s",
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.from == rl::kRelaySlot ? color::textDim : color::text), "%s",
                                    rl::describeEnd(k.from, k.conn).c_str());
                 ImGui::TableNextColumn();
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textDim), "\xe2\x86\x92 %s", rl::describeTo(k.to).c_str());

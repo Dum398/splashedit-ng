@@ -2,12 +2,15 @@
 // linked consoles (each a pcsx-redux) with nothing else installed. Every
 // console is redux's SIO1 client to it. It is a port of the default relay
 // mode of psnl_server (the Python reference server): rooms by scene hash,
-// slots 1..10 (slot 0 is the relay itself, the host), reliable Events acked
-// and fanned out, ObjectState and AppData relayed, Ping answered, and a 30 Hz
-// snapshot of every member's own avatar. Unlike psnl it also tells every
-// member when the room changes (an unsolicited HelloAck), so each console's
-// player count stays current. psxsplash needs no change for any of it: a
-// HelloAck from slot 0 makes a console a client.
+// slots 1..10 (slot 0 is the relay itself, which is in no game), reliable
+// Events acked and fanned out, ObjectState and AppData relayed, Ping
+// answered, and a 30 Hz snapshot of every member's own avatar. Unlike psnl it
+// also tells every member when the room changes (an unsolicited HelloAck), so
+// each console's player count stays current, and it gives each room an
+// authority: its first member, then, when the authority leaves, the lowest
+// slot still in it. The HelloAck's hostSlot names it, so that console is
+// psxsplash's host (yourSlot == hostSlot) and the rest are clients; a later
+// ack hands authority over. psxsplash needs no change for any of it.
 //
 // The pure parts (CRC, frames, redux's protobuf wire, rooms and the snapshot)
 // have no sockets and are tested on their own; Relay runs them on a thread
@@ -35,7 +38,7 @@ inline constexpr size_t kHeaderSize = 8;    // <BBBBHH type, srcSlot, flags, res
 inline constexpr size_t kMaxPayload = 512;  // longer is a mis-sync
 inline constexpr uint32_t kMagic = 0x4C4E5350;  // "PSNL"
 inline constexpr uint16_t kProtoVersion = 1;
-inline constexpr uint8_t kHostSlot = 0;     // the relay
+inline constexpr uint8_t kRelaySlot = 0;    // the relay: a sender and receiver in the log, never the authority
 inline constexpr uint8_t kNoSlot = 0xFF;
 inline constexpr uint8_t kFirstPlayerSlot = 1;
 inline constexpr uint8_t kMaxSlots = 11;    // slots 0..10; players 1..10
@@ -116,7 +119,7 @@ std::vector<uint8_t> packHello(const HelloPayload& h);
 struct HelloAckPayload {  // <IHBBIB3s magic, protoVersion, yourSlot, hostSlot, sceneHash, playerCount
     uint32_t magic = kMagic, sceneHash = 0;
     uint16_t protoVersion = kProtoVersion;
-    uint8_t yourSlot = kNoSlot, hostSlot = kHostSlot, playerCount = 0;
+    uint8_t yourSlot = kNoSlot, hostSlot = kRelaySlot, playerCount = 0;  // hostSlot 0 (the relay): nobody is host
 };
 std::optional<HelloAckPayload> parseHelloAck(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> packHelloAck(const HelloAckPayload& a);
@@ -136,10 +139,12 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
 // ---- the relay's rules, without sockets ----
 
 // One routed packet, for the Network view. `from` is the sender's slot:
-// kHostSlot for the relay, kNoSlot for a console that has none yet (then
-// `conn` says which). `to` lists the slots it went to (kHostSlot: the relay
+// kRelaySlot for the relay, kNoSlot for a console that has none yet (then
+// `conn` says which). `to` lists the slots it went to (kRelaySlot: the relay
 // took it). Snapshots and Ping/Pong a sender sends within a second fold into
-// one entry, `count` of them.
+// one entry, `count` of them. A row with `authority` set is no packet: the
+// room (`conn`) got that authority, after `previous` (kNoSlot: the room's
+// first); `type` is 0 and `to` the members it was told to.
 struct Packet {
     uint64_t id = 0;
     double time = 0;  // seconds since the relay started
@@ -149,6 +154,8 @@ struct Packet {
     uint32_t size = 0;  // frame bytes, all `count` of them
     uint32_t count = 1;
     std::vector<uint8_t> to;
+    uint8_t authority = kNoSlot, previous = kNoSlot;
+    bool handOff() const { return authority != kNoSlot; }
 };
 
 // One accepted connection: `index` counts from 1 in accept order (console k
@@ -157,6 +164,8 @@ struct Connection {
     int index = 0;
     uint8_t slot = kNoSlot;
     int room = 0;  // 0: none
+    uint8_t authority = kNoSlot;  // its room's authority slot
+    bool isAuthority() const { return joined && slot != kNoSlot && authority == slot; }
     uint32_t sceneHash = 0;
     bool open = true, joined = false;
     double connectedAt = 0, lastSeen = 0;
@@ -197,6 +206,7 @@ class Hub {
         int id = 0;
         std::optional<uint32_t> sceneHash;
         std::map<uint8_t, int> members;  // slot -> connection
+        uint8_t authority = kNoSlot;     // psxsplash's host: the slot whose world objects count
     };
     struct Session {
         int id = 0;
@@ -210,10 +220,11 @@ class Hub {
     void dispatch(Session& s, const Frame& f, double now);
     void onHello(Session& s, const Frame& f, double now);
     void onReliable(Session& s, const Frame& f, double now);
-    bool join(Session& s, uint32_t sceneHash);
+    bool join(Session& s, uint32_t sceneHash, double now);
     void leave(Session& s, double now);
     void sendAck(Session& s, double now);
     void announce(int roomId, int except, double now);
+    void setAuthority(Room& r, uint8_t slot, double now);
     void send(Session& s, uint8_t type, const std::vector<uint8_t>& payload, std::optional<uint16_t> seq);
     void sendRaw(Session& s, const std::vector<uint8_t>& frame);
     void close(Session& s, double now, bool told);
@@ -276,6 +287,8 @@ struct PacketFilter {
     int slot = -1;
     bool shows(const Packet& p) const;
 };
+// The row's type in words: packetTypeName, or "Authority slot 2 (was 1)".
+std::string describeType(const Packet& p);
 // "relay", "slot 3", "conn 2" (a console with no slot yet).
 std::string describeEnd(uint8_t slot, int conn);
 // The recipients in words: "slot 2, 3", "relay".

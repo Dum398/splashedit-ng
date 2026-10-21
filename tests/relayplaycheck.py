@@ -5,7 +5,8 @@
 # then console 1, then each next console once the relay has accepted the one
 # before it (every console is redux's SIO1 client to the relay). All three
 # views must show frames, their status lines must reach "Relay slot S ·
-# Linked" with slots 1, 2 and 3 in console order, none host, 3 players each;
+# Linked" with slots 1, 2 and 3 in console order, console 1 (the room's
+# authority) host and the others not, 3 players each;
 # console 2 must log events console 1 and 3 sent (the relay fanned them out);
 # and the Network view must list Hellos, HelloAcks and Events from slot 1 to
 # slots 2 and 3. Stop (F5) ends every console and the relay.
@@ -110,7 +111,7 @@ for c in lines:
 if len(linked) == N:
     check('slots 1, 2, 3 in console order', [linked[c][0] for c in (1, 2, 3)] == [1, 2, 3], linked)
     check('the engine agrees with the relay', all(linked[c][0] == linked[c][1] for c in linked), linked)
-    check('no console is host', not any(linked[c][2] for c in linked), linked)
+    check('console 1 is host, the others are not', [linked[c][2] for c in (1, 2, 3)] == [True, False, False], linked)
     check('3 players each', all(linked[c][3] == N for c in linked), linked)
 
 shown = [l for l in out.splitlines() if l.startswith('console: play shown ')]

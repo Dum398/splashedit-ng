@@ -176,7 +176,7 @@ for line in lines:
         focused[int(m.group(1))] = bool(m.group(2))
 check('the grid shows 4 consoles', sorted(status) == [1, 2, 3, 4], sorted(status))
 for c in range(1, N + 1):
-    want = 'Relay slot %d · Linked · slot %d · not host · 4 players' % (c, c)
+    want = 'Relay slot %d · Linked · slot %d · %s · 4 players' % (c, c, 'host' if c == 1 else 'not host')
     check('console %d: relay slot %d, 4 players' % (c, c), any(l.startswith(want) for l in status.get(c, [])), status.get(c, [])[-2:])
 check('a click gives console 3 the keyboard', focused.get(3) and not focused.get(1), focused)
 check('the output popup has Output and Network', 'play: output tab network' in lines, [l for l in lines if l.startswith('play: output tab')])

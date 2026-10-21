@@ -1683,7 +1683,7 @@ void testRelayFrames() {
     CHECK(rl::crc16(reinterpret_cast<const uint8_t*>(nine), 9) == 0x29B1);
     // The same frame psnl's encode_frame builds (ng-deps/relay/snapgen.py).
     rl::Avatar a{1, 2, 3, 4, 1};
-    const std::vector<uint8_t> frame = rl::encodeFrame(rl::Snapshot, rl::buildSnapshot({{1, a}}), rl::kHostSlot, 0);
+    const std::vector<uint8_t> frame = rl::encodeFrame(rl::Snapshot, rl::buildSnapshot({{1, a}}), rl::kRelaySlot, 0);
     CHECK(frame == fromHex("a50300000000001800010000000101000001000000020000000300000004000000943e"));
 
     const std::vector<uint8_t> f1 = rl::encodeFrame(rl::Event, {1, 2, 3, 4, 5, 6, 7, 8}, 2, 77);
@@ -1760,7 +1760,9 @@ void testRelayProtobuf() {
 }
 
 // Rooms: join by scene, lowest free slot, re-Hello keeps the slot, leaving
-// and silence free it, and every member hears of each change.
+// and silence free it, and every member hears of each change. The first
+// member is the room's authority (every ack's hostSlot) until it leaves; then
+// the lowest slot left takes over, and a newcomer in a freed lower slot does not.
 void testRelayRooms() {
     rl::Hub h;
     const uint32_t A = 0xAAAA0001, B = 0xBBBB0002;
@@ -1769,20 +1771,22 @@ void testRelayRooms() {
     hubSend(h, c1, helloFrame(A), 0.1);
     auto sent = hubSent(h);
     std::vector<rl::HelloAckPayload> a1 = acksIn(sent[c1]);
-    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].hostSlot == rl::kHostSlot && a1[0].playerCount == 1 &&
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].hostSlot == 1 && a1[0].playerCount == 1 &&
           a1[0].sceneHash == A && a1[0].magic == rl::kMagic && a1[0].protoVersion == rl::kProtoVersion);
-    CHECK(sent[c1].size() == 1 && sent[c1][0].srcSlot == rl::kHostSlot);
+    CHECK(sent[c1].size() == 1 && sent[c1][0].srcSlot == rl::kRelaySlot);
     // A second console in the same scene: slot 2, and console 1 is told there are 2 now.
     hubSend(h, c2, helloFrame(A), 0.2);
     sent = hubSent(h);
     std::vector<rl::HelloAckPayload> a2 = acksIn(sent[c2]);
-    CHECK(a2.size() == 1 && a2[0].yourSlot == 2 && a2[0].playerCount == 2);
+    CHECK(a2.size() == 1 && a2[0].yourSlot == 2 && a2[0].playerCount == 2 && a2[0].hostSlot == 1);
     a1 = acksIn(sent[c1]);
-    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].playerCount == 2);
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].playerCount == 2 && a1[0].hostSlot == 1);
+    CHECK(h.connections().at(c1).isAuthority() && !h.connections().at(c2).isAuthority() && h.connections().at(c2).authority == 1);
     // Another scene: a room of its own, nobody else hears of it.
     hubSend(h, c3, helloFrame(B), 0.3);
     sent = hubSent(h);
-    CHECK(acksIn(sent[c3]).size() == 1 && acksIn(sent[c3])[0].yourSlot == 1 && acksIn(sent[c3])[0].playerCount == 1);
+    CHECK(acksIn(sent[c3]).size() == 1 && acksIn(sent[c3])[0].yourSlot == 1 && acksIn(sent[c3])[0].playerCount == 1 &&
+          acksIn(sent[c3])[0].hostSlot == 1 && h.connections().at(c3).isAuthority());
     CHECK(sent.count(c1) == 0 && sent.count(c2) == 0);
     // Hello again (a scene reload, or a lost ack): same slot, acked again; no change for the others.
     hubSend(h, c2, helloFrame(A, 2), 0.4);
@@ -1800,21 +1804,41 @@ void testRelayRooms() {
     sent = hubSent(h);
     CHECK(acksIn(sent[c4]).size() == 1 && acksIn(sent[c4])[0].yourSlot == 3 && acksIn(sent[c4])[0].playerCount == 3);
     CHECK(acksIn(sent[c1]).size() == 1 && acksIn(sent[c1])[0].playerCount == 3 && acksIn(sent[c2]).size() == 1);
+    CHECK(acksIn(sent[c4])[0].hostSlot == 1 && acksIn(sent[c1])[0].hostSlot == 1);
     hubSend(h, c1, rl::encodeFrame(rl::Bye, {}, 1, 3), 0.7);
     sent = hubSent(h);
     CHECK(h.takeClosed() == std::vector<int>({c1}) && !h.connections().at(c1).open);
     CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && acksIn(sent[c4]).size() == 1 &&
           acksIn(sent[c4])[0].playerCount == 2 && acksIn(sent[c4])[0].yourSlot == 3);
+    // Slot 1 left: authority passes to slot 2, and both who stay are told so.
+    CHECK(acksIn(sent[c2])[0].hostSlot == 2 && acksIn(sent[c4])[0].hostSlot == 2);
+    CHECK(h.connections().at(c2).isAuthority() && h.connections().at(c4).authority == 2 && !h.connections().at(c1).isAuthority());
+    {
+        // The Network view's log has the hand-off: room 1 now has slot 2, after 1, told to 2 and 3.
+        std::vector<const rl::Packet*> rows;
+        for (const rl::Packet& k : h.packets())
+            if (k.handOff()) rows.push_back(&k);
+        CHECK(rows.size() == 3);  // room A's first, room B's first, the hand-off
+        if (rows.size() == 3) {
+            CHECK(rows[0]->authority == 1 && rows[0]->previous == rl::kNoSlot && rl::describeType(*rows[0]) == "Authority slot 1");
+            CHECK(rows[2]->authority == 2 && rows[2]->previous == 1 && rows[2]->from == rl::kRelaySlot && rows[2]->type == 0 &&
+                  rows[2]->to == std::vector<uint8_t>({2, 3}) && rl::describeType(*rows[2]) == "Authority slot 2 (was 1)" &&
+                  rl::PacketFilter{}.shows(*rows[2]));
+        }
+    }
     // The lowest free slot again: 1.
     const int c5 = h.connect(0.8);
     hubSend(h, c5, helloFrame(A), 0.8);
     sent = hubSent(h);
     CHECK(acksIn(sent[c5]).size() == 1 && acksIn(sent[c5])[0].yourSlot == 1 && acksIn(sent[c5])[0].playerCount == 3);
     CHECK(h.connections().at(c5).slot == 1 && h.connections().at(c5).index == c5);
+    // It takes the freed slot 1, not the authority: that stays with slot 2.
+    CHECK(acksIn(sent[c5])[0].hostSlot == 2 && acksIn(sent[c2])[0].hostSlot == 2 && !h.connections().at(c5).isAuthority());
     // A socket that closes leaves too.
     h.disconnect(c5, 0.9);
     sent = hubSent(h);
-    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && h.takeClosed().empty());
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && acksIn(sent[c2])[0].hostSlot == 2 &&
+          h.takeClosed().empty());
     // 20 s of silence ends a member; one that spoke stays.
     hubSend(h, c2, rl::encodeFrame(rl::Ping, std::vector<uint8_t>(12, 0), 2, 4), 15.0);
     h.tick(21.0);
@@ -1854,7 +1878,7 @@ void testRelayReliable() {
     auto sent = hubSent(h);
     CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::EventAck && sent[c[0]][0].seq == 5 && sent[c[0]][0].payload.empty());
     for (int i : {1, 2})
-        CHECK(sent[c[i]].size() == 1 && sent[c[i]][0].type == rl::Event && sent[c[i]][0].srcSlot == rl::kHostSlot &&
+        CHECK(sent[c[i]].size() == 1 && sent[c[i]][0].type == rl::Event && sent[c[i]][0].srcSlot == rl::kRelaySlot &&
               sent[c[i]][0].payload == std::vector<uint8_t>(ev.begin(), ev.begin() + 8));
     const uint16_t seqTo2 = sent[c[1]][0].seq;
     // The retransmission: acked again, not delivered again.
@@ -1898,7 +1922,7 @@ void testRelayReliable() {
     CHECK(events.size() == 4);
     if (events.size() == 4) {
         CHECK(events[0]->from == 1 && events[0]->to == std::vector<uint8_t>({2, 3}) && events[0]->seq == 5 && events[0]->size == 21);
-        CHECK(events[1]->to == std::vector<uint8_t>({rl::kHostSlot}));
+        CHECK(events[1]->to == std::vector<uint8_t>({rl::kRelaySlot}));
         CHECK(rl::describeTo(events[0]->to) == "slots 2, 3" && rl::describeTo(events[1]->to) == "relay");
     }
     CHECK(pings.size() == 1 && pings[0]->count == 2 && pings[0]->from == 2);
@@ -1971,7 +1995,7 @@ void testRelaySnapshot() {
     auto sent = hubSent(h);
     const std::vector<uint8_t> want = rl::buildSnapshot({{1, rl::Avatar{5000, -20, 30, 1000, 1}}, {2, rl::Avatar{}}});
     for (int c : {a, b})
-        CHECK(sent[c].size() == 1 && sent[c][0].type == rl::Snapshot && sent[c][0].seq == 0 && sent[c][0].srcSlot == rl::kHostSlot &&
+        CHECK(sent[c].size() == 1 && sent[c][0].type == rl::Snapshot && sent[c][0].seq == 0 && sent[c][0].srcSlot == rl::kRelaySlot &&
               sent[c][0].payload == want);
     h.tick(1.01);
     CHECK(hubSent(h).empty());

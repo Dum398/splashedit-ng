@@ -59,6 +59,7 @@
 #include "blend.hh"
 #include "blocks.hh"
 #include "luacompile.hh"
+#include "luascan.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
@@ -1067,6 +1068,80 @@ void testScriptWithoutMesh() {
     CHECK(without.ok());
     CHECK(b.find("scene-wide game logic") == std::string::npos);
     CHECK(with.stats.triangles == without.stats.triangles);
+}
+
+// The bundled engines run precompiled Lua and have no compiler: the scan
+// finds the globals that need one (or a file system), and nothing else.
+void testRuntimeLuaScan() {
+    auto names = [](const std::string& src) {
+        std::vector<std::string> out;
+        for (const splash::RuntimeLuaUse& u : splash::runtimeLuaUses(src)) out.push_back(u.name + ":" + std::to_string(u.line));
+        return out;
+    };
+    using V = std::vector<std::string>;
+    CHECK(names("local f = loadstring('return 1')\n") == V({"loadstring:1"}));
+    CHECK(names("-- top\n\nload(\"x = 1\")()\ndofile 'a.lua'\nloadfile[[b]]\n") == V({"load:3", "dofile:4", "loadfile:5"}));
+    CHECK(names("pcall(load, s)\nlocal ok = _G.loadstring\nlocal d = string.dump(f)\n") ==
+          V({"load:1", "loadstring:2", "string.dump:3"}));
+    // Not uses: strings, comments, fields, methods, table keys.
+    CHECK(names("print('load(x)', \"dofile\")\n-- loadstring(s)\n--[==[ load(s)\n]==]\nlocal s = [[load(s)]]\n").empty());
+    CHECK(names("Scene.Load(1)\nMemCard.load(0)\nobj:load()\nlocal t = {load = 1, dofile = 2}\nlocal x = t.load\n").empty());
+    CHECK(names("local mystring = 1\nlocal d = self.string.dump\n").empty());
+    // The script's own load: declared, a parameter, or assigned.
+    CHECK(names("local function load(n) end\nload(1)\n").empty());
+    CHECK(names("local load = function() end\nload()\n").empty());
+    CHECK(names("local a, loadfile = 1, 2\nloadfile()\n").empty());
+    CHECK(names("function f(x, dofile) dofile() end\n").empty());
+    CHECK(names("function load() end\nload()\n").empty());
+    CHECK(names("load = print\nload('hi')\n").empty());
+    // Lines count through long strings and escaped newlines.
+    CHECK(names("local s = [[\n\n]]\nlocal t = 'a\\\nb'\nloadstring(s)\n") == V({"loadstring:6"}));
+    CHECK(names("x = 1..2\nload(s)\n") == V({"load:2"}));
+
+    CHECK(splash::runtimeLuaWarning("scripts/a.lua", {}).empty());
+    const std::string w = splash::runtimeLuaWarning("scripts/a.lua", splash::runtimeLuaUses("loadstring(s)\nloadstring(t)\ndofile('x')\n"));
+    CHECK(w.rfind("scripts/a.lua: loadstring on line 1, dofile on line 3. ", 0) == 0);
+    CHECK(w.find("line 2") == std::string::npos);
+    CHECK(w.find("The engine runs precompiled scripts and has no Lua compiler for text at run time") != std::string::npos);
+    CHECK(w.find("loadstring of Lua text fails with \"parser not loaded\"") != std::string::npos);
+    CHECK(w.find("dofile does not exist on the PS1") != std::string::npos);
+    CHECK(w.find("Write that code in a script as a function and call it") != std::string::npos);
+    const std::string both = splash::runtimeLuaWarning("b.lua", splash::runtimeLuaUses("load(a) loadstring(b)"));
+    CHECK(both.find("load and loadstring of Lua text fail with") != std::string::npos);
+}
+
+// The scan reaches Problems: the live export (what the Problems popup lists)
+// warns about a script that loads Lua text, and not about one that does not.
+void testRuntimeLuaProblem() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "runtime_lua_problem";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    std::ofstream(dir / "scripts/door.lua", std::ios::binary) << "function onCreate(self)\n  local f = loadstring(\"return 1\")\nend\n";
+    std::ofstream(dir / "scripts/lamp.lua", std::ios::binary) << "function onCreate(self)\n  print('loadstring')\nend\n";
+    splash::Scene sc;
+    splash::Object door, lamp;
+    door.name = "Door";
+    door.script = splash::ScriptComponent{"scripts/door.lua", {}};
+    lamp.name = "Lamp";
+    lamp.script = splash::ScriptComponent{"scripts/lamp.lua", {}};
+    sc.objects = {door, lamp};
+    editor::Document d;
+    d.reset(sc, dir, "s");
+    editor::LiveExport live(0.0);
+    live.update(d, 1.0);
+    live.update(d, 2.0);
+    live.wait();
+    CHECK(live.result().has_value());
+    if (!live.result()) return;
+    size_t door_ = 0, lamp_ = 0;
+    for (const std::string& w : live.result()->warnings) {
+        if (w.rfind("scripts/door.lua: loadstring on line 2. The engine runs precompiled scripts", 0) == 0) door_++;
+        if (w.find("scripts/lamp.lua") != std::string::npos) lamp_++;
+    }
+    CHECK(door_ == 1 && lamp_ == 0);
+    fs::remove_all(dir, ec);
 }
 
 // LiveExport: waits for edits to settle, then exports the current revision.
@@ -13897,6 +13972,8 @@ int main(int argc, char** argv) {
     testOrderingTableReach();
     testObjectRamBudget();
     testScriptWithoutMesh();
+    testRuntimeLuaScan();
+    testRuntimeLuaProblem();
     testWorldStreamPlan();
     testWorldStreamExport();
     testStreamFarPopIn();

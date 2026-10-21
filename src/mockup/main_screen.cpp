@@ -3544,10 +3544,12 @@ static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn,
 }
 
 // A clickable marker for an object without geometry. Returns true when clicked.
-static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col) {
+static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col,
+                      const std::string& name = {}) {
     ImVec2 c;
     if (!view.project(p, mn, sz, &c)) return false;
     if (!ImRect(mn, mn + sz).Contains(c)) return false;
+    if (!name.empty()) nameRect("vp.marker." + name, ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)));
     Hit h = interact("marker", ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)));
     dl->AddCircleFilled(c, 13, rgb(0x0e1014, 200), 24);
     // The ring brightens on hover.
@@ -5364,7 +5366,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
         if (!ic) continue;
         ImGui::PushID((int)i);
-        if (sceneIcon(dl, view, mn, sz, pos, ic, col) && i < paths.size()) doc.select(pickTarget(doc, paths[i]));
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name) && i < paths.size()) doc.select(pickTarget(doc, paths[i]));
         ImGui::PopID();
     }
     if (previewing) previewCamera(dl, view, mn, sz, view.preview());

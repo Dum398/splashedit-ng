@@ -257,15 +257,19 @@ std::vector<uint8_t> packHelloAck(const HelloAckPayload& a) {
 
 static constexpr int64_t kFp12TwoPi = 25736;  // one turn in 4.12 fixed point
 
-std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> members) {
+static int64_t normalYaw(int32_t yaw) { return ((int64_t(yaw) % kFp12TwoPi) + kFp12TwoPi) % kFp12TwoPi; }
+
+std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> members, std::vector<WorldObject> objects) {
     std::stable_sort(members.begin(), members.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<uint8_t> b;
-    if (members.size() >= 2) {  // compact pays for itself from 2 avatars
+    const size_t records = members.size() + objects.size();
+    if (records >= 2) {  // compact pays for itself from 2 records
         int64_t lo[3], hi[3];
         for (int k = 0; k < 3; ++k) lo[k] = hi[k] = 0;
-        for (size_t i = 0; i < members.size(); ++i) {
-            const Avatar& a = members[i].second;
-            const int64_t v[3] = {a.px, a.py, a.pz};
+        for (size_t i = 0; i < records; ++i) {
+            const int64_t v[3] = {i < members.size() ? members[i].second.px : objects[i - members.size()].px,
+                                  i < members.size() ? members[i].second.py : objects[i - members.size()].py,
+                                  i < members.size() ? members[i].second.pz : objects[i - members.size()].pz};
             for (int k = 0; k < 3; ++k) {
                 if (i == 0 || v[k] < lo[k]) lo[k] = v[k];
                 if (i == 0 || v[k] > hi[k]) hi[k] = v[k];
@@ -279,8 +283,11 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
                 break;
             }
         if (shift >= 0) {
+            // As many objects as fit one frame: 16 bytes of header and origin, 10 an avatar, 11 an object.
+            const size_t room = (kMaxPayload - 16 - 10 * members.size()) / 11;
+            if (objects.size() > room) objects.resize(room);
             b.push_back(uint8_t(members.size()));
-            b.push_back(0);
+            b.push_back(uint8_t(objects.size()));
             b.push_back(1);  // SNAP_FORMAT_COMPACT
             b.push_back(uint8_t(shift));
             for (int k = 0; k < 3; ++k) put32(b, uint32_t(int32_t(lo[k])));
@@ -290,13 +297,23 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
                 put16(b, uint16_t((int64_t(a.px) - lo[0]) >> shift));
                 put16(b, uint16_t((int64_t(a.py) - lo[1]) >> shift));
                 put16(b, uint16_t((int64_t(a.pz) - lo[2]) >> shift));
-                put16(b, uint16_t(((int64_t(a.yaw) % kFp12TwoPi) + kFp12TwoPi) % kFp12TwoPi));
+                put16(b, uint16_t(normalYaw(a.yaw)));
+            }
+            for (const WorldObject& o : objects) {
+                put16(b, o.actorId);
+                b.push_back(o.flags);
+                put16(b, uint16_t((int64_t(o.px) - lo[0]) >> shift));
+                put16(b, uint16_t((int64_t(o.py) - lo[1]) >> shift));
+                put16(b, uint16_t((int64_t(o.pz) - lo[2]) >> shift));
+                put16(b, uint16_t(normalYaw(o.yaw)));
             }
             return b;
         }
     }
+    const size_t room = (kMaxPayload - 4) / 20 - std::min(members.size(), (kMaxPayload - 4) / 20);
+    if (objects.size() > room) objects.resize(room);
     b.push_back(uint8_t(members.size()));
-    b.push_back(0);
+    b.push_back(uint8_t(objects.size()));
     b.push_back(0);  // SNAP_FORMAT_LEGACY
     b.push_back(0);
     for (const auto& [slot, a] : members) {
@@ -307,6 +324,15 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
         put32(b, uint32_t(a.py));
         put32(b, uint32_t(a.pz));
         put32(b, uint32_t(a.yaw));
+    }
+    for (const WorldObject& o : objects) {
+        put16(b, o.actorId);
+        b.push_back(o.flags);
+        b.push_back(0);
+        put32(b, uint32_t(o.px));
+        put32(b, uint32_t(o.py));
+        put32(b, uint32_t(o.pz));
+        put32(b, uint32_t(o.yaw));
     }
     return b;
 }
@@ -465,6 +491,7 @@ void Hub::leave(Session& s, double now) {
     c.room = 0;
     c.joined = false;
     c.authority = kNoSlot;
+    s.objects.clear();
     if (!r) return;
     r->members.erase(c.slot);
     if (r->members.empty()) {
@@ -526,6 +553,7 @@ void Hub::onHello(Session& s, const Frame& f, double now) {
         // Again: a scene change (or a lost ack). Keep the slot, re-ack.
         const bool moved = c.sceneHash != h->sceneHash;
         c.sceneHash = h->sceneHash;
+        if (moved) s.objects.clear();
         s.rxSeq.reset();
         if (Room* r = room(c.room)) {
             bool all = true;
@@ -577,9 +605,12 @@ void Hub::dispatch(Session& s, const Frame& f, double now) {
         case Hello: onHello(s, f, now); break;
         case Snapshot: {
             log(now, c.slot, s.id, Snapshot, f.seq, size, {kRelaySlot});
-            // The sender's own legacy record is its avatar; anything else in it is ignored.
+            // psxsplash sends legacy records: its own avatar, then, from the
+            // host, its world objects. The sender's own avatar record is kept,
+            // and the world objects only from the room's authority; anything
+            // else in it is ignored.
             if (!c.room || f.payload.size() < 4) break;
-            const size_t count = f.payload[0];
+            const size_t count = f.payload[0], objectCount = f.payload[1];
             size_t off = 4;
             for (size_t i = 0; i < count && off + 20 <= f.payload.size(); ++i, off += 20) {
                 const uint8_t* r = f.payload.data() + off;
@@ -589,6 +620,19 @@ void Hub::dispatch(Session& s, const Frame& f, double now) {
                 s.avatar.py = int32_t(get32(r + 8));
                 s.avatar.pz = int32_t(get32(r + 12));
                 s.avatar.yaw = int32_t(get32(r + 16));
+            }
+            if (!c.isAuthority() || f.payload[2] != 0) break;  // legacy only: the format psxsplash sends
+            s.objects.clear();
+            for (size_t i = 0; i < objectCount && off + 20 <= f.payload.size(); ++i, off += 20) {
+                const uint8_t* r = f.payload.data() + off;
+                WorldObject o;
+                o.actorId = get16(r);
+                o.flags = r[2];
+                o.px = int32_t(get32(r + 4));
+                o.py = int32_t(get32(r + 8));
+                o.pz = int32_t(get32(r + 12));
+                o.yaw = int32_t(get32(r + 16));
+                s.objects.push_back(o);
             }
             break;
         }
@@ -628,13 +672,23 @@ void Hub::tick(double now) {
         for (const auto& [hash, members] : groups) {
             std::vector<std::pair<uint8_t, Avatar>> avatars;
             std::vector<uint8_t> to;
+            const std::vector<WorldObject>* objects = nullptr;  // the authority's, when it is in this scene group
             for (const auto& [slot, conn] : members) {
                 avatars.push_back({slot, m_sessions.at(conn).avatar});
                 to.push_back(slot);
+                if (slot == r.authority && !m_sessions.at(conn).objects.empty()) objects = &m_sessions.at(conn).objects;
             }
             const std::vector<uint8_t> frame = encodeFrame(Snapshot, buildSnapshot(avatars), kRelaySlot, 0);
-            for (const auto& [slot, conn] : members) sendRaw(m_sessions.at(conn), frame);
-            log(now, kRelaySlot, r.id, Snapshot, 0, frame.size() * members.size(), to);
+            // The others get the authority's world objects too; the authority has them.
+            const std::vector<uint8_t> withObjects =
+                objects ? encodeFrame(Snapshot, buildSnapshot(avatars, *objects), kRelaySlot, 0) : frame;
+            size_t bytes = 0;
+            for (const auto& [slot, conn] : members) {
+                const std::vector<uint8_t>& f = slot == r.authority ? frame : withObjects;
+                sendRaw(m_sessions.at(conn), f);
+                bytes += f.size();
+            }
+            log(now, kRelaySlot, r.id, Snapshot, 0, bytes, to);
         }
     }
 }

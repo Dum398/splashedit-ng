@@ -10,7 +10,9 @@
 // authority: its first member, then, when the authority leaves, the lowest
 // slot still in it. The HelloAck's hostSlot names it, so that console is
 // psxsplash's host (yourSlot == hostSlot) and the rest are clients; a later
-// ack hands authority over. psxsplash needs no change for any of it.
+// ack hands authority over. Only the authority's world objects (the
+// Net.RegisterActor actors in its snapshots) go on to the others, in the
+// relay's own snapshots. psxsplash needs no change for any of it.
 //
 // The pure parts (CRC, frames, redux's protobuf wire, rooms and the snapshot)
 // have no sockets and are tested on their own; Relay runs them on a thread
@@ -130,11 +132,22 @@ struct Avatar {
     int32_t px = 0, py = 0, pz = 0, yaw = 0;
     uint8_t flags = 0x01;  // SNAP_FLAG_ACTIVE
 };
-// One snapshot for `members` (slot, avatar), byte for byte what psnl builds:
-// sorted by slot; compact format 1 (an origin and 16-bit offsets) from 2
-// avatars when the spread fits in 16 bits at some shift up to 15, else the
-// 20-byte legacy records.
-std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> members);
+// A world object of the authority's snapshot: an actor its scene registered
+// with Net.RegisterActor.
+struct WorldObject {
+    uint16_t actorId = 0;
+    int32_t px = 0, py = 0, pz = 0, yaw = 0;
+    uint8_t flags = 0x01;
+};
+// One snapshot for `members` (slot, avatar) and `objects`. With no objects it
+// is byte for byte what psnl builds: sorted by slot; compact format 1 (an
+// origin and 16-bit offsets) from 2 avatars when the spread fits in 16 bits
+// at some shift up to 15, else the 20-byte legacy records. Objects follow
+// the avatars as psxsplash reads them (networkmanager.cpp
+// applyPendingSnapshot): legacy [u16 actorId][u8 flags][u8 0][i32 x y z yaw],
+// compact [u16 actorId][u8 flags][u16 dx dy dz yaw], counted in the origin and
+// spread, compact from 2 records in all. Objects past kMaxPayload are left out.
+std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> members, std::vector<WorldObject> objects = {});
 
 // ---- the relay's rules, without sockets ----
 
@@ -215,6 +228,7 @@ class Hub {
         std::optional<uint16_t> rxSeq;
         uint16_t txSeq = 1;
         Avatar avatar;
+        std::vector<WorldObject> objects;  // its last snapshot's, while it is its room's authority
         std::vector<uint8_t> out;
     };
     void dispatch(Session& s, const Frame& f, double now);

@@ -47,6 +47,10 @@ class Ps1View {
         if (!(p == m_preview)) m_preview = p, m_previewDirty = true;
     }
     const editor::Preview& preview() const { return m_preview; }
+    // How far psxsplash draws, in GTE depth units (the ordering table size of
+    // the last export), 0 = not known. With the scene's edge fade on, the view
+    // fades the last eighth of it to the background as psxsplash does.
+    void setDrawDistance(uint32_t gteDepth) { m_drawDistance = gteDepth; }
     // The scene as drawn by the last render(): the posed copy while a preview
     // is on, else the document's. Null without a document.
     const splash::Scene* drawnScene() const;
@@ -125,6 +129,7 @@ class Ps1View {
     unsigned textureFor(const std::string& projectPath);  // cached; white/fallback on empty/error
 
     const editor::Document* m_doc = nullptr;
+    uint32_t m_drawDistance = 0;
     unsigned m_builtRevision = 0;
     editor::Preview m_preview;
     bool m_previewDirty = false;

@@ -1,8 +1,9 @@
 # Fog mask CLUTs. A fogged scene with a 4bpp, an 8bpp and a 16bpp cutout quad
 # exports one 16-entry and one 256-entry mask CLUT ({0x0000, 0xFFFF, ...}) into
 # the .vram, after the texture CLUTs and clear of them, and writes their CLUT
-# words into the header (offsets 58 and 66). The same scene with fog off is the
-# control: both words 0 and no extra CLUT.
+# words into the header (offsets 58 and 66). The edge fade draws the same fade
+# pass, so fog off with the edge fade on (the default) exports them too. Fog
+# and the edge fade off is the control: both words 0 and no extra CLUT.
 # usage: python3 fogmaskcheck.py <splashpack-cli>
 import json, os, struct, subprocess, sys, tempfile, zlib
 
@@ -23,7 +24,7 @@ def write_png(path, w, h, px):
                            chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
 
 
-def export(fog):
+def export(fog, edge=None):
     root = tempfile.mkdtemp()
     os.makedirs(os.path.join(root, 'meshes'))
     os.makedirs(os.path.join(root, 'textures'))
@@ -42,10 +43,11 @@ def export(fog):
              'settings': {'gteScaling': 100.0, 'sceneType': 'exterior', 'networkId': '', 'script': None,
                           'fog': {'enabled': fog, 'color': [0.5, 0.5, 0.6], 'density': 5}},
              'objects': objs}
+    if edge is not None: scene['settings']['edgeFade'] = edge
     json.dump(scene, open(os.path.join(root, 'fog.scene'), 'w'))
     out = os.path.join(root, 'out.splashpack')
     r = subprocess.run([cli, 'export', os.path.join(root, 'fog.scene'), '-o', out], capture_output=True, text=True)
-    check('export (fog %s) rc 0' % fog, r.returncode == 0, r.stdout + r.stderr)
+    check('export (fog %s, edge fade %s) rc 0' % (fog, edge), r.returncode == 0, r.stdout + r.stderr)
     pack = open(out, 'rb').read()
     vram = open(out[:-len('.splashpack')] + '.vram', 'rb').read()
     return pack, vram
@@ -84,8 +86,15 @@ check('fog on: no two CLUTs overlap', not overlap, overlap)
 
 pack, vram = export(False)
 headerCluts, recs = cluts(pack, vram)
-check('fog off: header words 0', struct.unpack_from('<H', pack, 58)[0] == 0 and struct.unpack_from('<H', pack, 66)[0] == 0)
-check('fog off: no extra CLUT', len(recs) == headerCluts, (len(recs), headerCluts))
+check('fog off, edge fade on: both header words set',
+      struct.unpack_from('<H', pack, 58)[0] != 0 and struct.unpack_from('<H', pack, 66)[0] != 0)
+check('fog off, edge fade on: .vram has the header CLUTs plus 2', len(recs) == headerCluts + 2, (len(recs), headerCluts))
+
+pack, vram = export(False, False)
+headerCluts, recs = cluts(pack, vram)
+check('fog and edge fade off: header words 0',
+      struct.unpack_from('<H', pack, 58)[0] == 0 and struct.unpack_from('<H', pack, 66)[0] == 0)
+check('fog and edge fade off: no extra CLUT', len(recs) == headerCluts, (len(recs), headerCluts))
 
 print('%d failed' % fails if fails else 'all checks passed')
 sys.exit(1 if fails else 0)

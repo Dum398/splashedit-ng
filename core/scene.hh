@@ -282,6 +282,11 @@ struct SceneSettings {
     float gteScaling = 100.f;
     SceneType sceneType = SceneType::Exterior;
     FogSettings fog;
+    // psxsplash fades everything to the background colour over the last
+    // eighth of the distance it draws to (the ordering table, or the fog wall
+    // when nearer), so nothing pops in at the edge. Saved only when off: a
+    // scene without the key reads as on.
+    bool edgeFade = true;
     std::string networkId;
     std::string script;  // scene Lua file, empty = none
     // psxsplash render buffers: ordering table buckets and bump allocator

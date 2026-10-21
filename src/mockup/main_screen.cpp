@@ -6642,8 +6642,8 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         // psxsplash clears the screen to this colour every frame (renderer.cpp
         // SetFog), fog or not; the pack keeps it in the fog block.
         const ImRect colRow = row("lfogcol", "Background",
-                                  "The screen clears to this colour every frame, fog on or off. With fog on, distant "
-                                  "triangles also fade to it. Click to pick one.");
+                                  "The screen clears to this colour every frame, fog on or off. With fog or the edge fade "
+                                  "on, distant triangles also fade to it. Click to pick one.");
         nameRect("scene.fogcol", colRow);
         const ColorFieldHit fogHit = colorField("fogcol", colRow, set.fog.color, "scene.fogcol");
         if (fogHit.clicked) ImGui::OpenPopup("##fogcolpick");
@@ -6683,6 +6683,16 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
         if (fe.done) doc.endMerge();
         if (!set.fog.enabled) caption("Off: density is kept for when fog is on.", color::textFaint);
+        // psxsplash renderer.cpp (fade.hh): the last eighth of the way to the
+        // nearer of the ordering table end and the fog wall fades to the
+        // background, so nothing appears all at once at the edge.
+        v = row("ledgefade", "Edge fade",
+                "Distant objects fade in from the background colour as they come within drawing distance, instead "
+                "of appearing all at once. Works with fog on or off.");
+        const ImRect edgeSw(ImVec2(v.Min.x, v.GetCenter().y - 8), ImVec2(v.Min.x + 30, v.GetCenter().y + 8));
+        nameRect("scene.edgefade", edgeSw);
+        if (toggle("edgefadeon", edgeSw, set.edgeFade))
+            doc.editSettings([](splash::SceneSettings& s) { s.edgeFade = !s.edgeFade; });
         const ImRect gteRow = row("lgte", "GTE scaling",
                                   "Editor units per PS1 unit. Positions export as value / scaling in 16-bit 4.12 fixed point, so "
                                   "everything must sit within 8 x scaling of the origin. Smaller is finer, larger reaches farther.");
@@ -6720,10 +6730,11 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         nameRect("scene.culling", ImRect(ImVec2(x0, cullTop - 2), ImVec2(x1, y)));
         if (namedRectsOn()) {
             // Scripted tests: the section's values when they change.
-            char now[128];
-            std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s culling %s", set.fog.enabled ? 1 : 0,
-                          set.fog.density, colourHex(set.fog.color).c_str(), double(set.gteScaling), interior ? "interior" : "exterior",
-                          roomCount ? ("rooms " + std::to_string(roomCount)).c_str() : "frustum");
+            char now[160];
+            std::snprintf(now, sizeof now, "scene: fog %d density %d colour %s gte %g type %s culling %s edgefade %d",
+                          set.fog.enabled ? 1 : 0, set.fog.density, colourHex(set.fog.color).c_str(), double(set.gteScaling),
+                          interior ? "interior" : "exterior", roomCount ? ("rooms " + std::to_string(roomCount)).c_str() : "frustum",
+                          set.edgeFade ? 1 : 0);
             static std::string reported;
             if (reported != now) {
                 reported = now;
@@ -11039,6 +11050,10 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         }
     }
     view.setPreview(tl ? st.timeline.preview(doc) : editor::Preview{});
+    {
+        const std::optional<splash::ExportResult>& live = st.live.result();
+        view.setDrawDistance(live && live->ok() ? live->stats.orderingTableSize : 0);
+    }
     if (st.scripts.sceneShown()) {
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;

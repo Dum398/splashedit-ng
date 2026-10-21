@@ -244,6 +244,80 @@ void testSceneRendering() {
     CHECK(d.undo() && !ds.fog.enabled);
 }
 
+// The edge fade switch: on for a new scene and for a scene saved before it
+// existed (no key), saved only when off, one undo step, and written to the
+// splashpack header byte after the fog density (psxsplash renderFlags bit 0).
+// Its fade pass needs the same bump room as fog's.
+void testSceneEdgeFade() {
+    namespace fs = std::filesystem;
+    CHECK(splash::SceneSettings{}.edgeFade);
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    {
+        std::ifstream in(project / "courtyard.scene", std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("edgeFade") == std::string::npos);
+    }
+    CHECK(splash::loadScene(project / "courtyard.scene").settings.edgeFade);
+
+    const fs::path dir = g_outDir / "edgefade";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    editor::Document d;
+    d.reset(sample(), dir, "edge");
+    CHECK(!d.save());
+    CHECK(slurp(dir / "edge.scene").find("edgeFade") == std::string::npos);
+    d.editSettings([](splash::SceneSettings& s) { s.edgeFade = !s.edgeFade; });
+    CHECK(!d.scene().settings.edgeFade && d.historySize() == 1);
+    CHECK(!d.save());
+    CHECK(slurp(dir / "edge.scene").find("\"edgeFade\": false") != std::string::npos);
+    editor::Document r;
+    CHECK(!r.load(dir, "edge.scene"));
+    CHECK(!r.scene().settings.edgeFade);
+    CHECK(d.undo() && d.scene().settings.edgeFade);
+
+    // An explicit true reads as on and is not kept as an unknown key.
+    splash::Scene s = splash::loadScene(project / "courtyard.scene");
+    s.settings.edgeFade = false;
+    splash::saveScene(s, dir / "off.scene");
+    {
+        std::string text = slurp(dir / "off.scene");
+        const size_t at = text.find("\"edgeFade\": false");
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) text.replace(at, std::strlen("\"edgeFade\": false"), "\"edgeFade\": true");
+        std::ofstream(dir / "on.scene", std::ios::binary) << text;
+    }
+    splash::Scene on = splash::loadScene(dir / "on.scene");
+    CHECK(on.settings.edgeFade && on.settings.extra.empty());
+    splash::saveScene(on, dir / "on2.scene");
+    CHECK(slurp(dir / "on2.scene").find("edgeFade") == std::string::npos);
+
+    // The pack: header byte 77, the fog density at 76 before it.
+    auto pack = [&](bool edge, bool fog, splash::ExportResult& res) {
+        splash::Scene sc = splash::loadScene(project / "courtyard.scene");
+        sc.settings.edgeFade = edge;
+        sc.settings.fog.enabled = fog;
+        sc.settings.fog.density = 7;
+        res = splash::exportSplashpack(sc, project, dir / "scene.splashpack");
+        return slurp(dir / "scene.splashpack");
+    };
+    splash::ExportResult a, b, c, e;
+    const std::string onPack = pack(true, false, a), offPack = pack(false, false, b);
+    CHECK(a.ok() && b.ok() && onPack.size() > 78 && offPack.size() > 78);
+    if (onPack.size() > 78 && offPack.size() > 78) {
+        CHECK(uint8_t(onPack[76]) == 7 && uint8_t(offPack[76]) == 7);
+        CHECK(uint8_t(onPack[77]) == splash::kRenderFlagEdgeFade && uint8_t(offPack[77]) == 0);
+    }
+    CHECK(a.stats.bumpAllocatorNeed > b.stats.bumpAllocatorNeed);
+    pack(true, true, c);
+    pack(false, true, e);
+    CHECK(c.ok() && e.ok() && c.stats.bumpAllocatorNeed == e.stats.bumpAllocatorNeed);
+    CHECK(c.stats.bumpAllocatorNeed == a.stats.bumpAllocatorNeed);
+}
+
 // The Memory card section's helpers: the filename preview, each problem's
 // fix, and the icon decoded through the export's shared palette.
 void testMemCard() {
@@ -4979,6 +5053,7 @@ void testStreamFarPopIn() {
     splash::Scene scene = splash::loadScene(project / "courtyard.scene");
     scene.settings.streamWorld = true;
     scene.settings.fog.enabled = false;
+    scene.settings.edgeFade = false;  // the edge fade alone also removes the warning: below
     splash::ExportOptions dry;
     dry.dryRun = true;
     const fs::path out = g_outDir / "farpop" / "scene.splashpack";
@@ -5004,6 +5079,13 @@ void testStreamFarPopIn() {
         CHECK(w->body.find("density 3 fades it out by 162.8 m") != std::string::npos);
         CHECK(std::any_of(walk.warnings.begin(), walk.warnings.end(),
                           [](const std::string& s) { return s.find("Far scenery pops in. ") != std::string::npos; }));
+    }
+    {
+        // With the edge fade on the edge is no longer hard: no warning.
+        splash::Scene faded = scene;
+        faded.settings.edgeFade = true;
+        splash::ExportResult r = splash::exportSplashpack(faded, project, out, dry);
+        CHECK(r.ok() && !popWarning(r));
     }
 
     // The fix: fog on at the density the warning names.
@@ -13880,6 +13962,7 @@ int main(int argc, char** argv) {
     testMerge();
     testSettings();
     testSceneRendering();
+    testSceneEdgeFade();
     testRenderPeak();
     testRenderLost();
     testMemCard();

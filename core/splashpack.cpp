@@ -753,9 +753,10 @@ void planStreaming(const Scene& scene, std::vector<ExpObject>& exporters, std::v
         warn(StreamProblem::TooManyNear, "Far scenery may appear late",
              "Up to " + std::to_string(plan.slotsWanted - 1) + " regions are near the camera at once, but psxsplash keeps " +
                  std::to_string(stream::kMaxSlots) + ". A shorter draw distance needs fewer.");
-    // Without fog the draw distance is a hard edge: scenery past it is not
-    // drawn at all, and appears whole as the camera comes within reach.
-    if (!(scene.settings.fog.enabled && scene.settings.fog.density > 0)) {
+    // Without fog or the edge fade the draw distance is a hard edge: scenery
+    // past it is not drawn at all, and appears whole as the camera comes
+    // within reach. The edge fade brings it in from the background colour.
+    if (!scene.settings.edgeFade && !(scene.settings.fog.enabled && scene.settings.fog.density > 0)) {
         stream::Box w = plan.regions.front().bounds;
         for (const stream::Region& r : plan.regions)
             w = {std::min(w.minX, r.bounds.minX), std::min(w.minZ, r.bounds.minZ), std::max(w.maxX, r.bounds.maxX),
@@ -1516,7 +1517,8 @@ static uint32_t orderingTableNeed(const Scene& scene, const std::vector<ExpObjec
 // camera), each at the costliest fragment size.
 static uint32_t bumpAllocatorNeed(const Scene& scene, const std::vector<ExpObject>& objs, const std::vector<bool>& streamed,
                                   uint64_t streamTris, const std::vector<UICanvas>& canvases) {
-    const bool fog = scene.settings.fog.enabled;
+    // The edge fade draws the same second fragment as fog, fog on or off.
+    const bool fog = scene.settings.fog.enabled || scene.settings.edgeFade;
     uint64_t n = kFragTPage + kNearPlaneAllowance;
     for (size_t i = 0; i < objs.size(); i++) {
         if (streamed[i]) continue;
@@ -2197,10 +2199,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         for (PsxTexture* t : cv)
             if (t) all.push_back(t);
     for (PsxTexture* t : spriteTextures) all.push_back(t);
-    // With fog on, psxsplash draws the fog over a 4bpp or 8bpp cutout texture
-    // through a mask CLUT, so the texture's holes get no fog.
+    // With fog or the edge fade on, psxsplash draws the fade over a 4bpp or
+    // 8bpp cutout texture through a mask CLUT, so the texture's holes get none.
     bool fogMask4 = false, fogMask8 = false;
-    if (scene.settings.fog.enabled)
+    if (scene.settings.fog.enabled || scene.settings.edgeFade)
         for (ExpObject& e : exporters)
             for (const PsxTexture* t : e.textures) {
                 if (!t || !t->cutout || !t->hasPalette) continue;
@@ -2624,7 +2626,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     w.u8(fog.enabled ? 1 : 0);
     for (float c : fog.color) w.u8(uint8_t(clampv(roundToInt(c * 255.f), 0, 255)));
     w.u8(uint8_t(clampv(fog.density, 1, 10)));
-    w.u8(0);
+    w.u8(scene.settings.edgeFade ? kRenderFlagEdgeFade : 0);  // render flags, was padding
     w.u16(uint16_t(rooms.rooms.size()));  // real rooms + the catch-all, or 0
     w.u16(uint16_t(rooms.portals.size()));
     w.u16(uint16_t(rooms.refs.size()));

@@ -685,6 +685,14 @@ Room. Controls are clicked by name. Needs a display.
 
     python3 scenefogcheck.py <splashedit>
 
+`edgefadecheck.py` drives the Rendering section's Edge fade switch (`@scene.edgefade`) on copies of
+the courtyard example, whose scene file has no `edgeFade` key and so reads as on. Ctrl+S alone keeps
+no key; one click saves `"edgeFade": false` and the inspector's `scene: fog ...` line ends `edgefade
+0`; a second click removes the key again; one Ctrl+Z takes the click back; a scene saved with it off
+opens with it off and a click turns it on. Needs a display.
+
+    python3 edgefadecheck.py <splashedit>
+
 `materialscheck.py` drives the mesh inspector on copies of the courtyard example. A one-material
 Crate keeps its Texture row (`obj.texture`), with a Colour row (`obj.matcol.0`) only when it has no
 texture. Given three materials (crate.png, a missing textures/nope.png, untextured) it must draw a

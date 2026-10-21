@@ -4601,7 +4601,8 @@ static std::optional<editor::relay::Connection> relayConnection(const State::Pla
 
 // One of the linked consoles: its picture, a "Console N" tag, the keys while
 // it has them (the focused one is outlined), and its status line below: its
-// relay slot when relayed, then what its engine last reported of its link.
+// relay slot and whose the room's authority is when relayed, then what its
+// engine last reported of its link.
 static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
     Fonts& f = fonts();
     State::Play& p = st.play;
@@ -4659,7 +4660,10 @@ static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
         const std::optional<editor::relay::Connection> rc = relayConnection(p, i);
         const std::string relay = !rc ? "Relay: not connected"
                                   : !rc->open ? "Relay: disconnected"
-                                  : rc->joined ? "Relay slot " + std::to_string(rc->slot)
+                                  : rc->joined ? "Relay slot " + std::to_string(rc->slot) +
+                                                     (rc->isAuthority() ? std::string(" \xc2\xb7 authority")
+                                                      : rc->authority != editor::relay::kNoSlot ? " \xc2\xb7 authority slot " + std::to_string(rc->authority)
+                                                                                                 : std::string())
                                                : "Relay: connected, no Hello yet";
         line = relay + " \xc2\xb7 " + line;
         if (!rc || !rc->open) dot = color::bad;
@@ -10201,10 +10205,16 @@ static void networkView(State& st) {
 
     // What the relay is doing, in one line, and Pause at the right.
     int joined = 0;
-    for (const rl::Connection& c : conns) joined += c.open && c.joined;
+    std::string authority;  // the slot each room's authority (psxsplash's host) has
+    for (const rl::Connection& c : conns) {
+        joined += c.open && c.joined;
+        if (c.open && c.isAuthority()) authority += (authority.empty() ? "" : ", ") + std::to_string(c.slot);
+    }
     const std::string head = p.relay->running() ? "Relay on 127.0.0.1:" + std::to_string(p.relay->port()) + "  \xc2\xb7  " +
-                                                      std::to_string(joined) + " of " + std::to_string(p.players) + " consoles in a room"
+                                                      std::to_string(joined) + " of " + std::to_string(p.players) + " consoles in a room" +
+                                                      (authority.empty() ? std::string() : "  \xc2\xb7  authority: slot " + authority)
                                                 : "Relay stopped  \xc2\xb7  what it routed last Play";
+    scriptLine("net.authority", "net: authority " + (authority.empty() ? std::string("none") : "slot " + authority));
     const float rowH = size::field + 6;
     const ImVec2 hs = measure(f.medium, type::body, head.c_str());
     dl->AddCircleFilled(ImVec2(o.x + 6, o.y + rowH * 0.5f), 4, p.relay->running() ? color::good : color::textFaint, 12);
@@ -10234,10 +10244,15 @@ static void networkView(State& st) {
     std::string connLine;
     for (const rl::Connection& c : conns) {
         const bool in = c.open && c.joined;
-        const std::string label = "Console " + std::to_string(c.index) + (in ? "  slot " + std::to_string(c.slot) : c.open ? "  no slot" : "  gone");
+        const std::string label = "Console " + std::to_string(c.index) +
+                                  (in ? "  slot " + std::to_string(c.slot) + (c.isAuthority() ? "  \xc2\xb7  authority" : "")
+                                   : c.open ? "  no slot"
+                                            : "  gone");
         char ago[48];
         std::snprintf(ago, sizeof ago, "last heard from %.1f s ago", std::max(0.0, p.relay->seconds() - c.lastSeen));
-        const std::string tip = "Relay connection " + std::to_string(c.index) + (in ? ", slot " + std::to_string(c.slot) : "") + ": " +
+        const std::string tip = "Relay connection " + std::to_string(c.index) + (in ? ", slot " + std::to_string(c.slot) : "") +
+                                (in && c.isAuthority() ? ", the room's authority (psxsplash's host: its world objects go to the others)" : "") +
+                                ": " +
                                 std::to_string(c.framesIn) + " frames in, " + std::to_string(c.framesOut) + " out, " +
                                 (c.open ? std::string(ago) : std::string("disconnected")) + ". Click to show only packets from or to it.";
         const bool on = in && p.netFilter.slot == c.slot;
@@ -10277,7 +10292,7 @@ static void networkView(State& st) {
         const ImVec2 cs = measure(f.regular, type::caption, count.c_str());
         text(dl, ImVec2(maxX - cs.x, y), f.regular, type::caption, p.netPaused ? color::warn : color::textFaint, count.c_str());
         text(dl, ImVec2(o.x, y), f.regular, type::caption, color::textFaint,
-             "Newest last. Snapshots, Pings and Pongs a console sends within a second share a row.");
+             "Newest last. Snapshots, Pings and Pongs a console sends within a second share a row; Authority rows are hand-offs.");
         y += cs.y + space::xs;
     }
     std::string filterWords = p.netFilter.slot < 0 ? "any" : std::to_string(p.netFilter.slot);
@@ -10287,9 +10302,14 @@ static void networkView(State& st) {
         // The newest few of the rows shown, for scripted checks.
         std::string last;
         for (size_t i = shown.size() > 3 ? shown.size() - 3 : 0; i < shown.size(); ++i)
-            last += " | " + rl::packetTypeName(shown[i]->type) + " " + rl::describeEnd(shown[i]->from, shown[i]->conn) + " > " +
+            last += " | " + rl::describeType(*shown[i]) + " " + rl::describeEnd(shown[i]->from, shown[i]->conn) + " > " +
                     rl::describeTo(shown[i]->to);
         scriptLine("net.last", "net: last" + last);
+        // The newest authority change among them.
+        std::string handOff;
+        for (const rl::Packet* k : shown)
+            if (k->handOff()) handOff = " " + rl::describeType(*k) + " " + rl::describeEnd(k->from, k->conn) + " > " + rl::describeTo(k->to);
+        scriptLine("net.handoff", "net: hand-off" + (handOff.empty() ? std::string(" none") : handOff));
     }
 
     ImGui::SetCursorScreenPos(ImVec2(o.x, y));
@@ -10326,15 +10346,17 @@ static void networkView(State& st) {
                 ImGui::TableNextColumn();
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textDim), "\xe2\x86\x92 %s", rl::describeTo(k.to).c_str());
                 ImGui::TableNextColumn();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(packetColor(k.type)), "%s", rl::packetTypeName(k.type).c_str());
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.handOff() ? color::warn : packetColor(k.type)), "%s",
+                                   rl::describeType(k).c_str());
                 if (k.count > 1) {
                     ImGui::SameLine();
                     ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "\xc3\x97%u", unsigned(k.count));
                 }
                 ImGui::TableNextColumn();
-                if (k.count == 1 && k.type != rl::Snapshot) ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.seq));
+                if (k.count == 1 && k.type != rl::Snapshot && !k.handOff())
+                    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.seq));
                 ImGui::TableNextColumn();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.size));
+                if (!k.handOff()) ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.size));
             }
         if (!p.netPaused && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
         ImGui::EndTable();

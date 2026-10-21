@@ -8,16 +8,19 @@
 # display block opens the Game view) while a child keeps talking. Console k
 # waits (4 - k) * 0.6 s before connecting, so consoles started all at once
 # would reach the relay in the wrong order: only Play's one-at-a-time start
-# gives console k slot k.
+# gives console k slot k. Once the check sees Pause resumed, it creates a
+# file that makes console 1's fake say Bye: the authority leaves.
 #
 # Checks: Players > 4 Consoles is saved; Play starts the relay, then the four
 # consoles in order; the grid shows four consoles, each "Relay slot k ·
-# Linked · ... 4 players" (every member hears of every join); a click gives
-# console 3 the keyboard; the Network view maps consoles to slots, counts the
-# handshake and the Events, filters by slot and type, and Pause holds it;
-# Stop (F5) ends the session.
+# Linked · ... 4 players" (every member hears of every join), console 1 the
+# authority and host, the others naming it; a click gives console 3 the
+# keyboard; the Network view maps consoles to slots, names the authority,
+# counts the handshake and the Events, filters by slot and type, and Pause
+# holds it; when console 1 leaves, its log has the hand-off to slot 2 and
+# console 2 is the authority and host; Stop (F5) ends the session.
 # usage: python3 relayviewcheck.py <splashedit> [screenshot prefix]   (needs a display: xvfb-run -a)
-import os, re, shutil, stat, subprocess, sys, tempfile
+import os, re, shutil, stat, subprocess, sys, tempfile, threading
 
 editor = os.path.abspath(sys.argv[1])
 display = os.path.join(os.path.dirname(editor), 'emulator_tests')
@@ -74,7 +77,7 @@ def talk(sock):
     sock.settimeout(0.1)
     buf, psnl, slot, seq, start, parent = b'', b'', 0xFF, 2, time.time(), os.getppid()
     nextEvent = time.time() + 1
-    while time.time() - start < 100 and os.getppid() == parent:
+    while time.time() - start < 250 and os.getppid() == parent:
         try:
             got = sock.recv(4096)
             if not got:
@@ -101,6 +104,9 @@ def talk(sock):
                 print('splashedit-link: state 2 host %d slot %d players %d' % (int(slot == host), slot, players), flush=True)
             elif t == 4:
                 sock.sendall(wire(frame(5, b'', sq, slot)))
+        if k == 1 and slot != 0xFF and os.path.exists(os.environ.get('RELAYVIEW_LEAVE', '')):
+            sock.sendall(wire(frame(7, b'', seq, slot)))  # Bye: the authority leaves
+            return
         if slot != 0xFF and time.time() >= nextEvent:
             nextEvent += 1
             sock.sendall(wire(frame(4, struct.pack('<ii', 7, slot * 1000 + seq), seq, slot)))
@@ -127,7 +133,8 @@ with open(redux, 'w', newline='\n') as fh:
 os.chmod(redux, os.stat(redux).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 tmp = os.path.join(work, 'tmp')
 os.makedirs(tmp)
-ENV = dict(os.environ, SPLASHEDIT_REDUX=redux, SPLASHEDIT_PSXSPLASH=engine, TMPDIR=tmp, TMP=tmp, TEMP=tmp)
+leave = os.path.join(work, 'leave')
+ENV = dict(os.environ, SPLASHEDIT_REDUX=redux, SPLASHEDIT_PSXSPLASH=engine, TMPDIR=tmp, TMP=tmp, TEMP=tmp, RELAYVIEW_LEAVE=leave)
 ENV.pop('SPLASHEDIT_BIOS', None)
 
 project = os.path.join(work, 'courtyard')
@@ -148,13 +155,28 @@ args = [editor, '--size', '1600x960', '--project', project, '--scene', os.path.j
         '--click', '@play.tab.network', '--wait', '60'] + shot('network') + \
        ['--click', '@net.slot.2', '--wait', '10', '--click', '@net.type.Snapshot', '--wait', '10',
         '--click', '@net.pause', '--wait', '120'] + shot('filtered') + \
-       ['--click', '@net.pause', '--wait', '10', '--key', 'escape', '--wait', '10', '--key', 'f5', '--wait', '30',
-        '--screenshot', os.path.join(work, 'end.png')]
-r = subprocess.run(args, capture_output=True, text=True, env=ENV, timeout=300)
-out = r.stdout
-lines = out.splitlines()
-check('editor ran', r.returncode == 0, r.stderr[-800:])
-missing = [l for l in (r.stdout + r.stderr).splitlines() if 'no such control drawn' in l]
+       ['--click', '@net.pause', '--wait', '10',
+        '--click', '@net.type.Event', '--wait', '3', '--click', '@net.type.EventAck', '--wait', '240'] + shot('handoff') + \
+       ['--key', 'escape', '--wait', '10', '--key', 'f5', '--wait', '30', '--screenshot', os.path.join(work, 'end.png')]
+errfile = open(os.path.join(work, 'stderr.txt'), 'w+')
+proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=errfile, text=True, env=ENV)
+killer = threading.Timer(300, proc.kill)
+killer.start()
+lines = []
+for line in proc.stdout:  # as the editor prints it: after Resume, console 1 leaves
+    lines.append(line.rstrip('\n'))
+    if lines[-1] == 'net: resumed' and not os.path.exists(leave):
+        open(leave, 'w').close()
+proc.wait()
+killer.cancel()
+errfile.seek(0)
+err = errfile.read()
+out = '\n'.join(lines)
+if shots:
+    with open(shots + '-out.txt', 'w') as fh:
+        fh.write(out + '\n' + err)
+check('editor ran', proc.returncode == 0, err[-800:])
+missing = [l for l in lines + err.splitlines() if 'no such control drawn' in l]
 check('every control the script names was drawn', not missing, missing)
 check('Players > 4 Consoles picks 4, through the relay', 'play: players 4 relay' in lines, [l for l in lines if l.startswith('play: players')])
 with open(cfg) as fh:
@@ -176,7 +198,8 @@ for line in lines:
         focused[int(m.group(1))] = bool(m.group(2))
 check('the grid shows 4 consoles', sorted(status) == [1, 2, 3, 4], sorted(status))
 for c in range(1, N + 1):
-    want = 'Relay slot %d · Linked · slot %d · %s · 4 players' % (c, c, 'host' if c == 1 else 'not host')
+    want = ('Relay slot 1 · authority · Linked · slot 1 · host · 4 players' if c == 1 else
+            'Relay slot %d · authority slot 1 · Linked · slot %d · not host · 4 players' % (c, c))
     check('console %d: relay slot %d, 4 players' % (c, c), any(l.startswith(want) for l in status.get(c, [])), status.get(c, [])[-2:])
 check('a click gives console 3 the keyboard', focused.get(3) and not focused.get(1), focused)
 check('the output popup has Output and Network', 'play: output tab network' in lines, [l for l in lines if l.startswith('play: output tab')])
@@ -194,10 +217,24 @@ slot2 = [l for l in last if l != 'net: last']
 check('filtered rows all touch slot 2, no Snapshots',
       slot2 and all(all('slot 2' in row or 'slots 2' in row or ', 2' in row for row in l.split(' | ')[1:]) and 'Snapshot' not in l
                     for l in slot2[-1:]), slot2[-2:])
+auth = [(i, l) for i, l in enumerate(lines) if l.startswith('net: authority')]
+check('the Network view names slot 1 the authority', auth and auth[0][1] == 'net: authority slot 1', auth[:3])
 paused = [i for i, l in enumerate(lines) if l == 'net: paused']
 resumed = [i for i, l in enumerate(lines) if l == 'net: resumed']
 held = [l for l in lines[paused[0]:resumed[0]] if l.startswith('net: shown ')] if paused and resumed else []
 check('Pause holds the list still', paused and resumed and len(held) == 1 and held[0].endswith(' paused'), held)
+# The hand-off: console 1 said Bye after Resume.
+after = lines[resumed[0]:] if resumed else []
+check('when slot 1 leaves, the Network view names slot 2', 'net: authority slot 2' in after,
+      [l for l in after if l.startswith('net: authority')])
+handoff = [l for l in after if l.startswith('net: hand-off')]
+check('and its log shows the hand-off row', 'net: hand-off Authority slot 2 (was 1) relay > slots 2, 3, 4' in handoff, handoff[-3:])
+check('console 2 is the authority and host now',
+      any('| Relay slot 2 · authority · Linked · slot 2 · host · 3 players' in l for l in after if l.startswith('game: console 2 ')),
+      status.get(2, [])[-2:])
+check('console 3 names slot 2',
+      any('| Relay slot 3 · authority slot 2 · Linked · slot 3 · not host · 3 players' in l for l in after if l.startswith('game: console 3 ')),
+      status.get(3, [])[-2:])
 end = [l for l in lines if l.startswith('playstatus: ')]
 check('the status bar says 4 via the relay', any('4 linked consoles via the relay' in l for l in end), end[-3:])
 check('Stop stops every console', end and not end[-1].startswith('playstatus: pcsx-redux running'), end[-2:])

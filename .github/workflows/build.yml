@@ -325,6 +325,9 @@ jobs:
       - name: Object inspector scrolls
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/inspectorscrollcheck.py build/splashedit
+      - name: Scene panel scrolls
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/treescrollcheck.py build/splashedit
       - name: Viewport trigger, interact and nav overlays
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/gizmocheck.py build/splashedit

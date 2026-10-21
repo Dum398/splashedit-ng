@@ -240,6 +240,17 @@ struct State {
     std::vector<int> treeMenuPath;
     ImVec2 treeMenuPos;
     bool treeMenuRight = false;
+    // The Scene panel's rows scroll: how far up (px), the rows' height last
+    // frame (to clamp before they are drawn again), the thumb being dragged, and
+    // the selection and filter it last brought into view: a selection made
+    // anywhere (viewport, a new object, --select) is scrolled to once, the
+    // wheel is left alone otherwise.
+    float treeScroll = 0;
+    float treeContent = 0;
+    bool treeThumbHeld = false;
+    bool treeRevealPending = false;  // the selection's groups were opened; scroll to its row next frame
+    std::optional<std::vector<int>> treeSeenSelection;
+    std::string treeSeenFilter;
 
     // The title-bar menu that is open (index into File..Help), or -1.
     int menuOpen = -1;

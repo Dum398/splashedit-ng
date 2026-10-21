@@ -63,6 +63,7 @@
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
 #include "ui/ui_scale.hh"
+#include "ui/list_scroll.hh"
 #include "ui/scrub.hh"
 #include "ui/colour_hex.hh"
 #include "budget.hh"
@@ -12354,6 +12355,35 @@ void testSpriteDirectionSets() {
     }
 }
 
+// The Scene panel's rows scroll (#227): clamped to the rows, a row brought
+// into view moves the scroll as little as it can, the thumb spans the view
+// in proportion and its drag covers the whole scroll, and a dragged row
+// scrolls the list only near or past an edge.
+void testListScroll() {
+    CHECK(ui::maxScroll(500, 800) == 0);
+    CHECK(ui::maxScroll(2000, 800) == 1200);
+    CHECK(ui::clampScroll(-10, 2000, 800) == 0);
+    CHECK(ui::clampScroll(5000, 2000, 800) == 1200);
+    CHECK(ui::clampScroll(300, 500, 800) == 0);  // rows collapsed shorter than the view: back to the top
+    CHECK(ui::scrollToShow(100, 300, 326, 800) == 100);   // in view: left alone
+    CHECK(ui::scrollToShow(400, 300, 326, 800) == 300);   // above: its top at the view's top
+    CHECK(ui::scrollToShow(0, 1900, 1926, 800) == 1126);  // below: its bottom at the view's bottom
+    CHECK(ui::scrollToShow(0, 100, 1000, 800) == 100);    // taller than the view: its top
+    const ui::Thumb none = ui::thumb(0, 500, 800);
+    CHECK(none.top == 0 && none.height == 800);
+    const ui::Thumb top = ui::thumb(0, 2000, 800), end = ui::thumb(1200, 2000, 800);
+    CHECK(std::fabs(top.height - 320) < 1e-3f && top.top == 0);
+    CHECK(std::fabs(end.top + end.height - 800) < 1e-3f);
+    CHECK(ui::thumb(0, 1e6f, 800).height == ui::kMinThumb);
+    CHECK(std::fabs(ui::thumbDragScroll(800 - 320, 2000, 800) - 1200) < 1e-3f);
+    CHECK(ui::thumbDragScroll(10, 500, 800) == 0);
+    CHECK(ui::edgeScrollSpeed(400, 100, 900, 26, 900) == 0);
+    CHECK(ui::edgeScrollSpeed(100, 100, 900, 26, 900) == -900);
+    CHECK(ui::edgeScrollSpeed(50, 100, 900, 26, 900) == -900);  // past the edge: full speed
+    CHECK(std::fabs(ui::edgeScrollSpeed(887, 100, 900, 26, 900) - 450) < 1e-3f);
+    CHECK(ui::edgeScrollSpeed(120, 100, 130, 26, 900) == 0);  // a view too short to have edges
+}
+
 // Dragging a whole-number field moves it one per pixel at any size (#174):
 // a 300 px wide element grows by 5 for 5 px, not by 15; Shift takes 10 px
 // per step. Other fields keep growing with the value.
@@ -13854,6 +13884,7 @@ int main(int argc, char** argv) {
     testGpuDumpParse();
     testGpuDecode();
     testGpuRaster();
+    testListScroll();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

@@ -13529,7 +13529,7 @@ void testUnitySkinned() {
 
 // Materials on placed models (#223): plane_2x2 (8) has a project material
 // dragged onto it in the scene (an m_Materials.Array.data[0] modification on
-// the model's MeshRenderer). Fixture: unity-models' materials.unity, saved by
+// the model's MeshRenderer); plane_remap gets it from its model's .meta. Fixture: unity-models' materials.unity, saved by
 // Unity 6000.3; both instances carry TEX_4BIT, smooth normals, Flat Color 100 grey.
 void testUnityPlacedMaterial() {
     using namespace splash::unity;
@@ -13546,6 +13546,9 @@ void testUnityPlacedMaterial() {
                fs::is_regular_file(dest / o->mesh->materials[0].texture);
     };
     CHECK(textured("plane_2x2 (8)"));
+    // plane_remap: the model's material plane_mat is remapped to the same
+    // project material in its .meta's externalObjects.
+    CHECK(textured("plane_remap"));
     for (const char* name : {"plane_2x2 (8)", "plane_remap"}) {
         const splash::Object* o = findObj(s.objects, name);
         CHECK(o && o->mesh && o->mesh->bitDepth == splash::BitDepth::Bpp4 && o->mesh->smoothNormals &&

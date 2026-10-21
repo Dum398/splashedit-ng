@@ -146,6 +146,7 @@ struct ExportStats {
     };
     struct NavRegionInfo {
         Vec3 centroid;  // XZ = vertex average, Y on the region's floor plane
+        float planeA = 0, planeB = 0, planeD = 0;  // floor Y = A*X + B*Z + D, metres
         float floorY = 0;  // centroid.y
         // Index into rooms, -1 for none. When navIslands is set the scene has
         // no Room objects and this is the region's connectivity island.
@@ -161,6 +162,7 @@ struct ExportStats {
         std::vector<NavPortalInfo> portals;
     };
     std::vector<NavRegionInfo> navInfo;
+    int shadows = 0;  // blob shadow records written (v28 when not 0)
     bool navIslands = false;
     // Nav walk-off zones on active objects, in flatten order: the boundary
     // edges each one opened (an edge inside two counts for the first).

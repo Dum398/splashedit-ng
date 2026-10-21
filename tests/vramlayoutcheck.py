@@ -16,7 +16,7 @@ example = os.path.join(here, '..', 'examples', 'courtyard')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 # Scrolls the scene inspector so the whole section is on screen.
-SCROLL = ['--wheel', '1400,500,-6', '--wait', '5']
+SCROLL = ['--scroll-to', '@vram.add', '--wait', '5']
 
 
 def check(name, ok, detail=''):

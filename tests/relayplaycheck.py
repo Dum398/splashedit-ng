@@ -1,13 +1,18 @@
 # Play with 3 consoles through the editor's relay, on a real pcsx-redux: a
-# copy of the courtyard whose object script calls Net.Connect() and, once
-# connected, Net.Send()s an event every second, and whose scene script logs
-# each one it gets (onNetEvent). Play (F5) with players=3 starts the relay,
+# copy of the courtyard whose object script calls Net.Connect() and
+# Net.RegisterActor()s the object Crate (3), and once connected Net.Send()s
+# an event every second and, on the host, moves the crate 2 units along x;
+# a console that is not host logs "cratecheck: moved" once its crate is
+# somewhere else than where it first saw it (only the host's world objects,
+# through the relay's snapshots, move it there). The scene script logs each
+# event it gets (onNetEvent). Play (F5) with players=3 starts the relay,
 # then console 1, then each next console once the relay has accepted the one
 # before it (every console is redux's SIO1 client to the relay). All three
 # views must show frames, their status lines must reach "Relay slot S ·
 # Linked" with slots 1, 2 and 3 in console order, console 1 (the room's
 # authority) host and the others not, 3 players each;
-# console 2 must log events console 1 and 3 sent (the relay fanned them out);
+# console 2 must log events console 1 and 3 sent (the relay fanned them out)
+# and see the crate the host moved;
 # and the Network view must list Hellos, HelloAcks and Events from slot 1 to
 # slots 2 and 3. Stop (F5) ends every console and the relay.
 #
@@ -41,9 +46,11 @@ work = tempfile.mkdtemp()
 project = os.path.join(work, 'courtyard')
 shutil.copytree(example, project)
 with open(os.path.join(project, 'scripts', 'game_logic.lua'), 'w', newline='\n') as fh:
-    fh.write('local frames, seconds = 0, 0\n'
+    fh.write('local frames, seconds, crate, startX = 0, 0, nil, nil\n'
              'function onCreate(self)\n'
              '    Net.Connect()\n'
+             '    crate = Actor.Find("Crate (3)")\n'
+             '    if crate then Net.RegisterActor(crate) end\n'
              'end\n'
              'function onUpdate(self, dt)\n'
              '    frames = frames + 1\n'
@@ -52,6 +59,16 @@ with open(os.path.join(project, 'scripts', 'game_logic.lua'), 'w', newline='\n')
              '    seconds = seconds + 1\n'
              '    if Net.State() == 2 then\n'
              '        Net.Send(7, Net.LocalSlot() * 1000 + seconds)\n'
+             '        if crate then\n'
+             '            local x = Actor.GetPositionXZ(crate)\n'
+             '            if Net.IsHost() then\n'
+             '                Actor.SetPosition(crate, Vec3.add(Actor.GetPosition(crate), Vec3.new(2, 0, 0)))\n'
+             '            elseif startX == nil then\n'
+             '                startX = x\n'
+             '            elseif x ~= startX then\n'
+             '                Debug.Log("cratecheck: moved " .. startX .. " to " .. x)\n'
+             '            end\n'
+             '        end\n'
              '    end\n'
              'end\n')
 with open(os.path.join(project, 'scripts', 'net_scene.lua'), 'w', newline='\n') as fh:
@@ -84,10 +101,19 @@ args += ['--click', '@game.console2', '--wait', '20', '--click', '@playstatus', 
          '--click', '@net.type.Snapshot', '--wait', '20']
 if shots:
     args += ['--shot', shots + '-network-nosnap.png']
+# Back to console 2's output, filtered to the crate the host moved.
+args += ['--click', '@play.tab.output', '--wait', '10', '--click', '@play.filter', '--wait', '3', '--key', 'escape', '--wait', '3',
+         '--text', 'cratecheck: moved', '--wait', '60']
+if shots:
+    args += ['--shot', shots + '-crate.png']
+args += ['--click', '@play.tab.network', '--wait', '10']  # out of the filter field, so F5 below reaches Play
 args += ['--key', 'escape', '--wait', '10', '--key', 'f5', '--wait', '60',
          '--screenshot', os.path.join(work, 'stopped.png')]
 r = subprocess.run(args, capture_output=True, text=True, timeout=900, env=ENV)
 out = r.stdout
+if shots:
+    with open(shots + '-out.txt', 'w') as fh:
+        fh.write(out + '\n' + r.stderr)
 check('editor ran', r.returncode == 0, r.stderr[-800:])
 play = [l for l in out.splitlines() if l.startswith('play:')]
 check('the relay listens first', any(l.startswith('play: relay listening, port ') for l in play), play)
@@ -104,22 +130,33 @@ for c in lines:
 linked = {}
 for c in lines:
     for l in lines[c]:
-        m = re.search(r'Relay slot (\d+) · Linked · slot (\d+) · (host|not host) · (\d+) players', l)
+        m = re.search(r'Relay slot (\d+) · (authority|authority slot \d+) · Linked · slot (\d+) · (host|not host) · (\d+) players', l)
         if m:
-            linked[c] = (int(m.group(1)), int(m.group(2)), m.group(3) == 'host', int(m.group(4)))
+            linked[c] = (int(m.group(1)), int(m.group(3)), m.group(4) == 'host', int(m.group(5)), m.group(2))
     check('console %d reaches Connected through the relay' % c, c in linked, lines[c][-3:])
 if len(linked) == N:
     check('slots 1, 2, 3 in console order', [linked[c][0] for c in (1, 2, 3)] == [1, 2, 3], linked)
     check('the engine agrees with the relay', all(linked[c][0] == linked[c][1] for c in linked), linked)
     check('console 1 is host, the others are not', [linked[c][2] for c in (1, 2, 3)] == [True, False, False], linked)
+    check('the relay names console 1 the authority', [linked[c][4] for c in (1, 2, 3)] ==
+          ['authority', 'authority slot 1', 'authority slot 1'], linked)
     check('3 players each', all(linked[c][3] == N for c in linked), linked)
 
-shown = [l for l in out.splitlines() if l.startswith('console: play shown ')]
+# The output's filter counts: 'relaycheck: got' until the Network tab, 'cratecheck: moved' once back on the output.
+olines = out.splitlines()
+tabs = [i for i, l in enumerate(olines) if l == 'play: output tab network']
+back = [i for i, l in enumerate(olines) if l == 'play: output tab output' and tabs and i > tabs[0]]
+shown = [l for l in (olines[:tabs[0]] if tabs else olines) if l.startswith('console: play shown ')]
 got = [int(m.group(1)) for l in shown for m in [re.match(r'console: play shown (\d+) of', l)] if m]
 check('console 2 got the others\' events (Net.Send crossed)', got and got[-1] > 0, shown[-3:])
+moved = [l for l in (olines[back[0]:] if back else []) if l.startswith('console: play shown ')]
+n = [int(m.group(1)) for l in moved for m in [re.match(r'console: play shown (\d+) of', l)] if m]
+check('console 2 sees the crate the host moved (world objects through the relay)', n and n[-1] > 0, moved[-3:])
 
 conns = [l for l in out.splitlines() if l.startswith('net: connections')]
 check('the Network view maps consoles to slots', 'net: connections 1:1 2:2 3:3' in conns, conns[-3:])
+check('and names slot 1 the authority', 'net: authority slot 1' in out.splitlines(),
+      [l for l in out.splitlines() if l.startswith('net: authority')][:3])
 types = [l for l in out.splitlines() if l.startswith('net: types')]
 last = types[-1] if types else ''
 counts = dict((k, int(v)) for k, v in re.findall(r' (\w+) (\d+)', last))

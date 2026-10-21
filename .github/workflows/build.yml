@@ -35,9 +35,15 @@ jobs:
           NOLOGO=$(sed -n 's/^ALL_FEATURES = //p' Makefile | tr ' ' '\n' | grep -vx bootlogo | paste -sd,)
           echo "features without the boot logo: $NOLOGO"
           case ",$NOLOGO," in ,, | *,bootlogo,*) echo "bad feature list"; exit 1 ;; esac
+          # Every engine is a NOPARSER=1 build: SplashEdit always exports Lua compiled, so the Lua
+          # parser would only cost RAM (28 KB of static image). make clean also deletes psxlua's
+          # liblua-noparser.a, which the engine's Makefile does not rebuild, so each variant makes it.
           mk() {
             make clean
-            make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips "$@"
+            make -C third_party/nugget/third_party/psxlua psx-noparser PREFIX=mipsel-linux-gnu
+            make -j4 PREFIX=mipsel-linux-gnu FORMAT=elf32-tradlittlemips NOPARSER=1 "$@"
+            # psxlua's parser stub: there only when the parser was left out.
+            grep -q "parser not loaded" psxsplash.ps-exe || { echo "not a NOPARSER build: $*"; exit 1; }
           }
           for logo in "" -nologo; do
             if [ -n "$logo" ]; then set -- "FEATURES=$NOLOGO"; else set --; fi

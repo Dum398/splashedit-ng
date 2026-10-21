@@ -203,7 +203,13 @@ Reader (R:splashpack.cpp): `cursor += sizeof(SPLASHPACKTextureAtlas)` / `sizeof(
 `core/luacompile.cpp`, which builds psxlua's compiler for the host and gives the same bytes as
 `luac_psx` (Lua 5.2, 32-bit integer numbers, debug info stripped). The engine loads both with
 `luaL_loadbuffer`, which treats data starting with `\x1bLua` as bytecode. An engine built with
-`NOPARSER=1` has no parser and only accepts bytecode.
+`NOPARSER=1` has no parser and only accepts bytecode: a source script fails to load with
+`Lua error: parser not loaded` on the TTY and the game runs on without it. Every engine SplashEdit
+bundles is a `NOPARSER=1` build, so Play, `splashpack-cli build` and `splashpack-cli disc` always
+store bytecode; `export` keeps source as its default for byte comparisons with SplashEdit 2.4, and
+needs `--lua-bytecode` for a pack those engines run. With no parser, `load` and `loadstring` of Lua
+text fail at run time ("parser not loaded"), as does `string.dump` ("dumper not loaded"); psxlua has
+no `dofile` or `loadfile`. Export warns about a script that uses any of them.
 
 ### 2.12 Mesh data (by per-object meshOffset). Per exporter in index order: `AlignToFourBytes`, offset recorded, then `Triangles.Count` x 52-byte `Tri`. Streamed objects emit nothing and `meshOffset = 0`. Tri record:
 

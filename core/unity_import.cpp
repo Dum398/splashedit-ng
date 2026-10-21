@@ -1740,9 +1740,13 @@ std::optional<MeshComponent> Importer::meshOf(const UObj& o, const UComp* mf, co
     for (size_t k = 0; k < subs; ++k) {
         Ref r;
         if (k < mats.size()) r = refOf(mats[k]);
-        if (auto ov = o.matOverrides.find(int(k)); ov != o.matOverrides.end()) r = ov->second;
+        // A placed model's renderer lives in the model, so a material set in
+        // the scene is only an override; it beats the model's own.
+        const auto ov = o.matOverrides.find(int(k));
+        const bool overridden = ov != o.matOverrides.end();
+        if (overridden) r = ov->second;
         const bool embedded = !r.guid.empty() && extOf(m_index.path(r.guid)) != ".mat";
-        if ((!mr && k < modelMats.size()) || (embedded && k < modelMats.size())) mc.materials.push_back(modelMats[k]);
+        if ((!mr && !overridden && k < modelMats.size()) || (embedded && k < modelMats.size())) mc.materials.push_back(modelMats[k]);
         else mc.materials.push_back(materialOf(r, path));
     }
     return mc;

@@ -1049,6 +1049,7 @@ struct TreeCtx {
     // The selected object's row, in px from the top of the scrolled rows, when drawn.
     std::optional<float> selTop{};
     float contentTop = 0;  // where the rows' top is drawn this frame (scrolled up past list.Min.y)
+    bool selectedHere = false;  // a row was clicked to select it this frame
     bool renameShown = false;
     std::string filter{};  // lower case; empty = every object
     int shown = 0;       // object rows drawn
@@ -1177,15 +1178,18 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
                 if (c.filter.empty()) c.doc.toggleExpanded(path);
             } else {
                 c.doc.select(path);
+                c.selectedHere = true;
             }
         }
         if (!c.st.treeDragging && h.hovered && ImGui::IsMouseDoubleClicked(0) && !(row.hasChildren && chevronClicked(rr, row.depth))) {
             c.doc.select(path);
+            c.selectedHere = true;
             c.st.frameRequest = true;
         }
         // Right-click: select it and open its menu.
         if (!c.st.treeDragging && h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             c.doc.select(path);
+            c.selectedHere = true;
             c.st.treeMenu = 1;
             c.st.treeMenuPath = path;
             c.st.treeMenuPos = ImGui::GetIO().MousePos;
@@ -3481,10 +3485,22 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     st.treeContent = ctx.y + size::row * 0.5f - ctx.contentTop;
     // A selection made since last frame, here or anywhere else, or a new
     // filter: its row is brought into view, once.
+    // Selected elsewhere under closed groups, the groups open first and the
+    // row is scrolled to when next drawn; a group closed afterwards stays closed.
     if (doc.selection() != st.treeSeenSelection || st.treeFilter != st.treeSeenFilter) {
-        if (ctx.selTop) scroll = ui::scrollToShow(scroll, *ctx.selTop, *ctx.selTop + size::row, listH);
-        st.treeSeenSelection = doc.selection();
-        st.treeSeenFilter = st.treeFilter;
+        const std::optional<editor::ObjectPath>& sel = doc.selection();
+        if (sel && !ctx.selTop && !ctx.selectedHere && !st.treeRevealPending && doc.object(*sel)) {
+            for (size_t n = 0; n < sel->size(); ++n) {
+                const editor::ObjectPath up(sel->begin(), sel->begin() + static_cast<std::ptrdiff_t>(n));
+                if (!doc.expanded(up)) doc.toggleExpanded(up);
+            }
+            st.treeRevealPending = true;
+        } else {
+            if (ctx.selTop) scroll = ui::scrollToShow(scroll, *ctx.selTop, *ctx.selTop + size::row, listH);
+            st.treeSeenSelection = sel;
+            st.treeSeenFilter = st.treeFilter;
+            st.treeRevealPending = false;
+        }
     }
     scroll = ui::clampScroll(scroll, st.treeContent, listH);
     if (ui::maxScroll(st.treeContent, listH) > 0) {

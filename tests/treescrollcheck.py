@@ -4,7 +4,8 @@
 # brings it into view and a click on it selects it, as does dragging the
 # thumb to the bottom; a row scrolled up under
 # the filter field does not take a click meant for the field; and --select of
-# the last object scrolls its row into view at startup; a row dragged to the
+# the last object scrolls its row into view at startup, and an object picked
+# in the viewport under a closed group opens it and is scrolled to; a row dragged to the
 # list's bottom edge scrolls it. Rects come from the editor's list of named
 # controls, as the last frame drew them; the list's visible part is
 # treelist.panel.
@@ -35,6 +36,11 @@ def project_copy():
     for k in range(1, N + 1):
         s['objects'].append({'name': 'Filler %d' % k, 'active': True, 'transform': {'position': [k * 0.5, 0, 0], 'rotation': [0, 0, 0, 1],
                              'scale': [1, 1, 1]}, 'components': [], 'children': []})
+    # Last of all, a group holding one object, clear of the fillers in the view.
+    child = {'name': 'Deep Child', 'active': True, 'transform': {'position': [-3, 2, 3], 'rotation': [0, 0, 0, 1], 'scale': [1, 1, 1]},
+             'components': [], 'children': []}
+    s['objects'].append({'name': 'Deep Group', 'active': True, 'transform': {'position': [0, 0, 0], 'rotation': [0, 0, 0, 1],
+                         'scale': [1, 1, 1]}, 'components': [], 'children': [child]})
     json.dump(s, open(scene, 'w', encoding='utf-8'), indent=2)
     return project
 
@@ -133,6 +139,22 @@ panel = rects.get('treelist.panel')
 last = rects.get('tree.' + LAST)
 check('--select of the last object scrolls its row into view', inside(last, panel), (last, panel))
 check('and it is the selection', selected == LAST, selected)
+
+# Deep Group closed from its chevron, the list wheeled back to the top, then
+# Deep Child picked from its marker in the viewport: the group opens and the
+# row is scrolled to. Closed again by hand, it stays closed.
+COLLAPSE = ['--scroll-to', '@tree.Deep Group', '--click', '@tree.Deep Group,-105,0', '--wait', '3',
+            '--wheel', '%d,%d,60' % (mx, my), '--wait', '3']
+lines, rects, selected = run(COLLAPSE)
+check('closing Deep Group hides its child row', 'tree.Deep Child' not in rects, rects.get('tree.Deep Child'))
+lines, rects, selected = run(COLLAPSE + ['--click', '@vp.marker.Deep Child', '--wait', '5'])
+panel = rects.get('treelist.panel')
+deep = rects.get('tree.Deep Child')
+check('picked in the viewport, Deep Child is the selection', selected == 'Deep Child', selected)
+check('its closed group opens and its row is scrolled into view', inside(deep, panel), (deep, panel))
+lines, rects, selected = run(COLLAPSE + ['--click', '@vp.marker.Deep Child', '--wait', '5', '--click', '@tree.Deep Group,-105,0', '--wait', '5'])
+check('closed again by hand with the selection unchanged, the group stays closed',
+      'tree.Deep Child' not in rects and selected == 'Deep Child', (rects.get('tree.Deep Child'), selected))
 
 print('%d failure%s' % (fails, '' if fails == 1 else 's'))
 sys.exit(1 if fails else 0)

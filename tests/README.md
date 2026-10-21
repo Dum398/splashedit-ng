@@ -855,8 +855,10 @@ tree's rows are `tree.<object name>`). Needs a display.
 than the Scene panel fits. The last row starts below the visible rows (`treelist.panel`); the wheel
 over them brings it into view and a click selects it (the run prints `selected: <name>`); a row
 scrolled up under the filter field (`treesearch`), or one under the Assets footer, does not take a
-click there; a row dragged to the bottom edge and held scrolls the list; and `--select` of the last
-object scrolls its row into view at startup. Needs a display.
+click there; a row dragged to the bottom edge and held scrolls the list; `--select` of the last
+object scrolls its row into view at startup; and with the last group (Deep Group) closed and the
+list back at the top, picking its child from its viewport marker (`vp.marker.Deep Child`) opens the
+group and scrolls to the row, while closing the group again by hand keeps it closed. Needs a display.
 
     python3 treescrollcheck.py <splashedit>
 

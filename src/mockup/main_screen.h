@@ -248,6 +248,7 @@ struct State {
     float treeScroll = 0;
     float treeContent = 0;
     bool treeThumbHeld = false;
+    bool treeRevealPending = false;  // the selection's groups were opened; scroll to its row next frame
     std::optional<std::vector<int>> treeSeenSelection;
     std::string treeSeenFilter;
 

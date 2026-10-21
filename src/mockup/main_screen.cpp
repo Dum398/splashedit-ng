@@ -8759,7 +8759,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine;
+    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine, flatColLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -9003,10 +9003,44 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         const splash::VertexColorMode modes[3] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
                                                   splash::VertexColorMode::Mesh};
         int curMode = (int)(std::find(std::begin(modes), std::end(modes), m.vertexColors) - std::begin(modes));
-        int pickMode = dropdownMenu("lighting", row("llight", "Lighting", "How light reaches this mesh. Baked vertex lighting costs nothing at runtime."),
+        const ImRect lightRow = row("llight", "Lighting", "How light reaches this mesh. Baked vertex lighting costs nothing at runtime.");
+        nameRect("obj.lighting", lightRow);  // its items are lighting/<label>
+        int pickMode = dropdownMenu("lighting", lightRow,
                                     icon::sun, lightingLabel(m.vertexColors), {"Baked vertex", "Flat", "Mesh colours"}, curMode);
         if (pickMode >= 0 && modes[pickMode] != m.vertexColors)
             doc.edit(path, [&](splash::Object& ob) { ob.mesh->vertexColors = modes[pickMode]; });
+        // Flat lighting's one colour, from a colour well and its picker (named
+        // obj.flatcolor and obj.flatcolorpick, as the material Colour row); a drag is one undo step.
+        if (m.vertexColors == splash::VertexColorMode::Flat) {
+            const std::array<float, 3> fc{m.flatColor[0] / 255.f, m.flatColor[1] / 255.f, m.flatColor[2] / 255.f};
+            const ImRect fcRow = row("lflatcol", "Flat colour", "The colour every vertex of this mesh gets on the console.");
+            nameRect("obj.flatcolor", fcRow);
+            auto setFlat = [&](const std::array<float, 3>& c) {
+                return [c](splash::Object& ob) {
+                    if (!ob.mesh) return;
+                    for (int k = 0; k < 3; k++) ob.mesh->flatColor[k] = uint8_t(std::lround(std::clamp(c[k], 0.f, 1.f) * 255));
+                };
+            };
+            const ColorFieldHit fcHit = colorField("flatcol", fcRow, fc, "obj.flatcolor");
+            if (fcHit.clicked) ImGui::OpenPopup("##flatcolpick");
+            if (fcHit.pasted) doc.edit(path, setFlat({(*fcHit.pasted)[0], (*fcHit.pasted)[1], (*fcHit.pasted)[2]}));
+            ImGui::SetNextWindowPos(ImVec2(fcRow.Max.x, fcRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            pushPopupStyle();
+            if (ImGui::BeginPopup("##flatcolpick")) {
+                float c[3] = {fc[0], fc[1], fc[2]};
+                ImGui::SetNextItemWidth(220);
+                if (ImGui::ColorPicker3("##flatcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                                 ImGuiColorEditFlags_NoAlpha))
+                    doc.edit(path, setFlat({c[0], c[1], c[2]}), "flatcolor");
+                nameRect("obj.flatcolorpick", ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (ImGui::IsItemDeactivated()) doc.endMerge();
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(4);
+            ImGui::PopStyleColor(2);
+            flatColLine = "flatcolor: " + std::to_string(m.flatColor[0]) + "," + std::to_string(m.flatColor[1]) + "," +
+                          std::to_string(m.flatColor[2]);
+        }
         if (doc.missingMeshColors(m)) {
             meshColLine = "mesh: colours missing " + m.mesh;
             std::string body = modelName + " has no vertex colours, so it shows flat grey (127, 127, 127) on the console.";
@@ -10141,6 +10175,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (removedFlags[static_cast<int>(c.kind)]) toRemove = c.kind;
 
     report("meshcol", meshColLine);
+    report("flatcolor", flatColLine);
     report("materials", materialLines);
     report("uvoffset", uvOffLine);
     report("texholes", texHolesLine);

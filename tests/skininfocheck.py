@@ -116,7 +116,7 @@ check('every clip grows in frames and bytes', sorted(clips30) == sorted(clips) =
 
 # A 50 s clip at 30 fps bakes 1500 frames: the Long clip card shows, in the panel.
 lines, rects = run(['--dblclick', '@obj.sfps', '--wait', '3', '--key', 'ctrl+a', '--text', '30', '--key', 'enter', '--wait', '3',
-                    '--wait-export'], clip_length=50)
+                    '--wait-export', '--scroll-to', '@obj.skinlong', '--wait', '3'], clip_length=50)
 _, clips = parse(lines)
 check('a 50 s clip at 30 fps bakes over 1000 frames', clips.get('bend', (0, 0))[0] > 1000, clips)
 check('and shows the Long clip card in the panel', inside(rects, 'obj.skinlong'), (rects.get('obj.skinlong'), rects.get('obj.panel')))

@@ -195,7 +195,7 @@ check('the same room on both sides is flagged as the exporter flags it',
 # The export is stretched so even a Release build shows the placeholder first; the export that
 # started before the picks (portal unlinked, so it fails) finishes before the linked one runs;
 # --wait-export holds until the result matches the scene, whatever the frame rate.
-s, out = run('Door', PICK + click('tree.West') + ['--wait-export'], env={'SPLASHEDIT_EXPORT_DELAY_MS': '1000'})
+s, out = run('Door', PICK + click('tree.West') + ['--wait-export'], env={'SPLASHEDIT_EXPORT_DELAY_MS': '5000'})
 rooms = [l for l in out if l.startswith('room: West')]
 check('the room line is there before the export lands', rooms[:1] in (['room: West Not exported yet'],
                                                                       ['room: West Export failed: see problems']), rooms)

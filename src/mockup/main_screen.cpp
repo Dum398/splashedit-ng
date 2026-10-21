@@ -4601,7 +4601,8 @@ static std::optional<editor::relay::Connection> relayConnection(const State::Pla
 
 // One of the linked consoles: its picture, a "Console N" tag, the keys while
 // it has them (the focused one is outlined), and its status line below: its
-// relay slot when relayed, then what its engine last reported of its link.
+// relay slot and whose the room's authority is when relayed, then what its
+// engine last reported of its link.
 static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
     Fonts& f = fonts();
     State::Play& p = st.play;
@@ -4659,7 +4660,10 @@ static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
         const std::optional<editor::relay::Connection> rc = relayConnection(p, i);
         const std::string relay = !rc ? "Relay: not connected"
                                   : !rc->open ? "Relay: disconnected"
-                                  : rc->joined ? "Relay slot " + std::to_string(rc->slot)
+                                  : rc->joined ? "Relay slot " + std::to_string(rc->slot) +
+                                                     (rc->isAuthority() ? std::string(" \xc2\xb7 authority")
+                                                      : rc->authority != editor::relay::kNoSlot ? " \xc2\xb7 authority slot " + std::to_string(rc->authority)
+                                                                                                 : std::string())
                                                : "Relay: connected, no Hello yet";
         line = relay + " \xc2\xb7 " + line;
         if (!rc || !rc->open) dot = color::bad;
@@ -8072,8 +8076,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
 
-    // Network: the id two consoles compare before they link. Empty, the
-    // engine derives one from the scene index and object count.
+    // Network: the id two consoles compare before they link (empty, the
+    // engine derives one from the scene index and object count; one click
+    // locks it to the scene's name), then how many consoles Play boots and
+    // whether 2 go through the relay: the Players list's own settings.
     {
         const float stop = y;
         const bool open = section("s_network", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::globe, color::textDim, "Network",
@@ -8081,7 +8087,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
         y += 34 + space::xs;
         const ImRect idRow = row("lnetid", "Network id",
-                                 "Consoles linked with Net.Begin only connect when their scenes have the same id. Name the scene "
+                                 "Consoles linked with Net.Connect only connect when their scenes have the same id. Name the scene "
                                  "here to keep the id stable between builds.");
         nameRect("scene.netid", idRow);
         std::string typed;
@@ -8090,14 +8096,57 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const uint32_t hash = splash::hashSceneId(set.networkId);
         char hex[16];
         std::snprintf(hex, sizeof hex, "0x%08X", unsigned(hash));
-        if (set.networkId.empty())
+        scriptLine("network", set.networkId.empty() ? std::string("network: derived")
+                                                     : "network: locked " + set.networkId + " hash " + hex);
+        if (set.networkId.empty()) {
             caption("Derived at run time: it changes when objects are added, so consoles running different builds may not "
                     "connect.",
                     color::textFaint);
-        else
+            // One click locks it to the scene's name: stable, and the same on every build of it.
+            const std::string stem = doc.sceneStem();
+            const std::string label = "Use \"" + stem + "\"";
+            const std::string tip = "Sets the Network id to the scene's name, " + stem + ". Ctrl+Z puts it back.";
+            if (!stem.empty() && button("scene.netid.fill", ImVec2(x0 + space::sm + lw, y), icon::lock, label.c_str(), ButtonKind::Secondary,
+                                        nullptr, tip.c_str()))
+                doc.editSettings([stem](splash::SceneSettings& s) { s.networkId = stem; });
+            if (!stem.empty()) y += size::field + 6 + space::xs;
+        } else
             caption(std::string("Locked: hash ") + hex + ".", color::good);
-        scriptLine("network", set.networkId.empty() ? std::string("network: derived")
-                                                     : "network: locked " + set.networkId + " hash " + hex);
+
+        // Play's consoles: the Players list (toolbar), saved for this user, not in the scene.
+        y += space::sm;
+        State::Play& play = st.play;
+        const ImRect playersRow = row("lnetplayers", "Play boots",
+                                      "How many consoles Play starts for this scene's network code: the toolbar's Players list. "
+                                      "Saved for you in the editor's settings, not in the scene.");
+        nameRect("scene.players", playersRow);
+        std::vector<std::string> counts;
+        for (int n = 1; n <= editor::kMaxPlayers; ++n)
+            counts.push_back(n == 1 ? std::string("1 Console") : n == 2 ? std::string("2 Linked Consoles") : std::to_string(n) + " Consoles");
+        std::vector<const char*> countItems;
+        for (const std::string& c : counts) countItems.push_back(c.c_str());
+        const int cur = std::clamp(play.tools.players, 1, editor::kMaxPlayers) - 1;
+        const int pickPlayers = dropdownMenu("scene.players", playersRow, icon::users, countItems[size_t(cur)], countItems, cur);
+        if (pickPlayers >= 0 && pickPlayers != cur) setPlayers(st, pickPlayers + 1);
+        const ImRect relayRow = row("lnetrelay", "Relay",
+                                    "Route 2 consoles through the editor's relay instead of linking them directly: the Players "
+                                    "list's Use the Relay for 2 Consoles. 3 or more always use it.");
+        {
+            // 3 or more have no choice: no switch then, only what happens.
+            float tx = relayRow.Min.x;
+            if (play.tools.players < 3) {
+                const ImRect relaySw(ImVec2(relayRow.Min.x, relayRow.GetCenter().y - 8), ImVec2(relayRow.Min.x + 30, relayRow.GetCenter().y + 8));
+                nameRect("scene.relay", relaySw);
+                if (toggle("scene.relay", relaySw, play.tools.relay)) setRelay(st, !play.tools.relay);
+                tx = relaySw.Max.x + space::sm;
+            }
+            const char* what = play.tools.players >= 3 ? "Always, for 3 or more consoles" : "Use it for 2 consoles";
+            const float ty = relayRow.GetCenter().y - measure(f.regular, type::caption, what).y * 0.5f;
+            text(dl, ImVec2(tx, ty), f.regular, type::caption, editor::usesRelay(play.tools) ? color::textDim : color::textFaint, what);
+        }
+        caption("2 consoles link directly, 3 or more through the relay.", color::textFaint);
+        scriptLine("scene.play", "scene: play " + std::to_string(play.tools.players) + (play.tools.relay ? " relay on" : " relay off") +
+                                     (editor::usesRelay(play.tools) ? " via relay" : ""));
         y += space::xs;
         if (!open) {
             ImGui::PopClipRect();
@@ -10201,10 +10250,16 @@ static void networkView(State& st) {
 
     // What the relay is doing, in one line, and Pause at the right.
     int joined = 0;
-    for (const rl::Connection& c : conns) joined += c.open && c.joined;
+    std::string authority;  // the slot each room's authority (psxsplash's host) has
+    for (const rl::Connection& c : conns) {
+        joined += c.open && c.joined;
+        if (c.open && c.isAuthority()) authority += (authority.empty() ? "" : ", ") + std::to_string(c.slot);
+    }
     const std::string head = p.relay->running() ? "Relay on 127.0.0.1:" + std::to_string(p.relay->port()) + "  \xc2\xb7  " +
-                                                      std::to_string(joined) + " of " + std::to_string(p.players) + " consoles in a room"
+                                                      std::to_string(joined) + " of " + std::to_string(p.players) + " consoles in a room" +
+                                                      (authority.empty() ? std::string() : "  \xc2\xb7  authority: slot " + authority)
                                                 : "Relay stopped  \xc2\xb7  what it routed last Play";
+    scriptLine("net.authority", "net: authority " + (authority.empty() ? std::string("none") : "slot " + authority));
     const float rowH = size::field + 6;
     const ImVec2 hs = measure(f.medium, type::body, head.c_str());
     dl->AddCircleFilled(ImVec2(o.x + 6, o.y + rowH * 0.5f), 4, p.relay->running() ? color::good : color::textFaint, 12);
@@ -10234,10 +10289,15 @@ static void networkView(State& st) {
     std::string connLine;
     for (const rl::Connection& c : conns) {
         const bool in = c.open && c.joined;
-        const std::string label = "Console " + std::to_string(c.index) + (in ? "  slot " + std::to_string(c.slot) : c.open ? "  no slot" : "  gone");
+        const std::string label = "Console " + std::to_string(c.index) +
+                                  (in ? "  slot " + std::to_string(c.slot) + (c.isAuthority() ? "  \xc2\xb7  authority" : "")
+                                   : c.open ? "  no slot"
+                                            : "  gone");
         char ago[48];
         std::snprintf(ago, sizeof ago, "last heard from %.1f s ago", std::max(0.0, p.relay->seconds() - c.lastSeen));
-        const std::string tip = "Relay connection " + std::to_string(c.index) + (in ? ", slot " + std::to_string(c.slot) : "") + ": " +
+        const std::string tip = "Relay connection " + std::to_string(c.index) + (in ? ", slot " + std::to_string(c.slot) : "") +
+                                (in && c.isAuthority() ? ", the room's authority (psxsplash's host: its world objects go to the others)" : "") +
+                                ": " +
                                 std::to_string(c.framesIn) + " frames in, " + std::to_string(c.framesOut) + " out, " +
                                 (c.open ? std::string(ago) : std::string("disconnected")) + ". Click to show only packets from or to it.";
         const bool on = in && p.netFilter.slot == c.slot;
@@ -10277,7 +10337,7 @@ static void networkView(State& st) {
         const ImVec2 cs = measure(f.regular, type::caption, count.c_str());
         text(dl, ImVec2(maxX - cs.x, y), f.regular, type::caption, p.netPaused ? color::warn : color::textFaint, count.c_str());
         text(dl, ImVec2(o.x, y), f.regular, type::caption, color::textFaint,
-             "Newest last. Snapshots, Pings and Pongs a console sends within a second share a row.");
+             "Newest last. Snapshots, Pings and Pongs a console sends within a second share a row; Authority rows are hand-offs.");
         y += cs.y + space::xs;
     }
     std::string filterWords = p.netFilter.slot < 0 ? "any" : std::to_string(p.netFilter.slot);
@@ -10287,9 +10347,14 @@ static void networkView(State& st) {
         // The newest few of the rows shown, for scripted checks.
         std::string last;
         for (size_t i = shown.size() > 3 ? shown.size() - 3 : 0; i < shown.size(); ++i)
-            last += " | " + rl::packetTypeName(shown[i]->type) + " " + rl::describeEnd(shown[i]->from, shown[i]->conn) + " > " +
+            last += " | " + rl::describeType(*shown[i]) + " " + rl::describeEnd(shown[i]->from, shown[i]->conn) + " > " +
                     rl::describeTo(shown[i]->to);
         scriptLine("net.last", "net: last" + last);
+        // The newest authority change among them.
+        std::string handOff;
+        for (const rl::Packet* k : shown)
+            if (k->handOff()) handOff = " " + rl::describeType(*k) + " " + rl::describeEnd(k->from, k->conn) + " > " + rl::describeTo(k->to);
+        scriptLine("net.handoff", "net: hand-off" + (handOff.empty() ? std::string(" none") : handOff));
     }
 
     ImGui::SetCursorScreenPos(ImVec2(o.x, y));
@@ -10321,20 +10386,22 @@ static void networkView(State& st) {
                 ImGui::TableNextColumn();
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%s", tbuf);
                 ImGui::TableNextColumn();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.from == rl::kHostSlot ? color::textDim : color::text), "%s",
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.from == rl::kRelaySlot ? color::textDim : color::text), "%s",
                                    rl::describeEnd(k.from, k.conn).c_str());
                 ImGui::TableNextColumn();
                 ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textDim), "\xe2\x86\x92 %s", rl::describeTo(k.to).c_str());
                 ImGui::TableNextColumn();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(packetColor(k.type)), "%s", rl::packetTypeName(k.type).c_str());
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.handOff() ? color::warn : packetColor(k.type)), "%s",
+                                   rl::describeType(k).c_str());
                 if (k.count > 1) {
                     ImGui::SameLine();
                     ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "\xc3\x97%u", unsigned(k.count));
                 }
                 ImGui::TableNextColumn();
-                if (k.count == 1 && k.type != rl::Snapshot) ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.seq));
+                if (k.count == 1 && k.type != rl::Snapshot && !k.handOff())
+                    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.seq));
                 ImGui::TableNextColumn();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.size));
+                if (!k.handOff()) ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.size));
             }
         if (!p.netPaused && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
         ImGui::EndTable();

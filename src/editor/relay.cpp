@@ -257,15 +257,19 @@ std::vector<uint8_t> packHelloAck(const HelloAckPayload& a) {
 
 static constexpr int64_t kFp12TwoPi = 25736;  // one turn in 4.12 fixed point
 
-std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> members) {
+static int64_t normalYaw(int32_t yaw) { return ((int64_t(yaw) % kFp12TwoPi) + kFp12TwoPi) % kFp12TwoPi; }
+
+std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> members, std::vector<WorldObject> objects) {
     std::stable_sort(members.begin(), members.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<uint8_t> b;
-    if (members.size() >= 2) {  // compact pays for itself from 2 avatars
+    const size_t records = members.size() + objects.size();
+    if (records >= 2) {  // compact pays for itself from 2 records
         int64_t lo[3], hi[3];
         for (int k = 0; k < 3; ++k) lo[k] = hi[k] = 0;
-        for (size_t i = 0; i < members.size(); ++i) {
-            const Avatar& a = members[i].second;
-            const int64_t v[3] = {a.px, a.py, a.pz};
+        for (size_t i = 0; i < records; ++i) {
+            const int64_t v[3] = {i < members.size() ? members[i].second.px : objects[i - members.size()].px,
+                                  i < members.size() ? members[i].second.py : objects[i - members.size()].py,
+                                  i < members.size() ? members[i].second.pz : objects[i - members.size()].pz};
             for (int k = 0; k < 3; ++k) {
                 if (i == 0 || v[k] < lo[k]) lo[k] = v[k];
                 if (i == 0 || v[k] > hi[k]) hi[k] = v[k];
@@ -279,8 +283,11 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
                 break;
             }
         if (shift >= 0) {
+            // As many objects as fit one frame: 16 bytes of header and origin, 10 an avatar, 11 an object.
+            const size_t room = (kMaxPayload - 16 - 10 * members.size()) / 11;
+            if (objects.size() > room) objects.resize(room);
             b.push_back(uint8_t(members.size()));
-            b.push_back(0);
+            b.push_back(uint8_t(objects.size()));
             b.push_back(1);  // SNAP_FORMAT_COMPACT
             b.push_back(uint8_t(shift));
             for (int k = 0; k < 3; ++k) put32(b, uint32_t(int32_t(lo[k])));
@@ -290,13 +297,23 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
                 put16(b, uint16_t((int64_t(a.px) - lo[0]) >> shift));
                 put16(b, uint16_t((int64_t(a.py) - lo[1]) >> shift));
                 put16(b, uint16_t((int64_t(a.pz) - lo[2]) >> shift));
-                put16(b, uint16_t(((int64_t(a.yaw) % kFp12TwoPi) + kFp12TwoPi) % kFp12TwoPi));
+                put16(b, uint16_t(normalYaw(a.yaw)));
+            }
+            for (const WorldObject& o : objects) {
+                put16(b, o.actorId);
+                b.push_back(o.flags);
+                put16(b, uint16_t((int64_t(o.px) - lo[0]) >> shift));
+                put16(b, uint16_t((int64_t(o.py) - lo[1]) >> shift));
+                put16(b, uint16_t((int64_t(o.pz) - lo[2]) >> shift));
+                put16(b, uint16_t(normalYaw(o.yaw)));
             }
             return b;
         }
     }
+    const size_t room = (kMaxPayload - 4) / 20 - std::min(members.size(), (kMaxPayload - 4) / 20);
+    if (objects.size() > room) objects.resize(room);
     b.push_back(uint8_t(members.size()));
-    b.push_back(0);
+    b.push_back(uint8_t(objects.size()));
     b.push_back(0);  // SNAP_FORMAT_LEGACY
     b.push_back(0);
     for (const auto& [slot, a] : members) {
@@ -307,6 +324,15 @@ std::vector<uint8_t> buildSnapshot(std::vector<std::pair<uint8_t, Avatar>> membe
         put32(b, uint32_t(a.py));
         put32(b, uint32_t(a.pz));
         put32(b, uint32_t(a.yaw));
+    }
+    for (const WorldObject& o : objects) {
+        put16(b, o.actorId);
+        b.push_back(o.flags);
+        b.push_back(0);
+        put32(b, uint32_t(o.px));
+        put32(b, uint32_t(o.py));
+        put32(b, uint32_t(o.pz));
+        put32(b, uint32_t(o.yaw));
     }
     return b;
 }
@@ -344,7 +370,7 @@ int Hub::visiblePlayers(int conn) const {
 
 void Hub::log(double now, uint8_t from, int conn, uint8_t type, uint16_t seq, size_t size, std::vector<uint8_t> to) {
     const bool folds = type == Snapshot || type == Ping || type == Pong;
-    const std::pair<int, uint8_t> key(from == kHostSlot ? -conn : conn, type);
+    const std::pair<int, uint8_t> key(from == kRelaySlot ? -conn : conn, type);
     if (folds) {
         auto it = m_folding.find(key);
         if (it != m_folding.end() && !m_log.empty() && it->second >= m_log.front().id) {
@@ -384,18 +410,19 @@ void Hub::send(Session& s, uint8_t type, const std::vector<uint8_t>& payload, st
         q = s.txSeq;
         s.txSeq = uint16_t(s.txSeq + 1);
     }
-    sendRaw(s, encodeFrame(type, payload, kHostSlot, q));
+    sendRaw(s, encodeFrame(type, payload, kRelaySlot, q));
 }
 
 void Hub::sendAck(Session& s, double now) {
     Connection& c = info(s);
     HelloAckPayload a;
     a.yourSlot = c.slot;
+    a.hostSlot = c.authority;  // the room's authority is psxsplash's host
     a.sceneHash = c.sceneHash;
     a.playerCount = uint8_t(visiblePlayers(s.id));
     const uint16_t seq = s.txSeq;
     send(s, HelloAck, packHelloAck(a), std::nullopt);
-    log(now, kHostSlot, s.id, HelloAck, seq, 1 + kHeaderSize + 16 + 2, {c.slot});
+    log(now, kRelaySlot, s.id, HelloAck, seq, 1 + kHeaderSize + 16 + 2, {c.slot});
 }
 
 void Hub::announce(int roomId, int except, double now) {
@@ -410,7 +437,25 @@ void Hub::announce(int roomId, int except, double now) {
     }
 }
 
-bool Hub::join(Session& s, uint32_t sceneHash) {
+void Hub::setAuthority(Room& r, uint8_t slot, double now) {
+    Packet p;
+    p.id = m_nextPacket++;
+    p.time = now;
+    p.from = kRelaySlot;
+    p.conn = r.id;
+    p.type = 0;
+    p.previous = r.authority;
+    p.authority = slot;
+    r.authority = slot;
+    for (const auto& [member, conn] : r.members) {
+        m_conns.at(conn).authority = slot;
+        p.to.push_back(member);
+    }
+    m_log.push_back(std::move(p));
+    while (m_log.size() > kPacketLog) m_log.pop_front();
+}
+
+bool Hub::join(Session& s, uint32_t sceneHash, double now) {
     Room* target = nullptr;
     for (Room& r : m_rooms) {
         if (r.members.size() >= size_t(kMaxSlots - kFirstPlayerSlot)) continue;
@@ -432,6 +477,10 @@ bool Hub::join(Session& s, uint32_t sceneHash) {
     c.slot = slot;
     c.room = target->id;
     c.joined = true;
+    c.authority = target->authority;
+    // The first member is the authority, and stays it while it is in: a later
+    // console with a lower slot (one freed by a leaver) does not take it.
+    if (target->authority == kNoSlot) setAuthority(*target, slot, now);
     return true;
 }
 
@@ -441,6 +490,8 @@ void Hub::leave(Session& s, double now) {
     const int roomId = c.room;
     c.room = 0;
     c.joined = false;
+    c.authority = kNoSlot;
+    s.objects.clear();
     if (!r) return;
     r->members.erase(c.slot);
     if (r->members.empty()) {
@@ -457,6 +508,8 @@ void Hub::leave(Session& s, double now) {
         only = h;
     }
     if (one && only) r->sceneHash = only;
+    // The authority left: the lowest slot still in takes over, and the acks below say so.
+    if (r->authority == c.slot) setAuthority(*r, r->members.begin()->first, now);
     announce(roomId, s.id, now);
 }
 
@@ -494,12 +547,13 @@ void Hub::onHello(Session& s, const Frame& f, double now) {
     Connection& c = info(s);
     const size_t size = 1 + kHeaderSize + f.payload.size() + 2;
     const std::optional<HelloPayload> h = parseHello(f.payload);
-    log(now, c.slot, s.id, Hello, f.seq, size, {kHostSlot});
+    log(now, c.slot, s.id, Hello, f.seq, size, {kRelaySlot});
     if (!h || h->magic != kMagic || h->protoVersion != kProtoVersion) return;  // the console latches the mismatch itself
     if (s.connected) {
         // Again: a scene change (or a lost ack). Keep the slot, re-ack.
         const bool moved = c.sceneHash != h->sceneHash;
         c.sceneHash = h->sceneHash;
+        if (moved) s.objects.clear();
         s.rxSeq.reset();
         if (Room* r = room(c.room)) {
             bool all = true;
@@ -512,7 +566,7 @@ void Hub::onHello(Session& s, const Frame& f, double now) {
         return;
     }
     c.sceneHash = h->sceneHash;
-    if (!c.room && !join(s, h->sceneHash)) return;
+    if (!c.room && !join(s, h->sceneHash, now)) return;
     s.connected = true;
     sendAck(s, now);
     announce(info(s).room, s.id, now);
@@ -531,10 +585,10 @@ void Hub::onReliable(Session& s, const Frame& f, double now) {
             }
     const bool dup = s.rxSeq && *s.rxSeq == f.seq;
     const bool relays = !dup && (f.type == ObjectState || f.type == AppData || (f.type == Event && f.payload.size() >= 8));
-    log(now, c.slot, s.id, f.type, f.seq, size, relays && !slots.empty() ? slots : std::vector<uint8_t>{kHostSlot});
+    log(now, c.slot, s.id, f.type, f.seq, size, relays && !slots.empty() ? slots : std::vector<uint8_t>{kRelaySlot});
     // Ack duplicates too: that is what stops the sender retransmitting.
     send(s, EventAck, {}, f.seq);
-    log(now, kHostSlot, s.id, EventAck, f.seq, 1 + kHeaderSize + 2, {c.slot});
+    log(now, kRelaySlot, s.id, EventAck, f.seq, 1 + kHeaderSize + 2, {c.slot});
     if (dup) return;
     s.rxSeq = f.seq;
     if (!relays) return;
@@ -550,10 +604,13 @@ void Hub::dispatch(Session& s, const Frame& f, double now) {
     switch (f.type) {
         case Hello: onHello(s, f, now); break;
         case Snapshot: {
-            log(now, c.slot, s.id, Snapshot, f.seq, size, {kHostSlot});
-            // The sender's own legacy record is its avatar; anything else in it is ignored.
+            log(now, c.slot, s.id, Snapshot, f.seq, size, {kRelaySlot});
+            // psxsplash sends legacy records: its own avatar, then, from the
+            // host, its world objects. The sender's own avatar record is kept,
+            // and the world objects only from the room's authority; anything
+            // else in it is ignored.
             if (!c.room || f.payload.size() < 4) break;
-            const size_t count = f.payload[0];
+            const size_t count = f.payload[0], objectCount = f.payload[1];
             size_t off = 4;
             for (size_t i = 0; i < count && off + 20 <= f.payload.size(); ++i, off += 20) {
                 const uint8_t* r = f.payload.data() + off;
@@ -564,26 +621,39 @@ void Hub::dispatch(Session& s, const Frame& f, double now) {
                 s.avatar.pz = int32_t(get32(r + 12));
                 s.avatar.yaw = int32_t(get32(r + 16));
             }
+            if (!c.isAuthority() || f.payload[2] != 0) break;  // legacy only: the format psxsplash sends
+            s.objects.clear();
+            for (size_t i = 0; i < objectCount && off + 20 <= f.payload.size(); ++i, off += 20) {
+                const uint8_t* r = f.payload.data() + off;
+                WorldObject o;
+                o.actorId = get16(r);
+                o.flags = r[2];
+                o.px = int32_t(get32(r + 4));
+                o.py = int32_t(get32(r + 8));
+                o.pz = int32_t(get32(r + 12));
+                o.yaw = int32_t(get32(r + 16));
+                s.objects.push_back(o);
+            }
             break;
         }
         case Event:
         case ObjectState:
         case AppData: onReliable(s, f, now); break;
         case Ping: {
-            log(now, c.slot, s.id, Ping, f.seq, size, {kHostSlot});
+            log(now, c.slot, s.id, Ping, f.seq, size, {kRelaySlot});
             if (f.payload.size() != 12) break;
             std::vector<uint8_t> pong(f.payload.begin(), f.payload.begin() + 4);  // the echo, as sent
             pong.insert(pong.end(), 8, 0);
             const uint16_t seq = s.txSeq;
             send(s, Pong, pong, std::nullopt);
-            log(now, kHostSlot, s.id, Pong, seq, 1 + kHeaderSize + 12 + 2, {c.slot});
+            log(now, kRelaySlot, s.id, Pong, seq, 1 + kHeaderSize + 12 + 2, {c.slot});
             break;
         }
         case Bye:
-            log(now, c.slot, s.id, Bye, f.seq, size, {kHostSlot});
+            log(now, c.slot, s.id, Bye, f.seq, size, {kRelaySlot});
             close(s, now, false);
             break;
-        default: log(now, c.slot, s.id, f.type, f.seq, size, {kHostSlot}); break;
+        default: log(now, c.slot, s.id, f.type, f.seq, size, {kRelaySlot}); break;
     }
 }
 
@@ -602,13 +672,23 @@ void Hub::tick(double now) {
         for (const auto& [hash, members] : groups) {
             std::vector<std::pair<uint8_t, Avatar>> avatars;
             std::vector<uint8_t> to;
+            const std::vector<WorldObject>* objects = nullptr;  // the authority's, when it is in this scene group
             for (const auto& [slot, conn] : members) {
                 avatars.push_back({slot, m_sessions.at(conn).avatar});
                 to.push_back(slot);
+                if (slot == r.authority && !m_sessions.at(conn).objects.empty()) objects = &m_sessions.at(conn).objects;
             }
-            const std::vector<uint8_t> frame = encodeFrame(Snapshot, buildSnapshot(avatars), kHostSlot, 0);
-            for (const auto& [slot, conn] : members) sendRaw(m_sessions.at(conn), frame);
-            log(now, kHostSlot, r.id, Snapshot, 0, frame.size() * members.size(), to);
+            const std::vector<uint8_t> frame = encodeFrame(Snapshot, buildSnapshot(avatars), kRelaySlot, 0);
+            // The others get the authority's world objects too; the authority has them.
+            const std::vector<uint8_t> withObjects =
+                objects ? encodeFrame(Snapshot, buildSnapshot(avatars, *objects), kRelaySlot, 0) : frame;
+            size_t bytes = 0;
+            for (const auto& [slot, conn] : members) {
+                const std::vector<uint8_t>& f = slot == r.authority ? frame : withObjects;
+                sendRaw(m_sessions.at(conn), f);
+                bytes += f.size();
+            }
+            log(now, kRelaySlot, r.id, Snapshot, 0, bytes, to);
         }
     }
 }
@@ -875,19 +955,26 @@ bool PacketFilter::shows(const Packet& p) const {
     return std::find(p.to.begin(), p.to.end(), uint8_t(slot)) != p.to.end();
 }
 
+std::string describeType(const Packet& p) {
+    if (!p.handOff()) return packetTypeName(p.type);
+    std::string s = "Authority slot " + std::to_string(p.authority);
+    if (p.previous != kNoSlot) s += " (was " + std::to_string(p.previous) + ")";
+    return s;
+}
+
 std::string describeEnd(uint8_t slot, int conn) {
-    if (slot == kHostSlot) return "relay";
+    if (slot == kRelaySlot) return "relay";
     if (slot == kNoSlot) return "conn " + std::to_string(conn);
     return "slot " + std::to_string(slot);
 }
 
 std::string describeTo(const std::vector<uint8_t>& to) {
     if (to.empty()) return "nobody";
-    if (to.size() == 1 && to[0] == kHostSlot) return "relay";
+    if (to.size() == 1 && to[0] == kRelaySlot) return "relay";
     std::string s = to.size() == 1 ? "slot " : "slots ";
     for (size_t i = 0; i < to.size(); ++i) {
         if (i) s += ", ";
-        s += to[i] == kHostSlot ? std::string("relay") : to[i] == kNoSlot ? std::string("?") : std::to_string(to[i]);
+        s += to[i] == kRelaySlot ? std::string("relay") : to[i] == kNoSlot ? std::string("?") : std::to_string(to[i]);
     }
     return s;
 }

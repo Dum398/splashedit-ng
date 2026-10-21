@@ -5,7 +5,10 @@
 # splashpack header (sceneHash, read with tests/splashdiff.py). The hash is
 # Unity's: FNV-1a over the low byte of each UTF-16 unit. The editor prints
 # "network: derived" or "network: locked <id> hash 0x<8 hex digits>" when it
-# changes.
+# changes. While the id is empty, a button locks it to the scene's name in
+# one undoable click. The section also holds Play's consoles and relay, the
+# Players list's own settings: picking them there saves them to the play
+# settings file (each run gets its own) and the toolbar's list agrees.
 # usage: python3 netidcheck.py <splashedit> <splashpack-cli> [screenshot.png]   (needs a display: xvfb-run -a)
 import json, os, shutil, subprocess, sys, tempfile
 
@@ -44,12 +47,22 @@ def copy():
     return project
 
 
+def settings(project):
+    """The run's own play settings file, beside the project: 2 consoles, no relay at first."""
+    cfg = os.path.join(os.path.dirname(project), 'play.cfg')
+    if not os.path.exists(cfg):
+        with open(cfg, 'w') as fh:
+            fh.write('players=2\nrelay=0\n')
+    return cfg
+
+
 def run(project, args):
     """Runs the editor on `project` (the scene inspector shows), scrolls the
     inspector to its end, then `args`. Returns the network: lines, all
     output lines, the named controls and the screenshot path."""
     shot = os.path.join(project, 'shot.png')
-    cmd = [editor, '--size', '1600x960', '--project', project, '--wait', '5', '--wheel', '1400,600,-60', '--wait', '3'] + args + \
+    cmd = [editor, '--size', '1600x960', '--project', project, '--play-settings', settings(project),
+           '--wait', '5', '--wheel', '1400,600,-60', '--wait', '3'] + args + \
         ['--wait', '5', '--screenshot', shot]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=180)
     lines = (r.stdout + r.stderr).strip().splitlines()
@@ -108,6 +121,40 @@ check('a non-ASCII id exports the UTF-16 hash', got == unity_hash('été'), None
 p = copy()
 net, lines, _, _ = run(p, typed('lobby') + ['--key', 'ctrl+z', '--wait', '3'])
 check('Ctrl+Z after typing goes back to derived', net == ['network: derived', lobby, 'network: derived'], net)
+
+# One click locks the id to the scene's name; Ctrl+Z puts the derived id back.
+p = copy()
+net, lines, controls, _ = run(p, [])
+check('an empty id offers the scene\'s name', 'scene.netid.fill' in controls, sorted(c for c in controls if c.startswith('scene.')))
+courtyard = 'network: locked courtyard hash 0x%08X' % unity_hash('courtyard')
+net, lines, controls, _ = run(p, ['--click', '@scene.netid.fill', '--wait', '5'])
+check('the button locks the id to "courtyard"', net == ['network: derived', courtyard], net)
+check('and goes once the id is set', 'scene.netid.fill' not in controls)
+net, lines, _, _ = run(p, ['--click', '@scene.netid.fill', '--wait', '5', '--key', 'ctrl+z', '--wait', '3'])
+check('Ctrl+Z after the button goes back to derived', net == ['network: derived', courtyard, 'network: derived'], net)
+
+# Play's consoles and the relay, from the section: saved to the play settings, the toolbar agrees.
+p = copy()
+net, lines, controls, _ = run(p, [])
+scene = [l for l in lines if l.startswith('scene: play')]
+check('the section shows 2 consoles, relay off', scene[-1:] == ['scene: play 2 relay off'], scene)
+check('with a relay switch for 2', 'scene.relay' in controls and 'scene.players' in controls)
+net, lines, controls, _ = run(p, ['--click', '@scene.relay', '--wait', '5'])
+scene = [l for l in lines if l.startswith('scene: play')]
+check('the switch puts 2 consoles through the relay', scene[-1:] == ['scene: play 2 relay on via relay'] and
+      'play: players 2 relay' in lines, scene + [l for l in lines if l.startswith('play: players')])
+cfg = open(settings(p)).read()
+check('and saves relay=1 to the play settings', 'relay=1\n' in cfg and 'players=2\n' in cfg, cfg)
+net, lines, controls, _ = run(p, ['--click', '@scene.players', '--wait', '5', '--click', '@scene.players/5 Consoles', '--wait', '5'])
+scene = [l for l in lines if l.startswith('scene: play')]
+check('picking 5 consoles there', scene[-1:] == ['scene: play 5 relay on via relay'] and 'play: players 5 relay' in lines, scene)
+check('has no relay switch (3 or more always use it)', 'scene.relay' not in controls)
+cfg = open(settings(p)).read()
+check('and saves players=5', 'players=5\n' in cfg, cfg)
+net, lines, controls, _ = run(p, ['--click', '@players', '--wait', '5', '--click', '@menu.players/3 Consoles', '--wait', '5'])
+scene = [l for l in lines if l.startswith('scene: play')]
+check('the next run starts at 5, and the toolbar\'s list moves the section to 3',
+      scene[:1] == ['scene: play 5 relay on via relay'] and scene[-1:] == ['scene: play 3 relay on via relay'], scene)
 
 print('FAILS=%d' % fails)
 sys.exit(1 if fails else 0)

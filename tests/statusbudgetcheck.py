@@ -15,8 +15,8 @@ shots = sys.argv[2] if len(sys.argv) > 2 else None
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 # The scene inspector shows with nothing selected; once the export has landed
-# the wheel scrolls it to Memory card, its last section (memcardeditcheck.py).
-ENABLE_SAVES = ['--wheel', '1420,500,-200', '--wait', '3', '--click', '@scene.mcenable', '--wait', '3']
+# --scroll-to wheels it until Memory card's Enable saves switch is in view.
+ENABLE_SAVES = ['--scroll-to', '@scene.mcenable', '--wait', '3', '--click', '@scene.mcenable', '--wait', '3']
 
 
 def check(name, ok, detail=''):

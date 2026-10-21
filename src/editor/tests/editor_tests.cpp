@@ -1683,7 +1683,7 @@ void testRelayFrames() {
     CHECK(rl::crc16(reinterpret_cast<const uint8_t*>(nine), 9) == 0x29B1);
     // The same frame psnl's encode_frame builds (ng-deps/relay/snapgen.py).
     rl::Avatar a{1, 2, 3, 4, 1};
-    const std::vector<uint8_t> frame = rl::encodeFrame(rl::Snapshot, rl::buildSnapshot({{1, a}}), rl::kHostSlot, 0);
+    const std::vector<uint8_t> frame = rl::encodeFrame(rl::Snapshot, rl::buildSnapshot({{1, a}}), rl::kRelaySlot, 0);
     CHECK(frame == fromHex("a50300000000001800010000000101000001000000020000000300000004000000943e"));
 
     const std::vector<uint8_t> f1 = rl::encodeFrame(rl::Event, {1, 2, 3, 4, 5, 6, 7, 8}, 2, 77);
@@ -1760,7 +1760,9 @@ void testRelayProtobuf() {
 }
 
 // Rooms: join by scene, lowest free slot, re-Hello keeps the slot, leaving
-// and silence free it, and every member hears of each change.
+// and silence free it, and every member hears of each change. The first
+// member is the room's authority (every ack's hostSlot) until it leaves; then
+// the lowest slot left takes over, and a newcomer in a freed lower slot does not.
 void testRelayRooms() {
     rl::Hub h;
     const uint32_t A = 0xAAAA0001, B = 0xBBBB0002;
@@ -1769,20 +1771,22 @@ void testRelayRooms() {
     hubSend(h, c1, helloFrame(A), 0.1);
     auto sent = hubSent(h);
     std::vector<rl::HelloAckPayload> a1 = acksIn(sent[c1]);
-    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].hostSlot == rl::kHostSlot && a1[0].playerCount == 1 &&
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].hostSlot == 1 && a1[0].playerCount == 1 &&
           a1[0].sceneHash == A && a1[0].magic == rl::kMagic && a1[0].protoVersion == rl::kProtoVersion);
-    CHECK(sent[c1].size() == 1 && sent[c1][0].srcSlot == rl::kHostSlot);
+    CHECK(sent[c1].size() == 1 && sent[c1][0].srcSlot == rl::kRelaySlot);
     // A second console in the same scene: slot 2, and console 1 is told there are 2 now.
     hubSend(h, c2, helloFrame(A), 0.2);
     sent = hubSent(h);
     std::vector<rl::HelloAckPayload> a2 = acksIn(sent[c2]);
-    CHECK(a2.size() == 1 && a2[0].yourSlot == 2 && a2[0].playerCount == 2);
+    CHECK(a2.size() == 1 && a2[0].yourSlot == 2 && a2[0].playerCount == 2 && a2[0].hostSlot == 1);
     a1 = acksIn(sent[c1]);
-    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].playerCount == 2);
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].playerCount == 2 && a1[0].hostSlot == 1);
+    CHECK(h.connections().at(c1).isAuthority() && !h.connections().at(c2).isAuthority() && h.connections().at(c2).authority == 1);
     // Another scene: a room of its own, nobody else hears of it.
     hubSend(h, c3, helloFrame(B), 0.3);
     sent = hubSent(h);
-    CHECK(acksIn(sent[c3]).size() == 1 && acksIn(sent[c3])[0].yourSlot == 1 && acksIn(sent[c3])[0].playerCount == 1);
+    CHECK(acksIn(sent[c3]).size() == 1 && acksIn(sent[c3])[0].yourSlot == 1 && acksIn(sent[c3])[0].playerCount == 1 &&
+          acksIn(sent[c3])[0].hostSlot == 1 && h.connections().at(c3).isAuthority());
     CHECK(sent.count(c1) == 0 && sent.count(c2) == 0);
     // Hello again (a scene reload, or a lost ack): same slot, acked again; no change for the others.
     hubSend(h, c2, helloFrame(A, 2), 0.4);
@@ -1800,21 +1804,41 @@ void testRelayRooms() {
     sent = hubSent(h);
     CHECK(acksIn(sent[c4]).size() == 1 && acksIn(sent[c4])[0].yourSlot == 3 && acksIn(sent[c4])[0].playerCount == 3);
     CHECK(acksIn(sent[c1]).size() == 1 && acksIn(sent[c1])[0].playerCount == 3 && acksIn(sent[c2]).size() == 1);
+    CHECK(acksIn(sent[c4])[0].hostSlot == 1 && acksIn(sent[c1])[0].hostSlot == 1);
     hubSend(h, c1, rl::encodeFrame(rl::Bye, {}, 1, 3), 0.7);
     sent = hubSent(h);
     CHECK(h.takeClosed() == std::vector<int>({c1}) && !h.connections().at(c1).open);
     CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && acksIn(sent[c4]).size() == 1 &&
           acksIn(sent[c4])[0].playerCount == 2 && acksIn(sent[c4])[0].yourSlot == 3);
+    // Slot 1 left: authority passes to slot 2, and both who stay are told so.
+    CHECK(acksIn(sent[c2])[0].hostSlot == 2 && acksIn(sent[c4])[0].hostSlot == 2);
+    CHECK(h.connections().at(c2).isAuthority() && h.connections().at(c4).authority == 2 && !h.connections().at(c1).isAuthority());
+    {
+        // The Network view's log has the hand-off: room 1 now has slot 2, after 1, told to 2 and 3.
+        std::vector<const rl::Packet*> rows;
+        for (const rl::Packet& k : h.packets())
+            if (k.handOff()) rows.push_back(&k);
+        CHECK(rows.size() == 3);  // room A's first, room B's first, the hand-off
+        if (rows.size() == 3) {
+            CHECK(rows[0]->authority == 1 && rows[0]->previous == rl::kNoSlot && rl::describeType(*rows[0]) == "Authority slot 1");
+            CHECK(rows[2]->authority == 2 && rows[2]->previous == 1 && rows[2]->from == rl::kRelaySlot && rows[2]->type == 0 &&
+                  rows[2]->to == std::vector<uint8_t>({2, 3}) && rl::describeType(*rows[2]) == "Authority slot 2 (was 1)" &&
+                  rl::PacketFilter{}.shows(*rows[2]));
+        }
+    }
     // The lowest free slot again: 1.
     const int c5 = h.connect(0.8);
     hubSend(h, c5, helloFrame(A), 0.8);
     sent = hubSent(h);
     CHECK(acksIn(sent[c5]).size() == 1 && acksIn(sent[c5])[0].yourSlot == 1 && acksIn(sent[c5])[0].playerCount == 3);
     CHECK(h.connections().at(c5).slot == 1 && h.connections().at(c5).index == c5);
+    // It takes the freed slot 1, not the authority: that stays with slot 2.
+    CHECK(acksIn(sent[c5])[0].hostSlot == 2 && acksIn(sent[c2])[0].hostSlot == 2 && !h.connections().at(c5).isAuthority());
     // A socket that closes leaves too.
     h.disconnect(c5, 0.9);
     sent = hubSent(h);
-    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && h.takeClosed().empty());
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && acksIn(sent[c2])[0].hostSlot == 2 &&
+          h.takeClosed().empty());
     // 20 s of silence ends a member; one that spoke stays.
     hubSend(h, c2, rl::encodeFrame(rl::Ping, std::vector<uint8_t>(12, 0), 2, 4), 15.0);
     h.tick(21.0);
@@ -1854,7 +1878,7 @@ void testRelayReliable() {
     auto sent = hubSent(h);
     CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::EventAck && sent[c[0]][0].seq == 5 && sent[c[0]][0].payload.empty());
     for (int i : {1, 2})
-        CHECK(sent[c[i]].size() == 1 && sent[c[i]][0].type == rl::Event && sent[c[i]][0].srcSlot == rl::kHostSlot &&
+        CHECK(sent[c[i]].size() == 1 && sent[c[i]][0].type == rl::Event && sent[c[i]][0].srcSlot == rl::kRelaySlot &&
               sent[c[i]][0].payload == std::vector<uint8_t>(ev.begin(), ev.begin() + 8));
     const uint16_t seqTo2 = sent[c[1]][0].seq;
     // The retransmission: acked again, not delivered again.
@@ -1898,7 +1922,7 @@ void testRelayReliable() {
     CHECK(events.size() == 4);
     if (events.size() == 4) {
         CHECK(events[0]->from == 1 && events[0]->to == std::vector<uint8_t>({2, 3}) && events[0]->seq == 5 && events[0]->size == 21);
-        CHECK(events[1]->to == std::vector<uint8_t>({rl::kHostSlot}));
+        CHECK(events[1]->to == std::vector<uint8_t>({rl::kRelaySlot}));
         CHECK(rl::describeTo(events[0]->to) == "slots 2, 3" && rl::describeTo(events[1]->to) == "relay");
     }
     CHECK(pings.size() == 1 && pings[0]->count == 2 && pings[0]->from == 2);
@@ -1971,12 +1995,164 @@ void testRelaySnapshot() {
     auto sent = hubSent(h);
     const std::vector<uint8_t> want = rl::buildSnapshot({{1, rl::Avatar{5000, -20, 30, 1000, 1}}, {2, rl::Avatar{}}});
     for (int c : {a, b})
-        CHECK(sent[c].size() == 1 && sent[c][0].type == rl::Snapshot && sent[c][0].seq == 0 && sent[c][0].srcSlot == rl::kHostSlot &&
+        CHECK(sent[c].size() == 1 && sent[c][0].type == rl::Snapshot && sent[c][0].seq == 0 && sent[c][0].srcSlot == rl::kRelaySlot &&
               sent[c][0].payload == want);
     h.tick(1.01);
     CHECK(hubSent(h).empty());
     h.tick(1.0 + rl::kSnapshotSeconds + 0.001);
     CHECK(hubSent(h).size() == 2);
+}
+
+// What psxsplash reads of a snapshot's world objects: networkmanager.cpp
+// applyPendingSnapshot, line for line (avatars skipped, then each object's
+// actorId and body, legacy or compact). {actorId, x, y, z, yaw} each.
+std::vector<std::array<int32_t, 5>> engineObjects(const std::vector<uint8_t>& snap) {
+    std::vector<std::array<int32_t, 5>> out;
+    const uint8_t* p = snap.data();
+    const size_t len = snap.size();
+    if (len < 4) return out;
+    const uint8_t avatarCount = p[0], objectCount = p[1], format = p[2], posShift = p[3];
+    size_t off = 4;
+    const bool compact = format == 1;
+    int32_t ox = 0, oy = 0, oz = 0;
+    if (compact) {
+        if (len < off + 12 || posShift > 15) return out;
+        std::memcpy(&ox, p + off, 4);
+        std::memcpy(&oy, p + off + 4, 4);
+        std::memcpy(&oz, p + off + 8, 4);
+        off += 12;
+    } else if (format != 0)
+        return out;
+    const size_t avatarSize = compact ? 10 : 20, objectSize = compact ? 11 : 20;
+    auto body = [&](size_t at, std::array<int32_t, 5>& r) {
+        if (compact) {
+            uint16_t d[4];
+            std::memcpy(d, p + at, 8);
+            r[1] = ox + (int32_t(d[0]) << posShift);
+            r[2] = oy + (int32_t(d[1]) << posShift);
+            r[3] = oz + (int32_t(d[2]) << posShift);
+            r[4] = int32_t(d[3]);
+        } else
+            std::memcpy(&r[1], p + at, 16);
+    };
+    for (uint8_t i = 0; i < avatarCount && off + avatarSize <= len; ++i) off += avatarSize;
+    for (uint8_t i = 0; i < objectCount; ++i) {
+        if (off + objectSize > len) break;
+        std::array<int32_t, 5> r{};
+        r[0] = int32_t(p[off] | (p[off + 1] << 8));
+        body(off + (compact ? 3 : 4), r);
+        off += objectSize;
+        out.push_back(r);
+    }
+    return out;
+}
+
+// A snapshot as psxsplash builds one (buildAndSendSnapshot): legacy, its
+// avatar at `slot`, then `objects` {actorId, x, y, z, yaw}.
+std::vector<uint8_t> engineSnapshot(uint8_t slot, const std::vector<std::array<int32_t, 5>>& objects) {
+    std::vector<uint8_t> b = {1, uint8_t(objects.size()), 0, 0, slot, 1, 0, 0};
+    auto put = [&](int32_t v) {
+        for (int k = 0; k < 4; ++k) b.push_back(uint8_t(uint32_t(v) >> (8 * k)));
+    };
+    for (int32_t v : {slot * 100, 0, -slot * 100, 0}) put(v);
+    for (const auto& o : objects) {
+        b.insert(b.end(), {uint8_t(o[0]), uint8_t(o[0] >> 8), 1, 0});
+        for (int k = 1; k < 5; ++k) put(o[k]);
+    }
+    return b;
+}
+
+// World objects: the authority's (and only the authority's) go on in the
+// relay's snapshots to the rest of its scene group, as psxsplash reads them;
+// a hand-off moves that to the new authority.
+void testRelayWorldObjects() {
+    struct Case {
+        const char* name;
+        std::vector<std::pair<uint8_t, std::array<int32_t, 5>>> members;
+        std::vector<std::array<int32_t, 6>> objects;
+        const char* hex;
+    };
+    // Generated by /home/pixel/sources/ng-deps/authority/snapobjgen.py (psnl avatars, psxsplash object records).
+    const Case cases[] = {
+        {"object_only", {}, {{5, 4096, -8192, 12288, 100, 1}}, "00010000050001000010000000e0ffff0030000064000000"},
+        {"one_and_one", {{1, {100, -200, 300, 50, 1}}}, {{7, 9000, 0, -4000, -100, 1}},
+         "010101006400000038ffffff60f0ffff010100000000cc103200070001c422c80000002464"},
+        {"two_and_two", {{2, {1000, 0, -1000, 4096, 1}}, {1, {1100, 50, -900, -10, 1}}},
+         {{3, 200000, 40, 7, 30000, 1}, {12, -5000, -60, 1000, 25736, 1}},
+         "0202010278ecffffc4ffffff18fcffff0101f5051b0019007e640201dc050f000000001003000132c81900fb00a8100c000100000000f4010000"},
+        {"far_object", {{1, {-2000000000, 0, 0, 1, 1}}}, {{300, 2000000000, 5, -5, 2, 1}},
+         "0101000001010000006cca880000000000000000010000002c0101000094357705000000fbffffff02000000"},
+    };
+    for (const Case& c : cases) {
+        std::vector<std::pair<uint8_t, rl::Avatar>> m;
+        for (const auto& [slot, v] : c.members) m.push_back({slot, rl::Avatar{v[0], v[1], v[2], v[3], uint8_t(v[4])}});
+        std::vector<rl::WorldObject> o;
+        for (const auto& v : c.objects) o.push_back(rl::WorldObject{uint16_t(v[0]), v[1], v[2], v[3], v[4], uint8_t(v[5])});
+        const std::vector<uint8_t> snap = rl::buildSnapshot(m, o);
+        const bool same = snap == fromHex(c.hex);
+        if (!same) std::fprintf(stderr, "relay snapshot case %s differs from snapobjgen\n", c.name);
+        CHECK(same);
+        // And psxsplash reads the objects back: ids exact, positions within the shift's step.
+        const std::vector<std::array<int32_t, 5>> back = engineObjects(snap);
+        CHECK(back.size() == o.size());
+        for (size_t i = 0; i < back.size() && i < o.size(); ++i) {
+            const int32_t step = snap[2] == 1 ? (1 << snap[3]) : 1;
+            CHECK(back[i][0] == o[i].actorId && back[i][1] <= o[i].px && o[i].px - back[i][1] < step && back[i][2] <= o[i].py &&
+                  o[i].py - back[i][2] < step && back[i][3] <= o[i].pz && o[i].pz - back[i][3] < step);
+        }
+    }
+    // Never past one frame: 10 avatars and 40 objects (compact), and far apart (legacy).
+    {
+        std::vector<std::pair<uint8_t, rl::Avatar>> m;
+        for (uint8_t s = 1; s <= 10; ++s) m.push_back({s, rl::Avatar{s * 10, 0, 0, 0, 1}});
+        std::vector<rl::WorldObject> o(40);
+        for (size_t i = 0; i < o.size(); ++i) o[i].actorId = uint16_t(i + 1);
+        std::vector<uint8_t> snap = rl::buildSnapshot(m, o);
+        CHECK(snap.size() <= rl::kMaxPayload && snap[2] == 1 && snap.size() == 16 + 10 * 10 + 11 * size_t(snap[1]) && snap[1] == 36);
+        o[0].px = 2000000000;
+        m[0].second.px = -2000000000;
+        snap = rl::buildSnapshot(m, o);
+        CHECK(snap.size() <= rl::kMaxPayload && snap[2] == 0 && snap.size() == 4 + 20 * (10 + size_t(snap[1])) && snap[1] == 15);
+    }
+
+    // The hub: slot 1 (the authority) and slot 2 both send objects; 2 and 3
+    // get slot 1's, slot 1 gets none; slot 2's are dropped.
+    rl::Hub h;
+    const int a = h.connect(0), b = h.connect(0), c = h.connect(0);
+    for (int k : {a, b, c}) hubSend(h, k, helloFrame(9), 0);
+    hubSent(h);
+    const std::vector<std::array<int32_t, 5>> mine = {{4, 40960, -4096, 8192, 1024}, {9, 45056, 0, 0, 0}};
+    hubSend(h, a, rl::encodeFrame(rl::Snapshot, engineSnapshot(1, mine), 1, 0), 0.5);
+    hubSend(h, b, rl::encodeFrame(rl::Snapshot, engineSnapshot(2, {{6, 1, 2, 3, 4}}), 2, 0), 0.5);
+    h.tick(1.0);
+    auto sent = hubSent(h);
+    std::vector<std::pair<uint8_t, rl::Avatar>> avatars = {{1, rl::Avatar{100, 0, -100, 0, 1}}, {2, rl::Avatar{200, 0, -200, 0, 1}},
+                                                           {3, rl::Avatar{}}};
+    std::vector<rl::WorldObject> objs;
+    for (const auto& v : mine) objs.push_back(rl::WorldObject{uint16_t(v[0]), v[1], v[2], v[3], v[4], 1});
+    const std::vector<uint8_t> plain = rl::buildSnapshot(avatars), carried = rl::buildSnapshot(avatars, objs);
+    CHECK(sent[a].size() == 1 && sent[a][0].type == rl::Snapshot && sent[a][0].payload == plain && sent[a][0].payload[1] == 0);
+    for (int k : {b, c}) {
+        CHECK(sent[k].size() == 1 && sent[k][0].type == rl::Snapshot && sent[k][0].payload == carried);
+        if (sent[k].size() == 1) {
+            const std::vector<std::array<int32_t, 5>> got = engineObjects(sent[k][0].payload);
+            CHECK(got.size() == 2 && got[0][0] == 4 && got[1][0] == 9 && got[0][1] == 40960 && got[0][2] == -4096 && got[0][3] == 8192 &&
+                  got[0][4] == 1024 && got[1][1] == 45056);
+        }
+    }
+    // Slot 1 leaves: slot 2 is the authority, slot 1's objects are gone, and slot 2's now count.
+    hubSend(h, a, rl::encodeFrame(rl::Bye, {}, 1, 3), 1.1);
+    h.tick(1.2);
+    sent = hubSent(h);
+    for (int k : {b, c})
+        for (const rl::Frame& f : sent[k])
+            if (f.type == rl::Snapshot) CHECK(f.payload[1] == 0);
+    hubSend(h, b, rl::encodeFrame(rl::Snapshot, engineSnapshot(2, {{6, 1, 2, 3, 4}}), 2, 1), 1.3);
+    h.tick(1.4);
+    sent = hubSent(h);
+    const std::vector<std::array<int32_t, 5>> got = sent[c].size() == 1 ? engineObjects(sent[c][0].payload) : std::vector<std::array<int32_t, 5>>{};
+    CHECK(got.size() == 1 && got[0] == (std::array<int32_t, 5>{6, 1, 2, 3, 4}));
+    CHECK(sent[b].size() == 1 && sent[b][0].payload[1] == 0);
 }
 
 // The server on a socket: three clients speaking redux's wire get slots 1, 2
@@ -13782,6 +13958,7 @@ int main(int argc, char** argv) {
     testRelayRooms();
     testRelayReliable();
     testRelaySnapshot();
+    testRelayWorldObjects();
     testRelaySocket();
     testPlayBootLogo();
     testBuildScenes();

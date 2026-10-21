@@ -82,7 +82,9 @@ static int usage() {
                  "  exports the scenes as one build, <dir>/scene_<i>.{splashpack,vram,spu,loading}, the files\n"
                  "  psxsplash's PCdrv loader opens (the game boots in scene 0), as Play does: scene 0 carries the\n"
                  "  largest ordering table and bump allocator of the build, since psxsplash allocates them once,\n"
-                 "  from scene 0, and prints a render buffers line when it raised them\n"
+                 "  from scene 0, and prints a render buffers line when it raised them; Lua is always stored\n"
+                 "  compiled, as Play stores it (the bundled engines have no Lua compiler), so --lua-bytecode\n"
+                 "  changes nothing here\n"
                  "usage: splashpack-cli disc <scene>... --engine <psxsplash.ps-exe> -o <out.bin> [--project <dir>]\n"
                  "    [--licence <file|psxsplash|none>] [--volume <name>] [--track <audio file>]...\n"
                  "  builds a bootable disc image (.bin + .cue) of the scenes, numbered in the order given\n"
@@ -464,12 +466,11 @@ static void printRaised(const splash::ExportStats& st) {
 static int buildCmd(int argc, char** argv) {
     std::vector<std::string> scenePaths;
     std::string outDir, project;
-    bool bytecode = false;
     for (int i = 2; i < argc; i++) {
         std::string a = argv[i];
         if (a == "-o" && i + 1 < argc) outDir = argv[++i];
         else if (a == "--project" && i + 1 < argc) project = argv[++i];
-        else if (a == "--lua-bytecode") bytecode = true;
+        else if (a == "--lua-bytecode") continue;  // always on: kept so older command lines still work
         else if (!a.empty() && a[0] != '-') scenePaths.push_back(a);
         else return usage();
     }
@@ -489,7 +490,8 @@ static int buildCmd(int argc, char** argv) {
         const fs::path root = project.empty() ? fs::path(scenePaths.front()).parent_path() : fs::path(project);
         fs::create_directories(outDir);
         splash::ExportOptions opt;
-        opt.luaBytecode = bytecode;
+        // The bundled engines are NOPARSER builds: Lua source does not load there.
+        opt.luaBytecode = true;
         opt.vram = splash::readVramSettings(root / "vram.json");
         auto spk = [&](size_t i) { return fs::path(outDir) / ("scene_" + std::to_string(i) + ".splashpack"); };
         const std::vector<splash::ExportResult> all = splash::exportBuild(ptrs, root, spk, opt);

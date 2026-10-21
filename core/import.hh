@@ -37,6 +37,7 @@ struct ImportedModel {
     std::vector<std::string> textures;  // every PNG written, project-relative
     bool skinned = false;               // the baked mesh carries a skeleton
     std::vector<std::string> clips;     // every .anim written, project-relative, in file order
+    std::vector<std::string> clipTakes; // beside clips: each one's name in the file (its take)
     int triangles = 0;
     std::vector<std::string> warnings;
 };

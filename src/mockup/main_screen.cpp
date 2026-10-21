@@ -41,6 +41,7 @@
 #include "ui/colour_hex.hh"
 #include "ui/file_dialog.h"
 #include "ui/icons.h"
+#include "ui/list_scroll.hh"
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
@@ -138,17 +139,39 @@ static std::filesystem::path playDir() {
 
 static void notify(State& st, std::string msg, bool bad);
 static void scriptLine(const char* tag, const std::string& line);
+static std::string utf8(const std::filesystem::path& p);
+
+// Stop: every console of the session, and the relay they went through.
+static void stopPlay(State::Play& p) {
+    for (State::Play::Console& c : p.cons) c.emu.stop();
+    p.starting = 0;
+    if (p.relay) p.relay->stop();
+}
+
+// Console `i` (from 0) of the session.
+static Emulator& consoleEmu(State::Play& p, int i) { return p.cons[size_t(i)].emu; }
+static const GameView& consoleGame(const State::Play& p, int i) { return p.cons[size_t(i)].game; }
+
+// Where console `i`'s capture files are: the Play directory with 1 console,
+// the console's own directory with more (they share the Play directory).
+static std::filesystem::path captureDir(const State::Play& p, int i) {
+    return p.players >= 2 ? editor::consoleDir(playDir(), i) : playDir();
+}
 
 // Capture frame (the Game view, Build menu): asks framecapture.lua in the
 // running redux for one GPU frame; pollFrameCapture opens it in the Frame tab.
+// With linked consoles, the one that has the keyboard.
 static bool canCaptureFrame(const State& st) {
-    return st.play.emu.running() && st.play.game.attached() && !st.play.capturing && !st.play.captureScript.empty();
+    const State::Play& p = st.play;
+    const int i = p.players >= 2 ? p.focus : 0;
+    return p.cons[0].emu.running() && consoleGame(p, i).attached() && !p.capturing && !p.captureScript.empty();
 }
 
 static void captureFrame(State& st) {
     if (!canCaptureFrame(st)) return;
     std::string err;
-    if (!editor::requestCapture(playDir(), &err)) {
+    st.play.captureConsole = st.play.players >= 2 ? st.play.focus : 0;
+    if (!editor::requestCapture(captureDir(st.play, st.play.captureConsole), &err)) {
         notify(st, "Capture frame: " + err, true);
         return;
     }
@@ -161,17 +184,18 @@ static void captureFrame(State& st) {
 static void pollFrameCapture(State& st) {
     State::Play& p = st.play;
     if (!p.capturing) return;
-    if (!p.emu.running()) {
+    if (!consoleEmu(p, p.captureConsole).running()) {
         p.capturing = false;
         return;
     }
     std::string why;
-    const editor::CaptureState cs = editor::pollCapture(playDir(), &why);
+    const std::filesystem::path dir = captureDir(p, p.captureConsole);
+    const editor::CaptureState cs = editor::pollCapture(dir, &why);
     if (cs == editor::CaptureState::Waiting) {
         if (SDL_GetTicks() - p.captureAt > 20000) {
             p.capturing = false;
             std::error_code ec;
-            std::filesystem::remove(playDir() / "capture.flag", ec);
+            std::filesystem::remove(dir / "capture.flag", ec);
             notify(st, "No frame came back from pcsx-redux; Capture frame needs a pcsx-redux with the GPU dump recorder", true);
             scriptLine(nullptr, "frame: capture timed out");
         }
@@ -184,11 +208,13 @@ static void pollFrameCapture(State& st) {
         return;
     }
     std::string err;
-    if (!st.frame.load(playDir() / "capture.gpd", &err)) {
+    if (!st.frame.load(dir / "capture.gpd", &err)) {
         notify(st, "Capture frame: " + err, true);
         return;
     }
-    notify(st, "Captured a frame", false);
+    notify(st, p.players >= 2 ? "Captured a frame from Console " + std::to_string(p.captureConsole + 1) : "Captured a frame",
+           false);
+    scriptLine(nullptr, "frame: captured from console " + std::to_string(p.captureConsole + 1) + " " + utf8(dir));
 }
 // What a click on an object in the viewport selects: a prefab instance as a
 // whole (its content is edited in the prefab), else the object itself.
@@ -230,10 +256,20 @@ static std::filesystem::path openSceneFile(const editor::Document& doc) {
 // The build list's scenes for Play and Run on hardware, run on the worker
 // thread: the open one is `scene` (unsaved edits included), the rest are read
 // from disk; a file that does not load is an export error naming it.
+// With a `reporter` (Play with 2 linked consoles) each scene also gets the
+// link status reporter (editor::withLinkReporter), its script saved there.
 static splash::ExportResult exportBuild(const std::vector<std::filesystem::path>& files, const std::filesystem::path& open,
                                         const splash::Scene& scene, const std::filesystem::path& root,
-                                        const std::filesystem::path& dir) {
+                                        const std::filesystem::path& dir, const std::filesystem::path& reporter = {}) {
     editor::BuildScenes b = editor::loadBuildScenes(root, files, open, scene);
+    if (b.errors.empty() && !reporter.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(reporter.parent_path(), ec);  // the first Play: no Play folder yet
+        std::ofstream out(reporter, std::ios::binary | std::ios::trunc);
+        out << editor::linkReporterLua();
+        if (!out) b.errors.push_back("Cannot write " + utf8(reporter));
+        for (splash::Scene& sc : b.scenes) sc = editor::withLinkReporter(std::move(sc), reporter);
+    }
     if (!b.errors.empty()) {
         splash::ExportResult r;
         r.errors = std::move(b.errors);
@@ -241,6 +277,9 @@ static splash::ExportResult exportBuild(const std::vector<std::filesystem::path>
     }
     return editor::exportForPlay(b.pointers(), root, dir, b.names);
 }
+
+// The link reporter's script, beside the Play directory's scene files.
+static std::filesystem::path linkReporterFile() { return playDir() / "splashedit_link.lua"; }
 
 // Where the open scene is in `files`; -1 when it is not there.
 static int indexIn(const std::vector<std::filesystem::path>& files, const std::filesystem::path& open) {
@@ -275,8 +314,8 @@ static void reportBuild(State& st, const char* what, const State::Play::Launch& 
 // F5 and the Play button: start, or stop what is running.
 static void togglePlay(State& st, const editor::Document& doc) {
     State::Play& p = st.play;
-    if (p.emu.running()) {
-        p.emu.stop();
+    if (p.cons[0].emu.running()) {
+        stopPlay(p);
         return;
     }
     if (p.build.valid()) return;
@@ -298,9 +337,16 @@ static void togglePlay(State& st, const editor::Document& doc) {
     p.reloadIndex = indexIn(files, openSceneFile(doc));
     p.built = {};
     p.playLaunch = launchOf(files, openSceneFile(doc));
+    p.players = std::clamp(p.tools.players, 1, editor::kMaxPlayers);
+    p.relayed = editor::usesRelay(p.tools);
+    p.focus = 0;
+    for (State::Play::Console& c : p.cons) c.link.reset();
+    p.linkError.clear();
+    p.networkId = !doc.scene().settings.networkId.empty();
+    const std::filesystem::path reporter = p.players >= 2 ? linkReporterFile() : std::filesystem::path();
     p.build = std::async(std::launch::async, [files = std::move(files), open = openSceneFile(doc), scene = doc.scene(),
-                                              root = doc.projectRoot()] {
-        splash::ExportResult r = exportBuild(files, open, scene, root, playDir());
+                                              root = doc.projectRoot(), reporter] {
+        splash::ExportResult r = exportBuild(files, open, scene, root, playDir(), reporter);
         // Its presence at boot is what makes the game watch for live edits.
         if (r.ok() && !editor::writeReloadFlag(playDir(), 0)) r.errors.push_back("Cannot write reload.flag");
         return r;
@@ -310,8 +356,8 @@ static void togglePlay(State& st, const editor::Document& doc) {
 // Ctrl+Shift+F5 and the Restart button: stop the running game, then build
 // and run again, edits included, in one step.
 static void restartPlay(State& st, const editor::Document& doc) {
-    if (!st.play.emu.running()) return;
-    st.play.emu.stop();
+    if (!st.play.cons[0].emu.running()) return;
+    stopPlay(st.play);
     togglePlay(st, doc);
 }
 
@@ -359,7 +405,7 @@ static void sendEdits(State& st, const editor::Document& doc) {
         splash::ExportResult r = p.reload.get();
         p.message = r.ok() ? std::string() : "Live edit not sent: " + r.errors.front();
     }
-    if (!p.emu.running() || p.build.valid() || doc.loadId() != p.peakScene || p.reloadIndex < 0) return;
+    if (!p.cons[0].emu.running() || p.build.valid() || doc.loadId() != p.peakScene || p.reloadIndex < 0) return;
     if (doc.revision() != p.seenRev) {
         p.seenRev = doc.revision();
         p.seenAt = now;
@@ -367,7 +413,8 @@ static void sendEdits(State& st, const editor::Document& doc) {
     if (doc.revision() == p.sentRev || now - p.seenAt < 0.3) return;
     p.sentRev = doc.revision();
     const unsigned gen = ++p.reloadGeneration;
-    p.reload = std::async(std::launch::async, [scene = doc.scene(), root = doc.projectRoot(), gen, index = size_t(p.reloadIndex)] {
+    splash::Scene scene = p.players >= 2 ? editor::withLinkReporter(doc.scene(), linkReporterFile()) : doc.scene();
+    p.reload = std::async(std::launch::async, [scene = std::move(scene), root = doc.projectRoot(), gen, index = size_t(p.reloadIndex)] {
         return editor::reloadForPlay(scene, root, playDir(), gen, index);
     });
 }
@@ -390,32 +437,89 @@ static void updatePlay(State& st, const editor::Document& doc) {
             editor::restartLog(p.hwLog);
         }
     }
-    p.emu.poll();
-    // Read lines printed since the last frame (some may already have scrolled out).
-    const std::deque<std::string>& out = p.emu.output();
-    if (p.emu.lineCount() < p.linesSeen) p.linesSeen = 0;  // restarted
-    const uint64_t first = p.emu.lineCount() - out.size();
-    for (uint64_t i = std::max(p.linesSeen, first); i < p.emu.lineCount(); ++i) {
-        editor::RenderPeak rp;
-        editor::RenderLost rl;
-        if (editor::parseRenderPeak(out[size_t(i - first)], &rp)) p.peak = rp;
-        else if (editor::parseRenderLost(out[size_t(i - first)], &rl)) {
-            const double now = ImGui::GetTime();
-            p.lostGap = p.lost ? now - p.lostAt : 0;
-            p.lostAt = now;
-            p.lost = rl;
-            p.lostMax = editor::maxRenderLost(p.lostMax, rl);
+    for (State::Play::Console& c : p.cons) c.emu.poll();
+    // Every console's link reports; console 1's lines also its render reports.
+    for (int k = 0; k < editor::kMaxPlayers; ++k) {
+        State::Play::Console& c = p.cons[size_t(k)];
+        const std::deque<std::string>& out = c.emu.output();
+        if (c.emu.lineCount() < c.linesSeen) c.linesSeen = 0;  // restarted
+        const uint64_t first = c.emu.lineCount() - out.size();
+        for (uint64_t i = std::max(c.linesSeen, first); i < c.emu.lineCount(); ++i) {
+            const std::string& line = out[size_t(i - first)];
+            editor::RenderPeak rp;
+            editor::RenderLost rl;
+            editor::LinkStatus ls;
+            if (editor::parseLinkStatus(line, &ls)) c.link = ls;
+            else if (k > 0) continue;
+            else if (editor::parseRenderPeak(line, &rp)) p.peak = rp;
+            else if (editor::parseRenderLost(line, &rl)) {
+                const double now = ImGui::GetTime();
+                p.lostGap = p.lost ? now - p.lostAt : 0;
+                p.lostAt = now;
+                p.lost = rl;
+                p.lostMax = editor::maxRenderLost(p.lostMax, rl);
+            }
+        }
+        c.linesSeen = c.emu.lineCount();
+    }
+    // Console k starts once console k-1 has connected: to console 1's link
+    // server with 2 linked directly, to the relay (its k-th connection, which
+    // is how the relay's connections map to consoles) otherwise. Redux's
+    // client tries to connect once, at startup.
+    if (p.starting > 0) {
+        const int k = p.starting;
+        const uint64_t waited = SDL_GetTicks() - p.startSince;
+        const bool ready = p.relayed ? p.relay && p.relay->accepted() >= k : editor::linkPortTaken(p.linkPort);
+        if (!p.cons[0].emu.running()) p.starting = 0;
+        else if (ready) {
+            std::string err;
+            const editor::PlayTools eff = editor::withDefaults(p.tools, p.bundleDir);
+            State::Play::Console& c = p.cons[size_t(k)];
+            if (!c.emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, editor::consoleDir(playDir(), k)), &err)) {
+                p.linkError = "Console " + std::to_string(k + 1) + " could not start pcsx-redux: " + err;
+                p.starting = 0;
+            } else {
+                editor::restartLog(c.log);
+                scriptLine(nullptr, "play: console " + std::to_string(k + 1) + " started, " +
+                                        (p.relayed ? "relay port " + std::to_string(p.relay->port())
+                                                   : "link port " + std::to_string(p.linkPort)));
+                p.starting = k + 1 < p.players ? k + 1 : 0;
+                p.startSince = SDL_GetTicks();
+            }
+        } else if (waited > (p.relayed ? 30000u : 15000u)) {
+            p.starting = 0;
+            p.linkError = p.relayed ? "Console " + std::to_string(k + 1) + " not started: console " + std::to_string(k) +
+                                          " never connected to the relay (port " + std::to_string(p.relay ? p.relay->port() : 0) +
+                                          "); this pcsx-redux may lack SIO1 client support"
+                                    : "Not started: console 1 never opened its link port (" + std::to_string(p.linkPort) +
+                                          "); this pcsx-redux may lack SIO1 server support";
+            scriptLine(nullptr, "play: console " + std::to_string(k + 1) + " not started: " + p.linkError);
         }
     }
-    p.linesSeen = p.emu.lineCount();
-    if (p.emu.running()) {
-        if (!p.game.attached() && p.game.attach(p.emu.pid())) p.gameFocus = true;
-        p.game.update();
-        if (!p.game.attached() && p.message.empty() && SDL_GetTicks() - p.startedAt > 10000)
+    if (p.cons[0].emu.running()) {
+        if (!p.cons[0].game.attached() && p.cons[0].game.attach(p.cons[0].emu.pid())) p.gameFocus = true;
+        p.cons[0].game.update();
+        if (!p.cons[0].game.attached() && p.message.empty() && SDL_GetTicks() - p.startedAt > 10000)
             p.message = "pcsx-redux started but shows nothing here; it needs -shmdisplay support";
-    } else if (p.game.attached()) {
-        p.game.detach();
-        p.gameFocus = false;
+    } else {
+        // Console 1 gone ends the session: the others and the relay go with it.
+        if (p.starting || std::any_of(p.cons.begin() + 1, p.cons.end(), [](const State::Play::Console& c) { return c.emu.running(); }) ||
+            (p.relay && p.relay->running()))
+            stopPlay(p);
+        if (p.cons[0].game.attached()) {
+            p.cons[0].game.detach();
+            p.gameFocus = false;
+        }
+    }
+    for (int k = 1; k < editor::kMaxPlayers; ++k) {
+        State::Play::Console& c = p.cons[size_t(k)];
+        if (c.emu.running()) {
+            if (!c.game.attached()) c.game.attach(c.emu.pid());
+            c.game.update();
+        } else if (c.game.attached()) {
+            c.game.detach();
+            if (p.focus == k) p.focus = 0;
+        }
     }
     pollFrameCapture(st);
     if (!p.build.valid() || p.build.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
@@ -430,13 +534,45 @@ static void updatePlay(State& st, const editor::Document& doc) {
         return;
     }
     std::string err;
-    if (!p.emu.start(editor::reduxCommand(eff, playDir(), p.captureScript), &err))
+    std::filesystem::path console;  // console 1's directory with linked consoles
+    if (p.players >= 2) {
+        // Relayed, every console is a client of the relay, which listens
+        // first; linked directly, console 1 is the server of console 2.
+        if (p.relayed) {
+            if (!p.relay) p.relay = std::make_unique<editor::relay::Relay>();
+            p.netFrozen.clear();
+            p.netPaused = false;
+            if (p.relay->start(&err)) p.linkPort = p.relay->port();
+        } else {
+            p.linkPort = editor::pickLinkPort();
+            if (!p.linkPort) err = "no free TCP port for the link between the consoles";
+        }
+        for (int i = 0; i < p.players && err.empty(); ++i)
+            editor::prepareConsole(editor::consoleDir(playDir(), i), !p.relayed && i == 0, p.linkPort, &err);
+        if (!err.empty()) {
+            if (p.relay) p.relay->stop();
+            p.message = "Could not start " + std::to_string(p.players) + " linked consoles: " + err;
+            return;
+        }
+        console = editor::consoleDir(playDir(), 0);
+        if (p.relayed) scriptLine(nullptr, "play: relay listening, port " + std::to_string(p.linkPort));
+    }
+    if (!p.cons[0].emu.start(editor::reduxCommand(eff, playDir(), p.captureScript, console), &err))
+    {
         p.message = "Could not start pcsx-redux: " + err;
+        if (p.relay) p.relay->stop();
+    }
     else {
         p.startedAt = SDL_GetTicks();
-        editor::restartLog(p.playLog);
+        editor::restartLog(p.cons[0].log);
         scriptLine(nullptr, "play: boots " + utf8(engine.filename()));
         scriptLine(nullptr, "play: started");
+        if (p.players >= 2) {
+            p.starting = 1;
+            p.startSince = SDL_GetTicks();
+            scriptLine(nullptr, std::string("play: console 1 started, ") + (p.relayed ? "relay port " : "link port ") +
+                                    std::to_string(p.linkPort));
+        }
     }
 }
 
@@ -665,7 +801,7 @@ static void playSetup(State& st, const editor::Document& doc, ImVec2 size) {
 }
 
 // Title-bar menu labels this frame, for placing the open menu under its label.
-static ImRect g_menuRects[6];
+static ImRect g_menuRects[7];  // the six menus, then the Players button
 // A press outside an open menu closes it; when that press lands on the same
 // label, its release must not open the menu again.
 static int g_menuIgnoreClick = -1;
@@ -718,6 +854,12 @@ static void dockTabs(State& st, ImDrawList* dl, ImRect r) {
         st.bottomTab = State::BottomTab::Frame;
 }
 
+// The Players button's words for `t`: "1 player", "2 linked", "2 via relay", "4 players".
+static std::string playersLabel(const editor::PlayTools& t) {
+    if (t.players <= 1) return "1 player";
+    if (t.players == 2) return t.relay ? "2 via relay" : "2 linked";
+    return std::to_string(std::min(t.players, editor::kMaxPlayers)) + " players";
+}
 static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document& doc) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, 0), ImVec2(size.x, size::titleBar));
@@ -765,7 +907,7 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     auto width = [&](const char* ic, const char* l) {
         return space::md * 2 + measure(f.medium, type::icon, ic).x + space::sm - 2 + measure(f.medium, type::body, l).x;
     };
-    const bool playing = st.play.emu.running(), building = st.play.build.valid();
+    const bool playing = st.play.cons[0].emu.running(), building = st.play.build.valid();
     const char* playIcon = playing ? icon::square : icon::play;
     const char* playLabel = playing ? "Stop" : building ? "Building" : "Play";
     wPlay = width(playIcon, playLabel);
@@ -779,11 +921,18 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
     const bool exporting = st.play.disc.valid();
     const char* exportLabel = exporting ? "Exporting" : "Export";
     wExport = width(icon::package, exportLabel);
-    float total = wPlay + wRestart + wRun + wExport + space::sm * 2;
+    // Players, right of Play: how many consoles the next Play boots; a click
+    // opens the list (menu 6).
+    const int players = st.play.tools.players;
+    const char* playersIcon = players >= 2 ? icon::users : icon::user;
+    const std::string playersText = playersLabel(st.play.tools);
+    const char* playersLabelText = playersText.c_str();
+    const float wPlayers = width(playersIcon, playersLabelText) + space::sm;
+    float total = wPlay + wRestart + wPlayers + wRun + wExport + space::sm * 2;
     float ax = std::floor(size.x * 0.5f + 90 - total * 0.5f);
     float ay = bar.Min.y + (bar.GetHeight() - (size::field + 6)) * 0.5f;
     const editor::PlayTools& tools = st.play.tools;
-    const std::string playTip = st.play.emu.running() ? std::string("Stop pcsx-redux (F5)")
+    const std::string playTip = st.play.cons[0].emu.running() ? std::string("Stop pcsx-redux (F5)")
                                 : tools.overlayPerf && tools.overlayRooms
                                     ? std::string("Build and run in pcsx-redux with the performance and room debug overlays (F5)")
                                 : tools.overlayPerf  ? std::string("Build and run in pcsx-redux with the performance overlay (F5)")
@@ -812,10 +961,24 @@ static ImRect titleBar(State& st, ImDrawList* dl, ImVec2 size, editor::Document&
             std::fflush(stdout);
         }
     }
-    if (button("run", ImVec2(ax + wPlay + wRestart + space::sm, ay), runIcon, runLabel, ButtonKind::Secondary, nullptr,
+    {
+        const std::string tip =
+            (players == 1 ? std::string("Play runs 1 console")
+             : !editor::usesRelay(st.play.tools)
+                 ? std::string("Play runs 2 consoles linked by cable (SIO1), side by side, for a two-player scene")
+                 : "Play runs " + std::to_string(players) +
+                       " consoles, each linked to the editor's relay, for a multiplayer scene; the Network view shows what they send") +
+            ". Click to choose" + (st.play.cons[0].emu.running() ? "; applies from the next Play" : "");
+        const ImVec2 at(ax + wPlay + wRestart + space::sm, ay);
+        float bw = 0;
+        if (button("players", at, playersIcon, playersLabelText, ButtonKind::Ghost, &bw, tip.c_str()))
+            st.menuOpen = st.menuOpen == 6 || g_menuIgnoreClick == 6 ? -1 : 6;
+        g_menuRects[6] = ImRect(at, at + ImVec2(bw, size::field + 6));
+    }
+    if (button("run", ImVec2(ax + wPlay + wRestart + wPlayers + space::sm, ay), runIcon, runLabel, ButtonKind::Secondary, nullptr,
                onHw ? "Stop serving the console (Ctrl+F5)" : "Upload to a console over serial (Ctrl+F5)"))
         toggleRun(st, doc);
-    if (button("export", ImVec2(ax + wPlay + wRestart + wRun + space::sm * 2, ay), icon::package, exportLabel, ButtonKind::Ghost, nullptr,
+    if (button("export", ImVec2(ax + wPlay + wRestart + wPlayers + wRun + space::sm * 2, ay), icon::package, exportLabel, ButtonKind::Ghost, nullptr,
                "Build a disc image (Ctrl+B)"))
         startExport(st, doc);
 
@@ -883,6 +1046,11 @@ struct TreeCtx {
     editor::Document& doc;
     ImRect panel;
     float y;
+    ImRect list{};  // the visible part of the rows: a row outside it takes no drop
+    // The selected object's row, in px from the top of the scrolled rows, when drawn.
+    std::optional<float> selTop{};
+    float contentTop = 0;  // where the rows' top is drawn this frame (scrolled up past list.Min.y)
+    bool selectedHere = false;  // a row was clicked to select it this frame
     bool renameShown = false;
     std::string filter{};  // lower case; empty = every object
     int shown = 0;       // object rows drawn
@@ -918,6 +1086,7 @@ static bool isUnder(const editor::ObjectPath& p, const editor::ObjectPath& ances
 static void treeDropTarget(TreeCtx& c, ImRect rr, const editor::ObjectPath& path, const splash::Object& o, bool open) {
     const ImVec2 m = ImGui::GetIO().MousePos;
     if (!c.st.treeDragging || m.y < rr.Min.y || m.y >= rr.Max.y || m.x < c.panel.Min.x || m.x >= c.panel.Max.x) return;
+    if (!c.list.Contains(m)) return;  // the row is scrolled out from under the pointer
     if (isUnder(path, c.st.treeDragPath)) return;  // onto itself or inside it
     if (c.doc.inInstance(path)) return;            // an instance's content comes from its prefab
     const float t = (m.y - rr.Min.y) / rr.GetHeight();
@@ -994,9 +1163,11 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
                                ". Open the prefab to change it (Inspector > Prefab > Open).").c_str());
         nameRect("tree." + o.name, rr);
         ++c.shown;
-        if (ImGui::IsRectVisible(rr.Min, rr.Max)) {
+        if (row.selected) c.selTop = rr.Min.y - c.contentTop;
+        if (rr.Overlaps(c.list)) {
+            // Only its visible part takes a dropped file.
             ImRect shown = rr;
-            shown.ClipWith(c.panel);
+            shown.ClipWith(c.list);
             c.st.treeRows.push_back({shown, path});
         }
         if (c.st.treeDragging) {
@@ -1008,15 +1179,18 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
                 if (c.filter.empty()) c.doc.toggleExpanded(path);
             } else {
                 c.doc.select(path);
+                c.selectedHere = true;
             }
         }
         if (!c.st.treeDragging && h.hovered && ImGui::IsMouseDoubleClicked(0) && !(row.hasChildren && chevronClicked(rr, row.depth))) {
             c.doc.select(path);
+            c.selectedHere = true;
             c.st.frameRequest = true;
         }
         // Right-click: select it and open its menu.
         if (!c.st.treeDragging && h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             c.doc.select(path);
+            c.selectedHere = true;
             c.st.treeMenu = 1;
             c.st.treeMenuPath = path;
             c.st.treeMenuPos = ImGui::GetIO().MousePos;
@@ -1637,7 +1811,7 @@ static bool openScene(State& st, editor::Document& doc, const std::filesystem::p
         st.recent.remove(abs);
         return false;
     }
-    st.play.emu.stop();
+    stopPlay(st.play);
     st.play.gameFocus = false;
     if (auto err = doc.load(abs.parent_path(), abs.filename())) {
         notify(st, "Could not open " + name + ": " + *err, true);
@@ -2423,6 +2597,7 @@ struct MenuEntry {
     enum Kind { Item, Separator, Heading } kind = Item;
     std::string label, shortcut;
     bool enabled = true, checked = false;
+    bool choice = false;  // one of a group: the picked one shows a dot, an on/off item a check mark
     std::function<void()> run;
 };
 
@@ -2435,6 +2610,12 @@ static MenuEntry item(std::string label, std::string shortcut, bool enabled, std
     e.run = std::move(run);
     return e;
 }
+// One option of a group (tool, look, console count): the picked one shows a dot.
+static MenuEntry choice(std::string label, std::string shortcut, std::function<void()> run, bool picked) {
+    MenuEntry e = item(std::move(label), std::move(shortcut), true, std::move(run), picked);
+    e.choice = true;
+    return e;
+}
 static MenuEntry separator() {
     MenuEntry e;
     e.kind = MenuEntry::Separator;
@@ -2445,6 +2626,22 @@ static MenuEntry heading(std::string label) {
     e.kind = MenuEntry::Heading;
     e.label = std::move(label);
     return e;
+}
+
+// The Players list (the toolbar button, Build > Players): how many consoles
+// the next Play boots, and whether 2 go through the relay. Saved with the tools.
+static void setPlayers(State& st, int players) {
+    State::Play& p = st.play;
+    p.tools.players = std::clamp(players, 1, editor::kMaxPlayers);
+    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+    scriptLine(nullptr, "play: players " + std::to_string(p.tools.players) + (editor::usesRelay(p.tools) ? " relay" : ""));
+}
+
+static void setRelay(State& st, bool on) {
+    State::Play& p = st.play;
+    p.tools.relay = on;
+    if (!p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+    scriptLine(nullptr, "play: players " + std::to_string(p.tools.players) + (editor::usesRelay(p.tools) ? " relay" : ""));
 }
 
 // Build > Performance / Room Debug Overlay: which psxsplash build Play and
@@ -2527,8 +2724,8 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(item("Align with View", "Ctrl+Shift+F", hasSel, [&] { st.alignRequest = true; }));
             break;
         case 3:  // Build
-            m.push_back(item(st.play.emu.running() ? "Stop" : "Play", "F5", !st.play.build.valid(), [&] { togglePlay(st, doc); }));
-            m.push_back(item("Restart", "Ctrl+Shift+F5", st.play.emu.running(), [&] { restartPlay(st, doc); }));
+            m.push_back(item(st.play.cons[0].emu.running() ? "Stop" : "Play", "F5", !st.play.build.valid(), [&] { togglePlay(st, doc); }));
+            m.push_back(item("Restart", "Ctrl+Shift+F5", st.play.cons[0].emu.running(), [&] { restartPlay(st, doc); }));
             m.push_back(item("Capture Frame", "", canCaptureFrame(st), [&] { captureFrame(st); }));
             m.push_back(item(st.play.hw.active() ? "Stop Hardware Run" : "Run on Hardware", "Ctrl+F5", !st.play.hwBuild.valid(),
                              [&] { toggleRun(st, doc); }));
@@ -2547,15 +2744,25 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                              st.play.tools.overlayRooms));
             m.push_back(item("Boot Logo in Test Runs", "", true, [&] { setBootLogo(st, !st.play.tools.bootLogo); },
                              st.play.tools.bootLogo));
+            m.push_back(separator());
+            m.push_back(item("Players: " + playersLabel(st.play.tools) + "...", "", true, [&] { st.menuOpen = 6; }));
+            break;
+        case 6:  // the Players button's list
+            m.push_back(heading("Consoles Play boots"));
+            for (int n = 1; n <= editor::kMaxPlayers; ++n)
+                m.push_back(choice(n == 1 ? std::string("1 Console") : n == 2 ? std::string("2 Linked Consoles") : std::to_string(n) + " Consoles",
+                                   "", [&st, n] { setPlayers(st, n); }, st.play.tools.players == n));
+            m.push_back(separator());
+            m.push_back(item("Use the Relay for 2 Consoles", "", true, [&] { setRelay(st, !st.play.tools.relay); }, st.play.tools.relay));
             break;
         case 4:  // View
-            m.push_back(item("Hand", "Q", true, [&] { st.tool = 0; }, st.tool == 0));
-            m.push_back(item("Move", "W", true, [&] { st.tool = 1; }, st.tool == 1));
-            m.push_back(item("Rotate", "E", true, [&] { st.tool = 2; }, st.tool == 2));
-            m.push_back(item("Scale", "R", true, [&] { st.tool = 3; }, st.tool == 3));
+            m.push_back(choice("Hand", "Q", [&] { st.tool = 0; }, st.tool == 0));
+            m.push_back(choice("Move", "W", [&] { st.tool = 1; }, st.tool == 1));
+            m.push_back(choice("Rotate", "E", [&] { st.tool = 2; }, st.tool == 2));
+            m.push_back(choice("Scale", "R", [&] { st.tool = 3; }, st.tool == 3));
             m.push_back(separator());
-            m.push_back(item("PS1 Look", "", true, [&] { st.viewMode = 0; }, st.viewMode == 0));
-            m.push_back(item("Clean Look", "", true, [&] { st.viewMode = 1; }, st.viewMode == 1));
+            m.push_back(choice("PS1 Look", "", [&] { st.viewMode = 0; }, st.viewMode == 0));
+            m.push_back(choice("Clean Look", "", [&] { st.viewMode = 1; }, st.viewMode == 1));
             m.push_back(separator());
             m.push_back(item("Snap", "", true, [&] { st.snap = !st.snap; }, st.snap));
             m.push_back(item("Orthographic", "", true, [&] { view.setOrtho(!view.ortho()); }, view.ortho()));
@@ -2653,7 +2860,19 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
             if (!menu.empty()) nameRect(menu + "/" + e.label, ir);
             const bool on = e.enabled && hit.hover > 0;
             if (on) dl->AddRectFilled(ir.Min, ir.Max, lerpColor(rgb(0x2a2f39, 0), color::hover, hit.hover), radius::field);
-            if (e.checked) dl->AddCircleFilled(ImVec2(ir.Min.x + space::md, ir.GetCenter().y), 3.5f, color::accent, 12);
+            if (e.checked) {
+                // Scripted checks find the mark as <menu>/<label>/dot or /check.
+                const ImVec2 c(ir.Min.x + space::md, ir.GetCenter().y);
+                if (e.choice) {
+                    dl->AddCircleFilled(c, 3.5f, color::accent, 12);
+                    if (!menu.empty()) nameRect(menu + "/" + e.label + "/dot", ImRect(c - ImVec2(4, 4), c + ImVec2(4, 4)));
+                } else {
+                    const ImVec2 cs = measure(f.medium, type::label, icon::check);
+                    const ImVec2 at(c.x - cs.x * 0.5f, centerY(f.medium, type::label, ir.Min.y, ir.Max.y));
+                    text(dl, at, f.medium, type::label, color::accent, icon::check);
+                    if (!menu.empty()) nameRect(menu + "/" + e.label + "/check", ImRect(at, at + cs));
+                }
+            }
             const ImU32 tc = !e.enabled ? color::textFaint : on && hit.hover > 0.5f ? color::text : color::textDim;
             text(dl, ImVec2(ir.Min.x + 28, centerY(f.regular, type::body, ir.Min.y, ir.Max.y)), f.regular, type::body, tc, e.label.c_str());
             if (!e.shortcut.empty()) {
@@ -2670,7 +2889,7 @@ static std::function<void()> menuRows(const std::vector<MenuEntry>& entries, flo
 }
 
 static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
-    static const char* ids[6] = {"##m_file", "##m_edit", "##m_object", "##m_build", "##m_view", "##m_help"};
+    static const char* ids[7] = {"##m_file", "##m_edit", "##m_object", "##m_build", "##m_view", "##m_help", "##m_players"};
     static int shown = -1;  // the menu whose popup was open last frame
     if (shown >= 0 && !ImGui::IsPopupOpen(ids[shown])) {
         // Closed by a press elsewhere: that press must not reopen it from its own label.
@@ -2702,7 +2921,7 @@ static void menus(State& st, editor::Document& doc, viewport::Ps1View& view) {
                                                         ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(2);
     if (!open) return;
-    static const char* names[6] = {"menu.file", "menu.edit", "menu.object", "menu.build", "menu.view", "menu.help"};
+    static const char* names[7] = {"menu.file", "menu.edit", "menu.object", "menu.build", "menu.view", "menu.help", "menu.players"};
     std::function<void()> run = menuRows(entries, w, h, names[shown]);
     if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) st.menuOpen = -1;
     if (run) st.menuOpen = -1;
@@ -3171,8 +3390,9 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         st.treeMenuPos = ImVec2(menuBtn.Max.x, menuBtn.Max.y + space::xs);
         st.treeMenuRight = true;
     }
-    searchField("treesearch", ImRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28)), "Filter objects", "Ctrl F",
-                &st.treeFilter, st.focusTreeFilter);
+    const ImRect searchRect(ImVec2(r.Min.x + space::sm, y), ImVec2(r.Max.x - space::sm, y + 28));
+    nameRect("treesearch", searchRect);
+    searchField("treesearch", searchRect, "Filter objects", "Ctrl F", &st.treeFilter, st.focusTreeFilter);
     st.focusTreeFilter = false;
     y += 28 + space::sm;
 
@@ -3199,9 +3419,38 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
 
     ImRect foot(ImVec2(r.Min.x, r.Max.y - 40), r.Max);
-    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y), true);
+    // The rows scroll between the filter (or the prefab bar) and the footer.
+    // The wheel over them, the thumb, and a row dragged near an edge move them,
+    // clamped to last frame's rows before they are drawn and to this frame's after.
+    const ImRect list(ImVec2(r.Min.x, y), ImVec2(r.Max.x, foot.Min.y));
+    nameRect("treelist.panel", list);  // for --scroll-to
+    const float listH = list.GetHeight();
+    const ImGuiIO& io = ImGui::GetIO();
+    float& scroll = st.treeScroll;
+    bool thumbHot = false;
+    if (ui::maxScroll(st.treeContent, listH) > 0) {
+        if (ImGui::IsMouseHoveringRect(list.Min, list.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+            scroll -= io.MouseWheel * 48.0f;
+        // Registered before the rows so it wins the press where they meet.
+        const ui::Thumb th = ui::thumb(scroll, st.treeContent, listH);
+        const ImRect thumbRect(ImVec2(r.Max.x - 7, list.Min.y + th.top), ImVec2(r.Max.x - 1, list.Min.y + th.top + th.height));
+        nameRect("treethumb", thumbRect);
+        Hit t = interact("treethumb", thumbRect);
+        st.treeThumbHeld = t.held;
+        thumbHot = t.hovered || t.held;
+        if (t.held) scroll += ui::thumbDragScroll(io.MouseDelta.y, st.treeContent, listH);
+        if (st.treeDragging && r.Contains(io.MousePos))
+            scroll += ui::edgeScrollSpeed(io.MousePos.y, list.Min.y, list.Max.y, size::row, 900.0f) * io.DeltaTime;
+    } else {
+        st.treeThumbHeld = false;
+    }
+    scroll = ui::clampScroll(scroll, st.treeContent, listH);
+    ImGui::PushClipRect(list.Min, list.Max, true);
+    y = list.Min.y - scroll;
     const editor::ObjectPath root;
     TreeCtx ctx{st, doc, r, y + size::row};
+    ctx.list = list;
+    ctx.contentTop = y;
     ctx.filter = lower(st.treeFilter);
     bool rootOpen = !ctx.filter.empty() || doc.expanded(root);
     TreeRow top{0, icon::layers, color::accentHover, doc.sceneStem().c_str(), nullptr, !doc.scene().objects.empty(), rootOpen};
@@ -3231,12 +3480,12 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // Dragging a row: the scene row or the empty space under the rows drops it at the top level, last.
     if (st.treeDragging) {
         const ImVec2 m = ImGui::GetIO().MousePos;
-        const bool inTree = m.x >= r.Min.x && m.x < r.Max.x && m.y >= y && m.y < foot.Min.y;
-        if (!ctx.hasDrop && inTree && (m.y < y + size::row || m.y >= ctx.y)) {
+        const bool inTree = list.Contains(m);
+        if (!ctx.hasDrop && inTree && (m.y < rr.Max.y || m.y >= ctx.y)) {
             ctx.hasDrop = true;
             ctx.dropParent.clear();
             ctx.dropIndex = static_cast<int>(doc.scene().objects.size());
-            ctx.dropInto = m.y < y + size::row;
+            ctx.dropInto = m.y < rr.Max.y;
             ctx.dropMark = ctx.dropInto ? rr : ImRect(ImVec2(rr.Min.x + space::xs + 16, ctx.y - 1), ImVec2(rr.Max.x, ctx.y + 1));
         }
         // A drop that leaves the object where it is shows nothing.
@@ -3251,6 +3500,35 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         }
     }
     ImGui::PopClipRect();
+
+    // The rows' height, with half a row under the last to drop at the end.
+    st.treeContent = ctx.y + size::row * 0.5f - ctx.contentTop;
+    // A selection made since last frame, here or anywhere else, or a new
+    // filter: its row is brought into view, once.
+    // Selected elsewhere under closed groups, the groups open first and the
+    // row is scrolled to when next drawn; a group closed afterwards stays closed.
+    if (doc.selection() != st.treeSeenSelection || st.treeFilter != st.treeSeenFilter) {
+        const std::optional<editor::ObjectPath>& sel = doc.selection();
+        if (sel && !ctx.selTop && !ctx.selectedHere && !st.treeRevealPending && doc.object(*sel)) {
+            for (size_t n = 0; n < sel->size(); ++n) {
+                const editor::ObjectPath up(sel->begin(), sel->begin() + static_cast<std::ptrdiff_t>(n));
+                if (!doc.expanded(up)) doc.toggleExpanded(up);
+            }
+            st.treeRevealPending = true;
+        } else {
+            if (ctx.selTop) scroll = ui::scrollToShow(scroll, *ctx.selTop, *ctx.selTop + size::row, listH);
+            st.treeSeenSelection = sel;
+            st.treeSeenFilter = st.treeFilter;
+            st.treeRevealPending = false;
+        }
+    }
+    scroll = ui::clampScroll(scroll, st.treeContent, listH);
+    if (ui::maxScroll(st.treeContent, listH) > 0) {
+        // A thin bar at the right edge, as in the inspector; it can be dragged.
+        const ui::Thumb th = ui::thumb(scroll, st.treeContent, listH);
+        dl->AddRectFilled(ImVec2(r.Max.x - 5, list.Min.y + th.top + 2), ImVec2(r.Max.x - 2, list.Min.y + th.top + th.height - 2),
+                          rgb(0xffffff, thumbHot ? 90 : 40), 2);
+    }
 
     if (st.treeDragging) {
         const splash::Object* dragged = doc.object(st.treeDragPath);
@@ -3302,10 +3580,12 @@ static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn,
 }
 
 // A clickable marker for an object without geometry. Returns true when clicked.
-static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col) {
+static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col,
+                      const std::string& name = {}) {
     ImVec2 c;
     if (!view.project(p, mn, sz, &c)) return false;
     if (!ImRect(mn, mn + sz).Contains(c)) return false;
+    if (!name.empty()) nameRect("vp.marker." + name, ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)));
     Hit h = interact("marker", ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)));
     dl->AddCircleFilled(c, 13, rgb(0x0e1014, 200), 24);
     // The ring brightens on hover.
@@ -4228,7 +4508,7 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
         st.followAt[0] = selAt.x, st.followAt[1] = selAt.y, st.followAt[2] = selAt.z;
     }
 
-    const bool keys = !io.WantTextInput && !(st.play.gameFocus && st.play.game.attached());
+    const bool keys = !io.WantTextInput && !(st.play.gameFocus && st.play.cons[0].game.attached());
     if ((keys && io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F, false)) || st.alignRequest) alignWithView(doc, view, flats);
     st.alignRequest = false;
     if ((keys && !io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) || st.frameRequest) {
@@ -4297,21 +4577,164 @@ static uint16_t hostPad(bool keyboard) {
     return pad;
 }
 
+static std::string cutTo(ImFont* font, float size, const std::string& s, float room);
+
+// With linked consoles the Game view holds them all, each with its link
+// status line under its picture: 2 side by side when that gives the 4:3
+// pictures more room, stacked otherwise; more in a grid of ceil(sqrt(N))
+// columns.
+static constexpr float kLinkStatusH = 24;
+static std::vector<ImRect> consoleRects(ImRect r, int n) {
+    const float g = space::sm, w = r.GetWidth(), h = r.GetHeight(), lh = kLinkStatusH;
+    std::vector<ImRect> out;
+    if (n == 2) {
+        const bool across = std::min((w - g) / 2, (h - lh) * 4 / 3) >= std::min(w, ((h - g) / 2 - lh) * 4 / 3);
+        if (across) {
+            const float half = (w - g) / 2;
+            out.push_back(ImRect(r.Min, ImVec2(r.Min.x + half, r.Max.y)));
+            out.push_back(ImRect(ImVec2(r.Max.x - half, r.Min.y), r.Max));
+        } else {
+            const float half = (h - g) / 2;
+            out.push_back(ImRect(r.Min, ImVec2(r.Max.x, r.Min.y + half)));
+            out.push_back(ImRect(ImVec2(r.Min.x, r.Max.y - half), r.Max));
+        }
+        return out;
+    }
+    const int cols = std::max(1, int(std::ceil(std::sqrt(double(n) - 1e-9))));
+    const int rows = (n + cols - 1) / cols;
+    const float cw = (w - g * float(cols - 1)) / float(cols), ch = (h - g * float(rows - 1)) / float(rows);
+    for (int i = 0; i < n; ++i) {
+        const int cx = i % cols, cy = i / cols;
+        const ImVec2 a(r.Min.x + float(cx) * (cw + g), r.Min.y + float(cy) * (ch + g));
+        out.push_back(ImRect(a, a + ImVec2(cw, ch)));
+    }
+    return out;
+}
+
+// The relay connection console `i` is (its accept order, see updatePlay), if it connected.
+static std::optional<editor::relay::Connection> relayConnection(const State::Play& p, int i) {
+    if (!p.relayed || !p.relay) return std::nullopt;
+    for (const editor::relay::Connection& c : p.relay->connections())
+        if (c.index == i + 1) return c;
+    return std::nullopt;
+}
+
+// One of the linked consoles: its picture, a "Console N" tag, the keys while
+// it has them (the focused one is outlined), and its status line below: its
+// relay slot and whose the room's authority is when relayed, then what its
+// engine last reported of its link.
+static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
+    Fonts& f = fonts();
+    State::Play& p = st.play;
+    const GameView& game = consoleGame(p, i);
+    const bool focused = p.focus == i;
+    const ImRect pic(r.Min, ImVec2(r.Max.x, r.Max.y - kLinkStatusH));
+    dl->AddRectFilled(pic.Min, pic.Max, IM_COL32_BLACK, radius::window);
+    const float w = pic.GetWidth(), h = pic.GetHeight();
+    const float gw = std::min(w, h * 4 / 3), gh = gw * 3 / 4;
+    const ImVec2 c = pic.GetCenter();
+    if (unsigned tex = game.texture())
+        ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, c - ImVec2(gw / 2, gh / 2), c + ImVec2(gw / 2, gh / 2));
+    else if (i > 0 && !p.linkError.empty() && !consoleEmu(p, i).running())
+        textCentered(dl, pic, f.regular, type::body, color::bad,
+                     cutTo(f.regular, type::body, p.linkError, pic.GetWidth() - space::md * 2).c_str());
+    else {
+        const std::string wait = p.starting == i && i > 0
+                                     ? (p.relayed ? "Waiting for console " + std::to_string(i) + " to reach the relay..."
+                                                  : std::string("Waiting for console 1's link..."))
+                                 : p.starting > 0 && i > p.starting ? std::string("Starts after console ") + std::to_string(i)
+                                                                    : std::string("Waiting for pcsx-redux...");
+        textCentered(dl, pic, f.regular, type::body, color::textDim, cutTo(f.regular, type::body, wait, pic.GetWidth() - space::md * 2).c_str());
+    }
+    const std::string name = "Console " + std::to_string(i + 1);
+    const ImVec2 ls = measure(f.medium, type::label, name.c_str());
+    const ImRect tag(pic.Min + ImVec2(space::md, space::md), pic.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
+    const bool active = focused && p.gameFocus;
+    dl->AddRectFilled(tag.Min, tag.Max, active ? color::accent : rgb(0x0e1014, 190), radius::pill);
+    textCentered(dl, tag, f.medium, type::label, active ? IM_COL32_WHITE : color::textDim, name.c_str());
+    // The keys, shortened when the picture is narrow; the other console says how to take them.
+    const char* full = "Arrows  \xc2\xb7  Z X A S  \xc2\xb7  Q W 1 2  \xc2\xb7  Enter Start  \xc2\xb7  Backspace Select";
+    const char* brief = "Arrows  \xc2\xb7  Z X A S  \xc2\xb7  Enter Start";
+    const char* info = active ? full : focused ? "Click to control this console" : "Click to control this console instead";
+    const float room = pic.GetWidth() - space::md * 2 - 20;
+    if (active && measure(f.regular, type::caption, info).x > room) info = brief;
+    if (measure(f.regular, type::caption, info).x <= room) {
+        const ImVec2 is = measure(f.regular, type::caption, info);
+        const ImRect chip(ImVec2(pic.Min.x + space::md, pic.Max.y - space::md - 24),
+                          ImVec2(pic.Min.x + space::md + is.x + 20, pic.Max.y - space::md));
+        dl->AddRectFilled(chip.Min, chip.Max, rgb(0x0e1014, 190), radius::pill);
+        textCentered(dl, chip, f.regular, type::caption, color::textDim, info);
+    }
+    if (active) dl->AddRect(pic.Min, pic.Max, color::accent, radius::window, 0, 2.0f);
+    // The link status line: what this console's engine last reported.
+    const std::optional<editor::LinkStatus>& ls2 = p.cons[size_t(i)].link;
+    std::string line;
+    ImU32 dot = color::textFaint;
+    if (!consoleEmu(p, i).running()) line = "Not running";
+    else if (!ls2) line = "Link: waiting for the game to report";
+    else {
+        line = editor::describeLinkStatus(*ls2, p.networkId);
+        dot = ls2->linked() ? color::good : ls2->state == 1 ? color::warn : ls2->state >= 3 ? color::bad : color::textFaint;
+    }
+    if (p.relayed && consoleEmu(p, i).running()) {
+        const std::optional<editor::relay::Connection> rc = relayConnection(p, i);
+        const std::string relay = !rc ? "Relay: not connected"
+                                  : !rc->open ? "Relay: disconnected"
+                                  : rc->joined ? "Relay slot " + std::to_string(rc->slot) +
+                                                     (rc->isAuthority() ? std::string(" \xc2\xb7 authority")
+                                                      : rc->authority != editor::relay::kNoSlot ? " \xc2\xb7 authority slot " + std::to_string(rc->authority)
+                                                                                                 : std::string())
+                                               : "Relay: connected, no Hello yet";
+        line = relay + " \xc2\xb7 " + line;
+        if (!rc || !rc->open) dot = color::bad;
+    }
+    const ImRect sl(ImVec2(r.Min.x, pic.Max.y), r.Max);
+    const float y = sl.Min.y + (sl.GetHeight() - measure(f.regular, type::caption, "Ag").y) * 0.5f;
+    dl->AddCircleFilled(ImVec2(sl.Min.x + 8, sl.GetCenter().y), 3.5f, dot, 12);
+    const std::string shown = cutTo(f.regular, type::caption, line, sl.GetWidth() - 22);
+    text(dl, ImVec2(sl.Min.x + 18, y), f.regular, type::caption, color::textDim, shown.c_str());
+    const std::string id = "game.console" + std::to_string(i + 1);
+    interact((id + ".status").c_str(), sl);
+    nameRect(id, pic);
+    nameRect(id + ".status", sl);
+    if (shown != line) tooltip(line.c_str());
+    scriptLine(id.c_str(), "game: console " + std::to_string(i + 1) + (game.texture() ? " frames" : " waiting") +
+                               (active ? " focused" : "") + " | " + line);
+}
+
 // The game as pcsx-redux shows it, 4:3 and letterboxed.
 static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     Fonts& f = fonts();
     State::Play& p = st.play;
+    if (p.players >= 2) {
+        const std::vector<ImRect> cr = consoleRects(r, p.players);
+        for (int i = 0; i < p.players; ++i) consolePanel(st, dl, cr[size_t(i)], i);
+        // The keyboard and pad go to the focused console only.
+        const uint16_t pad = hostPad(p.gameFocus);
+        for (int i = 0; i < p.players; ++i) p.cons[size_t(i)].game.setPads(p.focus == i ? pad : 0xffff, 0xffff);
+        if (!p.captureScript.empty() && p.focus < p.players) {
+            const char* capLabel = p.capturing ? "Capturing..." : "Capture frame";
+            const float bw = buttonWidth(icon::camera, capLabel);
+            const ImRect fr = cr[size_t(p.focus)];
+            const ImVec2 at(fr.Max.x - space::md - bw, fr.Min.y + space::md - 3);
+            if (button("game.capture", at, icon::camera, capLabel, ButtonKind::Secondary, nullptr,
+                       "Record the next frame this console draws and open it in the Frame tab") &&
+                !p.capturing)
+                captureFrame(st);
+        }
+        return;
+    }
     dl->AddRectFilled(r.Min, r.Max, IM_COL32_BLACK, radius::window);
     float w = r.GetWidth(), h = r.GetHeight();
     float gw = std::min(w, h * 4 / 3), gh = gw * 3 / 4;
     ImVec2 c = r.GetCenter();
     ImRect g(c - ImVec2(gw / 2, gh / 2), c + ImVec2(gw / 2, gh / 2));
-    if (unsigned tex = p.game.texture())
+    if (unsigned tex = p.cons[0].game.texture())
         ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.Min, g.Max);
     else
         textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
     // The keyboard is the controller only while the Game view has focus; a gamepad always is.
-    p.game.setPads(hostPad(p.gameFocus), 0xffff);
+    p.cons[0].game.setPads(hostPad(p.gameFocus), 0xffff);
     const char* label = "Game";
     ImVec2 ls = measure(f.medium, type::label, label);
     ImRect tag(r.Min + ImVec2(space::md, space::md), r.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
@@ -4326,7 +4749,7 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     // Triangles the engine lost or bent lately, above that. It reports only
     // when there are some, every 60 frames, so a report much older than the
     // gap between the last two means there are none now.
-    const bool lostNow = p.emu.running() && p.lost && p.lost->any() &&
+    const bool lostNow = p.cons[0].emu.running() && p.lost && p.lost->any() &&
                          ImGui::GetTime() - p.lostAt <= std::max(3.0, 1.5 * p.lostGap);
     if (lostNow) {
         const std::string lost = "Last 60 frames: " + editor::describeRenderLost(*p.lost);
@@ -4387,6 +4810,11 @@ static ImRect splitViewport(State& st, ImDrawList* dl, ImRect r) {
          ImGui::IsMouseClicked(ImGuiMouseButton_Middle))) {
         if (game.Contains(ImGui::GetMousePos())) p.gameFocus = true;
         if (scene.Contains(ImGui::GetMousePos())) p.gameFocus = false;
+        if (p.players >= 2) {
+            const std::vector<ImRect> cr = consoleRects(game, p.players);
+            for (int i = 0; i < p.players; ++i)
+                if (cr[size_t(i)].Contains(ImGui::GetMousePos())) p.focus = i;
+        }
     }
     gamePanel(st, dl, game);
     return scene;
@@ -4772,7 +5200,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         st.prefabViews.pop_back();
     }
     Fonts& f = fonts();
-    if (st.play.game.attached()) r = splitViewport(st, dl, r);
+    if (st.play.cons[0].game.attached()) r = splitViewport(st, dl, r);
     view.clean = st.viewMode == 1;
     // In pixels, so the clean view stays sharp at any UI scale or pixel density.
     const ImVec2 fb = ImGui::GetIO().DisplayFramebufferScale;
@@ -5059,7 +5487,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
         if (!ic) continue;
         ImGui::PushID((int)i);
-        if (sceneIcon(dl, view, mn, sz, pos, ic, col) && i < paths.size()) doc.select(pickTarget(doc, paths[i]));
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name) && i < paths.size()) doc.select(pickTarget(doc, paths[i]));
         ImGui::PopID();
     }
     if (previewing) previewCamera(dl, view, mn, sz, view.preview());
@@ -7749,8 +8177,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
 
-    // Network: the id two consoles compare before they link. Empty, the
-    // engine derives one from the scene index and object count.
+    // Network: the id two consoles compare before they link (empty, the
+    // engine derives one from the scene index and object count; one click
+    // locks it to the scene's name), then how many consoles Play boots and
+    // whether 2 go through the relay: the Players list's own settings.
     {
         const float stop = y;
         const bool open = section("s_network", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::globe, color::textDim, "Network",
@@ -7758,7 +8188,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
         y += 34 + space::xs;
         const ImRect idRow = row("lnetid", "Network id",
-                                 "Consoles linked with Net.Begin only connect when their scenes have the same id. Name the scene "
+                                 "Consoles linked with Net.Connect only connect when their scenes have the same id. Name the scene "
                                  "here to keep the id stable between builds.");
         nameRect("scene.netid", idRow);
         std::string typed;
@@ -7767,14 +8197,57 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const uint32_t hash = splash::hashSceneId(set.networkId);
         char hex[16];
         std::snprintf(hex, sizeof hex, "0x%08X", unsigned(hash));
-        if (set.networkId.empty())
+        scriptLine("network", set.networkId.empty() ? std::string("network: derived")
+                                                     : "network: locked " + set.networkId + " hash " + hex);
+        if (set.networkId.empty()) {
             caption("Derived at run time: it changes when objects are added, so consoles running different builds may not "
                     "connect.",
                     color::textFaint);
-        else
+            // One click locks it to the scene's name: stable, and the same on every build of it.
+            const std::string stem = doc.sceneStem();
+            const std::string label = "Use \"" + stem + "\"";
+            const std::string tip = "Sets the Network id to the scene's name, " + stem + ". Ctrl+Z puts it back.";
+            if (!stem.empty() && button("scene.netid.fill", ImVec2(x0 + space::sm + lw, y), icon::lock, label.c_str(), ButtonKind::Secondary,
+                                        nullptr, tip.c_str()))
+                doc.editSettings([stem](splash::SceneSettings& s) { s.networkId = stem; });
+            if (!stem.empty()) y += size::field + 6 + space::xs;
+        } else
             caption(std::string("Locked: hash ") + hex + ".", color::good);
-        scriptLine("network", set.networkId.empty() ? std::string("network: derived")
-                                                     : "network: locked " + set.networkId + " hash " + hex);
+
+        // Play's consoles: the Players list (toolbar), saved for this user, not in the scene.
+        y += space::sm;
+        State::Play& play = st.play;
+        const ImRect playersRow = row("lnetplayers", "Play boots",
+                                      "How many consoles Play starts for this scene's network code: the toolbar's Players list. "
+                                      "Saved for you in the editor's settings, not in the scene.");
+        nameRect("scene.players", playersRow);
+        std::vector<std::string> counts;
+        for (int n = 1; n <= editor::kMaxPlayers; ++n)
+            counts.push_back(n == 1 ? std::string("1 Console") : n == 2 ? std::string("2 Linked Consoles") : std::to_string(n) + " Consoles");
+        std::vector<const char*> countItems;
+        for (const std::string& c : counts) countItems.push_back(c.c_str());
+        const int cur = std::clamp(play.tools.players, 1, editor::kMaxPlayers) - 1;
+        const int pickPlayers = dropdownMenu("scene.players", playersRow, icon::users, countItems[size_t(cur)], countItems, cur);
+        if (pickPlayers >= 0 && pickPlayers != cur) setPlayers(st, pickPlayers + 1);
+        const ImRect relayRow = row("lnetrelay", "Relay",
+                                    "Route 2 consoles through the editor's relay instead of linking them directly: the Players "
+                                    "list's Use the Relay for 2 Consoles. 3 or more always use it.");
+        {
+            // 3 or more have no choice: no switch then, only what happens.
+            float tx = relayRow.Min.x;
+            if (play.tools.players < 3) {
+                const ImRect relaySw(ImVec2(relayRow.Min.x, relayRow.GetCenter().y - 8), ImVec2(relayRow.Min.x + 30, relayRow.GetCenter().y + 8));
+                nameRect("scene.relay", relaySw);
+                if (toggle("scene.relay", relaySw, play.tools.relay)) setRelay(st, !play.tools.relay);
+                tx = relaySw.Max.x + space::sm;
+            }
+            const char* what = play.tools.players >= 3 ? "Always, for 3 or more consoles" : "Use it for 2 consoles";
+            const float ty = relayRow.GetCenter().y - measure(f.regular, type::caption, what).y * 0.5f;
+            text(dl, ImVec2(tx, ty), f.regular, type::caption, editor::usesRelay(play.tools) ? color::textDim : color::textFaint, what);
+        }
+        caption("2 consoles link directly, 3 or more through the relay.", color::textFaint);
+        scriptLine("scene.play", "scene: play " + std::to_string(play.tools.players) + (play.tools.relay ? " relay on" : " relay off") +
+                                     (editor::usesRelay(play.tools) ? " via relay" : ""));
         y += space::xs;
         if (!open) {
             ImGui::PopClipRect();
@@ -9867,6 +10340,235 @@ static std::string cutTo(ImFont* font, float size, const std::string& s, float r
     return shown + "...";
 }
 
+// ---- The Network view: what Play's relay routed (editor/relay.hh). ----
+
+// A colour per kind of packet: handshakes blue, reliable traffic green,
+// application data amber, snapshots cyan, keepalives faint.
+static ImU32 packetColor(uint8_t type) {
+    namespace rl = editor::relay;
+    switch (type) {
+        case rl::Hello:
+        case rl::HelloAck:
+        case rl::Bye: return color::accent;
+        case rl::Event:
+        case rl::EventAck: return color::good;
+        case rl::ObjectState:
+        case rl::AppData: return color::warn;
+        case rl::Snapshot: return code::api;
+        case rl::Ping:
+        case rl::Pong: return color::textFaint;
+        default: return color::textDim;
+    }
+}
+
+// A small toggle chip at `at`, flowing onto a new line past `maxX` (back to
+// `x0`); `at` moves past it. True when clicked.
+static bool netChip(const std::string& id, ImVec2& at, float x0, float maxX, const std::string& label, ImU32 tone, bool on,
+                    const std::string& tip = {}) {
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 ts = measure(f.medium, type::caption, label.c_str());
+    const float w = ts.x + 30, h = 24;
+    if (at.x + w > maxX && at.x > x0) {
+        at.x = x0;
+        at.y += h + space::xs;
+    }
+    const ImRect r(at, at + ImVec2(w, h));
+    const Hit hit = interact(id.c_str(), r);
+    nameRect(id, r);
+    dl->AddRectFilled(r.Min, r.Max, on ? lerpColor(color::hover, color::active, hit.hover) : lerpColor(color::field, color::hover, hit.hover),
+                      radius::pill);
+    if (on) dl->AddRect(r.Min, r.Max, tone, radius::pill, 0, 1.0f);
+    dl->AddCircleFilled(ImVec2(r.Min.x + 12, r.GetCenter().y), 3.5f, on ? tone : color::textFaint, 12);
+    text(dl, ImVec2(r.Min.x + 21, r.Min.y + (h - ts.y) * 0.5f), f.medium, type::caption, on ? color::text : color::textFaint, label.c_str());
+    if (!tip.empty() && hit.hovered) tooltip(tip.c_str());
+    at.x += w + space::xs;
+    return hit.clicked;
+}
+
+// The relay's connections, a filter by console slot and by packet type, a
+// Pause, and every packet that passes, newest last.
+static void networkView(State& st) {
+    namespace rl = editor::relay;
+    State::Play& p = st.play;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float width = ImGui::GetContentRegionAvail().x, maxX = o.x + width;
+    if (!p.relay) {
+        text(dl, o, f.regular, type::body, color::textDim,
+             "The relay runs while Play boots 3 or more consoles, or 2 with Use the Relay on (the Players button).");
+        ImGui::Dummy(ImVec2(width, 28));
+        scriptLine("net.view", "net: no relay");
+        return;
+    }
+    const std::vector<rl::Connection> conns = p.relay->connections();
+    std::vector<rl::Packet> live;
+    if (!p.netPaused) live = p.relay->packets();
+    const std::vector<rl::Packet>& all = p.netPaused ? p.netFrozen : live;
+
+    // What the relay is doing, in one line, and Pause at the right.
+    int joined = 0;
+    std::string authority;  // the slot each room's authority (psxsplash's host) has
+    for (const rl::Connection& c : conns) {
+        joined += c.open && c.joined;
+        if (c.open && c.isAuthority()) authority += (authority.empty() ? "" : ", ") + std::to_string(c.slot);
+    }
+    const std::string head = p.relay->running() ? "Relay on 127.0.0.1:" + std::to_string(p.relay->port()) + "  \xc2\xb7  " +
+                                                      std::to_string(joined) + " of " + std::to_string(p.players) + " consoles in a room" +
+                                                      (authority.empty() ? std::string() : "  \xc2\xb7  authority: slot " + authority)
+                                                : "Relay stopped  \xc2\xb7  what it routed last Play";
+    scriptLine("net.authority", "net: authority " + (authority.empty() ? std::string("none") : "slot " + authority));
+    const float rowH = size::field + 6;
+    const ImVec2 hs = measure(f.medium, type::body, head.c_str());
+    dl->AddCircleFilled(ImVec2(o.x + 6, o.y + rowH * 0.5f), 4, p.relay->running() ? color::good : color::textFaint, 12);
+    text(dl, ImVec2(o.x + 18, o.y + (rowH - hs.y) * 0.5f), f.medium, type::body, color::text, head.c_str());
+    {
+        const char* label = p.netPaused ? "Resume" : "Pause";
+        const char* ic = p.netPaused ? icon::play : nullptr;
+        const float bw = buttonWidth(ic, label);
+        const ImVec2 at(maxX - bw, o.y);
+        if (button("net.pause", at, ic, label, p.netPaused ? ButtonKind::Secondary : ButtonKind::Ghost,
+                   nullptr, p.netPaused ? "Show packets as they come again" : "Hold the list still to read it; the relay keeps routing")) {
+            p.netPaused = !p.netPaused;
+            if (p.netPaused) p.netFrozen = p.relay->packets();
+            else p.netFrozen.clear();
+            scriptLine(nullptr, std::string("net: ") + (p.netPaused ? "paused" : "resumed"));
+        }
+        nameRect("net.pause", ImRect(at, at + ImVec2(bw, rowH)));
+    }
+
+    // Slots: All, then a chip per console (its slot, and whether it is in).
+    float y = o.y + rowH + space::sm;
+    const float labelW = 52;
+    text(dl, ImVec2(o.x, y + 4), f.regular, type::caption, color::textFaint, "Slot");
+    ImVec2 at(o.x + labelW, y);
+    if (netChip("net.slot.all", at, o.x + labelW, maxX, "All", color::accent, p.netFilter.slot < 0, "Packets from and to every console"))
+        p.netFilter.slot = -1;
+    std::string connLine;
+    for (const rl::Connection& c : conns) {
+        const bool in = c.open && c.joined;
+        const std::string label = "Console " + std::to_string(c.index) +
+                                  (in ? "  slot " + std::to_string(c.slot) + (c.isAuthority() ? "  \xc2\xb7  authority" : "")
+                                   : c.open ? "  no slot"
+                                            : "  gone");
+        char ago[48];
+        std::snprintf(ago, sizeof ago, "last heard from %.1f s ago", std::max(0.0, p.relay->seconds() - c.lastSeen));
+        const std::string tip = "Relay connection " + std::to_string(c.index) + (in ? ", slot " + std::to_string(c.slot) : "") +
+                                (in && c.isAuthority() ? ", the room's authority (psxsplash's host: its world objects go to the others)" : "") +
+                                ": " +
+                                std::to_string(c.framesIn) + " frames in, " + std::to_string(c.framesOut) + " out, " +
+                                (c.open ? std::string(ago) : std::string("disconnected")) + ". Click to show only packets from or to it.";
+        const bool on = in && p.netFilter.slot == c.slot;
+        if (netChip("net.slot." + std::to_string(c.index), at, o.x + labelW, maxX, label, in ? color::good : c.open ? color::warn : color::bad, on, tip) &&
+            in)
+            p.netFilter.slot = on ? -1 : c.slot;
+        connLine += " " + std::to_string(c.index) + ":" + (in ? std::to_string(c.slot) : std::string("-"));
+    }
+    if (conns.empty()) text(dl, ImVec2(at.x + space::sm, y + 4), f.regular, type::caption, color::textFaint, "No console has connected yet");
+    scriptLine("net.conns", "net: connections" + (connLine.empty() ? std::string(" none") : connLine));
+
+    // Types, each with how many came.
+    y = at.y + 24 + space::sm;
+    text(dl, ImVec2(o.x, y + 4), f.regular, type::caption, color::textFaint, "Type");
+    at = ImVec2(o.x + labelW, y);
+    uint64_t perType[rl::kPacketTypes + 1] = {};
+    for (const rl::Packet& k : all)
+        if (k.type >= 1 && k.type <= rl::kPacketTypes) perType[k.type] += k.count;
+    std::string typeLine;
+    for (int t = 1; t <= rl::kPacketTypes; ++t) {
+        const std::string name = rl::packetTypeName(uint8_t(t));
+        const bool on = p.netFilter.types & (1u << t);
+        if (netChip("net.type." + name, at, o.x + labelW, maxX, name + "  " + std::to_string(perType[t]), packetColor(uint8_t(t)), on,
+                    on ? "Click to hide " + name + " packets" : "Click to show " + name + " packets"))
+            p.netFilter.types ^= 1u << t;
+        if (perType[t]) typeLine += " " + name + " " + std::to_string(perType[t]);
+    }
+    scriptLine("net.types", "net: types" + typeLine);
+
+    std::vector<const rl::Packet*> shown;
+    for (const rl::Packet& k : all)
+        if (p.netFilter.shows(k)) shown.push_back(&k);
+    y = at.y + 24 + space::sm;
+    {
+        const std::string count = std::to_string(shown.size()) + " of " + std::to_string(all.size()) + " shown" +
+                                  (p.netPaused ? "  \xc2\xb7  paused" : "");
+        const ImVec2 cs = measure(f.regular, type::caption, count.c_str());
+        text(dl, ImVec2(maxX - cs.x, y), f.regular, type::caption, p.netPaused ? color::warn : color::textFaint, count.c_str());
+        text(dl, ImVec2(o.x, y), f.regular, type::caption, color::textFaint,
+             "Newest last. Snapshots, Pings and Pongs a console sends within a second share a row; Authority rows are hand-offs.");
+        y += cs.y + space::xs;
+    }
+    std::string filterWords = p.netFilter.slot < 0 ? "any" : std::to_string(p.netFilter.slot);
+    scriptLine("net.view", "net: shown " + std::to_string(shown.size()) + " of " + std::to_string(all.size()) + " slot " + filterWords +
+                               (p.netPaused ? " paused" : ""));
+    {
+        // The newest few of the rows shown, for scripted checks.
+        std::string last;
+        for (size_t i = shown.size() > 3 ? shown.size() - 3 : 0; i < shown.size(); ++i)
+            last += " | " + rl::describeType(*shown[i]) + " " + rl::describeEnd(shown[i]->from, shown[i]->conn) + " > " +
+                    rl::describeTo(shown[i]->to);
+        scriptLine("net.last", "net: last" + last);
+        // The newest authority change among them.
+        std::string handOff;
+        for (const rl::Packet* k : shown)
+            if (k->handOff()) handOff = " " + rl::describeType(*k) + " " + rl::describeEnd(k->from, k->conn) + " > " + rl::describeTo(k->to);
+        scriptLine("net.handoff", "net: hand-off" + (handOff.empty() ? std::string(" none") : handOff));
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(o.x, y));
+    ImGui::PushFont(f.regular, type::caption);
+    ImGui::PushStyleColor(ImGuiCol_TableRowBg, color::field);
+    ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt, lerpColor(color::field, color::raised, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_TableHeaderBg, color::raised);
+    const ImGuiTableFlags tf = ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit |
+                               ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_PadOuterX;
+    if (ImGui::BeginTable("##netpackets", 6, tf, ImVec2(width, 340))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthFixed, 70);
+        ImGui::TableSetupColumn("To", ImGuiTableColumnFlags_WidthFixed, 130);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Seq", ImGuiTableColumnFlags_WidthFixed, 56);
+        ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthFixed, 64);
+        ImGui::PushStyleColor(ImGuiCol_Text, color::textDim);
+        ImGui::TableHeadersRow();
+        ImGui::PopStyleColor();
+        ImGuiListClipper clip;
+        clip.Begin(int(shown.size()));
+        while (clip.Step())
+            for (int i = clip.DisplayStart; i < clip.DisplayEnd; ++i) {
+                const rl::Packet& k = *shown[size_t(i)];
+                char tbuf[32];
+                std::snprintf(tbuf, sizeof tbuf, "%.3f", k.time);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%s", tbuf);
+                ImGui::TableNextColumn();
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.from == rl::kRelaySlot ? color::textDim : color::text), "%s",
+                                   rl::describeEnd(k.from, k.conn).c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textDim), "\xe2\x86\x92 %s", rl::describeTo(k.to).c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(k.handOff() ? color::warn : packetColor(k.type)), "%s",
+                                   rl::describeType(k).c_str());
+                if (k.count > 1) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "\xc3\x97%u", unsigned(k.count));
+                }
+                ImGui::TableNextColumn();
+                if (k.count == 1 && k.type != rl::Snapshot && !k.handOff())
+                    ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.seq));
+                ImGui::TableNextColumn();
+                if (!k.handOff()) ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(color::textFaint), "%u", unsigned(k.size));
+            }
+        if (!p.netPaused && ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 4) ImGui::SetScrollHereY(1.0f);
+        ImGui::EndTable();
+    }
+    ImGui::PopStyleColor(3);
+    ImGui::PopFont();
+}
+
 // Status bar entry for Play: building, running (click for its output), how
 // it ended, or why it did not start.
 static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& st, const editor::Document& doc) {
@@ -9876,14 +10578,16 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     ImU32 tone = color::textDim, dot = 0;
     if (p.build.valid()) {
         label = "Building for Play";
-    } else if (p.emu.running()) {
-        label = "pcsx-redux running";
+    } else if (p.cons[0].emu.running()) {
+        label = p.players >= 2 ? "pcsx-redux running, " + std::to_string(p.players) + " linked consoles" +
+                                     (p.relayed ? " via the relay" : "")
+                               : "pcsx-redux running";
         dot = color::good;
     } else if (!p.message.empty()) {
         label = p.message;
         tone = color::bad;
-    } else if (p.emu.exitCode()) {
-        int c = *p.emu.exitCode();
+    } else if (p.cons[0].emu.exitCode()) {
+        int c = *p.cons[0].emu.exitCode();
         label = c ? "pcsx-redux exited with code " + std::to_string(c) : "pcsx-redux closed";
         tone = c ? color::bad : color::textFaint;
     } else {
@@ -9894,7 +10598,7 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     label = cutTo(f.medium, type::caption, label, std::max(60.0f, maxX - x - pad - 10));
     ImVec2 ls = measure(f.medium, type::caption, label.c_str());
     ImRect r(ImVec2(x, bar.Min.y + 5), ImVec2(x + pad + ls.x + 10, bar.Max.y - 5));
-    const bool hasOutput = !p.emu.output().empty();
+    const bool hasOutput = !p.cons[0].emu.output().empty() || p.relay;
     Hit h = interact("playstatus", r);
     nameRect("playstatus", r);
     if (label != whole) tooltip(whole.c_str());
@@ -9906,18 +10610,40 @@ static float playStatus(ImDrawList* dl, ImRect bar, float x, float maxX, State& 
     if (dot) dl->AddCircleFilled(ImVec2(r.Min.x + 12, r.GetCenter().y), 3.5f, dot, 12);
     text(dl, ImVec2(r.Min.x + pad, bar.Min.y + (size::statusBar - ls.y) * 0.5f), f.medium, type::caption, tone, label.c_str());
 
-    ImGui::SetNextWindowPos(ImVec2(r.Min.x, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
-    ImGui::SetNextWindowSize(ImVec2(720, 0));
+    const bool network = p.relay && p.outputTab == 1;
+    const float popupW = network ? 900.0f : 720.0f;
+    // Kept inside the window: the status entry sits well right of the middle.
+    const float popupX = std::max(space::sm, std::min(r.Min.x, ImGui::GetIO().DisplaySize.x - popupW - space::sm));
+    ImGui::SetNextWindowPos(ImVec2(popupX, r.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
+    ImGui::SetNextWindowSize(ImVec2(popupW, 0));
     pushPopupStyle();
     const bool open = ImGui::BeginPopup("##playoutput", ImGuiWindowFlags_NoSavedSettings);
     ImGui::PopStyleVar(4);
     ImGui::PopStyleColor(2);
     if (!open) return r.Max.x + space::md;
-    outputLog(st, "play", p.emu.output(), p.emu.lineCount(), p.playLog);
-    if (p.emu.running()) {
+    // Relayed: Output (the focused console's lines) or Network (the relay's packets).
+    const int shownConsole = p.players >= 2 && p.focus < p.players ? p.focus : 0;
+    if (p.relay) {
+        const ImVec2 c = ImGui::GetCursorScreenPos();
+        ImVec2 at = c;
+        const float maxX = c.x + ImGui::GetContentRegionAvail().x;
+        if (netChip("play.tab.output", at, c.x, maxX, "Output of console " + std::to_string(shownConsole + 1), color::accent, !network,
+                    "What the console with the keyboard printed; click a console in the Game view to read another"))
+            p.outputTab = 0;
+        if (netChip("play.tab.network", at, c.x, maxX, "Network", color::accent, network, "Every packet the relay routed between the consoles"))
+            p.outputTab = 1;
+        ImGui::SetCursorScreenPos(ImVec2(c.x, at.y + 24 + space::sm));
+        scriptLine("play.tab", std::string("play: output tab ") + (network ? "network" : "output"));
+    }
+    if (network) networkView(st);
+    else {
+        State::Play::Console& c = p.cons[size_t(shownConsole)];
+        outputLog(st, "play", c.emu.output(), c.emu.lineCount(), c.log);
+    }
+    if (p.cons[0].emu.running()) {
         ImVec2 c = ImGui::GetCursorScreenPos();
         float ws = 0;
-        if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary, &ws)) p.emu.stop();
+        if (button("stopplay", c, icon::square, "Stop", ButtonKind::Secondary, &ws)) stopPlay(p);
         else if (button("restartplay", ImVec2(c.x + ws + space::sm, c.y), icon::restart, "Restart", ButtonKind::Secondary, nullptr,
                         "Stop, rebuild and run again (Ctrl+Shift+F5)"))
             restartPlay(st, doc);
@@ -10244,7 +10970,7 @@ static void shortcuts(State& st, editor::Document& doc) {
     }
     if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.menuOpen >= 0) return;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
-    if (st.play.gameFocus && st.play.game.attached()) {
+    if (st.play.gameFocus && st.play.cons[0].game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
         if (ctrl && shift && pressed(ImGuiKey_F5)) restartPlay(st, doc);
         return;

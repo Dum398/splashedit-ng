@@ -22,6 +22,7 @@
 #include "rooms.hh"
 #include "font.hh"
 #include "luacompile.hh"
+#include "luascan.hh"
 #include "navregion.hh"
 #include "shadow.hh"
 #include "skin.hh"
@@ -2330,6 +2331,9 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         try {
             std::string src = readFile(root / p);
             if (fs::path(p).extension() == ".blocks") src = blocksFileToLua(src, p);
+            // The bundled engines have no Lua compiler: text loaded at run time fails there.
+            std::string runtime = runtimeLuaWarning(p, runtimeLuaUses(src));
+            if (!runtime.empty()) res.warnings.push_back(std::move(runtime));
             luaSources.push_back(src);
             if (options.luaBytecode) {
                 std::vector<uint8_t> bc = compileLua(src, p);

@@ -1,6 +1,7 @@
 // Headless tests for the editor's document model: the undo history and the
 // viewport's ray picker and gizmo maths. No SDL, no GL. Run through CTest (`ctest`).
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <chrono>
@@ -24,7 +25,11 @@
 #ifndef _WIN32
 #include <csignal>
 #include <cstdlib>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <unistd.h>
 #endif
 
 #include "editor/asset_browser.hh"
@@ -42,6 +47,8 @@
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
 #include "editor/play.hh"
+#include "editor/linkplay.hh"
+#include "editor/relay.hh"
 #include "editor/project.hh"
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
@@ -52,10 +59,12 @@
 #include "blend.hh"
 #include "blocks.hh"
 #include "luacompile.hh"
+#include "luascan.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
 #include "ui/ui_scale.hh"
+#include "ui/list_scroll.hh"
 #include "ui/scrub.hh"
 #include "ui/colour_hex.hh"
 #include "budget.hh"
@@ -1062,6 +1071,80 @@ void testScriptWithoutMesh() {
     CHECK(with.stats.triangles == without.stats.triangles);
 }
 
+// The bundled engines run precompiled Lua and have no compiler: the scan
+// finds the globals that need one (or a file system), and nothing else.
+void testRuntimeLuaScan() {
+    auto names = [](const std::string& src) {
+        std::vector<std::string> out;
+        for (const splash::RuntimeLuaUse& u : splash::runtimeLuaUses(src)) out.push_back(u.name + ":" + std::to_string(u.line));
+        return out;
+    };
+    using V = std::vector<std::string>;
+    CHECK(names("local f = loadstring('return 1')\n") == V({"loadstring:1"}));
+    CHECK(names("-- top\n\nload(\"x = 1\")()\ndofile 'a.lua'\nloadfile[[b]]\n") == V({"load:3", "dofile:4", "loadfile:5"}));
+    CHECK(names("pcall(load, s)\nlocal ok = _G.loadstring\nlocal d = string.dump(f)\n") ==
+          V({"load:1", "loadstring:2", "string.dump:3"}));
+    // Not uses: strings, comments, fields, methods, table keys.
+    CHECK(names("print('load(x)', \"dofile\")\n-- loadstring(s)\n--[==[ load(s)\n]==]\nlocal s = [[load(s)]]\n").empty());
+    CHECK(names("Scene.Load(1)\nMemCard.load(0)\nobj:load()\nlocal t = {load = 1, dofile = 2}\nlocal x = t.load\n").empty());
+    CHECK(names("local mystring = 1\nlocal d = self.string.dump\n").empty());
+    // The script's own load: declared, a parameter, or assigned.
+    CHECK(names("local function load(n) end\nload(1)\n").empty());
+    CHECK(names("local load = function() end\nload()\n").empty());
+    CHECK(names("local a, loadfile = 1, 2\nloadfile()\n").empty());
+    CHECK(names("function f(x, dofile) dofile() end\n").empty());
+    CHECK(names("function load() end\nload()\n").empty());
+    CHECK(names("load = print\nload('hi')\n").empty());
+    // Lines count through long strings and escaped newlines.
+    CHECK(names("local s = [[\n\n]]\nlocal t = 'a\\\nb'\nloadstring(s)\n") == V({"loadstring:6"}));
+    CHECK(names("x = 1..2\nload(s)\n") == V({"load:2"}));
+
+    CHECK(splash::runtimeLuaWarning("scripts/a.lua", {}).empty());
+    const std::string w = splash::runtimeLuaWarning("scripts/a.lua", splash::runtimeLuaUses("loadstring(s)\nloadstring(t)\ndofile('x')\n"));
+    CHECK(w.rfind("scripts/a.lua: loadstring on line 1, dofile on line 3. ", 0) == 0);
+    CHECK(w.find("line 2") == std::string::npos);
+    CHECK(w.find("The engine runs precompiled scripts and has no Lua compiler for text at run time") != std::string::npos);
+    CHECK(w.find("loadstring of Lua text fails with \"parser not loaded\"") != std::string::npos);
+    CHECK(w.find("dofile does not exist on the PS1") != std::string::npos);
+    CHECK(w.find("Write that code in a script as a function and call it") != std::string::npos);
+    const std::string both = splash::runtimeLuaWarning("b.lua", splash::runtimeLuaUses("load(a) loadstring(b)"));
+    CHECK(both.find("load and loadstring of Lua text fail with") != std::string::npos);
+}
+
+// The scan reaches Problems: the live export (what the Problems popup lists)
+// warns about a script that loads Lua text, and not about one that does not.
+void testRuntimeLuaProblem() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "runtime_lua_problem";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "scripts", ec);
+    std::ofstream(dir / "scripts/door.lua", std::ios::binary) << "function onCreate(self)\n  local f = loadstring(\"return 1\")\nend\n";
+    std::ofstream(dir / "scripts/lamp.lua", std::ios::binary) << "function onCreate(self)\n  print('loadstring')\nend\n";
+    splash::Scene sc;
+    splash::Object door, lamp;
+    door.name = "Door";
+    door.script = splash::ScriptComponent{"scripts/door.lua", {}};
+    lamp.name = "Lamp";
+    lamp.script = splash::ScriptComponent{"scripts/lamp.lua", {}};
+    sc.objects = {door, lamp};
+    editor::Document d;
+    d.reset(sc, dir, "s");
+    editor::LiveExport live(0.0);
+    live.update(d, 1.0);
+    live.update(d, 2.0);
+    live.wait();
+    CHECK(live.result().has_value());
+    if (!live.result()) return;
+    size_t door_ = 0, lamp_ = 0;
+    for (const std::string& w : live.result()->warnings) {
+        if (w.rfind("scripts/door.lua: loadstring on line 2. The engine runs precompiled scripts", 0) == 0) door_++;
+        if (w.find("scripts/lamp.lua") != std::string::npos) lamp_++;
+    }
+    CHECK(door_ == 1 && lamp_ == 0);
+    fs::remove_all(dir, ec);
+}
+
 // LiveExport: waits for edits to settle, then exports the current revision.
 void testLiveExport() {
     const std::filesystem::path project = std::filesystem::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
@@ -1504,6 +1587,702 @@ void testPlay() {
     t.bios = "/x/openbios.bin";
     cmd = editor::reduxCommand(t, "/b");
     CHECK(cmd.size() == want.size() + 2 && cmd[5] == "-bios" && cmd[6] == "/x/openbios.bin");
+}
+
+// Play with 2 linked consoles: each console's pcsx.json (the SIO1 keys redux
+// reads, Clienthost with its lowercase h), its directory and -portable
+// command, the capture redirect, the port helpers, the players setting and
+// the link reporter's lines.
+void testLinkPlay() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "link-play";
+    fs::remove_all(dir, ec);
+    const std::string server = editor::linkSettings(true, 41234), client = editor::linkSettings(false, 41234);
+    CHECK(server == "{\"emulator\":{\"Debug\":{\"SIO1Server\":true,\"SIO1ServerPort\":41234,\"SIO1Client\":false}}}\n");
+    CHECK(client == "{\"emulator\":{\"Debug\":{\"SIO1Server\":false,\"SIO1Client\":true,\"SIO1Clienthost\":\"127.0.0.1\","
+                    "\"SIO1ClientPort\":41234}}}\n");
+    CHECK(editor::consoleDir("/p", 0) == fs::path("/p") / "console1" && editor::consoleDir("/p", 1) == fs::path("/p") / "console2");
+
+    // Each console's directory: its settings, the capture redirect, no stale capture.
+    const fs::path c1 = editor::consoleDir(dir, 0);
+    fs::create_directories(c1, ec);
+    { std::ofstream(c1 / "capture.flag") << "1"; }
+    std::string err;
+    CHECK(editor::prepareConsole(c1, true, 41234, &err) && err.empty());
+    auto slurp = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    CHECK(slurp(c1 / "pcsx.json") == server);
+    CHECK(slurp(c1 / "capturedir.lua").find("SplashEditCaptureDir = [==[" + c1.generic_string() + "]==]") != std::string::npos);
+    CHECK(!fs::exists(c1 / "capture.flag"));
+    CHECK(!editor::prepareConsole(c1 / "pcsx.json" / "under-a-file", false, 1, &err) && !err.empty());
+
+    // Commands: 1 console exactly as before; a console adds -portable, and its
+    // capture redirect runs before framecapture.lua.
+    editor::PlayTools t;
+    t.redux = "/r/pcsx-redux";
+    t.psxsplash = "/x/psxsplash.ps-exe";
+    const std::vector<std::string> one = {"/r/pcsx-redux", "-run", "-fastboot", "-no-ui", "-shmdisplay", "-loadexe",
+                                          "/x/psxsplash.ps-exe", "-pcdrv", "-pcdrvbase", "/b"};
+    CHECK(editor::reduxCommand(t, "/b") == one);
+    std::vector<std::string> want = one;
+    want.insert(want.end(), {"-dofile", "/a/framecapture.lua"});
+    CHECK(editor::reduxCommand(t, "/b", "/a/framecapture.lua") == want);
+    want = one;
+    want.insert(want.end(), {"-portable", "/b/console2"});
+    CHECK(editor::reduxCommand(t, "/b", {}, "/b/console2") == want);
+    // The redirect path is joined natively (a backslash on Windows).
+    want.insert(want.end(), {"-dofile", (fs::path("/b/console2") / "capturedir.lua").string(), "-dofile",
+                             "/a/framecapture.lua"});
+    CHECK(editor::reduxCommand(t, "/b", "/a/framecapture.lua", "/b/console2") == want);
+
+    // Ports: a free one is not taken; one held by a listener is.
+    const uint16_t port = editor::pickLinkPort();
+    CHECK(port != 0);
+    CHECK(!editor::linkPortTaken(port));
+    CHECK(!editor::linkPortTaken(0));
+#ifndef _WIN32
+    {
+        const int s = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_ANY);
+        a.sin_port = htons(port);
+        const int one = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);  // as libuv binds redux's server
+        const bool listening = s >= 0 && bind(s, reinterpret_cast<const sockaddr*>(&a), sizeof a) == 0 && listen(s, 1) == 0;
+        CHECK(listening);
+        CHECK(!listening || editor::linkPortTaken(port));
+        if (s >= 0) close(s);
+    }
+#endif
+
+    // Players: 1 to 10 round-trip with the relay toggle; out of range clamps;
+    // absent or not a number reads 1, relay off.
+    const fs::path cfg = dir / "play.cfg";
+    for (int n = 1; n <= editor::kMaxPlayers; ++n) {
+        t.players = n;
+        t.relay = n % 2;
+        const editor::PlayTools back = editor::savePlayTools(cfg, t) ? editor::loadPlayTools(cfg) : editor::PlayTools{};
+        CHECK(back.players == n && back.relay == bool(n % 2));
+    }
+    t.relay = false;
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=3\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 3 && !editor::loadPlayTools(cfg).relay);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=40\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == editor::kMaxPlayers);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=0\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 1);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\nplayers=two\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 1);
+    { std::ofstream(cfg, std::ios::trunc) << "redux=/r\n"; }
+    CHECK(editor::loadPlayTools(cfg).players == 1);
+    // 2 link directly unless the relay is asked for; 3 or more always use it.
+    editor::PlayTools u;
+    u.players = 1;
+    CHECK(!editor::usesRelay(u));
+    u.players = 2;
+    CHECK(!editor::usesRelay(u));
+    u.relay = true;
+    CHECK(editor::usesRelay(u));
+    u.relay = false;
+    u.players = 3;
+    CHECK(editor::usesRelay(u));
+
+    // The reporter: last object, script only; its lines parse and read as words.
+    splash::Scene sc;
+    sc.objects.resize(2);
+    sc.objects[0].name = "a";
+    const splash::Scene rep = editor::withLinkReporter(sc, "/b/splashedit_link.lua");
+    CHECK(rep.objects.size() == 3 && rep.objects[0].name == "a" && rep.objects[2].name == editor::kLinkReporter);
+    CHECK(rep.objects[2].script && rep.objects[2].script->lua == "/b/splashedit_link.lua" && !rep.objects[2].mesh);
+    const std::string lua = editor::linkReporterLua();
+    CHECK(lua.find("Net.State()") != std::string::npos && lua.find("splashedit-link: state ") != std::string::npos);
+    editor::LinkStatus ls;
+    CHECK(editor::parseLinkStatus("splashedit-link: state 2 host 1 slot 0 players 2", &ls) && ls.linked() && ls.host &&
+          ls.slot == 0 && ls.players == 2);
+    CHECK(editor::parseLinkStatus("[tty] splashedit-link: state 1 host 0 slot 1 players 0", &ls) && ls.state == 1 && !ls.host);
+    CHECK(!editor::parseLinkStatus("splashedit-link: state 2 host", &ls));
+    CHECK(!editor::parseLinkStatus("psxsplash: render peak depth 258 of 988, bump 11808 of 51656", &ls));
+    editor::LinkStatus host{2, true, 0, 2}, guest{2, false, 1, 2};
+    CHECK(editor::describeLinkStatus(host, true) == (const char*)u8"Linked · slot 0 · host · 2 players");
+    CHECK(editor::describeLinkStatus(guest, true) == (const char*)u8"Linked · slot 1 · not host · 2 players");
+    CHECK(editor::describeLinkStatus(guest, false).find("no Network id: set one in Scene > Network") != std::string::npos);
+    CHECK(editor::describeLinkStatus({0, false, 0, 0}, true).find("Net.Connect()") != std::string::npos);
+    CHECK(editor::describeLinkStatus({4, false, 0, 0}, true).find("another scene") != std::string::npos);
+}
+
+// ---- Play's relay (editor/relay.hh) ----
+
+namespace rl = editor::relay;
+
+std::vector<uint8_t> fromHex(const std::string& h) {
+    std::vector<uint8_t> b;
+    for (size_t i = 0; i + 1 < h.size(); i += 2) b.push_back(uint8_t(std::stoi(h.substr(i, 2), nullptr, 16)));
+    return b;
+}
+
+// The frames the hub sent since the last call, per connection.
+std::map<int, std::vector<rl::Frame>> hubSent(rl::Hub& h) {
+    std::map<int, std::vector<rl::Frame>> m;
+    for (auto& [conn, bytes] : h.takeOutput()) {
+        rl::FrameParser p;
+        p.feed(bytes.data(), bytes.size(), m[conn]);
+    }
+    return m;
+}
+
+std::vector<uint8_t> helloFrame(uint32_t scene, uint16_t seq = 1, uint32_t magic = rl::kMagic) {
+    rl::HelloPayload hp;
+    hp.sceneHash = scene;
+    hp.tiebreak = 0x1234;
+    hp.magic = magic;
+    return rl::encodeFrame(rl::Hello, rl::packHello(hp), rl::kNoSlot, seq);
+}
+
+void hubSend(rl::Hub& h, int conn, const std::vector<uint8_t>& frame, double now) { h.receive(conn, frame.data(), frame.size(), now); }
+
+// The HelloAcks among `frames`.
+std::vector<rl::HelloAckPayload> acksIn(const std::vector<rl::Frame>& frames) {
+    std::vector<rl::HelloAckPayload> v;
+    for (const rl::Frame& f : frames)
+        if (f.type == rl::HelloAck)
+            if (std::optional<rl::HelloAckPayload> a = rl::parseHelloAck(f.payload)) v.push_back(*a);
+    return v;
+}
+
+// CRC, frames and the parser's resync, against psnl's own bytes.
+void testRelayFrames() {
+    const char* nine = "123456789";
+    CHECK(rl::crc16(reinterpret_cast<const uint8_t*>(nine), 9) == 0x29B1);
+    // The same frame psnl's encode_frame builds (ng-deps/relay/snapgen.py).
+    rl::Avatar a{1, 2, 3, 4, 1};
+    const std::vector<uint8_t> frame = rl::encodeFrame(rl::Snapshot, rl::buildSnapshot({{1, a}}), rl::kRelaySlot, 0);
+    CHECK(frame == fromHex("a50300000000001800010000000101000001000000020000000300000004000000943e"));
+
+    const std::vector<uint8_t> f1 = rl::encodeFrame(rl::Event, {1, 2, 3, 4, 5, 6, 7, 8}, 2, 77);
+    const std::vector<uint8_t> f2 = rl::encodeFrame(rl::AppData, {9, 9}, 3, 78, 1);
+    std::vector<rl::Frame> got;
+    {
+        rl::FrameParser p;
+        p.feed(f1.data(), f1.size(), got);
+        CHECK(got.size() == 1 && got[0].type == rl::Event && got[0].srcSlot == 2 && got[0].seq == 77 && got[0].payload.size() == 8 &&
+              got[0].payload[7] == 8 && p.frames == 1);
+    }
+    // Garbage (with a false sync in it), a frame, a frame with a flipped byte,
+    // a header claiming 600 bytes, then a frame: the good ones come through.
+    std::vector<uint8_t> stream = {0x00, 0x13, 0xA5, 0x01, 0x02, 0xFF};
+    stream.insert(stream.end(), f1.begin(), f1.end());
+    std::vector<uint8_t> bad = f2;
+    bad[5] ^= 0x40;
+    stream.insert(stream.end(), bad.begin(), bad.end());
+    const std::vector<uint8_t> huge = {0xA5, 4, 1, 0, 0, 0, 0, 0x58, 0x02};
+    stream.insert(stream.end(), huge.begin(), huge.end());
+    stream.insert(stream.end(), f2.begin(), f2.end());
+    for (int chunk : {1, 3, 1000}) {
+        rl::FrameParser p;
+        got.clear();
+        for (size_t at = 0; at < stream.size(); at += size_t(chunk))
+            p.feed(stream.data() + at, std::min(size_t(chunk), stream.size() - at), got);
+        CHECK(got.size() == 2 && got[0].seq == 77 && got[1].type == rl::AppData && got[1].seq == 78 && got[1].flags == 1 &&
+              got[1].payload == std::vector<uint8_t>({9, 9}));
+        CHECK(p.crcErrors >= 1 && p.resyncs >= 1);
+    }
+    CHECK(rl::packetTypeName(rl::HelloAck) == "HelloAck" && rl::packetTypeName(rl::Pong) == "Pong" &&
+          rl::packetTypeName(42) == "Type 42");
+}
+
+// Redux's SIO1 client wire: messages of at most 245 data bytes, and the
+// stream Redux itself sends (a FlowControl, then one byte per message).
+void testRelayProtobuf() {
+    std::vector<uint8_t> out;
+    const std::vector<uint8_t> ten = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    rl::encodeSio(ten.data(), ten.size(), out);
+    std::vector<uint8_t> want = {14, 0x0A, 12, 0x0A, 10};
+    want.insert(want.end(), ten.begin(), ten.end());
+    CHECK(out == want);
+    // 245 bytes fit one message (its length byte 251); 246 need two; 600 three.
+    for (size_t n : {size_t(245), size_t(246), size_t(600)}) {
+        std::vector<uint8_t> data(n);
+        for (size_t i = 0; i < n; ++i) data[i] = uint8_t(i * 7);
+        out.clear();
+        rl::encodeSio(data.data(), n, out);
+        size_t msgs = 0, maxLen = 0;
+        for (size_t at = 0; at < out.size(); at += 1 + out[at]) {
+            ++msgs;
+            maxLen = std::max<size_t>(maxLen, out[at]);
+        }
+        CHECK(msgs == (n + rl::kMaxSioData - 1) / rl::kMaxSioData && maxLen <= 251);
+        if (n == 245) CHECK(out[0] == 251 && out.size() == 252);
+        rl::SioDecoder d;
+        std::vector<uint8_t> back;
+        for (size_t at = 0; at < out.size(); at += 5) d.feed(out.data() + at, std::min<size_t>(5, out.size() - at), back);
+        CHECK(back == data && d.messages == msgs && d.decodeErrors == 0);
+    }
+    // As Redux sends: FlowControl{dxr, xts}, then DataTransfer{data: 1 byte}
+    // with an empty FlowControl beside it; a broken message between is skipped.
+    std::vector<uint8_t> redux = {6, 0x12, 4, 0x08, 1, 0x10, 1};
+    for (uint8_t b : {uint8_t(0xA5), uint8_t(0x00), uint8_t(0x42)}) {
+        const std::vector<uint8_t> m = {7, 0x0A, 3, 0x0A, 1, b, 0x12, 0};
+        redux.insert(redux.end(), m.begin(), m.end());
+        if (b == 0x00) redux.insert(redux.end(), {3, 0x0A, 0xFF, 0xFF});  // a length running past its message
+    }
+    rl::SioDecoder d;
+    std::vector<uint8_t> back;
+    d.feed(redux.data(), redux.size(), back);
+    CHECK(back == std::vector<uint8_t>({0xA5, 0x00, 0x42}) && d.flowControls == 1 && d.decodeErrors == 1 && d.messages == 5);
+}
+
+// Rooms: join by scene, lowest free slot, re-Hello keeps the slot, leaving
+// and silence free it, and every member hears of each change. The first
+// member is the room's authority (every ack's hostSlot) until it leaves; then
+// the lowest slot left takes over, and a newcomer in a freed lower slot does not.
+void testRelayRooms() {
+    rl::Hub h;
+    const uint32_t A = 0xAAAA0001, B = 0xBBBB0002;
+    const int c1 = h.connect(0), c2 = h.connect(0), c3 = h.connect(0);
+    CHECK(c1 == 1 && c2 == 2 && c3 == 3);
+    hubSend(h, c1, helloFrame(A), 0.1);
+    auto sent = hubSent(h);
+    std::vector<rl::HelloAckPayload> a1 = acksIn(sent[c1]);
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].hostSlot == 1 && a1[0].playerCount == 1 &&
+          a1[0].sceneHash == A && a1[0].magic == rl::kMagic && a1[0].protoVersion == rl::kProtoVersion);
+    CHECK(sent[c1].size() == 1 && sent[c1][0].srcSlot == rl::kRelaySlot);
+    // A second console in the same scene: slot 2, and console 1 is told there are 2 now.
+    hubSend(h, c2, helloFrame(A), 0.2);
+    sent = hubSent(h);
+    std::vector<rl::HelloAckPayload> a2 = acksIn(sent[c2]);
+    CHECK(a2.size() == 1 && a2[0].yourSlot == 2 && a2[0].playerCount == 2 && a2[0].hostSlot == 1);
+    a1 = acksIn(sent[c1]);
+    CHECK(a1.size() == 1 && a1[0].yourSlot == 1 && a1[0].playerCount == 2 && a1[0].hostSlot == 1);
+    CHECK(h.connections().at(c1).isAuthority() && !h.connections().at(c2).isAuthority() && h.connections().at(c2).authority == 1);
+    // Another scene: a room of its own, nobody else hears of it.
+    hubSend(h, c3, helloFrame(B), 0.3);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c3]).size() == 1 && acksIn(sent[c3])[0].yourSlot == 1 && acksIn(sent[c3])[0].playerCount == 1 &&
+          acksIn(sent[c3])[0].hostSlot == 1 && h.connections().at(c3).isAuthority());
+    CHECK(sent.count(c1) == 0 && sent.count(c2) == 0);
+    // Hello again (a scene reload, or a lost ack): same slot, acked again; no change for the others.
+    hubSend(h, c2, helloFrame(A, 2), 0.4);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].yourSlot == 2 && acksIn(sent[c2])[0].playerCount == 2);
+    CHECK(sent.count(c1) == 0);
+    // A foreign Hello is ignored.
+    const int cx = h.connect(0.5);
+    hubSend(h, cx, helloFrame(A, 1, 0x12345678), 0.5);
+    sent = hubSent(h);
+    CHECK(sent.count(cx) == 0 && !h.connections().at(cx).joined);
+    // Console 4 takes slot 3; console 1 leaves with Bye; 2 and 4 hear there are 2.
+    const int c4 = h.connect(0.6);
+    hubSend(h, c4, helloFrame(A), 0.6);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c4]).size() == 1 && acksIn(sent[c4])[0].yourSlot == 3 && acksIn(sent[c4])[0].playerCount == 3);
+    CHECK(acksIn(sent[c1]).size() == 1 && acksIn(sent[c1])[0].playerCount == 3 && acksIn(sent[c2]).size() == 1);
+    CHECK(acksIn(sent[c4])[0].hostSlot == 1 && acksIn(sent[c1])[0].hostSlot == 1);
+    hubSend(h, c1, rl::encodeFrame(rl::Bye, {}, 1, 3), 0.7);
+    sent = hubSent(h);
+    CHECK(h.takeClosed() == std::vector<int>({c1}) && !h.connections().at(c1).open);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && acksIn(sent[c4]).size() == 1 &&
+          acksIn(sent[c4])[0].playerCount == 2 && acksIn(sent[c4])[0].yourSlot == 3);
+    // Slot 1 left: authority passes to slot 2, and both who stay are told so.
+    CHECK(acksIn(sent[c2])[0].hostSlot == 2 && acksIn(sent[c4])[0].hostSlot == 2);
+    CHECK(h.connections().at(c2).isAuthority() && h.connections().at(c4).authority == 2 && !h.connections().at(c1).isAuthority());
+    {
+        // The Network view's log has the hand-off: room 1 now has slot 2, after 1, told to 2 and 3.
+        std::vector<const rl::Packet*> rows;
+        for (const rl::Packet& k : h.packets())
+            if (k.handOff()) rows.push_back(&k);
+        CHECK(rows.size() == 3);  // room A's first, room B's first, the hand-off
+        if (rows.size() == 3) {
+            CHECK(rows[0]->authority == 1 && rows[0]->previous == rl::kNoSlot && rl::describeType(*rows[0]) == "Authority slot 1");
+            CHECK(rows[2]->authority == 2 && rows[2]->previous == 1 && rows[2]->from == rl::kRelaySlot && rows[2]->type == 0 &&
+                  rows[2]->to == std::vector<uint8_t>({2, 3}) && rl::describeType(*rows[2]) == "Authority slot 2 (was 1)" &&
+                  rl::PacketFilter{}.shows(*rows[2]));
+        }
+    }
+    // The lowest free slot again: 1.
+    const int c5 = h.connect(0.8);
+    hubSend(h, c5, helloFrame(A), 0.8);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c5]).size() == 1 && acksIn(sent[c5])[0].yourSlot == 1 && acksIn(sent[c5])[0].playerCount == 3);
+    CHECK(h.connections().at(c5).slot == 1 && h.connections().at(c5).index == c5);
+    // It takes the freed slot 1, not the authority: that stays with slot 2.
+    CHECK(acksIn(sent[c5])[0].hostSlot == 2 && acksIn(sent[c2])[0].hostSlot == 2 && !h.connections().at(c5).isAuthority());
+    // A socket that closes leaves too.
+    h.disconnect(c5, 0.9);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 2 && acksIn(sent[c2])[0].hostSlot == 2 &&
+          h.takeClosed().empty());
+    // 20 s of silence ends a member; one that spoke stays.
+    hubSend(h, c2, rl::encodeFrame(rl::Ping, std::vector<uint8_t>(12, 0), 2, 4), 15.0);
+    h.tick(21.0);
+    std::vector<int> closed = h.takeClosed();
+    std::sort(closed.begin(), closed.end());
+    CHECK(closed == std::vector<int>({c3, cx, c4}));
+    CHECK(h.connections().at(c2).open && h.connections().at(c2).joined && !h.connections().at(c4).joined);
+    sent = hubSent(h);
+    CHECK(acksIn(sent[c2]).size() == 1 && acksIn(sent[c2])[0].playerCount == 1);
+
+    // Ten fill a room; the eleventh starts a new one.
+    rl::Hub full;
+    std::vector<int> ids;
+    for (int i = 0; i < 11; ++i) {
+        ids.push_back(full.connect(0));
+        hubSend(full, ids.back(), helloFrame(A), 0);
+    }
+    CHECK(full.connections().at(ids[9]).slot == 10 && full.connections().at(ids[10]).slot == 1 &&
+          full.connections().at(ids[10]).room != full.connections().at(ids[0]).room && full.visiblePlayers(ids[0]) == 10 &&
+          full.visiblePlayers(ids[10]) == 1);
+}
+
+// Events: acked (duplicates too), deduped on the last seq, fanned out to the
+// rest of the room as their 8 bytes; ObjectState and AppData relayed; Ping
+// answered with its echo; and the log lists who got what.
+void testRelayReliable() {
+    rl::Hub h;
+    const uint32_t A = 7;
+    int c[3];
+    for (int i = 0; i < 3; ++i) {
+        c[i] = h.connect(0);
+        hubSend(h, c[i], helloFrame(A), 0);
+    }
+    hubSent(h);
+    std::vector<uint8_t> ev = {7, 0, 0, 0, 0xE9, 3, 0, 0, 0xEE, 0xEE};  // id 7, arg 1001, and 2 more bytes
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, ev, 1, 5), 1.0);
+    auto sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::EventAck && sent[c[0]][0].seq == 5 && sent[c[0]][0].payload.empty());
+    for (int i : {1, 2})
+        CHECK(sent[c[i]].size() == 1 && sent[c[i]][0].type == rl::Event && sent[c[i]][0].srcSlot == rl::kRelaySlot &&
+              sent[c[i]][0].payload == std::vector<uint8_t>(ev.begin(), ev.begin() + 8));
+    const uint16_t seqTo2 = sent[c[1]][0].seq;
+    // The retransmission: acked again, not delivered again.
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, ev, 1, 5), 1.1);
+    sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::EventAck && sent[c[0]][0].seq == 5);
+    CHECK(sent.count(c[1]) == 0 && sent.count(c[2]) == 0);
+    // The next one goes through, with the next seq on each recipient's own count.
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, ev, 1, 6), 1.2);
+    sent = hubSent(h);
+    CHECK(sent[c[1]].size() == 1 && sent[c[1]][0].seq == uint16_t(seqTo2 + 1));
+    // From console 3: to 1 and 2.
+    hubSend(h, c[2], rl::encodeFrame(rl::AppData, {'h', 'i'}, 3, 40), 1.3);
+    sent = hubSent(h);
+    CHECK(sent[c[2]].size() == 1 && sent[c[2]][0].type == rl::EventAck && sent[c[2]][0].seq == 40);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::AppData && sent[c[0]][0].payload == std::vector<uint8_t>({'h', 'i'}));
+    CHECK(sent[c[1]].size() == 1 && sent[c[1]][0].type == rl::AppData);
+    hubSend(h, c[1], rl::encodeFrame(rl::ObjectState, {1, 2, 3}, 2, 9), 1.4);
+    sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent[c[0]][0].type == rl::ObjectState && sent[c[2]].size() == 1 && sent[c[1]][0].type == rl::EventAck);
+    // A short Event is acked and dropped, as psnl does.
+    hubSend(h, c[0], rl::encodeFrame(rl::Event, {1, 2}, 1, 7), 1.5);
+    sent = hubSent(h);
+    CHECK(sent[c[0]].size() == 1 && sent.count(c[1]) == 0);
+    // Ping: a Pong with the echo, the rest zero.
+    std::vector<uint8_t> ping = {0xEF, 0xBE, 0xAD, 0xDE, 1, 2, 3, 4, 5, 6, 0, 0};
+    hubSend(h, c[1], rl::encodeFrame(rl::Ping, ping, 2, 10), 1.6);
+    hubSend(h, c[1], rl::encodeFrame(rl::Ping, ping, 2, 11), 1.7);
+    sent = hubSent(h);
+    CHECK(sent[c[1]].size() == 2 && sent[c[1]][0].type == rl::Pong &&
+          sent[c[1]][0].payload == std::vector<uint8_t>({0xEF, 0xBE, 0xAD, 0xDE, 0, 0, 0, 0, 0, 0, 0, 0}));
+
+    // The log: the first Event from slot 1 to slots 2 and 3, its ack to slot 1;
+    // the duplicate stopped at the relay; the two Pings one entry.
+    const std::deque<rl::Packet>& log = h.packets();
+    std::vector<const rl::Packet*> events, pings;
+    for (const rl::Packet& p : log) {
+        if (p.type == rl::Event) events.push_back(&p);
+        if (p.type == rl::Ping) pings.push_back(&p);
+    }
+    CHECK(events.size() == 4);
+    if (events.size() == 4) {
+        CHECK(events[0]->from == 1 && events[0]->to == std::vector<uint8_t>({2, 3}) && events[0]->seq == 5 && events[0]->size == 21);
+        CHECK(events[1]->to == std::vector<uint8_t>({rl::kRelaySlot}));
+        CHECK(rl::describeTo(events[0]->to) == "slots 2, 3" && rl::describeTo(events[1]->to) == "relay");
+    }
+    CHECK(pings.size() == 1 && pings[0]->count == 2 && pings[0]->from == 2);
+    bool hello = false;
+    for (const rl::Packet& p : log)
+        if (p.type == rl::Hello && p.from == rl::kNoSlot && p.conn == c[0]) hello = true;
+    CHECK(hello && rl::describeEnd(rl::kNoSlot, 3) == "conn 3" && rl::describeEnd(0, 0) == "relay" && rl::describeEnd(4, 1) == "slot 4");
+    // The Network view's filter: by type, and by slot either end.
+    rl::PacketFilter only;
+    only.types = 1u << rl::Event;
+    CHECK(only.shows(*events[0]) && !only.shows(*pings[0]));
+    only.types = ~0u;
+    only.slot = 3;
+    CHECK(only.shows(*events[0]) && !only.shows(*pings[0]));
+    only.slot = 2;
+    CHECK(only.shows(*pings[0]));
+}
+
+// Snapshots: byte for byte what psnl's Room.build_snapshot makes
+// (ng-deps/relay/snapgen.py), and what the hub sends each room at 30 Hz.
+void testRelaySnapshot() {
+    struct Case {
+        const char* name;
+        std::vector<std::pair<uint8_t, std::array<int32_t, 5>>> members;
+        const char* hex;
+    };
+    // Generated by /home/pixel/sources/ng-deps/relay/snapgen.py from psnl_server/rooms.py Room.build_snapshot.
+    const Case cases[] = {
+        {"one", {{1, {100, -200, 300, 50, 1}}}, "01000000010100006400000038ffffff2c01000032000000"},
+        {"two_close", {{2, {1000, 0, -1000, 4096, 1}}, {1, {1100, 50, -900, -10, 1}}},
+         "02000100e80300000000000018fcffff01016400320064007e6402010000000000000010"},
+        {"three_shift", {{3, {0, 0, 0, 0, 1}}, {1, {200000, -5, 7, 30000, 1}}, {2, {-100000, 9, 70000, 25736, 0}}},
+         "030001036079fefffbffffff0000000001017c9200000000a8100200000001002e2200000301d430000000000000"},
+        {"far", {{1, {-2000000000, 0, 0, 1, 1}}, {2, {2000000000, 0, 0, 2, 1}}},
+         "0200000001010000006cca880000000000000000010000000201000000943577000000000000000002000000"},
+        {"zero_avatars", {{1, {0, 0, 0, 0, 1}}, {2, {0, 0, 0, 0, 1}}, {3, {0, 0, 0, 0, 1}}},
+         "03000100000000000000000000000000010100000000000000000201000000000000000003010000000000000000"},
+        {"ten",
+         {{10, {40960, -7770, 113466, 21000, 1}}, {9, {36864, -6993, 114465, 18000, 1}}, {8, {32768, -6216, 115464, 15000, 1}},
+          {7, {28672, -5439, 116463, 12000, 1}}, {6, {24576, -4662, 117462, 9000, 1}}, {5, {20480, -3885, 118461, 6000, 1}},
+          {4, {16384, -3108, 119460, 3000, 1}}, {3, {12288, -2331, 120459, 0, 1}}, {2, {8192, -1554, 121458, -3000, 1}},
+          {1, {4096, -777, 122457, -6000, 1}}},
+         "0a00010000100000a6e1ffff3abb010001010000511b1f23184d020100104818381fd058030100203f15511b00000401003036126a17b80b05010040"
+         "2d0f8313701706010050240c9c0f2823070100601b09b50be02e080100701206ce07983a090100800903e70350460a010090000000000852"},
+    };
+    for (const Case& c : cases) {
+        std::vector<std::pair<uint8_t, rl::Avatar>> m;
+        for (const auto& [slot, v] : c.members) m.push_back({slot, rl::Avatar{v[0], v[1], v[2], v[3], uint8_t(v[4])}});
+        const bool same = rl::buildSnapshot(m) == fromHex(c.hex);
+        if (!same) std::fprintf(stderr, "relay snapshot case %s differs from psnl\n", c.name);
+        CHECK(same);
+    }
+
+    // The hub: each member's own legacy record (a record for another slot is
+    // ignored), sent to the room as one snapshot every 1/30 s.
+    rl::Hub h;
+    const int a = h.connect(0), b = h.connect(0);
+    hubSend(h, a, helloFrame(9), 0);
+    hubSend(h, b, helloFrame(9), 0);
+    hubSent(h);
+    std::vector<uint8_t> snap = {2, 0, 0, 0};
+    for (uint8_t slot : {uint8_t(1), uint8_t(2)}) {
+        const int32_t v[4] = {slot == 1 ? 5000 : 99, -20, 30, 1000};
+        snap.insert(snap.end(), {slot, 1, 0, 0});
+        for (int32_t x : v)
+            for (int k = 0; k < 4; ++k) snap.push_back(uint8_t(uint32_t(x) >> (8 * k)));
+    }
+    hubSend(h, a, rl::encodeFrame(rl::Snapshot, snap, 1, 0), 0.5);
+    h.tick(1.0);
+    auto sent = hubSent(h);
+    const std::vector<uint8_t> want = rl::buildSnapshot({{1, rl::Avatar{5000, -20, 30, 1000, 1}}, {2, rl::Avatar{}}});
+    for (int c : {a, b})
+        CHECK(sent[c].size() == 1 && sent[c][0].type == rl::Snapshot && sent[c][0].seq == 0 && sent[c][0].srcSlot == rl::kRelaySlot &&
+              sent[c][0].payload == want);
+    h.tick(1.01);
+    CHECK(hubSent(h).empty());
+    h.tick(1.0 + rl::kSnapshotSeconds + 0.001);
+    CHECK(hubSent(h).size() == 2);
+}
+
+// What psxsplash reads of a snapshot's world objects: networkmanager.cpp
+// applyPendingSnapshot, line for line (avatars skipped, then each object's
+// actorId and body, legacy or compact). {actorId, x, y, z, yaw} each.
+std::vector<std::array<int32_t, 5>> engineObjects(const std::vector<uint8_t>& snap) {
+    std::vector<std::array<int32_t, 5>> out;
+    const uint8_t* p = snap.data();
+    const size_t len = snap.size();
+    if (len < 4) return out;
+    const uint8_t avatarCount = p[0], objectCount = p[1], format = p[2], posShift = p[3];
+    size_t off = 4;
+    const bool compact = format == 1;
+    int32_t ox = 0, oy = 0, oz = 0;
+    if (compact) {
+        if (len < off + 12 || posShift > 15) return out;
+        std::memcpy(&ox, p + off, 4);
+        std::memcpy(&oy, p + off + 4, 4);
+        std::memcpy(&oz, p + off + 8, 4);
+        off += 12;
+    } else if (format != 0)
+        return out;
+    const size_t avatarSize = compact ? 10 : 20, objectSize = compact ? 11 : 20;
+    auto body = [&](size_t at, std::array<int32_t, 5>& r) {
+        if (compact) {
+            uint16_t d[4];
+            std::memcpy(d, p + at, 8);
+            r[1] = ox + (int32_t(d[0]) << posShift);
+            r[2] = oy + (int32_t(d[1]) << posShift);
+            r[3] = oz + (int32_t(d[2]) << posShift);
+            r[4] = int32_t(d[3]);
+        } else
+            std::memcpy(&r[1], p + at, 16);
+    };
+    for (uint8_t i = 0; i < avatarCount && off + avatarSize <= len; ++i) off += avatarSize;
+    for (uint8_t i = 0; i < objectCount; ++i) {
+        if (off + objectSize > len) break;
+        std::array<int32_t, 5> r{};
+        r[0] = int32_t(p[off] | (p[off + 1] << 8));
+        body(off + (compact ? 3 : 4), r);
+        off += objectSize;
+        out.push_back(r);
+    }
+    return out;
+}
+
+// A snapshot as psxsplash builds one (buildAndSendSnapshot): legacy, its
+// avatar at `slot`, then `objects` {actorId, x, y, z, yaw}.
+std::vector<uint8_t> engineSnapshot(uint8_t slot, const std::vector<std::array<int32_t, 5>>& objects) {
+    std::vector<uint8_t> b = {1, uint8_t(objects.size()), 0, 0, slot, 1, 0, 0};
+    auto put = [&](int32_t v) {
+        for (int k = 0; k < 4; ++k) b.push_back(uint8_t(uint32_t(v) >> (8 * k)));
+    };
+    for (int32_t v : {slot * 100, 0, -slot * 100, 0}) put(v);
+    for (const auto& o : objects) {
+        b.insert(b.end(), {uint8_t(o[0]), uint8_t(o[0] >> 8), 1, 0});
+        for (int k = 1; k < 5; ++k) put(o[k]);
+    }
+    return b;
+}
+
+// World objects: the authority's (and only the authority's) go on in the
+// relay's snapshots to the rest of its scene group, as psxsplash reads them;
+// a hand-off moves that to the new authority.
+void testRelayWorldObjects() {
+    struct Case {
+        const char* name;
+        std::vector<std::pair<uint8_t, std::array<int32_t, 5>>> members;
+        std::vector<std::array<int32_t, 6>> objects;
+        const char* hex;
+    };
+    // Generated by /home/pixel/sources/ng-deps/authority/snapobjgen.py (psnl avatars, psxsplash object records).
+    const Case cases[] = {
+        {"object_only", {}, {{5, 4096, -8192, 12288, 100, 1}}, "00010000050001000010000000e0ffff0030000064000000"},
+        {"one_and_one", {{1, {100, -200, 300, 50, 1}}}, {{7, 9000, 0, -4000, -100, 1}},
+         "010101006400000038ffffff60f0ffff010100000000cc103200070001c422c80000002464"},
+        {"two_and_two", {{2, {1000, 0, -1000, 4096, 1}}, {1, {1100, 50, -900, -10, 1}}},
+         {{3, 200000, 40, 7, 30000, 1}, {12, -5000, -60, 1000, 25736, 1}},
+         "0202010278ecffffc4ffffff18fcffff0101f5051b0019007e640201dc050f000000001003000132c81900fb00a8100c000100000000f4010000"},
+        {"far_object", {{1, {-2000000000, 0, 0, 1, 1}}}, {{300, 2000000000, 5, -5, 2, 1}},
+         "0101000001010000006cca880000000000000000010000002c0101000094357705000000fbffffff02000000"},
+    };
+    for (const Case& c : cases) {
+        std::vector<std::pair<uint8_t, rl::Avatar>> m;
+        for (const auto& [slot, v] : c.members) m.push_back({slot, rl::Avatar{v[0], v[1], v[2], v[3], uint8_t(v[4])}});
+        std::vector<rl::WorldObject> o;
+        for (const auto& v : c.objects) o.push_back(rl::WorldObject{uint16_t(v[0]), v[1], v[2], v[3], v[4], uint8_t(v[5])});
+        const std::vector<uint8_t> snap = rl::buildSnapshot(m, o);
+        const bool same = snap == fromHex(c.hex);
+        if (!same) std::fprintf(stderr, "relay snapshot case %s differs from snapobjgen\n", c.name);
+        CHECK(same);
+        // And psxsplash reads the objects back: ids exact, positions within the shift's step.
+        const std::vector<std::array<int32_t, 5>> back = engineObjects(snap);
+        CHECK(back.size() == o.size());
+        for (size_t i = 0; i < back.size() && i < o.size(); ++i) {
+            const int32_t step = snap[2] == 1 ? (1 << snap[3]) : 1;
+            CHECK(back[i][0] == o[i].actorId && back[i][1] <= o[i].px && o[i].px - back[i][1] < step && back[i][2] <= o[i].py &&
+                  o[i].py - back[i][2] < step && back[i][3] <= o[i].pz && o[i].pz - back[i][3] < step);
+        }
+    }
+    // Never past one frame: 10 avatars and 40 objects (compact), and far apart (legacy).
+    {
+        std::vector<std::pair<uint8_t, rl::Avatar>> m;
+        for (uint8_t s = 1; s <= 10; ++s) m.push_back({s, rl::Avatar{s * 10, 0, 0, 0, 1}});
+        std::vector<rl::WorldObject> o(40);
+        for (size_t i = 0; i < o.size(); ++i) o[i].actorId = uint16_t(i + 1);
+        std::vector<uint8_t> snap = rl::buildSnapshot(m, o);
+        CHECK(snap.size() <= rl::kMaxPayload && snap[2] == 1 && snap.size() == 16 + 10 * 10 + 11 * size_t(snap[1]) && snap[1] == 36);
+        o[0].px = 2000000000;
+        m[0].second.px = -2000000000;
+        snap = rl::buildSnapshot(m, o);
+        CHECK(snap.size() <= rl::kMaxPayload && snap[2] == 0 && snap.size() == 4 + 20 * (10 + size_t(snap[1])) && snap[1] == 15);
+    }
+
+    // The hub: slot 1 (the authority) and slot 2 both send objects; 2 and 3
+    // get slot 1's, slot 1 gets none; slot 2's are dropped.
+    rl::Hub h;
+    const int a = h.connect(0), b = h.connect(0), c = h.connect(0);
+    for (int k : {a, b, c}) hubSend(h, k, helloFrame(9), 0);
+    hubSent(h);
+    const std::vector<std::array<int32_t, 5>> mine = {{4, 40960, -4096, 8192, 1024}, {9, 45056, 0, 0, 0}};
+    hubSend(h, a, rl::encodeFrame(rl::Snapshot, engineSnapshot(1, mine), 1, 0), 0.5);
+    hubSend(h, b, rl::encodeFrame(rl::Snapshot, engineSnapshot(2, {{6, 1, 2, 3, 4}}), 2, 0), 0.5);
+    h.tick(1.0);
+    auto sent = hubSent(h);
+    std::vector<std::pair<uint8_t, rl::Avatar>> avatars = {{1, rl::Avatar{100, 0, -100, 0, 1}}, {2, rl::Avatar{200, 0, -200, 0, 1}},
+                                                           {3, rl::Avatar{}}};
+    std::vector<rl::WorldObject> objs;
+    for (const auto& v : mine) objs.push_back(rl::WorldObject{uint16_t(v[0]), v[1], v[2], v[3], v[4], 1});
+    const std::vector<uint8_t> plain = rl::buildSnapshot(avatars), carried = rl::buildSnapshot(avatars, objs);
+    CHECK(sent[a].size() == 1 && sent[a][0].type == rl::Snapshot && sent[a][0].payload == plain && sent[a][0].payload[1] == 0);
+    for (int k : {b, c}) {
+        CHECK(sent[k].size() == 1 && sent[k][0].type == rl::Snapshot && sent[k][0].payload == carried);
+        if (sent[k].size() == 1) {
+            const std::vector<std::array<int32_t, 5>> got = engineObjects(sent[k][0].payload);
+            CHECK(got.size() == 2 && got[0][0] == 4 && got[1][0] == 9 && got[0][1] == 40960 && got[0][2] == -4096 && got[0][3] == 8192 &&
+                  got[0][4] == 1024 && got[1][1] == 45056);
+        }
+    }
+    // Slot 1 leaves: slot 2 is the authority, slot 1's objects are gone, and slot 2's now count.
+    hubSend(h, a, rl::encodeFrame(rl::Bye, {}, 1, 3), 1.1);
+    h.tick(1.2);
+    sent = hubSent(h);
+    for (int k : {b, c})
+        for (const rl::Frame& f : sent[k])
+            if (f.type == rl::Snapshot) CHECK(f.payload[1] == 0);
+    hubSend(h, b, rl::encodeFrame(rl::Snapshot, engineSnapshot(2, {{6, 1, 2, 3, 4}}), 2, 1), 1.3);
+    h.tick(1.4);
+    sent = hubSent(h);
+    const std::vector<std::array<int32_t, 5>> got = sent[c].size() == 1 ? engineObjects(sent[c][0].payload) : std::vector<std::array<int32_t, 5>>{};
+    CHECK(got.size() == 1 && got[0] == (std::array<int32_t, 5>{6, 1, 2, 3, 4}));
+    CHECK(sent[b].size() == 1 && sent[b][0].payload[1] == 0);
+}
+
+// The server on a socket: three clients speaking redux's wire get slots 1, 2
+// and 3 in the order they connected.
+void testRelaySocket() {
+#ifndef _WIN32
+    rl::Relay relay;
+    std::string err;
+    CHECK(relay.start(&err) && relay.port() != 0 && relay.running());
+    int socks[3] = {-1, -1, -1};
+    for (int i = 0; i < 3; ++i) {
+        socks[i] = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a.sin_port = htons(relay.port());
+        CHECK(connect(socks[i], reinterpret_cast<sockaddr*>(&a), sizeof a) == 0);
+        // Accepted in order before the next connects, as Play waits for console k.
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (relay.accepted() < i + 1 && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        CHECK(relay.accepted() == i + 1);
+        // As redux: a FlowControl, then one DataTransfer per byte.
+        std::vector<uint8_t> wire = {6, 0x12, 4, 0x08, 1, 0x10, 1};
+        for (uint8_t b : helloFrame(0xC0FFEE)) wire.insert(wire.end(), {5, 0x0A, 3, 0x0A, 1, b});
+        CHECK(send(socks[i], wire.data(), wire.size(), 0) == ssize_t(wire.size()));
+    }
+    for (int i = 0; i < 3; ++i) {
+        rl::SioDecoder d;
+        rl::FrameParser p;
+        std::vector<rl::Frame> frames;
+        std::optional<rl::HelloAckPayload> ack;
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!ack && std::chrono::steady_clock::now() < until) {
+            pollfd pf{socks[i], POLLIN, 0};
+            if (poll(&pf, 1, 50) <= 0) continue;
+            uint8_t buf[2048];
+            const ssize_t n = recv(socks[i], buf, sizeof buf, 0);
+            if (n <= 0) break;
+            std::vector<uint8_t> data;
+            d.feed(buf, size_t(n), data);
+            p.feed(data.data(), data.size(), frames);
+            if (std::vector<rl::HelloAckPayload> acks = acksIn(frames); !acks.empty()) ack = acks.front();
+        }
+        CHECK(ack && ack->yourSlot == i + 1 && d.decodeErrors == 0);
+    }
+    const std::vector<rl::Connection> conns = relay.connections();
+    CHECK(conns.size() == 3);
+    for (size_t i = 0; i < conns.size(); ++i) CHECK(conns[i].index == int(i + 1) && conns[i].slot == i + 1 && conns[i].joined);
+    CHECK(relay.packetCount() >= 6);
+    for (int s : socks) close(s);
+    relay.stop();
+    CHECK(!relay.running() && relay.packets().size() >= 6);  // kept for the Network view
+#endif
 }
 
 // Build > Performance / Room Debug Overlay: Play and Run on hardware boot the
@@ -11828,6 +12607,35 @@ void testSpriteDirectionSets() {
     }
 }
 
+// The Scene panel's rows scroll (#227): clamped to the rows, a row brought
+// into view moves the scroll as little as it can, the thumb spans the view
+// in proportion and its drag covers the whole scroll, and a dragged row
+// scrolls the list only near or past an edge.
+void testListScroll() {
+    CHECK(ui::maxScroll(500, 800) == 0);
+    CHECK(ui::maxScroll(2000, 800) == 1200);
+    CHECK(ui::clampScroll(-10, 2000, 800) == 0);
+    CHECK(ui::clampScroll(5000, 2000, 800) == 1200);
+    CHECK(ui::clampScroll(300, 500, 800) == 0);  // rows collapsed shorter than the view: back to the top
+    CHECK(ui::scrollToShow(100, 300, 326, 800) == 100);   // in view: left alone
+    CHECK(ui::scrollToShow(400, 300, 326, 800) == 300);   // above: its top at the view's top
+    CHECK(ui::scrollToShow(0, 1900, 1926, 800) == 1126);  // below: its bottom at the view's bottom
+    CHECK(ui::scrollToShow(0, 100, 1000, 800) == 100);    // taller than the view: its top
+    const ui::Thumb none = ui::thumb(0, 500, 800);
+    CHECK(none.top == 0 && none.height == 800);
+    const ui::Thumb top = ui::thumb(0, 2000, 800), end = ui::thumb(1200, 2000, 800);
+    CHECK(std::fabs(top.height - 320) < 1e-3f && top.top == 0);
+    CHECK(std::fabs(end.top + end.height - 800) < 1e-3f);
+    CHECK(ui::thumb(0, 1e6f, 800).height == ui::kMinThumb);
+    CHECK(std::fabs(ui::thumbDragScroll(800 - 320, 2000, 800) - 1200) < 1e-3f);
+    CHECK(ui::thumbDragScroll(10, 500, 800) == 0);
+    CHECK(ui::edgeScrollSpeed(400, 100, 900, 26, 900) == 0);
+    CHECK(ui::edgeScrollSpeed(100, 100, 900, 26, 900) == -900);
+    CHECK(ui::edgeScrollSpeed(50, 100, 900, 26, 900) == -900);  // past the edge: full speed
+    CHECK(std::fabs(ui::edgeScrollSpeed(887, 100, 900, 26, 900) - 450) < 1e-3f);
+    CHECK(ui::edgeScrollSpeed(120, 100, 130, 26, 900) == 0);  // a view too short to have edges
+}
+
 // Dragging a whole-number field moves it one per pixel at any size (#174):
 // a 300 px wide element grows by 5 for 5 px, not by 15; Shift takes 10 px
 // per step. Other fields keep growing with the value.
@@ -12608,6 +13416,117 @@ void testUnityPrefab() {
     CHECK(lamp2 && lamp2->children.size() == 2);
 }
 
+// Exporters added to models placed in a scene (#223): Unity 6 leaves the
+// model's internalIDToNameTable empty, the scene names the model's objects
+// by hashed IDs. Fixture: tests/fixtures/unity-models, saved by Unity 6000.3.
+void testUnityModelIds() {
+    using namespace splash::unity;
+    using namespace unitytest;
+    CHECK(xxh64("") == 0xEF46DB3751D8E999ull);
+    CHECK(xxh64("abc") == 0x44BC2CF5AD770999ull);
+    // IDs Unity wrote: the root and its Transform, a node and its renderer
+    // (URP's SandBoxModel.fbx), nested, a lone top-level node's child, skinned.
+    CHECK(modelObjectId("GameObject", "//RootNode/root") == 919132149155446097LL);
+    CHECK(modelObjectId("Transform", "//RootNode/root/Transform") == -8679921383154817045LL);
+    CHECK(modelObjectId("GameObject", "//RootNode/root/Circle2") == 3650834566929780429LL);
+    CHECK(modelObjectId("MeshRenderer", "//RootNode/root/Circle2/MeshRenderer") == 5912129206897006233LL);
+    CHECK(modelObjectId("GameObject", "//RootNode/root/Base/Arm") == -1537605290578348017LL);
+    CHECK(modelObjectId("GameObject", "//RootNode/root/Tip") == -8469990867830010200LL);
+    CHECK(modelObjectId("SkinnedMeshRenderer", "//RootNode/root/Body/SkinnedMeshRenderer") == 1630794972795428178LL);
+
+    const fs::path proj = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "fixtures" / "unity-models";
+    const fs::path dest = g_outDir / "unity-model-ids";
+    fs::remove_all(dest);
+    fs::create_directories(dest);
+    ImportReport r;
+    const splash::Scene s = convertScene(proj, indexGuids(proj), proj / "Assets" / "Scenes" / "models.unity", dest, r);
+    std::function<const splash::Object*(const std::vector<splash::Object>&, const std::string&)> at =
+        [&](const std::vector<splash::Object>& objs, const std::string& path) -> const splash::Object* {
+        const size_t slash = path.find('/');
+        const splash::Object* o = findObj(objs, path.substr(0, slash));
+        return !o || slash == std::string::npos ? o : at(o->children, path.substr(slash + 1));
+    };
+    auto meshed = [&](const char* path) {
+        const splash::Object* o = at(s.objects, path);
+        return o && o->mesh && !o->mesh->mesh.empty();
+    };
+    const char* noExporter = "has a mesh but no PSXObjectExporter";
+    // solo.fbx: its one top-level node is the root, its child under it.
+    CHECK(meshed("solo") && meshed("solo/Tip"));
+    CHECK(at(s.objects, "solo") && at(s.objects, "solo")->children.size() == 1);
+    // multi.fbx: a nested node and a top-level one carry the added exporter.
+    CHECK(meshed("multi/Base/Arm") && meshed("multi/Lamp"));
+    CHECK(!meshed("multi/Base") && !meshed("multi/Base/Arm/Hand"));
+    CHECK(hasItem(r, ReportItem::LeftOut, "multi/Base", noExporter) && hasItem(r, ReportItem::LeftOut, "multi/Base/Arm/Hand", noExporter));
+    // rig.fbx: the skinned child holds its PSXSkinnedObjectExporter, and
+    // draws; neither it nor its model has a clip, so it gets no skin.
+    CHECK(meshed("rig/Prop") && meshed("rig/Body"));
+    CHECK(!hasItem(r, ReportItem::Later, "rig/Body", "PSXSkinnedObjectExporter"));
+    CHECK(at(s.objects, "rig/Body") && !at(s.objects, "rig/Body")->skin);
+    CHECK(hasItem(r, ReportItem::LeftOut, "rig/Body", "no animation clip, and its model has none"));
+    for (const char* p : {"solo", "solo/Tip", "multi", "multi/Base/Arm", "multi/Lamp", "rig/Prop", "rig/Body"})
+        CHECK(!hasItem(r, ReportItem::LeftOut, p, noExporter));
+    // The instances' root overrides land on the root.
+    CHECK(at(s.objects, "rig") && at(s.objects, "rig")->transform.position.x == 6);
+    CHECK(at(s.objects, "multi") && at(s.objects, "multi")->transform.position.x == 3);
+    if (g_failures)
+        for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
+}
+
+// PSXSkinnedObjectExporters (#223): the mesh of the SkinnedMeshRenderer on or
+// under the exporter, and a skin playing its AnimationClips. Fixture:
+// unity-models' skinned.unity and dancer.fbx (takes Walk, Wave), saved by Unity 6000.
+void testUnitySkinned() {
+    using namespace splash::unity;
+    using namespace unitytest;
+    // Clip IDs Unity wrote: per take, counting clips cut from the same take.
+    CHECK(modelObjectId("AnimationClip", "Walk") == 2667949614841947897LL);
+    CHECK(modelObjectId("AnimationClip", "Wave") == -57793324751458776LL);
+    CHECK(modelObjectId("AnimationClip", "Walk", 1) == 6027449108108357778LL);
+
+    const fs::path proj = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "fixtures" / "unity-models";
+    const fs::path dest = g_outDir / "unity-skinned";
+    fs::remove_all(dest);
+    fs::create_directories(dest);
+    ImportReport r;
+    const splash::Scene s = convertScene(proj, indexGuids(proj), proj / "Assets" / "Scenes" / "skinned.unity", dest, r);
+    auto clips = [&](const splash::Object* o) {
+        std::vector<std::string> out;
+        if (o && o->skin)
+            for (const std::string& c : o->skin->clips) {
+                const splash::AnimClip a = splash::loadAnim(dest / c);
+                out.push_back(a.name + (a.loop ? " loop" : ""));
+            }
+        return out;
+    };
+    for (const auto& it : r.items) CHECK(it.what.find("PSXSkinnedObjectExporter not imported") == std::string::npos);
+    // dancer: the exporter on the instance root draws its child Body's mesh;
+    // both clips resolve by fileID, with Unity's names and no loop (no clip settings).
+    const splash::Object* dancer = findObj(s.objects, "dancer");
+    CHECK(dancer && dancer->mesh && !dancer->mesh->mesh.empty() && dancer->skin);
+    if (!dancer || !dancer->mesh || !dancer->skin) return;
+    CHECK((clips(dancer) == std::vector<std::string>{"Wave", "Walk"}));
+    CHECK(dancer->skin->fps == 24 && dancer->mesh->bitDepth == splash::BitDepth::Bpp4);
+    CHECK(splash::loadMesh(dest / dancer->mesh->mesh).skin.has_value());
+    // Its child's PSXObjectExporter is skipped, as Unity skips it, with no item.
+    const splash::Object* body = findObj(dancer->children, "Body");
+    CHECK(body && !body->mesh && !body->skin);
+    for (const auto& it : r.items) CHECK(it.object != "dancer" && it.object != "dancer/Body");
+    // clipped: the .meta's clip settings rename the clips and loop them; the
+    // standalone .anim asset is named in the report.
+    const splash::Object* clipped = findObj(s.objects, "clipped");
+    CHECK((clips(clipped) == std::vector<std::string>{"WaveCut loop", "WalkCut loop"}));
+    CHECK(clipped && clipped->skin && clipped->skin->fps == 15);
+    CHECK(clipped && clipped->mesh && clipped->mesh->vertexColors == splash::VertexColorMode::Flat);
+    CHECK(hasItem(r, ReportItem::LeftOut, "clipped", "Assets/Anims/loose.anim"));
+    // idle: no clips listed, so the model's own play, and the report says so.
+    const splash::Object* idle = findObj(s.objects, "idle");
+    CHECK(idle && idle->mesh && idle->skin && idle->skin->clips.size() == 2);
+    CHECK(hasItem(r, ReportItem::Changed, "idle", "lists no animation clip"));
+    if (g_failures)
+        for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
+}
+
 void testUnityPrimitives() {
     using namespace splash::unity;
     auto outward = [](const splash::Mesh& m) {
@@ -13210,6 +14129,8 @@ int main(int argc, char** argv) {
     testOrderingTableReach();
     testObjectRamBudget();
     testScriptWithoutMesh();
+    testRuntimeLuaScan();
+    testRuntimeLuaProblem();
     testWorldStreamPlan();
     testWorldStreamExport();
     testStreamFarPopIn();
@@ -13265,6 +14186,14 @@ int main(int argc, char** argv) {
     testBlendCancel();
     testPlay();
     testPlayOverlays();
+    testLinkPlay();
+    testRelayFrames();
+    testRelayProtobuf();
+    testRelayRooms();
+    testRelayReliable();
+    testRelaySnapshot();
+    testRelayWorldObjects();
+    testRelaySocket();
     testPlayBootLogo();
     testBuildScenes();
     testBuildReport();
@@ -13358,6 +14287,8 @@ int main(int argc, char** argv) {
     testUnityGuidIndex();
     testUnityHierarchy();
     testUnityPrefab();
+    testUnityModelIds();
+    testUnitySkinned();
     testUnityPrimitives();
     testUnityReport();
     testUnityUi();
@@ -13365,6 +14296,7 @@ int main(int argc, char** argv) {
     testGpuDecode();
     testGpuRaster();
     testShadows();
+    testListScroll();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

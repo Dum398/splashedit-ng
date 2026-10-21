@@ -957,6 +957,50 @@ void bakeLayout(const YNode& rt, float scaleX, float scaleY, UIElement& e) {
     }
 }
 
+// ---- Model internal IDs ----
+
+uint64_t xxh64(std::string_view s, uint64_t seed) {
+    constexpr uint64_t P1 = 11400714785074694791ull, P2 = 14029467366897019727ull, P3 = 1609587929392839161ull,
+                       P4 = 9650029242287828579ull, P5 = 2870177450012600261ull;
+    auto rotl = [](uint64_t x, int r) { return (x << r) | (x >> (64 - r)); };
+    auto le = [&](size_t at, int bytes) {
+        uint64_t v = 0;
+        for (int b = 0; b < bytes; ++b) v |= uint64_t(uint8_t(s[at + size_t(b)])) << (8 * b);
+        return v;
+    };
+    auto round = [&](uint64_t acc, uint64_t in) { return rotl(acc + in * P2, 31) * P1; };
+    const size_t n = s.size();
+    size_t p = 0;
+    uint64_t h;
+    if (n >= 32) {
+        uint64_t v[4] = {seed + P1 + P2, seed + P2, seed, seed - P1};
+        for (; p + 32 <= n; p += 32)
+            for (int k = 0; k < 4; ++k) v[k] = round(v[k], le(p + size_t(k) * 8, 8));
+        h = rotl(v[0], 1) + rotl(v[1], 7) + rotl(v[2], 12) + rotl(v[3], 18);
+        for (uint64_t x : v) h = (h ^ round(0, x)) * P1 + P4;
+    } else {
+        h = seed + P5;
+    }
+    h += n;
+    for (; p + 8 <= n; p += 8) h = rotl(h ^ round(0, le(p, 8)), 27) * P1 + P4;
+    if (p + 4 <= n) {
+        h = rotl(h ^ (le(p, 4) * P1), 23) * P2 + P3;
+        p += 4;
+    }
+    for (; p < n; ++p) h = rotl(h ^ (uint64_t(uint8_t(s[p])) * P5), 11) * P1;
+    h ^= h >> 33;
+    h *= P2;
+    h ^= h >> 29;
+    h *= P3;
+    h ^= h >> 32;
+    return h;
+}
+
+long long modelObjectId(std::string_view type, std::string_view path, int n) {
+    const std::string key = "Type:" + std::string(type) + "->" + std::string(path) + std::to_string(n);
+    return (long long)xxh64(key);
+}
+
 // ---- The importer ----
 
 namespace {
@@ -1023,6 +1067,8 @@ struct UObj {
     // model's own MeshFilter/MeshRenderer would give it.
     std::string modelMesh;
     std::vector<Material> modelMats;
+    bool modelSkinned = false;  // that mesh is the model's SkinnedMeshRenderer's
+    std::string modelGuid;      // the placed model, for its clips
     std::map<int, Ref> matOverrides;  // m_Materials.Array.data[i] overrides
     // The RectTransform (class 224) body: m_AnchorMin/Max, m_AnchoredPosition,
     // m_SizeDelta, m_Pivot. nullptr for a plain Transform.
@@ -1034,6 +1080,16 @@ struct ModelAsset {
     std::string error;
     // internal fileID -> (class, name) from the model's .meta
     std::map<long long, std::pair<int, std::string>> ids;
+    bool preserveHierarchy = false;  // the .meta keeps a lone top-level node below the root
+    // The .meta's clipAnimations (authored clip settings), in order; empty
+    // when Unity makes one clip per take.
+    struct Clip {
+        long long id = 0;  // internalID, 0 when the .meta has none
+        std::string name, take;
+        bool loop = false;
+        long long firstFrame = 0;
+    };
+    std::vector<Clip> clipSettings;
 };
 
 // The internal IDs of a model's .meta: internalIDToNameTable (Unity 2019.3+)
@@ -1156,6 +1212,11 @@ class Importer {
     void reportAssetsIn(const YNode& body);
     void sceneSettings(const YNode& exp, SceneSettings& st);
     std::optional<MeshComponent> meshOf(const UObj& o, const UComp* mf, const UComp* mr, const std::string& path);
+    // A PSXSkinnedObjectExporter on object `idx`: the mesh of the
+    // SkinnedMeshRenderer on it or under it, and the skin playing its clips.
+    void skinnedObject(int idx, const UComp& exp, const std::string& path, Object& o);
+    std::string clipOf(const Ref& r, const std::string& path);
+    bool underSkinned(int idx) const;
     Material materialOf(const Ref& r, const std::string& path);
     std::string copyAsset(const fs::path& src, const std::string& folder, int* counter);
     std::string luaOf(const YNode& ref, const std::string& path, const std::string& field);
@@ -1178,6 +1239,7 @@ class Importer {
     std::set<std::string> m_taken;                       // project paths given out
     std::map<std::string, std::string> m_primitives;     // name -> mesh path
     std::map<std::string, std::unique_ptr<ModelAsset>> m_models;
+    std::map<std::string, std::string> m_clipFiles;  // "guid:fileID" of a clip -> its .anim
     std::set<std::string> m_sceneAssetsReported;
     std::vector<std::string> m_luaFiles;
     MemCardSettings m_memCard;
@@ -1401,11 +1463,14 @@ Importer::Unit Importer::instantiateModel(const Ref& source, const YNode& mod) {
     std::vector<int> nodeObj;
     if (ma && ma->error.empty()) {
         const ImportedModel& im = ma->model;
-        const bool single = im.nodes.size() == 1;
+        // Unity makes a lone top-level node the prefab root.
+        int tops = 0;
+        for (const ImportedNode& n : im.nodes) tops += n.parent < 0;
+        const bool single = tops == 1 && !ma->preserveHierarchy;
         for (size_t k = 0; k < im.nodes.size(); ++k) {
             const ImportedNode& n = im.nodes[k];
             int o = root;
-            if (!single) {
+            if (!single || n.parent >= 0) {
                 o = int(m_objs.size());
                 m_objs.emplace_back();
                 m_objs.back().name = n.name;
@@ -1417,6 +1482,8 @@ Importer::Unit Importer::instantiateModel(const Ref& source, const YNode& mod) {
             if (!n.mesh.empty()) {
                 m_objs[size_t(o)].modelMesh = n.mesh;
                 m_objs[size_t(o)].modelMats = n.materials;
+                m_objs[size_t(o)].modelSkinned = n.skinned;
+                m_objs[size_t(o)].modelGuid = source.guid;
             }
             nodeObj.push_back(o);
         }
@@ -1436,6 +1503,26 @@ Importer::Unit Importer::instantiateModel(const Ref& source, const YNode& mod) {
                     u.byFid[fid] = nodeObj[k];
                     break;
                 }
+        }
+        // Unity 2019.3+ leaves that table empty: the IDs are hashes of each
+        // object's path in the model. Where the table names an ID, it wins.
+        std::map<std::string, int> taken;
+        auto hashed = [&](const std::string& path, int o) {
+            for (const char* t : {"GameObject", "Transform", "MeshFilter", "MeshRenderer", "SkinnedMeshRenderer"}) {
+                const std::string p = std::strcmp(t, "GameObject") == 0 ? path : path + "/" + t;
+                u.byFid.emplace(modelObjectId(t, p, taken[std::string(t) + "->" + p]++), o);
+            }
+        };
+        std::vector<std::string> paths(im.nodes.size());
+        hashed("//RootNode/root", root);
+        for (size_t k = 0; k < im.nodes.size(); ++k) {
+            const ImportedNode& n = im.nodes[k];
+            if (single && n.parent < 0) {
+                paths[k] = "//RootNode/root";
+                continue;
+            }
+            paths[k] = (n.parent >= 0 ? paths[size_t(n.parent)] : std::string("//RootNode/root")) + "/" + n.name;
+            hashed(paths[k], nodeObj[k]);
         }
     }
     for (const YNode& m : mod["m_Modifications"].seq) {
@@ -1555,7 +1642,16 @@ ModelAsset* Importer::model(const std::string& guid, const std::string& path) {
         // Unity's model import scale, when the .meta sets one.
         for (const YDoc& d : parseYaml(readText(fs::path(src) += ".meta")))
             if (const YNode* mi = d.body.find("ModelImporter"))
-                if (const YNode* meshes = mi->find("meshes")) s.scale = float((*meshes)["globalScale"].num(1));
+                if (const YNode* meshes = mi->find("meshes")) {
+                    s.scale = float((*meshes)["globalScale"].num(1));
+                    ma->preserveHierarchy = (*meshes)["preserveHierarchy"].flag(false);
+                }
+        for (const YDoc& d : parseYaml(readText(fs::path(src) += ".meta")))
+            if (const YNode* mi = d.body.find("ModelImporter"))
+                if (const YNode* an = mi->find("animations"))
+                    for (const YNode& c : (*an)["clipAnimations"].seq)
+                        ma->clipSettings.push_back({c["internalID"].integer(0), c["name"].str(), c["takeName"].str(),
+                                                    c["loopTime"].flag(false), c["firstFrame"].integer(0)});
         saveImportSettings(copy, s);
         ma->model = importModel(copy, m_dest, s);
         ma->ids = metaIds(fs::path(src) += ".meta");
@@ -1650,6 +1746,193 @@ std::optional<MeshComponent> Importer::meshOf(const UObj& o, const UComp* mf, co
         else mc.materials.push_back(materialOf(r, path));
     }
     return mc;
+}
+
+bool Importer::underSkinned(int idx) const {
+    for (int i = idx; i >= 0; i = m_objs[size_t(i)].parent)
+        for (const UComp& c : m_objs[size_t(i)].comps)
+            if (c.classId == 114 && c.cls == "PSXSkinnedObjectExporter") return true;
+    return false;
+}
+
+// The first `units` UTF-16 code units of `s`, as Unity's exporter cuts a clip
+// name (String.Substring(0, 24)).
+static std::string cutUtf16(const std::string& s, size_t units) {
+    size_t i = 0, n = 0;
+    while (i < s.size()) {
+        const unsigned char c = uint8_t(s[i]);
+        const size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4, u = len == 4 ? 2 : 1;
+        if (n + u > units) break;
+        n += u, i += len;
+    }
+    return s.substr(0, i);
+}
+
+// A clip name as a file name.
+static std::string clipFileName(const std::string& name) {
+    std::string s;
+    for (unsigned char c : name) s += std::isalnum(c) || c == '-' || c == '_' ? char(c) : '_';
+    return s.empty() ? std::string("clip") : s;
+}
+
+// The .anim a PSXSkinnedObjectExporter's clip `r` plays: the model's take it
+// was cut from, under Unity's name and loop flag for the clip. A clip's
+// fileID is the .meta's clipAnimations[k].internalID, else
+// xxh64("Type:AnimationClip-><take><n>"), n counting earlier clips of that
+// take; with no clipAnimations Unity makes one clip per take, named after it,
+// that does not loop. Empty, reported, when it cannot be had.
+std::string Importer::clipOf(const Ref& r, const std::string& path) {
+    const std::string key = r.guid + ":" + std::to_string(r.fileId);
+    if (auto it = m_clipFiles.find(key); it != m_clipFiles.end()) return it->second;
+    const fs::path f = m_index.file(r.guid);
+    if (f.empty()) {
+        item(ReportItem::Missing, path, "animation clip (guid " + r.guid + ") is not in the project");
+        return {};
+    }
+    if (!canImportModel(f)) {
+        item(ReportItem::LeftOut, path, "animation clip " + m_index.path(r.guid) +
+                                            " is a Unity animation asset; only clips inside a model file (glTF, FBX, .blend) are imported");
+        return {};
+    }
+    ModelAsset* ma = model(r.guid, path);
+    if (!ma || !ma->error.empty()) return {};
+    std::string name, take;
+    bool loop = false, cut = false, found = false;
+    std::map<std::string, int> perTake;
+    for (const ModelAsset::Clip& c : ma->clipSettings) {
+        const int n = perTake[c.take]++;
+        if (found || (c.id ? c.id : modelObjectId("AnimationClip", c.take, n)) != r.fileId) continue;
+        name = c.name, take = c.take, loop = c.loop, cut = c.firstFrame > 0, found = true;
+    }
+    if (found) cut |= perTake[take] > 1;
+    if (!found && ma->clipSettings.empty())
+        for (const std::string& t : ma->model.clipTakes)
+            if (modelObjectId("AnimationClip", t, perTake[t]++) == r.fileId) {
+                name = take = t, found = true;
+                break;
+            }
+    // Before Unity 2019.3 the .meta names its IDs (class 74, AnimationClip).
+    if (auto it = ma->ids.find(r.fileId); !found && it != ma->ids.end() && it->second.first == 74) {
+        name = take = it->second.second, found = true;
+        for (const ModelAsset::Clip& c : ma->clipSettings)
+            if (c.name == name) take = c.take, loop = c.loop, cut = c.firstFrame > 0 || perTake[c.take] > 1;
+    }
+    const std::string model = m_index.path(r.guid);
+    if (!found) {
+        item(ReportItem::Missing, path, "animation clip #" + std::to_string(r.fileId) + " is not one of the clips of " + model);
+        return {};
+    }
+    const auto& takes = ma->model.clipTakes;
+    const size_t i = size_t(std::find(takes.begin(), takes.end(), take) - takes.begin());
+    if (i >= takes.size() || i >= ma->model.clips.size()) {
+        item(ReportItem::LeftOut, path, "animation clip '" + name + "' of " + model + " has no skeleton animation this import could bring over");
+        return {};
+    }
+    if (cut)
+        item(ReportItem::Changed, path, "animation clip '" + name + "' is a part of take '" + take + "' of " + model + "; it plays the whole take");
+    const std::string& orig = ma->model.clips[i];
+    AnimClip a;
+    try {
+        a = loadAnim(m_dest / fromUtf8(orig));
+    } catch (const std::exception& e) {
+        item(ReportItem::Missing, path, "animation clip '" + name + "': " + e.what());
+        return {};
+    }
+    std::string want = cutUtf16(name, 24);
+    if (want.empty()) want = cutUtf16(take, 24);
+    if (a.name == want && a.loop == loop) return m_clipFiles[key] = orig;
+    // Unity's name or loop flag differs from the model's own clip: a copy
+    // outside the model's folder, which a reimport of the model clears.
+    a.name = want;
+    a.loop = loop;
+    const std::string dir = "anims/" + safeStem(fs::path(fromUtf8(orig)).parent_path().filename().string());
+    const std::string base = clipFileName(want);
+    std::string rel = dir + "/" + base + ".anim";
+    for (int n = 2; m_taken.count(rel); ++n) rel = dir + "/" + base + "_" + std::to_string(n) + ".anim";
+    std::error_code ec;
+    fs::create_directories(m_dest / fromUtf8(dir), ec);
+    try {
+        saveAnim(a, m_dest / fromUtf8(rel));
+    } catch (const std::exception& e) {
+        item(ReportItem::Missing, path, "animation clip '" + name + "': " + e.what());
+        return {};
+    }
+    m_taken.insert(rel);
+    return m_clipFiles[key] = rel;
+}
+
+// Unity's exporter draws the mesh of GetComponentInChildren<SkinnedMeshRenderer>()
+// at the exporter's object and bakes the clips its AnimationClips lists
+// (PSXSkinnedMeshExporter.CreateProxy, BakeSkinData).
+void Importer::skinnedObject(int idx, const UComp& exp, const std::string& path, Object& o) {
+    const YNode& b = *exp.body;
+    o.startActive = b["IsActive"].flag(true);
+    // The renderer on the object, else on its first active descendant, depth first.
+    int at = -1;
+    const UComp* smr = nullptr;
+    std::function<void(int)> find = [&](int i) {
+        const UObj& u = m_objs[size_t(i)];
+        if (at >= 0 || (i != idx && !u.active)) return;
+        for (const UComp& c : u.comps)
+            if (c.classId == 137 && !refOf((*c.body)["m_Mesh"]).null()) {
+                at = i, smr = &c;
+                return;
+            }
+        if (u.modelSkinned) {
+            at = i;
+            return;
+        }
+        for (int ch : u.children) find(ch);
+    };
+    find(idx);
+    if (at < 0) {
+        item(ReportItem::LeftOut, path, "PSXSkinnedObjectExporter with no SkinnedMeshRenderer on or under it: Unity exports nothing for it either");
+        return;
+    }
+    const UObj& su = m_objs[size_t(at)];
+    std::optional<MeshComponent> mc = meshOf(su, smr, smr, path);
+    if (mc) {
+        const long long bpp = b["BitDepth"].integer(8);
+        mc->bitDepth = bpp == 4 ? BitDepth::Bpp4 : bpp == 15 || bpp == 16 ? BitDepth::Bpp16 : BitDepth::Bpp8;
+        const long long vc = b["ColorMode"].integer(0);
+        mc->vertexColors = vc == 1 ? VertexColorMode::Flat : vc == 2 ? VertexColorMode::Mesh : VertexColorMode::Baked;
+        const YNode& fc = b["FlatVertexColor"];
+        if (!fc.isNull()) {
+            const auto c = colorOf(fc, {128 / 255.f, 128 / 255.f, 128 / 255.f, 1});
+            mc->flatColor = {uint8_t(std::lround(c[0] * 255)), uint8_t(std::lround(c[1] * 255)), uint8_t(std::lround(c[2] * 255))};
+        }
+        mc->smoothNormals = b["SmoothNormals"].flag(true);
+        o.mesh = std::move(mc);
+    }
+    const std::string lua = luaOf(b["LuaFile"], path, "script");
+    if (!lua.empty()) o.script = ScriptComponent{lua, {}};
+    if (!o.mesh) return;
+
+    SkinComponent sk;
+    sk.fps = std::clamp(int(b["TargetFPS"].integer(15)), 1, 30);
+    for (const YNode& c : b["AnimationClips"].seq) {
+        const Ref r = refOf(c);
+        if (r.null()) continue;
+        const std::string a = clipOf(r, path);
+        if (!a.empty() && std::find(sk.clips.begin(), sk.clips.end(), a) == sk.clips.end()) sk.clips.push_back(a);
+    }
+    if (sk.clips.size() > 16) {
+        item(ReportItem::Changed, path, std::to_string(sk.clips.size()) + " animation clips, a skin plays at most 16: the first 16 are kept");
+        sk.clips.resize(16);
+    }
+    if (sk.clips.empty()) {
+        // psxsplash draws no skinned mesh without a clip: the model's own stand in.
+        const std::string guid = smr ? refOf((*smr->body)["m_Mesh"]).guid : su.modelGuid;
+        ModelAsset* ma = guid.empty() ? nullptr : model(guid, path);
+        if (ma && ma->error.empty())
+            for (size_t k = 0; k < ma->model.clips.size() && k < 16; ++k) sk.clips.push_back(ma->model.clips[k]);
+        if (sk.clips.empty())
+            item(ReportItem::LeftOut, path, "no animation clip, and its model has none: psxsplash draws no skinned mesh without one, so it gets no skin");
+        else
+            item(ReportItem::Changed, path, "PSXSkinnedObjectExporter lists no animation clip this import could bring over; the skin plays its model's " +
+                                                std::to_string(sk.clips.size()) + " clips instead, as psxsplash draws no skinned mesh without one");
+    }
+    if (!sk.clips.empty()) o.skin = std::move(sk);
 }
 
 void Importer::reportAssetsIn(const YNode& body) {
@@ -2107,11 +2390,15 @@ void Importer::convertObject(int idx, const std::string& parentPath, std::vector
     o.active = u.active;
     o.transform = u.t;
     const UComp *exp = nullptr, *mf = nullptr, *mr = nullptr;
+    const UComp* skin = nullptr;
     std::vector<std::string> leftOut;
     for (const UComp& c : u.comps) {
         if (c.classId == 33) mf = &c;
         else if (c.classId == 23) mr = &c;
         else if (c.classId == 114 && c.cls == "PSXObjectExporter") exp = &c;
+        else if (c.classId == 114 && c.cls == "PSXSkinnedObjectExporter") {
+            if (!skin) skin = &c;
+        } else if (c.classId == 137 && underSkinned(idx)) continue;  // drawn through the PSXSkinnedObjectExporter
         else if (c.classId == 114 && c.cls == "PSXSceneExporter") continue;  // the scene's settings
         else if (c.classId == 108) {
             const YNode& b = *c.body;
@@ -2171,7 +2458,11 @@ void Importer::convertObject(int idx, const std::string& parentPath, std::vector
             leftOut.push_back(n ? std::string(n) : "Unity component #" + std::to_string(c.classId));
         }
     }
-    if (exp) {
+    // Unity skips a PSXObjectExporter on or under a PSXSkinnedObjectExporter.
+    const bool covered = underSkinned(idx);
+    if (skin) {
+        skinnedObject(idx, *skin, path, o);
+    } else if (exp && !covered) {
         const YNode& b = *exp->body;
         auto field = [&](const char* now, const char* before) -> const YNode& {
             const YNode* n = b.find(now);
@@ -2208,7 +2499,7 @@ void Importer::convertObject(int idx, const std::string& parentPath, std::vector
         }
         const std::string lua = luaOf(field("luaFile", "LuaFile"), path, "script");
         if (!lua.empty()) o.script = ScriptComponent{lua, {}};
-    } else if ((mf && !refOf((*mf->body)["m_Mesh"]).null()) || !u.modelMesh.empty()) {
+    } else if (!covered && ((mf && !refOf((*mf->body)["m_Mesh"]).null()) || !u.modelMesh.empty())) {
         item(ReportItem::LeftOut, path, "has a mesh but no PSXObjectExporter, so Unity did not export it either; it is kept without its mesh");
     }
     if (!leftOut.empty()) {

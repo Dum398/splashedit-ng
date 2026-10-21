@@ -710,6 +710,11 @@ int main(int argc, char** argv) {
     brand::load(assetDir.c_str());
     if (!args.screenshot || args.splash) splash::load(assetDir.c_str(), !args.screenshot);
     ImGui_ImplSDL3_InitForOpenGL(window, ctx);
+    // The SDL3 backend turns SDL_BORDERLESS_WINDOWED_STYLE off for its own
+    // viewport windows. SDL reads that hint whenever it rebuilds this window's
+    // style (restore does). On Windows a maximized window without WS_CAPTION
+    // covers the taskbar. The editor opens no viewport windows.
+    SDL_SetHint("SDL_BORDERLESS_WINDOWED_STYLE", "1");
     {
         // The backend places the IME box in window coordinates.
         ImGuiPlatformIO& pio = ImGui::GetPlatformIO();
@@ -966,7 +971,7 @@ int main(int argc, char** argv) {
         // While the Game view has the keyboard, arrows and Enter are the controller:
         // they must not move ImGui's keyboard focus or press the button it lands on.
         // The script editor's arrows, Tab and Enter edit text.
-        if ((state.play.gameFocus && state.play.game.attached()) || state.scripts.hasKeyboard())
+        if ((state.play.gameFocus && state.play.cons[size_t(state.play.focus)].game.attached()) || state.scripts.hasKeyboard())
             io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
         else
             io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -1025,9 +1030,13 @@ int main(int argc, char** argv) {
             if (!writeShot(window, args.screenshot)) return 1;
             // For scripted checks: menus and pickers left open by the input.
             std::printf("popups open: %s\n", ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) ? "yes" : "no");
-            std::printf("game attached: %s\n", state.play.game.attached() ? "yes" : "no");
+            std::printf("game attached: %s\n", state.play.cons[0].game.attached() ? "yes" : "no");
             std::printf("status: %s\n", state.notice.c_str());
             std::printf("unsaved changes: %s\n", doc.dirty() ? "yes" : "no");
+            {
+                const splash::Object* sel = doc.selection() ? doc.object(*doc.selection()) : nullptr;
+                std::printf("selected: %s\n", sel ? sel->name.c_str() : "(none)");
+            }
             std::printf("inspector import warnings: %zu\n", state.importPanel.shown.size());
             for (const std::string& w : state.importPanel.shown) std::printf("  import warning: %s\n", w.c_str());
             std::printf("project panel open: %s\n", state.assets.open ? "yes" : "no");
@@ -1039,7 +1048,8 @@ int main(int argc, char** argv) {
         SDL_GL_SwapWindow(window);
     }
 
-    state.play.emu.stop();
+    for (auto& c : state.play.cons) c.emu.stop();
+    if (state.play.relay) state.play.relay->stop();
     splash::shutdown();
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();

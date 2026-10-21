@@ -594,6 +594,16 @@ display (CI runs it under `xvfb-run`).
 
     python3 renderlostcheck.py <splashedit> [screenshot prefix]
 
+`linkplaycheck.py` plays a copy of the courtyard whose scripts call `Net.Connect()` and
+`Net.Send()` with 2 linked consoles, on a real pcsx-redux: both views must show frames, their
+status lines must reach Linked with exactly one host, slots 0 and 1 and the no-Network-id hint;
+a click on console 2 gives it the keyboard and Capture frame then records console 2 into its own
+directory; Stop ends both. Needs SPLASHEDIT_REDUX and SPLASHEDIT_PSXSPLASH (and SPLASHEDIT_BIOS
+when that redux has none) and a display; without them it says so and passes. Not in CI, which
+never gets a real pcsx-redux for its checks.
+
+    python3 linkplaycheck.py <splashedit> [screenshot prefix]
+
 `scripteditorcheck.py` opens the courtyard example's `game_logic.lua` with Edit script, types a
 line and presses F5, then Ctrl+F5, with the script editor holding the keyboard. Each must save the
 tab before building, so the file on disk starts with the typed line; typing alone must not. Then
@@ -853,6 +863,17 @@ inspecting the other object, as tall, starts at the top again. Rows are found by
 tree's rows are `tree.<object name>`). Needs a display.
 
     python3 inspectorscrollcheck.py <splashedit>
+
+`treescrollcheck.py` adds 80 objects (Filler 1 to Filler 80) to a copy of the courtyard example, more
+than the Scene panel fits. The last row starts below the visible rows (`treelist.panel`); the wheel
+over them brings it into view and a click selects it (the run prints `selected: <name>`); a row
+scrolled up under the filter field (`treesearch`), or one under the Assets footer, does not take a
+click there; a row dragged to the bottom edge and held scrolls the list; `--select` of the last
+object scrolls its row into view at startup; and with the last group (Deep Group) closed and the
+list back at the top, picking its child from its viewport marker (`vp.marker.Deep Child`) opens the
+group and scrolls to the row, while closing the group again by hand keeps it closed. Needs a display.
+
+    python3 treescrollcheck.py <splashedit>
 
 `gizmocheck.py` adds a Trigger (Gate) and an Interactable (Lever) to a copy of the courtyard example
 and shoots the scene view twice, with the viewport's overlay toggle (`vp.gizmos`) on and off. Inside the

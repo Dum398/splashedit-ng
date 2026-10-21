@@ -13527,6 +13527,38 @@ void testUnitySkinned() {
         for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
 }
 
+// Materials on placed models (#223): plane_2x2 (8) has a project material
+// dragged onto it in the scene (an m_Materials.Array.data[0] modification on
+// the model's MeshRenderer); plane_remap gets it from its model's .meta. Fixture: unity-models' materials.unity, saved by
+// Unity 6000.3; both instances carry TEX_4BIT, smooth normals, Flat Color 100 grey.
+void testUnityPlacedMaterial() {
+    using namespace splash::unity;
+    using namespace unitytest;
+    const fs::path proj = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "fixtures" / "unity-models";
+    const fs::path dest = g_outDir / "unity-placed-material";
+    fs::remove_all(dest);
+    fs::create_directories(dest);
+    ImportReport r;
+    const splash::Scene s = convertScene(proj, indexGuids(proj), proj / "Assets" / "Scenes" / "materials.unity", dest, r);
+    auto textured = [&](const char* name) {
+        const splash::Object* o = findObj(s.objects, name);
+        return o && o->mesh && o->mesh->materials.size() == 1 && o->mesh->materials[0].texture == "textures/wall_stone.png" &&
+               fs::is_regular_file(dest / o->mesh->materials[0].texture);
+    };
+    CHECK(textured("plane_2x2 (8)"));
+    // plane_remap: the model's material plane_mat is remapped to the same
+    // project material in its .meta's externalObjects.
+    CHECK(textured("plane_remap"));
+    for (const char* name : {"plane_2x2 (8)", "plane_remap"}) {
+        const splash::Object* o = findObj(s.objects, name);
+        CHECK(o && o->mesh && o->mesh->bitDepth == splash::BitDepth::Bpp4 && o->mesh->smoothNormals &&
+              o->mesh->vertexColors == splash::VertexColorMode::Flat &&
+              (o->mesh->flatColor == std::array<uint8_t, 3>{100, 100, 100}));
+    }
+    if (g_failures)
+        for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
+}
+
 void testUnityPrimitives() {
     using namespace splash::unity;
     auto outward = [](const splash::Mesh& m) {
@@ -14289,6 +14321,7 @@ int main(int argc, char** argv) {
     testUnityPrefab();
     testUnityModelIds();
     testUnitySkinned();
+    testUnityPlacedMaterial();
     testUnityPrimitives();
     testUnityReport();
     testUnityUi();

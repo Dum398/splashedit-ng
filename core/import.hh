@@ -24,6 +24,7 @@ struct ImportedNode {
     Transform transform;
     std::string mesh;                 // project-relative .mesh in the node's own space, empty for none
     std::vector<Material> materials;  // one per submesh of `mesh`
+    std::vector<std::string> materialNames;  // beside materials: each one's name in the file
     // `mesh` carries a skeleton. Its space is then the baked mesh's: the
     // transform puts the node at the model's root, as glTF ignores a skinned
     // node's own transform.
@@ -33,6 +34,7 @@ struct ImportedNode {
 struct ImportedModel {
     std::string mesh;                 // project-relative path of the written .mesh
     std::vector<Material> materials;  // one per submesh, textures project-relative
+    std::vector<std::string> materialNames;  // beside materials: each one's name in the file
     std::vector<ImportedNode> nodes;  // the node tree, every parent before its children
     std::vector<std::string> textures;  // every PNG written, project-relative
     bool skinned = false;               // the baked mesh carries a skeleton

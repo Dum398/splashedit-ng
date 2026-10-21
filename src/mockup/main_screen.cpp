@@ -8076,8 +8076,10 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
 
-    // Network: the id two consoles compare before they link. Empty, the
-    // engine derives one from the scene index and object count.
+    // Network: the id two consoles compare before they link (empty, the
+    // engine derives one from the scene index and object count; one click
+    // locks it to the scene's name), then how many consoles Play boots and
+    // whether 2 go through the relay: the Players list's own settings.
     {
         const float stop = y;
         const bool open = section("s_network", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::globe, color::textDim, "Network",
@@ -8085,7 +8087,7 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (!open) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
         y += 34 + space::xs;
         const ImRect idRow = row("lnetid", "Network id",
-                                 "Consoles linked with Net.Begin only connect when their scenes have the same id. Name the scene "
+                                 "Consoles linked with Net.Connect only connect when their scenes have the same id. Name the scene "
                                  "here to keep the id stable between builds.");
         nameRect("scene.netid", idRow);
         std::string typed;
@@ -8094,14 +8096,57 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const uint32_t hash = splash::hashSceneId(set.networkId);
         char hex[16];
         std::snprintf(hex, sizeof hex, "0x%08X", unsigned(hash));
-        if (set.networkId.empty())
+        scriptLine("network", set.networkId.empty() ? std::string("network: derived")
+                                                     : "network: locked " + set.networkId + " hash " + hex);
+        if (set.networkId.empty()) {
             caption("Derived at run time: it changes when objects are added, so consoles running different builds may not "
                     "connect.",
                     color::textFaint);
-        else
+            // One click locks it to the scene's name: stable, and the same on every build of it.
+            const std::string stem = doc.sceneStem();
+            const std::string label = "Use \"" + stem + "\"";
+            const std::string tip = "Sets the Network id to the scene's name, " + stem + ". Ctrl+Z puts it back.";
+            if (!stem.empty() && button("scene.netid.fill", ImVec2(x0 + space::sm + lw, y), icon::lock, label.c_str(), ButtonKind::Secondary,
+                                        nullptr, tip.c_str()))
+                doc.editSettings([stem](splash::SceneSettings& s) { s.networkId = stem; });
+            if (!stem.empty()) y += size::field + 6 + space::xs;
+        } else
             caption(std::string("Locked: hash ") + hex + ".", color::good);
-        scriptLine("network", set.networkId.empty() ? std::string("network: derived")
-                                                     : "network: locked " + set.networkId + " hash " + hex);
+
+        // Play's consoles: the Players list (toolbar), saved for this user, not in the scene.
+        y += space::sm;
+        State::Play& play = st.play;
+        const ImRect playersRow = row("lnetplayers", "Play boots",
+                                      "How many consoles Play starts for this scene's network code: the toolbar's Players list. "
+                                      "Saved for you in the editor's settings, not in the scene.");
+        nameRect("scene.players", playersRow);
+        std::vector<std::string> counts;
+        for (int n = 1; n <= editor::kMaxPlayers; ++n)
+            counts.push_back(n == 1 ? std::string("1 Console") : n == 2 ? std::string("2 Linked Consoles") : std::to_string(n) + " Consoles");
+        std::vector<const char*> countItems;
+        for (const std::string& c : counts) countItems.push_back(c.c_str());
+        const int cur = std::clamp(play.tools.players, 1, editor::kMaxPlayers) - 1;
+        const int pickPlayers = dropdownMenu("scene.players", playersRow, icon::users, countItems[size_t(cur)], countItems, cur);
+        if (pickPlayers >= 0 && pickPlayers != cur) setPlayers(st, pickPlayers + 1);
+        const ImRect relayRow = row("lnetrelay", "Relay",
+                                    "Route 2 consoles through the editor's relay instead of linking them directly: the Players "
+                                    "list's Use the Relay for 2 Consoles. 3 or more always use it.");
+        {
+            // 3 or more have no choice: no switch then, only what happens.
+            float tx = relayRow.Min.x;
+            if (play.tools.players < 3) {
+                const ImRect relaySw(ImVec2(relayRow.Min.x, relayRow.GetCenter().y - 8), ImVec2(relayRow.Min.x + 30, relayRow.GetCenter().y + 8));
+                nameRect("scene.relay", relaySw);
+                if (toggle("scene.relay", relaySw, play.tools.relay)) setRelay(st, !play.tools.relay);
+                tx = relaySw.Max.x + space::sm;
+            }
+            const char* what = play.tools.players >= 3 ? "Always, for 3 or more consoles" : "Use it for 2 consoles";
+            const float ty = relayRow.GetCenter().y - measure(f.regular, type::caption, what).y * 0.5f;
+            text(dl, ImVec2(tx, ty), f.regular, type::caption, editor::usesRelay(play.tools) ? color::textDim : color::textFaint, what);
+        }
+        caption("2 consoles link directly, 3 or more through the relay.", color::textFaint);
+        scriptLine("scene.play", "scene: play " + std::to_string(play.tools.players) + (play.tools.relay ? " relay on" : " relay off") +
+                                     (editor::usesRelay(play.tools) ? " via relay" : ""));
         y += space::xs;
         if (!open) {
             ImGui::PopClipRect();

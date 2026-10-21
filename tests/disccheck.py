@@ -230,6 +230,14 @@ check('reference export of the second scene', r5.returncode == 0, r5.stderr)
 built = os.path.join(tmp, 'built')
 r6 = subprocess.run([cli, 'build', scene, cave, '--project', project, '-o', built, '--lua-bytecode'], capture_output=True, text=True)
 check('reference build of both scenes', r6.returncode == 0, r6.stderr)
+# The bundled engines have no Lua parser: build stores Lua compiled with or without the flag.
+plain = os.path.join(tmp, 'built-plain')
+r7 = subprocess.run([cli, 'build', scene, cave, '--project', project, '-o', plain], capture_output=True, text=True)
+same = r7.returncode == 0 and all(
+    open(os.path.join(plain, 'scene_%d.splashpack' % i), 'rb').read() ==
+    open(os.path.join(built, 'scene_%d.splashpack' % i), 'rb').read() for i in (0, 1))
+check('build without --lua-bytecode stores the same compiled Lua',
+      same and b'\x1bLua' in open(os.path.join(plain, 'scene_0.splashpack'), 'rb').read(), r7.stderr)
 two = os.path.join(tmp, 'two.bin')
 r4 = subprocess.run([cli, 'disc', scene, cave, '--project', project, '--engine', os.path.join(tmp, 'cd.ps-exe'), '-o', two],
                     capture_output=True, text=True)

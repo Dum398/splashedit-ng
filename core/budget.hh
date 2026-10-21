@@ -17,9 +17,13 @@ struct Budget {
 
 constexpr size_t kVramCapacity = 1024 * 512 * 2;
 constexpr size_t kSpuRamCapacity = 512 * 1024;
-// Heap of psxsplash 8283c6b (__stack_start - __heap_start in psxsplash.elf,
-// default build). The stack grows down into the same space.
-constexpr size_t kEngineHeapBytes = 0x80200000 - 0x8009f600;
+// Heap of the disc engine SplashEdit bundles, psxsplash d2c232c built with
+// LOADER=cdrom NOPARSER=1 and every feature: __stack_start - __heap_start in
+// psxsplash.elf (mipsel-none-elf-nm). The disc engine has the least heap of
+// those a game ships with; leaving the Lua parser out gave it 0x7000 bytes
+// (__heap_start 0x800a5c70 with the parser). The stack grows down into the
+// same space.
+constexpr size_t kEngineHeapBytes = 0x80200000 - 0x8009ec70;
 
 // psxsplash-docs components/objects.md: "roughly 1000-2000 visible triangles
 // per frame at 30fps". The top of that range is the meter's capacity.

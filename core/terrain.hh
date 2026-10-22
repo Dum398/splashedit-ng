@@ -65,7 +65,7 @@ enum class TerrainTool : uint8_t { Raise, Lower, Smooth, Flatten, Paint };
 struct TerrainBrush {
     TerrainTool tool = TerrainTool::Raise;
     float radius = 3;      // metres
-    float strength = 2;    // Raise/Lower: metres per second at the centre; Smooth/Flatten: rate per second
+    float strength = 4;    // Raise/Lower: metres per second at the centre; Smooth/Flatten: rate per second
     float falloff = 0.5f;  // 0 = hard edge, 1 = fades from the centre
     float target = 0;      // Flatten: the height taken at the start of the stroke
     int layer = 0;         // Paint

@@ -372,6 +372,7 @@ struct State {
     // terrainTool is -1 (off) or a splash::TerrainTool.
     int terrainTool = -1;
     splash::TerrainBrush terrainBrush;
+    bool terrainRadiusSet = false;  // the radius was typed or dragged; until then it follows the terrain's size
     editor::TerrainStroke terrainStroke;
 
     // Lua files open in the script editor, as tabs beside the Scene and UI.

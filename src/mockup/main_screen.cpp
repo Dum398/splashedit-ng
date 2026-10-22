@@ -5366,8 +5366,11 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         const editor::ObjectPath tpath = *doc.selection();
         dl->ChannelsSetCurrent(kChrome);
         const char* bIcons[5] = {icon::arrowUp, icon::arrowDown, icon::wand, icon::minus, icon::pencil};
-        const char* bTips[5] = {"Raise terrain", "Lower terrain", "Smooth terrain", "Flatten to the height where the stroke starts",
-                                "Paint the layer picked in the inspector"};
+        const char* bTips[5] = {"Raise: lifts the ground under the brush while the button is held",
+                                "Lower: digs the ground under the brush while the button is held",
+                                "Smooth: evens out bumps under the brush",
+                                "Flatten: pulls the ground under the brush to the height where the stroke started",
+                                "Paint: paints the layer picked in the inspector's Terrain section"};
         const ImVec2 tp = p + ImVec2(0, 40);
         ImRect trow(tp, tp + ImVec2(5 * 30 + 4, 32));
         dl->AddRectFilled(trow.Min, trow.Max, rgb(0x0e1014, 210), radius::button + 2);
@@ -5387,6 +5390,10 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
             std::printf("terrain: tool %s\n", st.terrainTool < 0 ? "off" : kToolNames[st.terrainTool]);
             std::fflush(stdout);
         }
+        // Until the radius is set by hand it follows the terrain: 8% of its
+        // larger side, so the circle reads on any size of terrain.
+        if (!st.terrainRadiusSet)
+            st.terrainBrush.radius = std::clamp(0.08f * std::max(sel->terrain->sizeX, sel->terrain->sizeZ), 1.f, 50.f);
         if (st.terrainTool >= 0) {
             ImGuiContext& g = *GImGui;
             ImGuiIO& io = ImGui::GetIO();
@@ -5449,7 +5456,9 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                     dl->AddPolyline(pts, n, col, ImDrawFlags_Closed, thick);
                 };
                 const ImU32 bc = st.terrainTool == int(splash::TerrainTool::Lower) ? color::bad : kind::terrain;
-                ring(brush.radius, bc, 2.0f);
+                ring(brush.radius, bc, 2.5f);
+                ImVec2 cp;
+                if (view.project(toGl(*hit), mn, sz, &cp)) dl->AddCircleFilled(cp, 3.f, bc);
                 ring(brush.radius * (1 - std::clamp(brush.falloff, 0.f, 1.f)), (bc & 0x00ffffffu) | (110u << IM_COL32_A_SHIFT), 1.2f);
             }
         }
@@ -9927,8 +9936,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             nameRect("obj.tradius", rr);
             {
                 float nv = st.terrainBrush.radius;
-                if (numberField("tradius", rr, fmtShort(nv, 2).c_str(), "m", 0, nullptr, &nv, true).changed)
+                if (numberField("tradius", rr, fmtShort(nv, 2).c_str(), "m", 0, nullptr, &nv, true).changed) {
                     st.terrainBrush.radius = std::clamp(nv, 0.1f, 200.f);
+                    st.terrainRadiusSet = true;
+                }
             }
             const ImRect sr = row("ltstrength", "Brush strength", "Raise and Lower: metres a second at the centre. Smooth and Flatten: how fast they pull.");
             nameRect("obj.tstrength", sr);

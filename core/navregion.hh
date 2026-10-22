@@ -31,6 +31,10 @@ struct NavBuildParams {
     float detailSampleDist = 6.0f;
     float detailMaxError = 0.025f;
     float maxPlaneError = 0.15f;
+    // Cut regions on a grid so each one's plane fits the ground within
+    // max(maxPlaneError, maxStepHeight) (terrain: a height field rolls inside
+    // one Recast region). One extra bake pass at most.
+    bool splitByPlaneError = false;
 };
 
 // One exported object, in exporter order.
@@ -84,6 +88,8 @@ constexpr int kNavMaxSpans = (1 << 24) - 1;
 // cell size grows; the region count barely moves (80 regions at 0.3 m, 85 at
 // 0.06 m on that terrain).
 constexpr int kNavSpanBudget = 1000000;
+// splitByPlaneError never cuts finer than this many metres.
+constexpr float kNavMinTile = 2.0f;
 
 // roomBoxes: the Room objects' world boxes (unexpanded) in room order. With
 // any, each region's roomIndex is the smallest room whose box (0.5 larger

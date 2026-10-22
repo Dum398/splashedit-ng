@@ -2526,6 +2526,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                          {},
                          e.mesh->bounds()};
         for (const auto& sm : e.mesh->submeshes) n.triangles.insert(n.triangles.end(), sm.begin(), sm.end());
+        // Walkable terrain rolls inside one Recast region: split them to fit.
+        if (n.walkable && e.obj->terrain) np.splitByPlaneError = true;
         navIn.push_back(std::move(n));
     }
     // Walk-off zones: active objects only, like trigger boxes.

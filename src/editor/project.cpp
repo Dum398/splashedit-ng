@@ -830,8 +830,10 @@ PlacedModel applyPlace(Document& doc, StagedModel& s, const std::optional<Object
     splash::ImportSettings& settings = s.settings;
     std::error_code ec;
     const std::string source = s.inside ? std::string() : utf8(fs::absolute(file, ec));
-    if (!s.hadSidecar || (!s.inside && settings.source != source)) {
+    const bool newSource = settings.targetTriangles > 0 && settings.sourceTriangles != r.model.sourceTriangles;
+    if (!s.hadSidecar || (!s.inside && settings.source != source) || newSource) {
         settings.source = source;
+        settings.sourceTriangles = r.model.sourceTriangles;
         try {
             splash::saveImportSettings(copy, settings);
         } catch (const std::exception& e) {
@@ -1071,6 +1073,19 @@ Reimported applyReimport(Document& doc, StagedModel& s, std::optional<bool> wasM
     const fs::path& file = s.file;
     const splash::ImportSettings& settings = s.settings;
     doc.refreshAssets(writtenFiles(r.model));
+    // The count before simplifying, for the inspector's Triangles row: into
+    // the sidecar as it is now, unless its target changed while this ran.
+    if (settings.targetTriangles > 0 && settings.sourceTriangles != r.model.sourceTriangles) {
+        try {
+            splash::ImportSettings now = splash::loadImportSettings(file);
+            if (now.targetTriangles == settings.targetTriangles) {
+                now.sourceTriangles = r.model.sourceTriangles;
+                splash::saveImportSettings(file, now);
+            }
+        } catch (const std::exception& e) {
+            r.model.warnings.push_back(std::string("the import settings were not saved: ") + e.what());
+        }
+    }
 
     Resync sync(r.model, settings, "models/" + splash::importName(file) + "/");
     sync.toMerged = wasMerged && !*wasMerged && settings.mergeMeshes;
@@ -1124,6 +1139,11 @@ ImportWarning explainImportWarning(const std::string& warning) {
         {"points and lines were left out", nullptr, "Turn them into faces in the modelling tool if they should be drawn"},
         {"morph target (shape key) animation", nullptr, "Drive the motion with bones instead of shape keys"},
         {"the import settings were not saved", nullptr, "Make the models/ folder writable, then change a setting to save it again"},
+        {" triangles, not the target ", nullptr,
+         "Raise the Triangles target, or join UV islands and materials in the modelling tool so fewer seams hold it"},
+        {"removed whole by simplifying", ": ", nullptr},
+        {"have recomputed normals", nullptr,
+         "Change the smoothing angle to choose which edges stay hard, or set Triangles to All to keep the file's normals"},
     };
     ImportWarning w{warning, {}};
     for (const Rule& r : rules) {

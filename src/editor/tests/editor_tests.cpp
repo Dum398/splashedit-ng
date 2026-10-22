@@ -4156,7 +4156,8 @@ splash::Mesh simplifyGrid(int w, int h, int split, bool flat, bool skin) {
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             const int c[4][2] = {{x, y}, {x, y + 1}, {x + 1, y + 1}, {x + 1, y}};
-            for (const int* tri : {std::array<int, 3>{0, 1, 2}.data(), std::array<int, 3>{0, 2, 3}.data()}) {
+            static const int halves[2][3] = {{0, 1, 2}, {0, 2, 3}};
+            for (const int* tri : halves) {
                 std::vector<int>& sm = m.submeshes[x < split ? 0 : 1];
                 const splash::Vec3 n{0.05f * float(t % 5), 0.05f * float(t % 3), -1};
                 for (int k = 0; k < 3; k++) {

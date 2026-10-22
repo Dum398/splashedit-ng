@@ -11,6 +11,7 @@
 
 #include "audio.hh"
 #include "editor/catalog.hh"
+#include "terrain.hh"
 #include "texture.hh"
 
 namespace fs = std::filesystem;
@@ -774,12 +775,62 @@ std::vector<std::string> namesOf(const std::vector<splash::Object>& objs) {
 
 }  // namespace
 
+namespace {
+const splash::TerrainComponent* loadedTerrainWithData(const std::vector<splash::Object>& objs, const std::string& data) {
+    for (const splash::Object& o : objs) {
+        if (o.terrain && o.terrain->data == data && splash::terrainLoaded(*o.terrain)) return &*o.terrain;
+        if (const splash::TerrainComponent* t = loadedTerrainWithData(o.children, data)) return t;
+    }
+    return nullptr;
+}
+bool terrainUses(const std::vector<splash::Object>& objs, const std::string& data) {
+    for (const splash::Object& o : objs)
+        if ((o.terrain && o.terrain->data == data) || terrainUses(o.children, data)) return true;
+    return false;
+}
+}  // namespace
+
+void Document::giveTerrainsOwnFiles(splash::Object& o, std::vector<std::string>& taken) const {
+    if (o.terrain) {
+        splash::TerrainComponent& t = *o.terrain;
+        const bool shared = terrainUses(m_scene.objects, t.data) ||
+                            std::find(taken.begin(), taken.end(), t.data) != taken.end();
+        if (!splash::terrainLoaded(t)) {
+            if (const splash::TerrainComponent* src = loadedTerrainWithData(m_scene.objects, t.data)) {
+                t.resolution = src->resolution;
+                t.heights = src->heights;
+                t.cellLayers = src->cellLayers;
+            } else if (!t.data.empty() && !m_project.empty()) {
+                try {
+                    splash::loadTerrainData(t, m_project / t.data);
+                } catch (const std::exception&) {
+                }
+            }
+        }
+        if (shared) {
+            const std::string want = t.data.empty() ? defaultTerrainData(o.name) : t.data;
+            t.data = splash::uniqueTerrainData(m_scene, m_project, want, taken);
+            if (!m_project.empty() && splash::terrainLoaded(t)) {
+                try {
+                    splash::saveTerrainData(t, m_project / t.data);
+                } catch (const std::exception&) {
+                }
+            }
+        }
+        taken.push_back(t.data);
+    }
+    if (!o.prefab.empty()) return;
+    for (splash::Object& c : o.children) giveTerrainsOwnFiles(c, taken);
+}
+
 std::optional<ObjectPath> Document::duplicateObject(const ObjectPath& path) {
     const splash::Object* o = object(path);
     if (!o || inInstance(path) || prefabRootLevel(ObjectPath(path.begin(), path.end() - 1))) return std::nullopt;
     const ObjectPath parentPath(path.begin(), path.end() - 1);
     splash::Object copy = *o;
     copy.name = numberedName(o->name, namesOf(parentPath.empty() ? m_scene.objects : object(parentPath)->children));
+    std::vector<std::string> taken;
+    giveTerrainsOwnFiles(copy, taken);
     ObjectPath at = path;
     ++at.back();
     insertObject(at, std::move(copy));
@@ -851,6 +902,8 @@ std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const 
         for (splash::Object& o : *objs) o.transform.position.x += dx;
     }
     std::vector<std::string> names = namesOf(siblings);
+    std::vector<std::string> taken;
+    for (splash::Object& o : *objs) giveTerrainsOwnFiles(o, taken);
     std::vector<std::unique_ptr<Command>> parts;
     ObjectPath at = parentPath;
     at.push_back(0);
@@ -923,6 +976,9 @@ std::optional<std::string> Document::save() {
         } else {
             splash::saveScene(m_scene, scenePath());
         }
+        // Terrain grids live in their own files next to the scene's assets.
+        std::vector<std::string> errs = splash::saveTerrains(m_scene, m_project);
+        if (!errs.empty()) return errs.front();
     } catch (const std::exception& e) {
         return std::string(e.what());
     }
@@ -1011,7 +1067,12 @@ bool Document::missingMeshColors(const splash::MeshComponent& m) const {
 bool Document::hasWarning(const splash::Object& o) const {
     if (!o.prefab.empty() && !o.prefabResolved) return true;
     if (o.mesh) {
-        if (const MeshInfo* mi = mesh(o.mesh->mesh); !mi || mi->status != AssetStatus::Ok) return true;
+        // A terrain builds its mesh from its grid instead of a .mesh file.
+        if (o.terrain) {
+            if (!splash::terrainLoaded(*o.terrain)) return true;
+        } else if (const MeshInfo* mi = mesh(o.mesh->mesh); !mi || mi->status != AssetStatus::Ok) {
+            return true;
+        }
         for (const splash::Material& mat : o.mesh->materials)
             if (const TextureInfo* t = texture(mat.texture); t && t->status != AssetStatus::Ok) return true;
         if (couldBe4bpp(*o.mesh)) return true;
@@ -1097,6 +1158,8 @@ void Document::refill() {
 
 std::vector<std::string> Document::resolvePrefabs() {
     m_prefabErrors = splash::resolvePrefabs(m_scene, m_project);
+    // Terrain grids the scene (or prefab content) brought in without them.
+    m_terrainErrors = splash::loadTerrains(m_scene, m_project);
     // A selection inside content that changed shape moves to its instance.
     for (std::optional<ObjectPath> p : {m_selection, m_pinned}) {
         if (!p || object(*p)) continue;
@@ -1191,6 +1254,10 @@ bool Document::unpackPrefab(const ObjectPath& path) {
     splash::Object plain = *o;
     plain.prefab.clear();
     plain.prefabResolved = false;
+    // Its terrains become the scene's own: a file each, apart from the prefab's.
+    // (The instance itself is still in the scene, so every one counts as shared.)
+    std::vector<std::string> taken;
+    giveTerrainsOwnFiles(plain, taken);
     return replaceTrees({{path, std::move(plain)}}) == 1;
 }
 

@@ -6,7 +6,9 @@
 #include <cmath>
 #include <deque>
 #include <limits>
+#include <map>
 #include <memory>
+#include <tuple>
 
 namespace splash {
 
@@ -252,6 +254,37 @@ int findClosestRegion(const NavMesh& nav, Vec3 spawn) {
 
 }  // namespace
 
+// Splits each region of `chf` (ids from `base`) along a square grid of
+// `tile` metres: a region's spans in different grid squares get different
+// ids. False, leaving the ids as `base`, when that needs more ids than
+// Recast holds.
+static bool tileRegions(rcCompactHeightfield& chf, const std::vector<unsigned short>& base, float tile) {
+    const int cells = std::max(1, int(tile / chf.cs));
+    std::map<std::tuple<int, int, int>, unsigned short> ids;
+    std::vector<unsigned short> out(base.size());
+    for (int z = 0; z < chf.height; z++)
+        for (int x = 0; x < chf.width; x++) {
+            const rcCompactCell& c = chf.cells[x + z * chf.width];
+            for (int i = int(c.index), n = int(c.index + c.count); i < n; i++) {
+                const unsigned short r = base[size_t(i)];
+                if (r == 0 || (r & RC_BORDER_REG)) {
+                    out[size_t(i)] = r;
+                    continue;
+                }
+                auto [it, fresh] = ids.try_emplace({int(r), x / cells, z / cells}, (unsigned short)(ids.size() + 1));
+                if (ids.size() >= RC_BORDER_REG) {
+                    for (size_t k = 0; k < base.size(); k++) chf.spans[k].reg = base[k];
+                    return false;
+                }
+                out[size_t(i)] = it->second;
+                (void)fresh;
+            }
+        }
+    for (size_t k = 0; k < out.size(); k++) chf.spans[k].reg = out[k];
+    chf.maxRegions = (unsigned short)(ids.size() + 1);
+    return true;
+}
+
 NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBuildParams& p, Vec3 spawn,
                         std::vector<std::string>& errors, const std::vector<Bounds>& roomBoxes,
                         const std::vector<Bounds>& walkoffBoxes) {
@@ -352,17 +385,21 @@ NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBui
             if (!rcBuildRegions(&ctx, *chf, 0, p.minRegionArea, p.mergeRegionArea)) return failed("rcBuildRegions");
             break;
     }
-    ContourSetPtr cset(rcAllocContourSet());
-    if (!cset || !rcBuildContours(&ctx, *chf, p.maxSimplifyError, maxEdgeLen, *cset, RC_CONTOUR_TESS_WALL_EDGES))
-        return failed("rcBuildContours");
-    PolyMeshPtr pmesh(rcAllocPolyMesh());
-    if (!pmesh || !rcBuildPolyMesh(&ctx, *cset, kNavMaxVertsPerRegion, *pmesh)) return failed("rcBuildPolyMesh");
-    DetailPtr dmesh(rcAllocPolyMeshDetail());
-    if (!dmesh || !rcBuildPolyMeshDetail(&ctx, *pmesh, *chf, detailSampleDist, p.detailMaxError, *dmesh))
-        return failed("rcBuildPolyMeshDetail");
-
-    // 5. One region per polygon with at least 3 vertices
-    const int nvp = pmesh->nvp;
+    // Terrain (splitByPlaneError): Recast's polygons know nothing of the
+    // height inside a region, so on rolling ground one region's plane can
+    // sit metres off the surface, and the player walks on that plane. Cut
+    // the regions along a square grid sized so the worst region's plane
+    // would fit within max(maxPlaneError, maxStepHeight), not below kNavMinTile.
+    std::vector<unsigned short> baseReg;
+    if (p.splitByPlaneError)
+        for (int i = 0; i < chf->spanCount; i++) baseReg.push_back(chf->spans[i].reg);
+    const float extent = std::max(bmax[0] - bmin[0], bmax[2] - bmin[2]);
+    float tile = 0;
+    ContourSetPtr cset;
+    PolyMeshPtr pmesh;
+    DetailPtr dmesh;
+    std::vector<int> polyToRegion;
+    int nvp = 0;
     auto poly = [&](int i) { return pmesh->polys + size_t(i) * 2 * size_t(nvp); };
     auto vertCount = [&](int i) {
         int nv = 0;
@@ -375,60 +412,90 @@ NavMesh buildNavRegions(const std::vector<NavInputObject>& objects, const NavBui
     auto worldZ = [&](unsigned short vi) {
         return float(double(pmesh->bmin[2]) + double(pmesh->verts[vi * 3 + 2]) * pmesh->cs);
     };
-    std::vector<int> polyToRegion(size_t(pmesh->npolys), -1);
-    for (int i = 0; i < pmesh->npolys; i++) {
-        int nv = vertCount(i);
-        if (nv < 3) continue;
-        NavRegion region;
-        std::vector<Vec3> pts;
+    for (;;) {
+        if (tile > 0) tileRegions(*chf, baseReg, tile);
+        nav.regions.clear();
+        cset.reset(rcAllocContourSet());
+        if (!cset || !rcBuildContours(&ctx, *chf, p.maxSimplifyError, maxEdgeLen, *cset, RC_CONTOUR_TESS_WALL_EDGES))
+            return failed("rcBuildContours");
+        pmesh.reset(rcAllocPolyMesh());
+        if (!pmesh || !rcBuildPolyMesh(&ctx, *cset, kNavMaxVertsPerRegion, *pmesh)) return failed("rcBuildPolyMesh");
+        dmesh.reset(rcAllocPolyMeshDetail());
+        if (!dmesh || !rcBuildPolyMeshDetail(&ctx, *pmesh, *chf, detailSampleDist, p.detailMaxError, *dmesh))
+            return failed("rcBuildPolyMeshDetail");
 
-        std::vector<bool> isBoundary(static_cast<size_t>(nv));
-        for (int j = 0; j < nv; j++) {
-            unsigned short nb = poly(i)[nvp + j];
-            isBoundary[size_t(j)] = nb == RC_MESH_NULL_IDX || (nb & 0x8000) != 0;
-        }
-        for (int j = 0; j < nv; j++) {
-            unsigned short vi = poly(i)[j];
-            float wx = worldX(vi), wz = worldZ(vi);
-            float wy;
+        // 5. One region per polygon with at least 3 vertices
+        nvp = pmesh->nvp;
+        polyToRegion.assign(size_t(pmesh->npolys), -1);
+        for (int i = 0; i < pmesh->npolys; i++) {
+            int nv = vertCount(i);
+            if (nv < 3) continue;
+            NavRegion region;
+            std::vector<Vec3> pts;
+
+            std::vector<bool> isBoundary(static_cast<size_t>(nv));
+            for (int j = 0; j < nv; j++) {
+                unsigned short nb = poly(i)[nvp + j];
+                isBoundary[size_t(j)] = nb == RC_MESH_NULL_IDX || (nb & 0x8000) != 0;
+            }
+            for (int j = 0; j < nv; j++) {
+                unsigned short vi = poly(i)[j];
+                float wx = worldX(vi), wz = worldZ(vi);
+                float wy;
+                if (i < dmesh->nmeshes) {
+                    unsigned int vbase = dmesh->meshes[size_t(i) * 4 + 0];
+                    wy = dmesh->verts[(vbase + unsigned(j)) * 3 + 1];
+                } else {
+                    wy = float(double(pmesh->bmin[1]) + double(pmesh->verts[vi * 3 + 1]) * pmesh->ch);
+                }
+                region.verts.push_back({wx, wz});
+                pts.push_back({wx, wy, wz});
+            }
+
+            // Counter-clockwise winding
+            float signedArea = 0;
+            for (size_t j = 0; j < region.verts.size(); j++) {
+                Vec2 a = region.verts[j], b = region.verts[(j + 1) % region.verts.size()];
+                signedArea = float(signedArea + (double(a.x) * b.y - double(b.x) * a.y));
+            }
+            if (signedArea < 0) {
+                std::reverse(region.verts.begin(), region.verts.end());
+                std::reverse(pts.begin(), pts.end());
+                std::vector<bool> reversed(static_cast<size_t>(nv));
+                for (int j = 0; j < nv; j++) reversed[size_t((nv - 2 - j + nv) % nv)] = isBoundary[size_t(j)];
+                isBoundary = reversed;
+            }
+            for (int j = 0; j < nv; j++)
+                if (isBoundary[size_t(j)]) region.boundaryEdgeMask |= uint8_t(1 << j);
+
+            // Interior detail samples join the plane fit.
             if (i < dmesh->nmeshes) {
                 unsigned int vbase = dmesh->meshes[size_t(i) * 4 + 0];
-                wy = dmesh->verts[(vbase + unsigned(j)) * 3 + 1];
-            } else {
-                wy = float(double(pmesh->bmin[1]) + double(pmesh->verts[vi * 3 + 1]) * pmesh->ch);
+                unsigned int vcount = dmesh->meshes[size_t(i) * 4 + 1];
+                for (unsigned int dv = unsigned(nv); dv < vcount; dv++) {
+                    const float* v = &dmesh->verts[(vbase + dv) * 3];
+                    pts.push_back({v[0], v[1], v[2]});
+                }
             }
-            region.verts.push_back({wx, wz});
-            pts.push_back({wx, wy, wz});
+            fitPlane(region, pts);
+            polyToRegion[size_t(i)] = int(nav.regions.size());
+            nav.regions.push_back(std::move(region));
         }
-
-        // Counter-clockwise winding
-        float signedArea = 0;
-        for (size_t j = 0; j < region.verts.size(); j++) {
-            Vec2 a = region.verts[j], b = region.verts[(j + 1) % region.verts.size()];
-            signedArea = float(signedArea + (double(a.x) * b.y - double(b.x) * a.y));
+        if (!p.splitByPlaneError || tile > 0) break;
+        // One more pass at most (each costs a full contour and detail build):
+        // a plane's misfit on a curved surface grows with the square of the
+        // region's width, so each region that is off needs a grid of
+        // width * sqrt(limit / misfit); take the smallest.
+        const float limit = std::max(p.maxPlaneError, p.maxStepHeight);
+        float want = extent;
+        for (const NavRegion& r : nav.regions) {
+            if (r.maxPlaneDeviation <= limit || r.verts.empty()) continue;
+            float x0 = r.verts[0].x, x1 = x0, z0 = r.verts[0].y, z1 = z0;
+            for (const Vec2& v : r.verts) x0 = std::min(x0, v.x), x1 = std::max(x1, v.x), z0 = std::min(z0, v.y), z1 = std::max(z1, v.y);
+            want = std::min(want, std::max(x1 - x0, z1 - z0) * std::sqrt(limit / r.maxPlaneDeviation));
         }
-        if (signedArea < 0) {
-            std::reverse(region.verts.begin(), region.verts.end());
-            std::reverse(pts.begin(), pts.end());
-            std::vector<bool> reversed(static_cast<size_t>(nv));
-            for (int j = 0; j < nv; j++) reversed[size_t((nv - 2 - j + nv) % nv)] = isBoundary[size_t(j)];
-            isBoundary = reversed;
-        }
-        for (int j = 0; j < nv; j++)
-            if (isBoundary[size_t(j)]) region.boundaryEdgeMask |= uint8_t(1 << j);
-
-        // Interior detail samples join the plane fit.
-        if (i < dmesh->nmeshes) {
-            unsigned int vbase = dmesh->meshes[size_t(i) * 4 + 0];
-            unsigned int vcount = dmesh->meshes[size_t(i) * 4 + 1];
-            for (unsigned int dv = unsigned(nv); dv < vcount; dv++) {
-                const float* v = &dmesh->verts[(vbase + dv) * 3];
-                pts.push_back({v[0], v[1], v[2]});
-            }
-        }
-        fitPlane(region, pts);
-        polyToRegion[size_t(i)] = int(nav.regions.size());
-        nav.regions.push_back(std::move(region));
+        if (want >= extent) break;
+        tile = std::max(want, kNavMinTile);
     }
 
     // 6. Portals from the poly mesh neighbour links, grouped by region

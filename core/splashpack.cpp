@@ -27,6 +27,7 @@
 #include "shadow.hh"
 #include "skin.hh"
 #include "texture.hh"
+#include "terrain.hh"
 #include "vrampacker.hh"
 #include "worldstream.hh"
 
@@ -1923,6 +1924,7 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     for (std::string& w : prefabNameWarnings(scene)) res.warnings.push_back(std::move(w));
 
     std::map<std::string, std::unique_ptr<Mesh>> meshes;
+    std::deque<Mesh> terrainMeshes;  // built from terrain grids, one per terrain object
     std::map<std::string, Image> images;
     std::deque<PsxTexture> textureStore;
 
@@ -1974,6 +1976,10 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         // all (Unity's FindObjectsByType skips it), so its components are not
         // checked either.
         if (!fo.activeInHierarchy) continue;
+        if (fo.object->terrain && !fo.object->mesh)
+            res.errors.push_back(fo.object->name + ": a terrain needs a mesh component (its materials are the terrain layers)");
+        if (fo.object->terrain && fo.object->skin)
+            res.errors.push_back(fo.object->name + ": a terrain cannot have a skin");
         if (fo.object->skin && !fo.object->mesh)
             res.errors.push_back(fo.object->name + ": a skin component needs a mesh component");
         if (!fo.object->mesh) {
@@ -1993,7 +1999,23 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         }
         ExpObject e{&fo, fo.object, &*fo.object->mesh, nullptr, {}, {}, {}, {}, {}, {}};
         try {
-            e.mesh = meshFor(e.mc->mesh);
+            if (fo.object->terrain) {
+                // A terrain's mesh comes from its grid (the editor's copy, or
+                // the data file when the scene was loaded without it), one
+                // submesh per material of its mesh component (the layers).
+                TerrainComponent t = *fo.object->terrain;
+                if (!terrainLoaded(t)) {
+                    if (t.data.empty()) throw std::runtime_error(fo.object->name + ": terrain has no data file");
+                    loadTerrainData(t, root / t.data);
+                }
+                if (e.mc->materials.size() > size_t(kTerrainMaxLayers))
+                    res.warnings.push_back(fo.object->name + ": a terrain paints with at most " +
+                                           std::to_string(kTerrainMaxLayers) + " layers; the materials past them are not used");
+                terrainMeshes.push_back(buildTerrainMesh(t, int(e.mc->materials.size())));
+                e.mesh = &terrainMeshes.back();
+            } else {
+                e.mesh = meshFor(e.mc->mesh);
+            }
         } catch (const std::exception& ex) {
             res.errors.push_back(ex.what());
             continue;
@@ -2504,6 +2526,8 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
                          {},
                          e.mesh->bounds()};
         for (const auto& sm : e.mesh->submeshes) n.triangles.insert(n.triangles.end(), sm.begin(), sm.end());
+        // Walkable terrain rolls inside one Recast region: split them to fit.
+        if (n.walkable && e.obj->terrain) np.splitByPlaneError = true;
         navIn.push_back(std::move(n));
     }
     // Walk-off zones: active objects only, like trigger boxes.

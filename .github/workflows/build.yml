@@ -310,6 +310,9 @@ jobs:
       - name: Nav walk-off zones in the editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/walkoffcheck.py build/splashedit
+      - name: Terrain sculpting and painting in the editor
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/terraincheck.py build/splashedit
       - name: Agents in the editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/agenteditcheck.py build/splashedit

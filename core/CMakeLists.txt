@@ -80,6 +80,7 @@ add_library(splashcore STATIC
     disc.cpp
     font.cpp
     scene.cpp
+    terrain.cpp
     skin.cpp
     texture.cpp
     vrampacker.cpp

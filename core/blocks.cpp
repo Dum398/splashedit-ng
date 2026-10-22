@@ -76,6 +76,16 @@ const std::vector<BlockSpec> kCatalogue = {
      "Switches the chosen light on; only point lights lit on the console (runtime lights) can be switched, and the list offers those."},
     {"light_off", K::Statement, "turn light %f off", 0, 0, F::Light, "Objects",
      "Switches the chosen light off; only point lights lit on the console (runtime lights) can be switched, and the list offers those."},
+    {"path_start", K::Statement, "start path %f", 0, 0, F::Object, "Objects",
+     "Starts the chosen path's followers (or the path a chosen follower rides); it does nothing while they run."},
+    {"path_stop", K::Statement, "stop path %f", 0, 0, F::Object, "Objects",
+     "Stops the chosen path's followers where they are; starting again sends animated followers back to their start."},
+    {"path_set_progress", K::Statement, "set progress of path %f to %1 percent", 1, 0, F::Object, "Objects",
+     "Puts the agents riding the chosen path (or the chosen agent) that far along it, in percent; followers moved by animation cannot jump and carry on."},
+    {"camera_ride", K::Statement, "camera rides path %f", 0, 0, F::Object, "Objects",
+     "Takes the camera off the player and moves it along the chosen path, looking the way it goes."},
+    {"camera_stop_ride", K::Statement, "camera stops riding", 0, 0, F::None, "Objects",
+     "Gives the camera back to the player."},
     {"remember", K::Statement, "remember %1 as %f", 1, 0, F::Key, "Variables",
      "Keeps a whole number under the name, across scene loads until the console is reset; it is not written to the memory card, and the game keeps at most 16 names."},
     {"play_sound", K::Statement, "play sound %f", 0, 0, F::Sound, "Sound and scenes",
@@ -129,6 +139,10 @@ const std::vector<BlockSpec> kCatalogue = {
      "How many frames the game has counted so far."},
     {"my_name", K::Reporter, "my name", 0, 0, F::None, "Objects",
      "The name of the object this script is on."},
+    {"path_progress", K::Reporter, "progress of path %f", 0, 0, F::Object, "Objects",
+     "How far along its path the chosen path's riders (or the chosen follower) are, in percent: 0 at the start, 100 at the end."},
+    {"path_running", K::Boolean, "path %f running?", 0, 0, F::Object, "Objects",
+     "True while the chosen path's followers (or the chosen follower) are riding."},
     {"position_x", K::Reporter, "x position of %f", 0, 0, F::Object, "Objects",
      "The object's x position, in game units."},
     {"position_y", K::Reporter, "y position of %f", 0, 0, F::Object, "Objects",
@@ -492,6 +506,9 @@ struct Gen {
         }
         if (op == "position_x" || op == "position_y" || op == "position_z")
             return {"Entity.GetPosition(" + object(b, at).s + ")." + op.substr(9), Atom};
+        // nil (no such path) reads 0, so = < > keep working.
+        if (op == "path_progress") return {"(Path.GetProgress(" + object(b, at).s + ") or 0)", Atom};
+        if (op == "path_running") return {"Path.IsRunning(" + object(b, at).s + ")", Atom};
         error(at, "unknown block");
         return nil();
     }
@@ -575,6 +592,14 @@ struct Gen {
                 line(out, depth, "Entity.SetActive(" + object(b, at).s + (op == "show" ? ", true)" : ", false)"));
             } else if (op == "light_on" || op == "light_off") {
                 line(out, depth, "Light.SetEnabled(" + light(b, at) + (op == "light_on" ? ", true)" : ", false)"));
+            } else if (op == "path_start" || op == "path_stop" || op == "camera_ride") {
+                const char* fn = op == "path_start" ? "Path.Start(" : op == "path_stop" ? "Path.Stop(" : "Path.RideCamera(";
+                line(out, depth, fn + object(b, at).s + ")");
+            } else if (op == "path_set_progress") {
+                const std::string o = object(b, at).s;
+                line(out, depth, "Path.SetProgress(" + o + ", " + input(b, 0, at).s + ")");
+            } else if (op == "camera_stop_ride") {
+                line(out, depth, "Path.StopCamera()");
             } else if (op == "remember") {
                 // Persist holds a Lua number, a whole one on the PS1: anything
                 // else is kept as 0. Refuse the inputs that are never whole.

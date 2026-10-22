@@ -24,6 +24,7 @@
 #include "luacompile.hh"
 #include "luascan.hh"
 #include "navregion.hh"
+#include "path.hh"
 #include "shadow.hh"
 #include "skin.hh"
 #include "texture.hh"
@@ -1228,6 +1229,9 @@ void writeSequences(BinWriter& w, size_t tableOffsetPos, const std::vector<Seque
             if (!err.empty()) res.errors.push_back(where + ": " + err);
         }
         for (const CutsceneTrack& t : c.tracks) {
+            // Editor-only types (Follow Path) are baked before this; their numbers are not psxsplash's.
+            if (int(t.type) > int(TrackType::LightEnabled))
+                res.errors.push_back(where + ": a track of an editor-only type reached the pack");
             if (t.keyframes.size() > size_t(kMaxKeyframes))
                 res.errors.push_back(where + ": a track has more than " + std::to_string(kMaxKeyframes) + " keyframes");
             int ty = int(t.type);
@@ -1909,8 +1913,29 @@ std::vector<uint8_t> memCardTable(const MemCardSettings& mc, ImageFor& imageFor,
 
 }  // namespace
 
+// Paths (core/path.hh): Lua files the export makes, by their virtual paths.
+struct GeneratedLua {
+    std::map<std::string, std::string> files;
+    std::string library, host, hostUser;
+};
+
+static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& root, const fs::path& out,
+                                          const ExportOptions& options, const GeneratedLua* gen);
+
 ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs::path& out,
                               const ExportOptions& options) {
+    if (!sceneUsesPaths(scene)) return exportSplashpackBaked(scene, root, out, options, nullptr);
+    PathBake pb = bakePaths(scene, [&](const std::string& p) { return readFile(root / p); });
+    GeneratedLua gen{pb.files, pb.libraryPath, pb.hostPath, pb.hostUserScript};
+    ExportResult res;
+    if (pb.errors.empty()) res = exportSplashpackBaked(pb.scene, root, out, options, &gen);
+    res.errors.insert(res.errors.begin(), pb.errors.begin(), pb.errors.end());
+    res.warnings.insert(res.warnings.begin(), pb.warnings.begin(), pb.warnings.end());
+    return res;
+}
+
+static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& root, const fs::path& out,
+                                          const ExportOptions& options, const GeneratedLua* gen) {
     ExportResult res;
     const float gte = scene.settings.gteScaling;
     std::vector<FlatObject> flat = flatten(scene);
@@ -2350,11 +2375,25 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
         if (e.obj->script) addLua(e.obj->script->lua);
     addLua(scene.settings.script);
     for (const FlatObject* t : triggers) addLua(t->object->trigger->lua);
+    // The paths' library: loaded at boot like every Lua file, on no object.
+    if (gen && !gen->library.empty()) addLua(gen->library);
     std::vector<std::string> luaData, luaSources;
     for (const std::string& p : luaFiles) {
         try {
-            std::string src = readFile(root / p);
-            if (fs::path(p).extension() == ".blocks") src = blocksFileToLua(src, p);
+            std::string src;
+            auto g = gen ? gen->files.find(p) : std::map<std::string, std::string>::const_iterator{};
+            if (gen && g != gen->files.end()) {
+                // The host's own script, then the paths' tick (core/path.cpp).
+                if (p == gen->host && !gen->hostUser.empty()) {
+                    std::string user = readFile(root / gen->hostUser);
+                    if (fs::path(gen->hostUser).extension() == ".blocks") user = blocksFileToLua(user, gen->hostUser);
+                    src = "do " + user + "\nend\n";
+                }
+                src += g->second;
+            } else {
+                src = readFile(root / p);
+                if (fs::path(p).extension() == ".blocks") src = blocksFileToLua(src, p);
+            }
             // The bundled engines have no Lua compiler: text loaded at run time fails there.
             std::string runtime = runtimeLuaWarning(p, runtimeLuaUses(src));
             if (!runtime.empty()) res.warnings.push_back(std::move(runtime));

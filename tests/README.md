@@ -285,6 +285,17 @@ base. It writes `__done__` containing `OK` when it has finished.
     pcsx-redux -testmode -stdout -safe -bios openbios.bin -loadexe luac_psx.ps-exe -run \
         -pcdrv -pcdrvbase <dir>
 
+`luabootcheck.py` runs host-compiled Lua on a real NOPARSER engine, which is what every bundled
+engine is: it builds a copy of the courtyard as Play does (Lua stored compiled), whose script works
+out a token with integer, division, modulo, power, FixedPoint, string, closure, table iteration and
+loop code and prints it from `onCreate`, boots the engine in pcsx-redux, and checks that exact line
+is in the log and that the engine printed no `parser not loaded` and no Lua error. CI runs it on
+Linux on the packaged engine and pcsx-redux, with the OpenBIOS that pcsx-redux build carries.
+`tools/psxluapin.sh <psxsplash> <CMakeLists.txt>`, in CI's engine job, checks the psxlua pin in CMakeLists.txt
+is the one psxsplash's nugget records.
+
+    python3 luabootcheck.py <splashpack-cli> <psxsplash.ps-exe> <pcsx-redux> <bios> [frame]
+
 ## Audio
 
 `audiocheck.py` encodes the WAVs in `audio/` at their own rate and compares the ADPCM with

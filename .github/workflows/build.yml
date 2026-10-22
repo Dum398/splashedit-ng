@@ -23,6 +23,18 @@ jobs:
         with:
           repository: psxsplash/psxsplash
           submodules: recursive
+      # The editor compiles Lua on the host and every engine here is NOPARSER, so the psxlua
+      # CMakeLists.txt pins must be the one this psxsplash's nugget records, or the shipped
+      # engines would misread the editor's bytecode while tests/luacheck.py stays green.
+      - uses: actions/checkout@v4
+        with:
+          path: editor
+          sparse-checkout: |
+            CMakeLists.txt
+            tools/psxluapin.sh
+          sparse-checkout-cone-mode: false
+      - name: psxlua pin matches the engine's
+        run: bash editor/tools/psxluapin.sh . editor/CMakeLists.txt
       - name: Toolchain
         run: |
           sudo apt-get update
@@ -472,6 +484,14 @@ jobs:
           else
             tar czf "splashedit-$(echo ${{ runner.os }} | tr A-Z a-z).tar.gz" splashedit
           fi
+      # The packaged NOPARSER engine runs Lua this editor compiled: boots it in the packaged
+      # pcsx-redux (with the OpenBIOS that build carries) and checks what the script prints.
+      - name: Host-compiled Lua on the packaged engine
+        if: runner.os == 'Linux'
+        run: |
+          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/luabootcheck.py \
+            build/cli/splashpack-cli splashedit/engine/psxsplash.ps-exe splashedit/redux/pcsx-redux \
+            splashedit/redux/pcsx-redux.AppDir/usr/share/pcsx-redux/resources/openbios.bin
       - uses: actions/upload-artifact@v4
         with:
           name: splashedit-${{ runner.os }}

@@ -43,6 +43,7 @@
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/sprites.hh"
+#include "editor/terrain_edit.hh"
 #include "editor/tilemap.hh"
 #include "editor/model_import.hh"
 #include "editor/pick.hh"
@@ -14480,6 +14481,284 @@ void testGpuRaster() {
     }
 }
 
+// A terrain object for the tests: `res` cells over size x size m, heights from `h(x, z)` (local metres).
+static splash::Object terrainObject(const char* name, int res, float size, float (*h)(float, float), int layers = 2) {
+    splash::Object o;
+    o.name = name;
+    splash::TerrainComponent& t = o.terrain.emplace();
+    t.data = std::string("terrain/") + name + ".terrain";
+    t.sizeX = t.sizeZ = size;
+    splash::initTerrain(t, res);
+    for (int z = 0; z <= res; z++)
+        for (int x = 0; x <= res; x++)
+            t.heights[size_t(z) * size_t(res + 1) + size_t(x)] = h(-size / 2 + size * float(x) / float(res), -size / 2 + size * float(z) / float(res));
+    o.mesh.emplace().materials.resize(size_t(layers));
+    o.collider.emplace().kind = splash::ColliderKind::Static;
+    return o;
+}
+
+void testTerrain() {
+    namespace fs = std::filesystem;
+    auto flat = [](float, float) { return 0.f; };
+    auto slope = [](float x, float) { return 0.5f * x; };
+    auto hills = [](float x, float z) { return 2.5f * std::sin(x * 0.25f) * std::cos(z * 0.2f) + 1.5f * std::sin(x * 0.1f + z * 0.15f); };
+    auto near = [](float a, float b, float e = 1e-4f) { return std::fabs(a - b) <= e; };
+
+    // Mesh from the grid: (N+1)^2 vertices, 2 N^2 triangles, a submesh per layer kept even when empty.
+    {
+        splash::Object o = terrainObject("T", 4, 8, flat);
+        splash::Mesh m = splash::buildTerrainMesh(*o.terrain, 2);
+        CHECK(m.positions.size() == 25 && m.normals.size() == 25 && m.uv.size() == 25);
+        CHECK(m.submeshes.size() == 2 && m.submeshes[0].size() == 4 * 4 * 6 && m.submeshes[1].empty());
+        CHECK(near(m.positions[0].x, -4) && near(m.positions[24].x, 4) && near(m.positions[24].z, 4));
+        CHECK(near(m.normals[12].y, 1));
+        CHECK(near(m.uv[4].x, 1) && near(m.uv[2].x, 0.5f));  // tileCells 4: one repeat over 4 cells
+        o.terrain->cellLayers[5] = 1;
+        m = splash::buildTerrainMesh(*o.terrain, 2);
+        CHECK(m.submeshes[0].size() == 15 * 6 && m.submeshes[1].size() == 6);
+        // A layer past the materials falls to the last one.
+        o.terrain->cellLayers[6] = 3;
+        CHECK(splash::buildTerrainMesh(*o.terrain, 2).submeshes[1].size() == 12);
+        // Every triangle faces up (clockwise from above, Unity's front face).
+        for (const auto& sm : m.submeshes)
+            for (size_t i = 0; i + 2 < sm.size(); i += 3) {
+                const splash::Vec3 a = m.positions[size_t(sm[i])], b = m.positions[size_t(sm[i + 1])], c = m.positions[size_t(sm[i + 2])];
+                CHECK(splash::cross(b - a, c - a).y > 0);
+            }
+    }
+    // Normals on a 0.5 slope along X: (-0.5, 1, 0) normalised.
+    {
+        splash::Object o = terrainObject("S", 4, 8, slope);
+        splash::Mesh m = splash::buildTerrainMesh(*o.terrain, 1);
+        const splash::Vec3 want = splash::normalized({-0.5f, 1, 0});
+        CHECK(near(m.normals[12].x, want.x) && near(m.normals[12].y, want.y) && near(m.normals[12].z, 0));
+        CHECK(near(m.normals[0].x, want.x));  // one-sided at the edge, same on a plane
+        CHECK(near(splash::terrainHeightAt(*o.terrain, 1.5f, 0.3f), 0.75f));
+    }
+    // Each cell splits along its flatter diagonal.
+    {
+        splash::Object o = terrainObject("D", 1, 1, flat, 1);
+        o.terrain->heights = {0, 0, 0, 1};  // a b c d: a-d differs by 1, b-c by 0 -> split b-c
+        splash::Mesh m = splash::buildTerrainMesh(*o.terrain, 1);
+        CHECK((m.submeshes[0] == std::vector<int>{0, 2, 1, 1, 2, 3}));
+        o.terrain->heights = {1, 0, 0, 1};  // b-c differs by 0, a-d by 0, tie at (0,0): split a-d
+        CHECK((splash::buildTerrainMesh(*o.terrain, 1).submeshes[0] == std::vector<int>{0, 2, 3, 0, 3, 1}));
+        o.terrain->heights = {0, 1, 0, 0};  // b-c differs by 1: split a-d
+        CHECK((splash::buildTerrainMesh(*o.terrain, 1).submeshes[0] == std::vector<int>{0, 2, 3, 0, 3, 1}));
+    }
+    // The data file round-trips; other files are refused.
+    {
+        const fs::path dir = g_outDir / "terrain-file";
+        fs::remove_all(dir);
+        splash::Object o = terrainObject("F", 3, 6, hills);
+        o.terrain->cellLayers[4] = 2;
+        splash::saveTerrainData(*o.terrain, dir / "a" / "f.terrain");
+        CHECK(fs::file_size(dir / "a" / "f.terrain") == 12 + 16 * 4 + 9);
+        splash::TerrainComponent back;
+        splash::loadTerrainData(back, dir / "a" / "f.terrain");
+        CHECK(back.resolution == 3 && back.heights == o.terrain->heights && back.cellLayers == o.terrain->cellLayers);
+        { std::ofstream(dir / "bad.terrain") << "not a terrain"; }
+        bool threw = false;
+        try { splash::loadTerrainData(back, dir / "bad.terrain"); } catch (const std::exception&) { threw = true; }
+        CHECK(threw && back.resolution == 3);
+        // The scene keeps the settings, not the grid; loadTerrains fills it from the file.
+        splash::Scene sc;
+        sc.objects.push_back(o);
+        sc.objects[0].terrain->data = "a/f.terrain";
+        sc.objects[0].terrain->tileCells = 3;
+        splash::saveScene(sc, dir / "t.scene");
+        splash::Scene re = splash::loadScene(dir / "t.scene");
+        CHECK(re.objects[0].terrain && re.objects[0].terrain->tileCells == 3 && re.objects[0].terrain->sizeX == 6 &&
+              !splash::terrainLoaded(*re.objects[0].terrain));
+        CHECK(splash::loadTerrains(re, dir).empty() && re.objects[0].terrain->heights == o.terrain->heights);
+        re.objects[0].terrain->data = "missing.terrain";
+        re.objects[0].terrain->resolution = 0;
+        CHECK(splash::loadTerrains(re, dir).size() == 1);
+    }
+    // Resampling: a plane stays the plane; layers go to the nearest cell centre.
+    {
+        splash::Object o = terrainObject("R", 4, 8, slope);
+        for (int z = 0; z < 4; z++)
+            for (int x = 2; x < 4; x++) o.terrain->cellLayers[size_t(z * 4 + x)] = 1;
+        splash::resampleTerrain(*o.terrain, 8);
+        CHECK(o.terrain->resolution == 8 && o.terrain->heights.size() == 81 && o.terrain->cellLayers.size() == 64);
+        bool plane = true;
+        for (int x = 0; x <= 8; x++) plane = plane && near(o.terrain->heights[size_t(5 * 9 + x)], 0.5f * (-4 + float(x)));
+        CHECK(plane);
+        CHECK(o.terrain->cellLayers[0] == 0 && o.terrain->cellLayers[3] == 0 && o.terrain->cellLayers[4] == 1 && o.terrain->cellLayers[63] == 1);
+        splash::resampleTerrain(*o.terrain, 1000);
+        CHECK(o.terrain->resolution == splash::kTerrainMaxResolution);
+    }
+    // Brushes, on a 10 x 10 m grid of 1 m cells.
+    {
+        using splash::TerrainTool;
+        splash::Object o = terrainObject("B", 10, 10, flat);
+        splash::TerrainComponent& t = *o.terrain;
+        auto at = [&](int x, int z) { return t.heights[size_t(z) * 11 + size_t(x)]; };
+        splash::TerrainBrush b;
+        b.radius = 2;
+        b.falloff = 0;
+        b.strength = 1;
+        b.tool = TerrainTool::Raise;
+        CHECK(splash::applyTerrainBrush(t, 0, 0, b, 0.5f));
+        CHECK(near(at(5, 5), 0.5f) && near(at(6, 5), 0.5f) && near(at(6, 6), 0.5f) && near(at(7, 5), 0) && near(at(0, 0), 0));
+        b.tool = TerrainTool::Lower;
+        splash::applyTerrainBrush(t, 0, 0, b, 0.25f);
+        CHECK(near(at(5, 5), 0.25f) && near(at(7, 5), 0));
+        // Falloff: full strength inside radius*(1-falloff), less towards the edge.
+        b.falloff = 1;
+        CHECK(near(splash::terrainBrushWeight(b, 0), 1) && splash::terrainBrushWeight(b, 1) < 1 && splash::terrainBrushWeight(b, 1) > 0 &&
+              splash::terrainBrushWeight(b, 2) == 0);
+        b.falloff = 0;
+        b.tool = TerrainTool::Flatten;
+        b.target = 0;
+        b.strength = 2;
+        splash::applyTerrainBrush(t, 0, 0, b, 0.5f);  // k = 1: all the way
+        CHECK(near(at(5, 5), 0) && near(at(6, 6), 0));
+        t.heights[5 * 11 + 5] = 5;
+        b.tool = TerrainTool::Smooth;
+        b.radius = 0.5f;  // the centre vertex only
+        splash::applyTerrainBrush(t, 0, 0, b, 0.5f);
+        CHECK(near(at(5, 5), 1));  // (5 + 4 * 0) / 5
+        b.tool = TerrainTool::Paint;
+        b.layer = 1;
+        b.radius = 1.6f;
+        CHECK(splash::applyTerrainBrush(t, 0, 0, b, 0.1f));
+        int painted = 0;
+        for (uint8_t l : t.cellLayers) painted += l;
+        CHECK(painted == 12);  // cell centres within 1.6 m of the middle: 4 at 0.71 m, 8 at 1.58 m
+        CHECK(!splash::applyTerrainBrush(t, 0, 0, b, 0.1f));  // nothing left to change
+    }
+    // Ray against the height field, and through an object's transform.
+    {
+        splash::Object o = terrainObject("H", 16, 16, hills);
+        std::optional<splash::Vec3> hit = splash::terrainRayHit(*o.terrain, {1.3f, 20, -2.1f}, {0, -1, 0});
+        CHECK(hit && near(hit->y, splash::terrainHeightAt(*o.terrain, 1.3f, -2.1f), 1e-3f));
+        CHECK(!splash::terrainRayHit(*o.terrain, {30, 20, 0}, {0, -1, 0}));
+        CHECK(!splash::terrainRayHit(*o.terrain, {0, 20, 0}, {0, 1, 0}));
+        hit = splash::terrainRayHit(*o.terrain, {-20, 10, 0.5f}, {1, -0.4f, 0});
+        CHECK(hit && near(hit->y, splash::terrainHeightAt(*o.terrain, hit->x, hit->z), 1e-3f));
+        editor::Document doc;
+        splash::Scene sc;
+        sc.objects.push_back(o);
+        sc.objects[0].transform.position = {100, 5, 0};
+        doc.reset(sc);
+        std::optional<splash::Vec3> w = editor::terrainHit(doc, {0}, {101.3f, 30, -2.1f}, {0, -1, 0});
+        CHECK(w && near(w->y, 5 + splash::terrainHeightAt(*o.terrain, 1.3f, -2.1f), 1e-3f));
+    }
+    // A stroke is one undo step; Flatten holds the height where it started.
+    {
+        editor::Document doc;
+        splash::Scene sc;
+        sc.objects.push_back(terrainObject("U", 10, 10, slope));
+        doc.reset(sc);
+        const std::vector<float> before = doc.scene().objects[0].terrain->heights;
+        editor::TerrainStroke st;
+        splash::TerrainBrush b;
+        b.tool = splash::TerrainTool::Flatten;
+        b.radius = 3;
+        b.falloff = 0;
+        b.strength = 10;
+        editor::beginTerrainStroke(st, doc, {0}, b, {2, 1, 0});  // ground at x=2 is 1 m
+        CHECK(near(st.brush.target, 1));
+        CHECK(editor::stepTerrainStroke(st, doc, {2, 1, 0}, 0.05f));
+        CHECK(editor::stepTerrainStroke(st, doc, {0, 0, 0}, 0.05f));  // moved: still flattens to 1
+        CHECK(editor::stepTerrainStroke(st, doc, {-1, -0.5f, 0}, 0.1f));
+        editor::endTerrainStroke(st, doc);
+        CHECK(doc.historySize() == 1 && st.steps == 3);
+        CHECK(near(doc.scene().objects[0].terrain->heights[5 * 11 + 5], 1, 0.01f));  // the centre was 0, now at the target
+        // A second stroke is a second step.
+        b.tool = splash::TerrainTool::Raise;
+        editor::beginTerrainStroke(st, doc, {0}, b, {0, 1, 0});
+        CHECK(editor::stepTerrainStroke(st, doc, {0, 1, 0}, 0.1f));
+        editor::endTerrainStroke(st, doc);
+        CHECK(doc.historySize() == 2);
+        CHECK(doc.undo() && doc.undo());
+        CHECK(doc.scene().objects[0].terrain->heights == before);
+        // Resolution: one step, undone exactly.
+        CHECK(editor::setTerrainResolution(doc, {0}, 20));
+        CHECK(doc.scene().objects[0].terrain->resolution == 20 && doc.historySize() == 1);
+        CHECK(!editor::setTerrainResolution(doc, {0}, 20));
+        CHECK(doc.undo() && doc.scene().objects[0].terrain->heights == before);
+        CHECK(editor::terrainInfoLine(2048, 4) == "2048 triangles, 4 regions when streamed");
+    }
+    // Add component: a flat grid, its layers in a mesh, a static collider.
+    {
+        splash::Object o;
+        o.name = "My Ground";
+        CHECK(editor::addComponent(o, editor::ComponentKind::Terrain));
+        CHECK(o.terrain && o.terrain->data == "terrain/My_Ground.terrain" && o.terrain->resolution == 32);
+        CHECK(o.mesh && o.mesh->materials.size() == 1 && o.collider && o.collider->kind == splash::ColliderKind::Static);
+        splash::Object m;
+        m.mesh.emplace().mesh = "meshes/a.mesh";
+        CHECK(!editor::cannotAdd(m, editor::ComponentKind::Terrain).empty());
+        CHECK(editor::removeComponent(o, editor::ComponentKind::Mesh) && !o.terrain);
+    }
+    // Duplicate and paste give the copy its own file, written at once; cut then paste keeps it.
+    {
+        const fs::path proj = g_outDir / "terrain-copies";
+        fs::remove_all(proj);
+        fs::create_directories(proj);
+        editor::Document doc;
+        splash::Scene sc;
+        sc.objects.push_back(terrainObject("G", 4, 8, hills));
+        doc.reset(sc, proj, "game");
+        CHECK(doc.save() == std::nullopt && fs::exists(proj / "terrain/G.terrain"));
+        // An in-memory edit not saved yet travels with the copy.
+        CHECK(doc.edit({0}, [](splash::Object& ob) { ob.terrain->heights[0] = 9; }));
+        std::optional<editor::ObjectPath> dup = doc.duplicateObject({0});
+        CHECK(dup && doc.object(*dup)->terrain->data == "terrain/G_2.terrain");
+        CHECK(fs::exists(proj / "terrain/G_2.terrain") && doc.object(*dup)->terrain->heights[0] == 9);
+        splash::TerrainComponent onDisk;
+        splash::loadTerrainData(onDisk, proj / "terrain/G_2.terrain");
+        CHECK(onDisk.heights == doc.object(*dup)->terrain->heights);
+        const size_t steps = doc.historySize();
+        CHECK(doc.undo() && doc.scene().objects.size() == 1 && fs::exists(proj / "terrain/G_2.terrain"));  // left unreferenced
+        CHECK(doc.historySize() == steps);
+        std::optional<editor::ObjectPath> pasted = doc.pasteObjects(doc.copyObject({0}), editor::ObjectPath{0});
+        CHECK(pasted && doc.object(*pasted)->terrain->data == "terrain/G_3.terrain");  // _2 is taken on disk
+        CHECK(doc.object(*pasted)->terrain->heights == doc.object({0})->terrain->heights);
+        const std::string cut = doc.cutObject(*pasted);
+        std::optional<editor::ObjectPath> back = doc.pasteObjects(cut, editor::ObjectPath{0});
+        CHECK(back && doc.object(*back)->terrain->data == "terrain/G_3.terrain");
+    }
+    // Export: an ordinary static mesh, walked on by the nav bake (regions whose
+    // planes follow the hills) and cut by world streaming.
+    {
+        const fs::path dir = g_outDir / "terrain-export";
+        fs::remove_all(dir);
+        splash::Scene sc;
+        sc.objects.push_back(terrainObject("Ground", 16, 40, hills));
+        splash::Object pl;
+        pl.name = "Player";
+        pl.player.emplace();
+        pl.transform.position = {0, splash::terrainHeightAt(*sc.objects[0].terrain, 0, 0), 0};
+        sc.objects.push_back(pl);
+        sc.settings.streamWorld = true;
+        sc.settings.gteScaling = 10;  // 40 m = 16384 units: several regions
+        splash::ExportOptions dry;
+        dry.dryRun = true;
+        splash::ExportResult r = splash::exportSplashpack(sc, dir, dir / "t.splashpack", dry);
+        CHECK(r.ok());
+        CHECK(r.stats.triangles == 2 * 16 * 16);
+        CHECK(r.stats.navRegions > 1 && r.stats.streamRegions > 1 && r.stats.streamedObjects >= 1);
+        // The regions' corners against the ground: unsplit, this terrain's 8
+        // regions sat 3.26 m off at worst, 0.93 m on average; cut, 64 regions
+        // at 1.12 m and 0.33 m.
+        float worst = 0, sum = 0;
+        int n = 0;
+        for (const auto& poly : r.stats.navOutlines)
+            for (const splash::Vec3& v : poly) {
+                const float d = std::fabs(v.y - splash::terrainHeightAt(*sc.objects[0].terrain, v.x, v.z));
+                worst = std::max(worst, d), sum += d, n++;
+            }
+        CHECK(worst < 2.0f && sum / float(std::max(n, 1)) < 0.5f);
+        // Without its mesh component the terrain has no layers: an error.
+        sc.objects[0].mesh.reset();
+        CHECK(!splash::exportSplashpack(sc, dir, dir / "t.splashpack", dry).ok());
+    }
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -14677,6 +14956,7 @@ int main(int argc, char** argv) {
     testGpuRaster();
     testShadows();
     testListScroll();
+    testTerrain();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

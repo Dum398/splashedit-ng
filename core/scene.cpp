@@ -253,6 +253,12 @@ json writeAgent(const AgentComponent& ag) {
     return j;
 }
 
+json writeTerrain(const TerrainComponent& t) {
+    json j = {{"type", "terrain"}, {"data", t.data}, {"sizeX", t.sizeX}, {"sizeZ", t.sizeZ}, {"tileCells", t.tileCells}};
+    putExtras(j, t.extra);
+    return j;
+}
+
 json writeAudio(const AudioComponent& a) {
     json j = {{"type", "audio"},
               {"clip", a.clip.empty() ? json(nullptr) : json(a.clip)},
@@ -438,6 +444,16 @@ Object readObject(const json& j) {
             }
             ag.extra = extrasOf(c, writeAgent(ag));
             o.agent = ag;
+        } else if (type == "terrain") {
+            TerrainComponent t;
+            t.data = c.value("data", t.data);
+            t.sizeX = c.value("sizeX", t.sizeX);
+            t.sizeZ = c.value("sizeZ", t.sizeZ);
+            t.tileCells = c.value("tileCells", t.tileCells);
+            if (!(t.sizeX > 0) || !(t.sizeZ > 0)) fail("object '" + o.name + "': terrain size must be above 0");
+            if (t.tileCells < 1 || t.tileCells > 256) fail("object '" + o.name + "': terrain tileCells must be 1..256");
+            t.extra = extrasOf(c, writeTerrain(t));
+            o.terrain = t;
         } else if (type == "skin") {
             SkinComponent sk;
             for (const json& cj : c.value("clips", json::array())) sk.clips.push_back(cj.get<std::string>());
@@ -486,6 +502,7 @@ json writeObject(const Object& o) {
     if (o.audio) comps.push_back(writeAudio(*o.audio));
     if (o.skin) comps.push_back(writeSkin(*o.skin));
     if (o.agent) comps.push_back(writeAgent(*o.agent));
+    if (o.terrain) comps.push_back(writeTerrain(*o.terrain));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();

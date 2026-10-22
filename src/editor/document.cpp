@@ -11,6 +11,7 @@
 
 #include "audio.hh"
 #include "editor/catalog.hh"
+#include "terrain.hh"
 #include "texture.hh"
 
 namespace fs = std::filesystem;
@@ -923,6 +924,9 @@ std::optional<std::string> Document::save() {
         } else {
             splash::saveScene(m_scene, scenePath());
         }
+        // Terrain grids live in their own files next to the scene's assets.
+        std::vector<std::string> errs = splash::saveTerrains(m_scene, m_project);
+        if (!errs.empty()) return errs.front();
     } catch (const std::exception& e) {
         return std::string(e.what());
     }
@@ -1011,7 +1015,12 @@ bool Document::missingMeshColors(const splash::MeshComponent& m) const {
 bool Document::hasWarning(const splash::Object& o) const {
     if (!o.prefab.empty() && !o.prefabResolved) return true;
     if (o.mesh) {
-        if (const MeshInfo* mi = mesh(o.mesh->mesh); !mi || mi->status != AssetStatus::Ok) return true;
+        // A terrain builds its mesh from its grid instead of a .mesh file.
+        if (o.terrain) {
+            if (!splash::terrainLoaded(*o.terrain)) return true;
+        } else if (const MeshInfo* mi = mesh(o.mesh->mesh); !mi || mi->status != AssetStatus::Ok) {
+            return true;
+        }
         for (const splash::Material& mat : o.mesh->materials)
             if (const TextureInfo* t = texture(mat.texture); t && t->status != AssetStatus::Ok) return true;
         if (couldBe4bpp(*o.mesh)) return true;
@@ -1097,6 +1106,8 @@ void Document::refill() {
 
 std::vector<std::string> Document::resolvePrefabs() {
     m_prefabErrors = splash::resolvePrefabs(m_scene, m_project);
+    // Terrain grids the scene (or prefab content) brought in without them.
+    m_terrainErrors = splash::loadTerrains(m_scene, m_project);
     // A selection inside content that changed shape moves to its instance.
     for (std::optional<ObjectPath> p : {m_selection, m_pinned}) {
         if (!p || object(*p)) continue;

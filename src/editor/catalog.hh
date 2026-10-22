@@ -10,7 +10,7 @@
 
 namespace editor {
 
-enum class ComponentKind { Mesh, Collider, Script, Light, Player, Navigation, Trigger, Interactable, Audio, Skin, Room, Portal, Walkoff, Agent };
+enum class ComponentKind { Mesh, Collider, Script, Light, Player, Navigation, Trigger, Interactable, Audio, Skin, Room, Portal, Walkoff, Agent, Terrain };
 
 struct ComponentInfo {
     ComponentKind kind;
@@ -44,6 +44,9 @@ const std::vector<ObjectPreset>& presets();
 // the way Unity names copies ("Point light (2)").
 splash::Object makeObject(const ObjectPreset& p, const std::vector<splash::Object>& siblings);
 std::string uniqueName(const std::string& base, const std::vector<splash::Object>& siblings);
+// The data file a new Terrain on an object named `objectName` gets:
+// terrain/<name>.terrain with anything but letters, digits, - and _ as _.
+std::string defaultTerrainData(const std::string& objectName);
 
 // Search score of `query` against a label and its keywords; 0 = no match.
 // Higher is better: whole label prefix, then a word prefix, then a substring,

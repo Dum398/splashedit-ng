@@ -214,6 +214,25 @@ struct AgentComponent {
     ExtraKeys extra;
 };
 
+// A height-field terrain. Its grid lives in a data file (the source of
+// truth on disk, core/terrain.hh); the editor holds it in `heights` and
+// `cellLayers` while the scene is open and writes it back on save. The
+// object's mesh component carries the layer textures (material i = layer i,
+// at most kTerrainMaxLayers) and how they export; core/terrain.hh builds the
+// mesh both the exporter and the scene view use.
+constexpr int kTerrainMaxLayers = 4;
+constexpr int kTerrainMaxResolution = 128;  // cells per side
+struct TerrainComponent {
+    std::string data;  // project-relative .terrain file
+    float sizeX = 32, sizeZ = 32;  // metres, centred on the object
+    int tileCells = 4;             // layer textures repeat every this many cells
+    // Not saved in the scene: read from and written to `data`.
+    int resolution = 0;               // cells per side, 0 = not loaded
+    std::vector<float> heights;       // (resolution+1)^2, row z then column x, metres
+    std::vector<uint8_t> cellLayers;  // resolution^2, layer per cell
+    ExtraKeys extra;
+};
+
 struct Transform {
     Vec3 position;
     Quat rotation;
@@ -239,6 +258,7 @@ struct Object {
     std::optional<AudioComponent> audio;
     std::optional<SkinComponent> skin;
     std::optional<AgentComponent> agent;
+    std::optional<TerrainComponent> terrain;
     std::vector<std::string> unknownComponents;  // components of an unknown type, as JSON text
     std::vector<Object> children;
     ExtraKeys extra;

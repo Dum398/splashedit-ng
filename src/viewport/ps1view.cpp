@@ -13,6 +13,7 @@
 #include "gl.h"
 #include "scene.hh"
 #include "splashpack.hh"
+#include "terrain.hh"
 #include "unitymath.hh"
 
 namespace viewport {
@@ -299,10 +300,26 @@ void Ps1View::rebuild() {
         // script turns them on; their lights still bake, so only meshes drop out.
         if (!fo.activeInHierarchy || !fo.object->active || !fo.object->mesh) continue;
         const splash::MeshComponent& mc = *fo.object->mesh;
-        if (mc.mesh.empty() || mc.materials.empty()) continue;
+        if ((mc.mesh.empty() && !fo.object->terrain) || mc.materials.empty()) continue;
         const splash::Mesh* mesh = nullptr;
+        splash::Mesh terrainMesh;
         auto mit = meshCache.find(meshCacheKey(mc.mesh));
-        if (mit != meshCache.end()) {
+        if (fo.object->terrain) {
+            // Built from the grid every rebuild (the exporter's builder), so a
+            // brush stroke shows as it is painted.
+            const splash::TerrainComponent* t = &*fo.object->terrain;
+            splash::TerrainComponent fromFile;
+            if (!splash::terrainLoaded(*t) && !t->data.empty()) {
+                fromFile = *t;
+                try {
+                    splash::loadTerrainData(fromFile, m_doc->resolve(t->data));
+                } catch (const std::exception&) {
+                }
+                t = &fromFile;
+            }
+            terrainMesh = splash::buildTerrainMesh(*t, int(mc.materials.size()));
+            mesh = &terrainMesh;
+        } else if (mit != meshCache.end()) {
             mesh = &mit->second;
         } else {
             try {

@@ -212,6 +212,9 @@ public:
     std::vector<std::string> resolvePrefabs();
     // The messages of the last resolvePrefabs().
     const std::vector<std::string>& prefabErrors() const { return m_prefabErrors; }
+    // Terrains whose data file the last resolvePrefabs() could not read
+    // (it also fills terrain grids in, splash::loadTerrains).
+    const std::vector<std::string>& terrainErrors() const { return m_terrainErrors; }
     // Writes the object at `path` with its children to prefabs/<name>.prefab
     // (a new file: "<name> (2).prefab" when that one exists) and turns it
     // into an instance of it, as one undo step. Returns the prefab's project
@@ -343,6 +346,7 @@ private:
     static constexpr size_t kNever = static_cast<size_t>(-1);
 
     std::vector<std::string> m_prefabErrors;
+    std::vector<std::string> m_terrainErrors;
     // Prefab mode: the document to go back to, the prefab file and its unknown keys.
     std::unique_ptr<Document> m_outer;
     std::string m_prefabFile;

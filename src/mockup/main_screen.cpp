@@ -32,6 +32,7 @@
 #include "editor/sprites.hh"
 #include "editor/tilemap.hh"
 #include "editor/texture_preview.hh"
+#include "terrain.hh"
 #include "texture.hh"
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
@@ -70,6 +71,7 @@ constexpr ImU32 room = rgb(0x40e0d0);
 constexpr ImU32 portal = rgb(0xffe14d);
 constexpr ImU32 walkoff = rgb(0xff6a00);
 constexpr ImU32 agent = rgb(0xff5fa0);
+constexpr ImU32 terrain = rgb(0x8fbf5a);
 constexpr ImU32 hearing = rgb(0x6ad8ff);
 constexpr ImU32 prefab = rgb(0x6ab0ff);  // a prefab instance, and .prefab files in the Project panel
 }  // namespace kind
@@ -1017,6 +1019,7 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Portal: return {icon::link, kind::portal};
         case K::Walkoff: return {icon::maximize, kind::walkoff};
         case K::Agent: return {icon::eye, kind::agent};
+        case K::Terrain: return {icon::layers, kind::terrain};
     }
     return {icon::box, color::textDim};
 }
@@ -1024,6 +1027,7 @@ static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     using K = editor::ComponentKind;
     if (o.light) return lookOf(K::Light);
     if (o.agent) return lookOf(K::Agent);
+    if (o.terrain) return lookOf(K::Terrain);
     if (o.mesh) return lookOf(K::Mesh);
     if (o.script && !o.collider) return {icon::script, kind::script};
     if (o.player) return lookOf(K::Player);
@@ -1229,6 +1233,19 @@ static splash::Vec3 spawnPoint(const viewport::Ps1View& view, const editor::Docu
 // The Add object picker. A new object goes right after the selection, as its
 // sibling, or at the end of the scene when nothing is selected. It lands on
 // the viewport's pivot, the point the camera orbits and frames on.
+// A Terrain just added to `o`: its data file made unique in the scene and on
+// disk, and written (flat) so the next new terrain does not take the name.
+static void placeNewTerrain(const editor::Document& doc, splash::Object& o) {
+    if (!o.terrain) return;
+    o.terrain->data = splash::uniqueTerrainData(doc.scene(), doc.projectRoot(), o.terrain->data);
+    if (doc.projectRoot().empty()) return;
+    try {
+        splash::saveTerrainData(*o.terrain, doc.resolve(o.terrain->data));
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "terrain: %s\n", e.what());
+    }
+}
+
 static void addObjectPicker(State& st, editor::Document& doc, const viewport::Ps1View& view, ImVec2 pos) {
     const char* id = "##addobject";
     if (st.openAddObject) {
@@ -1261,6 +1278,7 @@ static void addObjectPicker(State& st, editor::Document& doc, const viewport::Ps
     const std::vector<splash::Object>& siblings = parent ? parent->children : doc.scene().objects;
     splash::Object obj = editor::makeObject(ps[order[pick]], siblings);
     obj.transform.position = spawnPoint(view, doc, parentPath);
+    placeNewTerrain(doc, obj);
     if (!doc.expanded(parentPath)) doc.toggleExpanded(parentPath);
     doc.insertObject(at, std::move(obj));
 }
@@ -8522,7 +8540,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[static_cast<int>(editor::ComponentKind::Agent) + 1] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::Terrain) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
@@ -10309,7 +10327,9 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         int pick = picker(pid, ImVec2(add.Min.x, add.Max.y + space::xs), add.GetWidth(), "Add component", &st.pickQuery, items);
         if (pick >= 0) {
             editor::ComponentKind k = kinds[order[pick]];
-            doc.edit(path, [k](splash::Object& ob) { editor::addComponent(ob, k); });
+            doc.edit(path, [k, &doc](splash::Object& ob) {
+                if (editor::addComponent(ob, k) && k == editor::ComponentKind::Terrain) placeNewTerrain(doc, ob);
+            });
         }
     }
     if (toRemove) {

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cctype>
 
+#include "terrain.hh"
+
 namespace editor {
 
 const std::vector<ComponentInfo>& components() {
@@ -21,6 +23,7 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::Portal, "Portal", "door doorway opening room link culling", "An opening between two Rooms the camera can see through."},
         {ComponentKind::Walkoff, "Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box."},
         {ComponentKind::Agent, "Agent (NPC)", "npc enemy guard ai patrol waypoint vision hearing chase", "A character that walks the nav regions, patrols and senses the player."},
+        {ComponentKind::Terrain, "Terrain", "landscape ground heightmap height field hills sculpt paint", "Ground you sculpt and paint in the Scene view."},
     };
     return list;
 }
@@ -47,6 +50,7 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: return o.portal.has_value();
         case ComponentKind::Walkoff: return o.walkoff.has_value();
         case ComponentKind::Agent: return o.agent.has_value();
+        case ComponentKind::Terrain: return o.terrain.has_value();
     }
     return false;
 }
@@ -55,6 +59,10 @@ std::string cannotAdd(const splash::Object& o, ComponentKind k) {
     if (hasComponent(o, k)) return "Already added";
     // The exporter only reads colliders and skins off mesh objects.
     if ((k == ComponentKind::Collider || k == ComponentKind::Skin) && !o.mesh) return "Needs a Mesh";
+    // A terrain builds its own mesh: not on an object that draws a model, or animates one.
+    if (k == ComponentKind::Terrain && o.mesh && !o.mesh->mesh.empty()) return "Has a model mesh";
+    if (k == ComponentKind::Terrain && o.skin) return "Has a skin";
+    if (k == ComponentKind::Skin && o.terrain) return "Is a terrain";
     return {};
 }
 
@@ -75,6 +83,17 @@ bool addComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: o.portal.emplace(); break;
         case ComponentKind::Walkoff: o.walkoff.emplace(); break;
         case ComponentKind::Agent: o.agent.emplace(); break;
+        case ComponentKind::Terrain: {
+            // A flat grid, its layers in a mesh component's materials, solid and walkable.
+            splash::TerrainComponent& t = o.terrain.emplace();
+            t.data = defaultTerrainData(o.name);
+            splash::initTerrain(t, 32);
+            if (!o.mesh) o.mesh.emplace();
+            if (o.mesh->materials.empty()) o.mesh->materials.emplace_back();
+            if (!o.collider) o.collider.emplace();
+            o.collider->kind = splash::ColliderKind::Static;
+            break;
+        }
     }
     return true;
 }
@@ -86,6 +105,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
             o.mesh.reset();
             o.collider.reset();
             o.skin.reset();
+            o.terrain.reset();  // its layers are the mesh's materials
             break;
         case ComponentKind::Collider: o.collider.reset(); break;
         case ComponentKind::Script: o.script.reset(); break;
@@ -100,6 +120,7 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Portal: o.portal.reset(); break;
         case ComponentKind::Walkoff: o.walkoff.reset(); break;
         case ComponentKind::Agent: o.agent.reset(); break;
+        case ComponentKind::Terrain: o.terrain.reset(); break;
     }
     return true;
 }
@@ -120,8 +141,16 @@ const std::vector<ObjectPreset>& presets() {
         {"Portal", "door doorway opening room link", "An opening between two Rooms the camera can see through.", {K::Portal}},
         {"Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box.", {K::Walkoff}},
         {"Agent (NPC)", "npc enemy guard ai patrol waypoint", "A character that walks the nav regions, patrols and senses the player.", {K::Agent}},
+        {"Terrain", "landscape ground heightmap hills sculpt paint", "Ground you sculpt and paint in the Scene view.", {K::Terrain}},
     };
     return list;
+}
+
+std::string defaultTerrainData(const std::string& objectName) {
+    std::string n;
+    for (char c : objectName) n += std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ? c : '_';
+    if (n.empty()) n = "terrain";
+    return "terrain/" + n + ".terrain";
 }
 
 std::string uniqueName(const std::string& base, const std::vector<splash::Object>& siblings) {

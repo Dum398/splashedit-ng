@@ -313,6 +313,13 @@ public:
 
 private:
     void cacheAssets(const splash::Object& o);
+    // A copy of objects about to go into the scene (duplicate, paste, unpack):
+    // each terrain in it whose data file another terrain of the scene uses
+    // gets a fresh unique file, written now with the grid it was copied from
+    // (the scene's in-memory grid for that file, else the file). One whose
+    // file no other terrain uses keeps it (cut then paste). Prefab instance
+    // content is left alone: it is the prefab's and read-only.
+    void giveTerrainsOwnFiles(splash::Object& o, std::vector<std::string>& taken) const;
     void clearHistory();
     // Prefab mode: the root is the only top-level object.
     bool prefabRootLevel(const ObjectPath& parentPath) const { return m_outer && parentPath.empty(); }

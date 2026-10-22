@@ -221,7 +221,7 @@ struct AgentComponent {
 // at most kTerrainMaxLayers) and how they export; core/terrain.hh builds the
 // mesh both the exporter and the scene view use.
 constexpr int kTerrainMaxLayers = 4;
-constexpr int kTerrainMaxResolution = 128;  // cells per side
+constexpr int kTerrainMaxResolution = 64;  // cells per side (64 x 64 measured ~12 fps in Redux)
 struct TerrainComponent {
     std::string data;  // project-relative .terrain file
     float sizeX = 32, sizeZ = 32;  // metres, centred on the object

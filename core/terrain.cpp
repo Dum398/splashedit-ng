@@ -140,7 +140,7 @@ std::vector<std::string> loadTerrains(Scene& scene, const fs::path& projectRoot)
 
 std::vector<std::string> saveTerrains(const Scene& scene, const fs::path& projectRoot) {
     std::vector<std::string> errs;
-    eachTerrain(scene.objects, [&](const Object& o) {
+    auto save = [&](const Object& o) {
         const TerrainComponent& t = *o.terrain;
         if (!terrainLoaded(t) || t.data.empty()) return;
         try {
@@ -148,12 +148,22 @@ std::vector<std::string> saveTerrains(const Scene& scene, const fs::path& projec
         } catch (const std::exception& e) {
             errs.push_back(o.name + ": " + e.what());
         }
-    });
+    };
+    // Prefab instance content is the prefab's: its file is written with the prefab.
+    std::function<void(const std::vector<Object>&)> walk = [&](const std::vector<Object>& objs) {
+        for (const Object& o : objs) {
+            if (!o.prefab.empty()) continue;
+            if (o.terrain) save(o);
+            walk(o.children);
+        }
+    };
+    walk(scene.objects);
     return errs;
 }
 
-std::string uniqueTerrainData(const Scene& scene, const fs::path& projectRoot, const std::string& want) {
-    std::vector<std::string> used;
+std::string uniqueTerrainData(const Scene& scene, const fs::path& projectRoot, const std::string& want,
+                              const std::vector<std::string>& alsoTaken) {
+    std::vector<std::string> used = alsoTaken;
     eachTerrain(scene.objects, [&](const Object& o) { used.push_back(o.terrain->data); });
     const fs::path w(want);
     const std::string stem = (w.parent_path() / w.stem()).generic_string(), ext = w.extension().string();

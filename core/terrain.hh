@@ -37,8 +37,9 @@ std::vector<std::string> saveTerrains(const Scene& scene, const std::filesystem:
 
 // `want` (a project-relative .terrain path), or it with _2, _3 ... before the
 // extension when another terrain of the scene uses it or the file exists
-// under `projectRoot` (skipped when it is empty).
-std::string uniqueTerrainData(const Scene& scene, const std::filesystem::path& projectRoot, const std::string& want);
+// under `projectRoot` (skipped when it is empty), or it is in `alsoTaken`.
+std::string uniqueTerrainData(const Scene& scene, const std::filesystem::path& projectRoot, const std::string& want,
+                              const std::vector<std::string>& alsoTaken = {});
 
 // The mesh: (N+1)^2 shared vertices centred on the object, normals from the
 // height field, UVs repeating every tileCells cells, and `layers` submeshes

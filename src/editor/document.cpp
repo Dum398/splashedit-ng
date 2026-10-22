@@ -775,12 +775,62 @@ std::vector<std::string> namesOf(const std::vector<splash::Object>& objs) {
 
 }  // namespace
 
+namespace {
+const splash::TerrainComponent* loadedTerrainWithData(const std::vector<splash::Object>& objs, const std::string& data) {
+    for (const splash::Object& o : objs) {
+        if (o.terrain && o.terrain->data == data && splash::terrainLoaded(*o.terrain)) return &*o.terrain;
+        if (const splash::TerrainComponent* t = loadedTerrainWithData(o.children, data)) return t;
+    }
+    return nullptr;
+}
+bool terrainUses(const std::vector<splash::Object>& objs, const std::string& data) {
+    for (const splash::Object& o : objs)
+        if ((o.terrain && o.terrain->data == data) || terrainUses(o.children, data)) return true;
+    return false;
+}
+}  // namespace
+
+void Document::giveTerrainsOwnFiles(splash::Object& o, std::vector<std::string>& taken) const {
+    if (o.terrain) {
+        splash::TerrainComponent& t = *o.terrain;
+        const bool shared = terrainUses(m_scene.objects, t.data) ||
+                            std::find(taken.begin(), taken.end(), t.data) != taken.end();
+        if (!splash::terrainLoaded(t)) {
+            if (const splash::TerrainComponent* src = loadedTerrainWithData(m_scene.objects, t.data)) {
+                t.resolution = src->resolution;
+                t.heights = src->heights;
+                t.cellLayers = src->cellLayers;
+            } else if (!t.data.empty() && !m_project.empty()) {
+                try {
+                    splash::loadTerrainData(t, m_project / t.data);
+                } catch (const std::exception&) {
+                }
+            }
+        }
+        if (shared) {
+            const std::string want = t.data.empty() ? defaultTerrainData(o.name) : t.data;
+            t.data = splash::uniqueTerrainData(m_scene, m_project, want, taken);
+            if (!m_project.empty() && splash::terrainLoaded(t)) {
+                try {
+                    splash::saveTerrainData(t, m_project / t.data);
+                } catch (const std::exception&) {
+                }
+            }
+        }
+        taken.push_back(t.data);
+    }
+    if (!o.prefab.empty()) return;
+    for (splash::Object& c : o.children) giveTerrainsOwnFiles(c, taken);
+}
+
 std::optional<ObjectPath> Document::duplicateObject(const ObjectPath& path) {
     const splash::Object* o = object(path);
     if (!o || inInstance(path) || prefabRootLevel(ObjectPath(path.begin(), path.end() - 1))) return std::nullopt;
     const ObjectPath parentPath(path.begin(), path.end() - 1);
     splash::Object copy = *o;
     copy.name = numberedName(o->name, namesOf(parentPath.empty() ? m_scene.objects : object(parentPath)->children));
+    std::vector<std::string> taken;
+    giveTerrainsOwnFiles(copy, taken);
     ObjectPath at = path;
     ++at.back();
     insertObject(at, std::move(copy));
@@ -852,6 +902,8 @@ std::optional<ObjectPath> Document::pasteObjects(const std::string& text, const 
         for (splash::Object& o : *objs) o.transform.position.x += dx;
     }
     std::vector<std::string> names = namesOf(siblings);
+    std::vector<std::string> taken;
+    for (splash::Object& o : *objs) giveTerrainsOwnFiles(o, taken);
     std::vector<std::unique_ptr<Command>> parts;
     ObjectPath at = parentPath;
     at.push_back(0);
@@ -1202,6 +1254,10 @@ bool Document::unpackPrefab(const ObjectPath& path) {
     splash::Object plain = *o;
     plain.prefab.clear();
     plain.prefabResolved = false;
+    // Its terrains become the scene's own: a file each, apart from the prefab's.
+    // (The instance itself is still in the scene, so every one counts as shared.)
+    std::vector<std::string> taken;
+    giveTerrainsOwnFiles(plain, taken);
     return replaceTrees({{path, std::move(plain)}}) == 1;
 }
 

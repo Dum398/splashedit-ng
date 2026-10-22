@@ -50,7 +50,12 @@ FetchContent_Declare(ufbx
     GIT_REPOSITORY https://github.com/ufbx/ufbx.git
     GIT_TAG 26a482ae66871d7de36eb722aa060bce95bce274
     SOURCE_SUBDIR none)
-FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf ufbx)
+# meshoptimizer simplifies imported models to a triangle target (core/simplify.cpp).
+FetchContent_Declare(meshoptimizer
+    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
+    GIT_TAG 9e1f07b159d3cb777f1c67ed31fc11fd117986f4)  # v1.3
+set(MESHOPT_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(stb nlohmann_json recastnavigation psxlua psxavenc dr_libs cgltf ufbx meshoptimizer)
 
 option(SPLASHEDIT_BUILD_EDITOR "Build the editor (needs SDL3, FreeType, OpenGL)" ON)
 

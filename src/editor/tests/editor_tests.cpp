@@ -60,6 +60,7 @@
 #include "blocks.hh"
 #include "luacompile.hh"
 #include "luascan.hh"
+#include "simplify.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
 #include "ui/window_chrome.hh"
@@ -4129,6 +4130,267 @@ std::string robotGltf(float red, bool twoTriangles = false) {
            R"(,"type":"VEC3","min":[0,0,0],"max":[1,1,)" + (twoTriangles ? "1" : "0") + R"(]}],
 "bufferViews":[{"buffer":0,"byteLength":)" + std::to_string(n * 12) + R"(}],
 "buffers":[{"byteLength":)" + std::to_string(n * 12) + R"(,"uri":"data:application/octet-stream;base64,)" + buf + R"("}]})";
+}
+
+// A w x h grid of unit quads in the XY plane with UVs (x / w, y / h): columns
+// left of `split` in submesh 0, the rest in submesh 1. Shared vertices, or with
+// `flat` three fresh ones per triangle, each triangle's normal tilted its own
+// way (a faceted mesh, all normal seams). With `skin`, joint 0 left of `split`
+// and joint 1 from it on, weight 1.
+splash::Mesh simplifyGrid(int w, int h, int split, bool flat, bool skin) {
+    splash::Mesh m;
+    m.submeshes.resize(2);
+    if (skin) m.skin = splash::MeshSkin{}, m.skin->joints.resize(2), m.skin->joints[1].parent = 0;
+    auto vert = [&](int x, int y, splash::Vec3 n) {
+        m.positions.push_back({float(x), float(y), 0});
+        m.normals.push_back(n);
+        m.uv.push_back({float(x) / float(w), float(y) / float(h)});
+        if (skin) m.skin->vertexJoints.push_back({x < split ? 0 : 1, 0, 0, 0}), m.skin->vertexWeights.push_back({1, 0, 0, 0});
+        return int(m.positions.size() - 1);
+    };
+    std::vector<int> shared;
+    if (!flat)
+        for (int y = 0; y <= h; y++)
+            for (int x = 0; x <= w; x++) shared.push_back(vert(x, y, {0, 0, -1}));
+    int t = 0;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            const int c[4][2] = {{x, y}, {x, y + 1}, {x + 1, y + 1}, {x + 1, y}};
+            static const int halves[2][3] = {{0, 1, 2}, {0, 2, 3}};
+            for (const int* tri : halves) {
+                std::vector<int>& sm = m.submeshes[x < split ? 0 : 1];
+                const splash::Vec3 n{0.05f * float(t % 5), 0.05f * float(t % 3), -1};
+                for (int k = 0; k < 3; k++) {
+                    const int* p = c[tri[k]];
+                    sm.push_back(flat ? vert(p[0], p[1], n) : shared[size_t(p[1] * (w + 1) + p[0])]);
+                }
+                t++;
+            }
+        }
+    return m;
+}
+
+// True when no triangle of `m` is a sliver (degenerateTriangle).
+bool noSlivers(const splash::Mesh& m) {
+    for (const std::vector<int>& sm : m.submeshes)
+        for (size_t i = 0; i + 2 < sm.size(); i += 3)
+            if (splash::degenerateTriangle(m.positions[size_t(sm[i])], m.positions[size_t(sm[i + 1])], m.positions[size_t(sm[i + 2])]))
+                return false;
+    return true;
+}
+
+void testSimplifyToTriangles() {
+    CHECK(splash::degenerateTriangle({0, 0, 0}, {0.5f, 0, 0}, {1, 0, 0}) && splash::degenerateTriangle({0, 0, 0}, {0, 0, 0}, {0, 1, 0}));
+    CHECK(splash::degenerateTriangle({-0.9f, 0.1f, 0}, {-1.1f, 0.2f, 0}, {-1.3f, 0.3f, 0}));
+    CHECK(!splash::degenerateTriangle({0, 0, 0}, {1, 0, 0}, {0, 0.001f, 0}));
+    // Shared vertices, two submeshes: the target is met, every vertex is
+    // used, the material boundary (x 20) and the open border stay put, and
+    // each vertex keeps its own UV.
+    splash::Mesh g = simplifyGrid(40, 40, 20, false, false);
+    splash::SimplifyResult r = splash::simplifyToTriangles(g, 400);
+    CHECK(r.before == 3200 && r.after <= 400 && r.after >= 100);
+    CHECK(noSlivers(g));  // collapses on a flat grid leave corners on a line; those triangles go
+    CHECK(g.submeshes.size() == 2 && !g.submeshes[0].empty() && !g.submeshes[1].empty());
+    CHECK(int(g.submeshes[0].size() + g.submeshes[1].size()) == r.after * 3);
+    std::set<int> used;
+    bool sides = true, inRange = true;
+    for (int s = 0; s < 2; s++)
+        for (int i : g.submeshes[size_t(s)]) {
+            inRange = inRange && i >= 0 && size_t(i) < g.positions.size();
+            if (!inRange) break;
+            used.insert(i);
+            sides = sides && (s == 0 ? g.positions[size_t(i)].x <= 20 : g.positions[size_t(i)].x >= 20);
+        }
+    CHECK(inRange && used.size() == g.positions.size());
+    CHECK(sides);
+    bool uvs = g.uv.size() == g.positions.size() && g.normals.size() == g.positions.size();
+    for (size_t i = 0; uvs && i < g.positions.size(); i++)
+        uvs = near(g.uv[i].x, g.positions[i].x / 40) && near(g.uv[i].y, g.positions[i].y / 40);
+    CHECK(uvs);
+    int corners = 0;
+    for (const splash::Vec3& p : g.positions) corners += (p.x == 0 || p.x == 40) && (p.y == 0 || p.y == 40);
+    CHECK(corners == 4);
+
+    // Skinned: a collapse removes vertices, so each survivor keeps its own
+    // joint and weights.
+    splash::Mesh sk = simplifyGrid(40, 40, 20, false, true);
+    r = splash::simplifyToTriangles(sk, 400);
+    bool joints = sk.skin && sk.skin->vertexJoints.size() == sk.positions.size() && sk.skin->vertexWeights.size() == sk.positions.size() &&
+                  sk.skin->joints.size() == 2;
+    for (size_t i = 0; joints && i < sk.positions.size(); i++)
+        joints = sk.skin->vertexJoints[i][0] == (sk.positions[i].x < 20 ? 0 : 1) && sk.skin->vertexWeights[i][0] == 1;
+    CHECK(r.after <= 400 && joints);
+
+    // Faceted: every corner has its own normal. Normals are left out of the
+    // weld (the caller recomputes them), so the seam-safe pass reaches the
+    // target without the permissive one.
+    splash::Mesh flat = simplifyGrid(40, 40, 20, true, false);
+    CHECK(flat.positions.size() == 9600);
+    r = splash::simplifyToTriangles(flat, 400);
+    CHECK(r.after <= 400 && r.after >= 100 && flat.positions.size() < 1000);
+    CHECK(noSlivers(flat));
+    CHECK(!r.permissive);
+
+    // A target at or above the count, or 0, leaves the mesh as it was.
+    splash::Mesh same = simplifyGrid(4, 4, 2, true, false);
+    r = splash::simplifyToTriangles(same, 32);
+    CHECK(r.before == 32 && r.after == 32 && same.positions.size() == 96);
+    r = splash::simplifyToTriangles(same, 0);
+    CHECK(r.after == 32 && same.positions.size() == 96);
+}
+
+// importModel with targetTriangles: the sidecar keeps it (and only when set),
+// the baked and node meshes are simplified with recomputed normals, and a
+// target seams cannot reach is a warning naming the count reached.
+void testImportTargetTriangles() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "importtarget";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game";
+    fs::create_directories(proj / "models", ec);
+
+    // The sidecar.
+    fs::path model = proj / "models" / "grid.obj";
+    splash::ImportSettings s;
+    s.sourceTriangles = 99;  // not written without a target
+    splash::saveImportSettings(model, s);
+    std::string text;
+    {
+        std::ifstream in(splash::importSettingsPath(model));
+        text.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    CHECK(text.find("Triangles") == std::string::npos);
+    CHECK(splash::loadImportSettings(model).targetTriangles == 0 && splash::loadImportSettings(model).extra.empty());
+    s.targetTriangles = 800;
+    s.sourceTriangles = 3200;
+    splash::saveImportSettings(model, s);
+    splash::ImportSettings back = splash::loadImportSettings(model);
+    CHECK(back.targetTriangles == 800 && back.sourceTriangles == 3200 && back.extra.empty());
+    for (const char* bad : {R"({"targetTriangles": -5})", R"({"targetTriangles": 12.5})", R"({"targetTriangles": "many"})"}) {
+        std::ofstream(splash::importSettingsPath(model)) << bad;
+        bool threw = false;
+        try {
+            splash::loadImportSettings(model);
+        } catch (const std::exception& e) {
+            threw = std::string(e.what()).find("target triangles") != std::string::npos;
+        }
+        CHECK(threw);
+    }
+    fs::remove(splash::importSettingsPath(model), ec);
+
+    // A 40 x 40 grid (3200 triangles) with UVs.
+    {
+        std::ofstream o(dir / "grid.obj");
+        for (int y = 0; y <= 40; y++)
+            for (int x = 0; x <= 40; x++) o << "v " << x * 0.1 << " " << y * 0.1 << " 0\nvt " << x / 40.0 << " " << y / 40.0 << "\n";
+        o << "vn 0 0 1\n";
+        for (int y = 0; y < 40; y++)
+            for (int x = 0; x < 40; x++) {
+                const int a = y * 41 + x + 1, b = a + 1, c = a + 42, d = a + 41;
+                o << "f " << a << "/" << a << "/1 " << b << "/" << b << "/1 " << c << "/" << c << "/1\n";
+                o << "f " << a << "/" << a << "/1 " << c << "/" << c << "/1 " << d << "/" << d << "/1\n";
+            }
+    }
+    splash::ImportedModel all = splash::importModel(dir / "grid.obj", proj);
+    CHECK(all.triangles == 3200 && all.sourceTriangles == 3200);
+    splash::ImportSettings t;
+    t.targetTriangles = 800;
+    splash::ImportedModel some = splash::importModel(dir / "grid.obj", proj, t);
+    CHECK(some.sourceTriangles == 3200 && some.triangles <= 800 && some.triangles >= 200);
+    auto tris = [](const splash::Mesh& m) {
+        size_t n = 0;
+        for (const auto& sm : m.submeshes) n += sm.size() / 3;
+        return n;
+    };
+    const splash::Mesh baked = splash::loadMesh(proj / some.mesh);
+    CHECK(int(tris(baked)) == some.triangles && noSlivers(baked));
+    bool normals = !baked.normals.empty();
+    for (const splash::Vec3& n : baked.normals) normals = normals && near(std::fabs(n.z), 1);
+    CHECK(normals);
+    bool nodes = false;
+    for (const splash::ImportedNode& n : some.nodes)
+        if (!n.mesh.empty()) nodes = tris(splash::loadMesh(proj / n.mesh)) <= 800;
+    CHECK(nodes);
+    CHECK(std::any_of(some.warnings.begin(), some.warnings.end(),
+                      [](const std::string& w) { return w.find("recomputed normals") != std::string::npos; }));
+    CHECK(std::none_of(some.warnings.begin(), some.warnings.end(),
+                       [](const std::string& w) { return w.find("not the target") != std::string::npos; }));
+
+    // Recomputed normals ignore a sliver: a flat quad with a zero-area
+    // triangle along one edge still faces one way at every corner.
+    std::ofstream(dir / "sliver.obj") << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0.5 0 0\nf 1 2 3\nf 1 3 4\nf 1 5 2\n";
+    splash::ImportSettings rn;
+    rn.normals = splash::Normals::Recompute;
+    splash::ImportedModel sliver = splash::importModel(dir / "sliver.obj", proj, rn);
+    const splash::Mesh sm = splash::loadMesh(proj / sliver.mesh);
+    bool facing = sm.normals.size() == sm.positions.size() && !sm.normals.empty();
+    for (const splash::Vec3& n : sm.normals) facing = facing && near(std::fabs(n.z), 1);
+    CHECK(sliver.triangles == 3 && facing);
+
+    // Every triangle its own UV island: nothing can collapse without tearing
+    // the texture, so the import says how far it got.
+    {
+        std::ofstream o(dir / "islands.obj");
+        for (int y = 0; y <= 20; y++)
+            for (int x = 0; x <= 20; x++) o << "v " << x << " " << y << " 0\n";
+        int vt = 0;
+        for (int y = 0; y < 20; y++)
+            for (int x = 0; x < 20; x++) {
+                const int a = y * 21 + x + 1, b = a + 1, c = a + 22, d = a + 21;
+                for (const std::array<int, 3>& f : {std::array<int, 3>{a, b, c}, std::array<int, 3>{a, c, d}}) {
+                    const double u = (vt / 3 % 40) / 40.0, v = (vt / 3 / 40) / 40.0;
+                    o << "vt " << u << " " << v << "\nvt " << u + 0.02 << " " << v << "\nvt " << u << " " << v + 0.02 << "\n";
+                    o << "f " << f[0] << "/" << vt + 1 << " " << f[1] << "/" << vt + 2 << " " << f[2] << "/" << vt + 3 << "\n";
+                    vt += 3;
+                }
+            }
+    }
+    t.targetTriangles = 100;
+    splash::ImportedModel stuck = splash::importModel(dir / "islands.obj", proj, t);
+    const std::string want = "simplified to " + std::to_string(stuck.triangles) + " triangles, not the target 100";
+    CHECK(stuck.sourceTriangles == 800 && stuck.triangles > 100);
+    CHECK(std::any_of(stuck.warnings.begin(), stuck.warnings.end(),
+                      [&](const std::string& w) { return w.find(want) != std::string::npos; }));
+
+    // 50 separate 4 x 4 grids (32 triangles each) to 40 triangles: whole
+    // parts collapse away, and the import counts them.
+    {
+        std::ofstream o(dir / "parts.obj");
+        for (int i = 0; i < 50; i++)
+            for (int y = 0; y < 5; y++)
+                for (int x = 0; x < 5; x++) o << "v " << (i % 10) * 6 + x << " " << (i / 10) * 6 + y << " 0\n";
+        for (int i = 0; i < 50; i++)
+            for (int y = 0; y < 4; y++)
+                for (int x = 0; x < 4; x++) {
+                    const int a = i * 25 + y * 5 + x + 1, b = a + 1, c = a + 6, d = a + 5;
+                    o << "f " << a << " " << b << " " << c << "\nf " << a << " " << c << " " << d << "\n";
+                }
+    }
+    t.targetTriangles = 40;
+    splash::ImportedModel parts = splash::importModel(dir / "parts.obj", proj, t);
+    CHECK(parts.sourceTriangles == 1600 && parts.triangles <= 40);
+    CHECK(std::any_of(parts.warnings.begin(), parts.warnings.end(),
+                      [](const std::string& w) { return w.find("small parts were removed whole") != std::string::npos; }));
+    t.targetTriangles = 800;
+    parts = splash::importModel(dir / "parts.obj", proj, t);
+    CHECK(std::none_of(parts.warnings.begin(), parts.warnings.end(),
+                       [](const std::string& w) { return w.find("removed whole") != std::string::npos; }));
+
+    // The editor's reimport records the count before simplifying in the
+    // sidecar, for the inspector's Triangles row.
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    editor::PlacedModel p = editor::placeModel(doc, dir / "grid.obj", std::nullopt, {0}, {0, 0, 0});
+    const fs::path placed = proj / "models" / "grid.obj";
+    CHECK(p.error.empty() && splash::loadImportSettings(placed).sourceTriangles == 0);
+    splash::ImportSettings ps = splash::loadImportSettings(placed);
+    ps.targetTriangles = 500;
+    splash::saveImportSettings(placed, ps);
+    editor::Reimported re = editor::reimportModel(doc, placed);
+    CHECK(re.error.empty() && re.model.triangles <= 500);
+    splash::ImportSettings after = splash::loadImportSettings(placed);
+    CHECK(after.targetTriangles == 500 && after.sourceTriangles == 3200);
 }
 
 void testImportSettings() {
@@ -14335,6 +14597,8 @@ int main(int argc, char** argv) {
     testDefaultClipLoop();
     testClipLoopImportAndEdit();
     testImportSettings();
+    testSimplifyToTriangles();
+    testImportTargetTriangles();
     testModelImports();
     testModelImportsGaps();
     testUnirom();

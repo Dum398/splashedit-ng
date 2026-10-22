@@ -61,6 +61,7 @@ static int usage() {
                  "  --pcm writes the 16-bit mono WAV the encoder starts from, before resampling\n"
                  "usage: splashpack-cli import <model.glb|model.gltf|model.fbx|model.obj|model.blend> --project <dir>\n"
                  "    [--scale <f>] [--up file|y|z] [--normals import|recompute] [--smoothing <deg>] [--merge]\n"
+                 "    [--triangles <n>]\n"
                  "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
                  "  the settings start from <model>.import.json beside the model when there is one\n"
                  "usage: splashpack-cli import-unity <unityProject> <destDir> [--scenes Name1,Name2,...]\n"
@@ -336,6 +337,7 @@ static int importCmd(int argc, char** argv) {
             else if (a == "--scale" && more) s.scale = std::strtof(argv[++i], nullptr);
             else if (a == "--smoothing" && more) s.smoothingAngle = std::strtof(argv[++i], nullptr);
             else if (a == "--merge") s.mergeMeshes = true;
+            else if (a == "--triangles" && more) { const int t = std::atoi(argv[++i]); s.targetTriangles = t > 0 ? t : 0; }
             else if (a == "--up" && more) {
                 std::string v = argv[++i];
                 if (v == "file") s.up = splash::UpAxis::File;
@@ -351,10 +353,12 @@ static int importCmd(int argc, char** argv) {
         }
         if (project.empty()) return usage();
         static const char* const ups[] = {"file", "y", "z"};
-        std::printf("settings scale %g up %s normals %s smoothing %g merge %s\n", s.scale, ups[int(s.up)],
-                    s.normals == splash::Normals::Recompute ? "recompute" : "import", s.smoothingAngle, s.mergeMeshes ? "yes" : "no");
+        std::printf("settings scale %g up %s normals %s smoothing %g merge %s triangles %d\n", s.scale, ups[int(s.up)],
+                    s.normals == splash::Normals::Recompute ? "recompute" : "import", s.smoothingAngle, s.mergeMeshes ? "yes" : "no",
+                    s.targetTriangles);
         splash::ImportedModel m = splash::importModel(model, project, s);
         std::printf("mesh %s (%d triangles)\n", m.mesh.c_str(), m.triangles);
+        if (m.sourceTriangles != m.triangles) std::printf("simplified from %d triangles\n", m.sourceTriangles);
         for (size_t i = 0; i < m.materials.size(); i++) {
             const splash::Material& mat = m.materials[i];
             std::printf("material %zu texture %s colour %g %g %g %g\n", i, mat.texture.empty() ? "-" : mat.texture.c_str(),

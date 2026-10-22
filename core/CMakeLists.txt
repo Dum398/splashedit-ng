@@ -91,6 +91,7 @@ add_library(splashcore STATIC
     luacompile.cpp
     luascan.cpp
     import.cpp
+    simplify.cpp
     unity_import.cpp
     gpudump.cpp
     gpu_raster.cpp
@@ -100,7 +101,7 @@ target_include_directories(splashcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(splashcore SYSTEM PRIVATE ${stb_SOURCE_DIR} ${dr_libs_SOURCE_DIR} ${cgltf_SOURCE_DIR} ${ufbx_SOURCE_DIR})
 # .blend import runs Blender from a worker thread (blend.cpp).
 find_package(Threads REQUIRED)
-target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE recast psxlua psxav stbvorbis)
+target_link_libraries(splashcore PUBLIC nlohmann_json::nlohmann_json Threads::Threads PRIVATE recast psxlua psxav stbvorbis meshoptimizer)
 # The writer reproduces SplashEdit 2.4's float results bit for bit: no FMA
 # contraction, no fast-math.
 if(MSVC)

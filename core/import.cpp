@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include "blend.hh"
+#include "simplify.hh"
 #include "cgltf.h"
 #include "ufbx.h"
 #include "unitymath.hh"
@@ -438,7 +439,10 @@ void recomputeNormals(Mesh& mesh, float degrees) {
     };
     for (size_t t = 0; t < tris.size(); t++) {
         const Vec3 p[3] = {mesh.positions[size_t(tris[t][0])], mesh.positions[size_t(tris[t][1])], mesh.positions[size_t(tris[t][2])]};
-        face[t] = unit(cross(p[1] - p[0], p[2] - p[0]));
+        // A sliver (three corners on a line) has no direction of its own: a
+        // zero face normal, so it neither shades its neighbours nor takes a
+        // made-up one (unit() of a zero vector is +Y).
+        face[t] = degenerateTriangle(p[0], p[1], p[2]) ? Vec3{} : unit(cross(p[1] - p[0], p[2] - p[0]));
         for (int c = 0; c < 3; c++) {
             Vec3 a = p[(c + 1) % 3] - p[c], b = p[(c + 2) % 3] - p[c];
             float la = magnitude(a), lb = magnitude(b);
@@ -458,9 +462,17 @@ void recomputeNormals(Mesh& mesh, float degrees) {
             for (int c = 0; c < 3; c++) {
                 const int v = tris[t][size_t(c)];
                 Vec3 sum{};
+                const bool sliver = sqrMagnitude(face[t]) == 0;  // takes the faces around it, any angle
                 for (auto [u, cu] : around[key(v)])
-                    if (dot(face[u], face[t]) >= limit) sum = sum + face[u] * angle[u][size_t(cu)];
-                Vec3 n = sqrMagnitude(sum) > 0 ? unit(sum) : face[t];
+                    if (sliver || dot(face[u], face[t]) >= limit) sum = sum + face[u] * angle[u][size_t(cu)];
+                // A sliver corner with no face of its own around it (a vertex
+                // only the sliver uses) takes the faces around the sliver's other corners.
+                if (sliver && sqrMagnitude(sum) == 0)
+                    for (int k = 1; k < 3; k++)
+                        for (auto [u, cu] : around[key(tris[t][size_t((c + k) % 3)])]) sum = sum + face[u] * angle[u][size_t(cu)];
+                Vec3 n = face[t];
+                if (sqrMagnitude(sum) > 0) n = unit(sum);
+                else if (sliver) n = size_t(v) < mesh.normals.size() ? mesh.normals[size_t(v)] : Vec3{0, 1, 0};
                 auto [it, fresh] = made.try_emplace({v, n.x, n.y, n.z}, int(out.positions.size()));
                 if (fresh) {
                     out.positions.push_back(mesh.positions[size_t(v)]);
@@ -554,6 +566,43 @@ void applySettings(Sink& baked, std::vector<NodeBuild>& nodes, std::vector<AnimC
         for (NodeBuild& nb : nodes)
             if (nb.local) recomputeNormals(nb.local->mesh, s.smoothingAngle);
     }
+}
+
+// targetTriangles: the baked mesh is simplified toward the whole target, each
+// node mesh toward its share of it, in proportion to its triangles (at least
+// 4, at most all it has). A simplified mesh gets its normals recomputed: the
+// file's are per corner and do not survive vertices moving away.
+void reduce(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes, const ImportSettings& s) {
+    const int target = s.targetTriangles, total = baked.triangles();
+    if (target <= 0 || target >= total) return;
+    bool any = false;
+    auto simplify = [&](Mesh& mesh, int t) {
+        checkpoint();
+        const SimplifyResult r = simplifyToTriangles(mesh, t);
+        if (r.after == r.before) return r;
+        recomputeNormals(mesh, s.smoothingAngle);
+        any = true;
+        return r;
+    };
+    const SimplifyResult r = simplify(baked.mesh, target);
+    long long nodeTotal = 0;
+    for (const NodeBuild& nb : nodes)
+        if (nb.local) nodeTotal += nb.local->triangles();
+    for (NodeBuild& nb : nodes) {
+        if (!nb.local || nodeTotal <= 0) continue;
+        const int own = nb.local->triangles();
+        const int share = int((long long)target * own / nodeTotal);
+        simplify(nb.local->mesh, std::clamp(share, std::min(own, 4), own));
+    }
+    if (r.after > target)
+        out.warnings.push_back("simplified to " + std::to_string(r.after) + " triangles, not the target " +
+                               std::to_string(target) + ": UV seams, material edges and open borders keep the rest");
+    if (r.partsRemoved > 0)
+        out.warnings.push_back(std::to_string(r.partsRemoved) + (r.partsRemoved == 1 ? " small part was" : " small parts were") +
+                               " removed whole by simplifying: raise the target triangles to keep them");
+    if (any && s.normals == Normals::Import)
+        out.warnings.push_back("the simplified meshes have recomputed normals (smoothing angle " +
+                               std::to_string(int(std::lround(s.smoothingAngle))) + "), not the file's");
 }
 
 // Applies the settings, counts triangles, then writes the textures, the baked
@@ -760,6 +809,9 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     std::vector<AnimClip> clips = buildRig(out, baked, nodes, rig, settings);
     applySettings(baked, nodes, clips, settings);
     placeRootSpaceNodes(nodes);
+    checkpoint(0.6f);
+    out.sourceTriangles = baked.triangles();
+    reduce(out, baked, nodes, settings);
     checkpoint(0.65f);
     const Mesh& mesh = baked.mesh;
     out.triangles = baked.triangles();
@@ -1531,14 +1583,18 @@ const char* enumTo(E v, const std::pair<const char*, E> (&table)[N]) {
 }
 
 json settingsJson(const ImportSettings& s) {
-    return {{"scale", s.scale},
-            {"up", enumTo(s.up, kUpAxes)},
-            {"normals", enumTo(s.normals, kNormals)},
-            {"smoothingAngle", s.smoothingAngle},
-            {"mergeMeshes", s.mergeMeshes},
-            {"bitDepth", int(s.bitDepth)},
-            {"lighting", enumTo(s.lighting, kLighting)},
-            {"source", s.source}};
+    json j = {{"scale", s.scale},
+              {"up", enumTo(s.up, kUpAxes)},
+              {"normals", enumTo(s.normals, kNormals)},
+              {"smoothingAngle", s.smoothingAngle},
+              {"mergeMeshes", s.mergeMeshes},
+              {"bitDepth", int(s.bitDepth)},
+              {"lighting", enumTo(s.lighting, kLighting)},
+              {"source", s.source}};
+    // Only when set, so a sidecar without a target stays as it was.
+    if (s.targetTriangles > 0) j["targetTriangles"] = s.targetTriangles;
+    if (s.targetTriangles > 0 && s.sourceTriangles > 0) j["sourceTriangles"] = s.sourceTriangles;
+    return j;
 }
 
 }  // namespace
@@ -1572,9 +1628,18 @@ ImportSettings loadImportSettings(const fs::path& model) {
         }
         if (j.contains("lighting")) s.lighting = enumFrom(j["lighting"], kLighting, "lighting");
         s.source = j.value("source", s.source);
+        auto count = [&](const char* key, const char* name) {
+            if (!j.contains(key)) return 0;
+            const json& t = j[key];
+            if (!t.is_number_integer() || t.get<std::int64_t>() < 0 || t.get<std::int64_t>() > 1000000000)
+                fail(what + ": " + name + " must be a whole number, 0 or more");
+            return t.get<int>();
+        };
+        s.targetTriangles = count("targetTriangles", "target triangles");
+        s.sourceTriangles = count("sourceTriangles", "source triangles");
         json written = settingsJson(s);
         for (auto& [k, v] : j.items())
-            if (!written.contains(k)) s.extra.push_back({k, v.dump()});
+            if (!written.contains(k) && k != "targetTriangles" && k != "sourceTriangles") s.extra.push_back({k, v.dump()});
     } catch (const json::exception& e) {
         fail(what + ": " + e.what());
     } catch (const std::runtime_error& e) {

@@ -976,6 +976,16 @@ the warnings it drew with the screenshot, and the screenshot must show their war
 a display (CI runs it under `xvfb-run` on Linux).
 
     python3 importwarningscheck.py <splashedit> [screenshot.png]
+
+`importtrianglescheck.py` drops a 3200-triangle grid it writes (40 x 40 quads with UVs) on the
+courtyard example's viewport and types 800 into the inspector's Import settings Triangles field.
+The row must go from 3200 (bad against the 2000 in-view guide) to 3200 -> at most 800 (good), the
+sidecar must keep the target and the count before simplifying, the baked mesh on disk must have
+at most 800 triangles, and the screenshot must show the share in the good colour. Needs a display
+(CI runs it under `xvfb-run` on Linux).
+
+    python3 importtrianglescheck.py <splashedit> [screenshot.png]
+
 `timelineeditcheck.py` checks the Timeline's edits beyond keys on copies of the courtyard example
 with two cutscenes: renaming one in the scene inspector (double-click the name) and from the
 timeline's sequence picker, undo of a rename, a taken name and a 25-character one refused, the

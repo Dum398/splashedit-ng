@@ -8686,13 +8686,67 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 const float angleTop = y;
                 float av = cur.smoothingAngle;
                 FieldEdit afe = numberField("ismooth", irow("lismooth", "Smoothing angle",
-                                                            recompute ? "Faces meeting at less than this many degrees are shaded smooth across "
-                                                                        "the edge; sharper edges stay hard."
-                                                                      : "Not used: set Normals to Recompute first. Faces meeting at less than "
-                                                                        "this many degrees are shaded smooth across the edge."),
+                                                            recompute || cur.targetTriangles > 0
+                                                                ? "Faces meeting at less than this many degrees are shaded smooth across "
+                                                                  "the edge; sharper edges stay hard. Also used for the normals of a "
+                                                                  "simplified model (Triangles)."
+                                                                : "Not used: set Normals to Recompute first. Faces meeting at less than "
+                                                                  "this many degrees are shaded smooth across the edge."),
                                             fmtShort(cur.smoothingAngle).c_str(), "deg", 0, nullptr, &av);
                 scrub(afe, av, [](splash::ImportSettings& s, float v) { s.smoothingAngle = splash::clampv(v, 0.0f, 180.0f); });
-                if (!recompute) dl->AddRectFilled(ImVec2(x0 + space::sm, angleTop), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150));
+                if (!recompute && cur.targetTriangles == 0)
+                    dl->AddRectFilled(ImVec2(x0 + space::sm, angleTop), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150));
+                // Triangles: the target (All keeps every one), then what the last
+                // import made of the model and its share of the in-view guide.
+                {
+                    ImRect tr = irow("litris", "Triangles",
+                                     "Simplifies the model to about this many triangles as it is imported; All keeps every one. "
+                                     "UV seams, material edges and open borders stay, so a model can stop above the target. "
+                                     "Simplified meshes get their normals recomputed at the smoothing angle. The share is of the "
+                                     "2000 triangles the psxsplash docs suggest at most in view at once.");
+                    const float fw = tr.GetWidth();
+                    const std::string tval = cur.targetTriangles > 0 ? std::to_string(cur.targetTriangles) : std::string("All");
+                    float tv = float(cur.targetTriangles);
+                    FieldEdit tfe = numberField("itris", ImRect(tr.Min, ImVec2(tr.Min.x + fw, tr.Max.y)), tval.c_str(), nullptr, 0,
+                                                nullptr, &tv, true);
+                    nameRect("itris", ImRect(tr.Min, ImVec2(tr.Min.x + fw, tr.Max.y)));  // --dblclick @itris
+                    scrub(tfe, tv, [](splash::ImportSettings& s, float v) {
+                        s.targetTriangles = int(splash::clampv(std::lround(v), 0L, 1000000L));
+                    });
+                    const std::string baked = "models/" + splash::importName(ip.model) + ".mesh";
+                    if (!doc.mesh(baked)) doc.refreshAssets({baked});  // a model placed as parts: its baked mesh, once
+                    const editor::MeshInfo* bi = doc.mesh(baked);
+                    if (bi && bi->status == editor::AssetStatus::Ok) {
+                        const int result = bi->triangles;
+                        const int source = cur.targetTriangles > 0 && cur.sourceTriangles > 0 ? cur.sourceTriangles : result;
+                        const float share = float(result) / float(splash::kVisibleTriangleGuide);
+                        const splash::BudgetBand band = splash::budgetBandOf(share);
+                        const ImU32 col = band == splash::BudgetBand::Good ? color::good
+                                          : band == splash::BudgetBand::Warn ? color::warn
+                                                                             : color::bad;
+                        const std::string pct = std::to_string(int(std::lround(share * 100))) + "% of the " +
+                                                std::to_string(splash::kVisibleTriangleGuide) + " in view";
+                        const std::string counts = (source != result ? std::to_string(source) + " \xe2\x86\x92 " : std::string()) +
+                                                   std::to_string(result) + " triangles \xc2\xb7";
+                        // A caption line under the row, label column included for room: the
+                        // counts, then the share in its band's colour.
+                        const float lh = measure(f.regular, type::caption, counts.c_str()).y;
+                        const ImRect info(ImVec2(x0 + space::sm, y), ImVec2(tr.Max.x, y + lh + space::xs));
+                        y = info.Max.y + space::xs;
+                        ImGui::PushClipRect(info.Min, info.Max, true);
+                        text(dl, info.Min, f.regular, type::caption, color::textDim, counts.c_str());
+                        const float px = info.Min.x + measure(f.regular, type::caption, counts.c_str()).x + space::xs * 2;
+                        text(dl, ImVec2(px, info.Min.y), f.medium, type::caption, col, pct.c_str());
+                        ImGui::PopClipRect();
+                        interact("itrisinfo", info);
+                        tooltip((std::to_string(source) + " triangles in the model, " + std::to_string(result) +
+                                 " after simplifying: " + pct + " of the triangles the psxsplash docs suggest at most in view at once.")
+                                    .c_str());
+                        scriptLine("import.tris", "import triangles: " + std::to_string(source) + " -> " + std::to_string(result) +
+                                                      " target " + std::to_string(cur.targetTriangles) + " " +
+                                                      splash::budgetBand(share));
+                    }
+                }
                 ImRect mv = irow("limerge", "Merge meshes",
                                  "On makes each placed copy of the model one object drawing a single mesh. Off keeps the file's parts as "
                                  "child objects. Changing it rebuilds the copies already in the scene.");

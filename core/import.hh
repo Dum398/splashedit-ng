@@ -40,7 +40,8 @@ struct ImportedModel {
     bool skinned = false;               // the baked mesh carries a skeleton
     std::vector<std::string> clips;     // every .anim written, project-relative, in file order
     std::vector<std::string> clipTakes; // beside clips: each one's name in the file (its take)
-    int triangles = 0;
+    int triangles = 0;        // in the baked mesh as written
+    int sourceTriangles = 0;  // in the baked mesh before targetTriangles applied
     std::vector<std::string> warnings;
 };
 
@@ -58,6 +59,15 @@ struct ImportSettings {
     // sharper edge stays hard. Import: the file's normals, flat where it has none.
     Normals normals = Normals::Import;
     float smoothingAngle = 60;
+    // Above 0: the model is simplified toward this many triangles (see
+    // simplifyToTriangles), the baked mesh to all of them and each node mesh
+    // to its share, in proportion to its own count (at least 4, at most what
+    // it has). Every simplified mesh then gets recomputed normals, at
+    // smoothingAngle, whichever `normals` says. 0 keeps every triangle.
+    int targetTriangles = 0;
+    // The baked mesh's triangles before targetTriangles, as the editor last
+    // imported it (for the inspector; saved only with a target). 0: unknown.
+    int sourceTriangles = 0;
     // Objects the editor makes from the model: one object drawing the baked
     // mesh instead of the node tree, and these on each mesh component.
     bool mergeMeshes = false;
@@ -108,6 +118,8 @@ std::string importName(const std::filesystem::path& file);
 // `settings` then apply in the .mesh space: an up axis other than File turns
 // the model (Z up: -90 degrees about X, so +Z becomes +Y), scale multiplies
 // every position and node translation, and Recompute replaces the normals.
+// Then targetTriangles simplifies the meshes, with a warning when seams stop
+// it above the target and when it replaced normals the file had.
 // The outputs are named after `as` (see importName) when it is given, so a
 // model read from where it was dropped is named after its copy in the project.
 // With `progress`, importModel reports how far it is (`fraction`, 0 to 1, as

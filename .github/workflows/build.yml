@@ -484,6 +484,14 @@ jobs:
           else
             tar czf "splashedit-$(echo ${{ runner.os }} | tr A-Z a-z).tar.gz" splashedit
           fi
+      # The packaged NOPARSER engine runs Lua this editor compiled: boots it in the packaged
+      # pcsx-redux (with the OpenBIOS that build carries) and checks what the script prints.
+      - name: Host-compiled Lua on the packaged engine
+        if: runner.os == 'Linux'
+        run: |
+          LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/luabootcheck.py \
+            build/cli/splashpack-cli splashedit/engine/psxsplash.ps-exe splashedit/redux/pcsx-redux \
+            splashedit/redux/pcsx-redux.AppDir/usr/share/pcsx-redux/resources/openbios.bin
       - uses: actions/upload-artifact@v4
         with:
           name: splashedit-${{ runner.os }}

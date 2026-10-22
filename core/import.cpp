@@ -218,6 +218,7 @@ void addFlatTriangle(Mesh& mesh, std::vector<int>& sm, int c0, int c1, int c2, b
 // texture so an image shared by several materials is written once; `load`
 // returns its encoded bytes, or nothing when the file cannot be found.
 struct SourceMaterial {
+    std::string name;  // as the file names it
     std::array<float, 4> color{1, 1, 1, 1};
     const void* image = nullptr;
     std::function<std::optional<std::vector<unsigned char>>()> load;
@@ -800,7 +801,10 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
         }
         byIndex.push_back(outMat);
     }
-    for (int i : baked.materials) out.materials.push_back(byIndex[size_t(i)]);
+    for (int i : baked.materials) {
+        out.materials.push_back(byIndex[size_t(i)]);
+        out.materialNames.push_back(mats[size_t(i)].name);
+    }
 
     checkpoint(0.8f);
     fs::path meshFile = dir / (stem + ".mesh");
@@ -856,7 +860,10 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
             fs::path file = nodeDir / (name + ".mesh");
             saveMesh(nb.local->mesh, project / file);
             node.mesh = projectPath(file);
-            for (int i : nb.local->materials) node.materials.push_back(byIndex[size_t(i)]);
+            for (int i : nb.local->materials) {
+                node.materials.push_back(byIndex[size_t(i)]);
+                node.materialNames.push_back(mats[size_t(i)].name);
+            }
         }
         out.nodes.push_back(std::move(node));
     }
@@ -1171,6 +1178,7 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
     std::vector<SourceMaterial> mats;
     for (const cgltf_material* mat : materialOf) {
         SourceMaterial sm;
+        if (mat && mat->name) sm.name = mat->name;
         const cgltf_texture* t = nullptr;
         if (mat && mat->has_pbr_metallic_roughness) {
             const float* c = mat->pbr_metallic_roughness.base_color_factor;
@@ -1433,6 +1441,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     for (const ufbx_material* mat : materialOf) {
         SourceMaterial sm;
         if (mat) {
+            sm.name.assign(mat->name.data, mat->name.length);
             const ufbx_material_map& base = mat->pbr.base_color;
             if (base.has_value) {
                 float f = mat->pbr.base_factor.has_value ? float(mat->pbr.base_factor.value_real) : 1.0f;

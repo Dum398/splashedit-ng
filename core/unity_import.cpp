@@ -1646,6 +1646,15 @@ ModelAsset* Importer::model(const std::string& guid, const std::string& path) {
                     s.scale = float((*meshes)["globalScale"].num(1));
                     ma->preserveHierarchy = (*meshes)["preserveHierarchy"].flag(false);
                 }
+        // The .meta's material remaps (the Materials tab's On Demand Remap,
+        // or Search and Remap): a model material, by its name, drawn with a
+        // project material instead.
+        std::map<std::string, Ref> remap;
+        for (const YDoc& d : parseYaml(readText(fs::path(src) += ".meta")))
+            if (const YNode* mi = d.body.find("ModelImporter"))
+                for (const YNode& e : (*mi)["externalObjects"].seq)
+                    if (e["first"]["type"].str() == "UnityEngine:Material")
+                        remap[e["first"]["name"].str()] = refOf(e["second"]);
         for (const YDoc& d : parseYaml(readText(fs::path(src) += ".meta")))
             if (const YNode* mi = d.body.find("ModelImporter"))
                 if (const YNode* an = mi->find("animations"))
@@ -1654,6 +1663,13 @@ ModelAsset* Importer::model(const std::string& guid, const std::string& path) {
                                                     c["loopTime"].flag(false), c["firstFrame"].integer(0)});
         saveImportSettings(copy, s);
         ma->model = importModel(copy, m_dest, s);
+        auto remapped = [&](std::vector<Material>& mats, const std::vector<std::string>& names) {
+            for (size_t i = 0; i < mats.size() && i < names.size(); ++i)
+                if (auto it = remap.find(names[i]); it != remap.end() && extOf(m_index.path(it->second.guid)) == ".mat")
+                    mats[i] = materialOf(it->second, path);
+        };
+        remapped(ma->model.materials, ma->model.materialNames);
+        for (ImportedNode& n : ma->model.nodes) remapped(n.materials, n.materialNames);
         ma->ids = metaIds(fs::path(src) += ".meta");
         ++m_report.meshes;
         m_report.textures += int(ma->model.textures.size());
@@ -1740,9 +1756,13 @@ std::optional<MeshComponent> Importer::meshOf(const UObj& o, const UComp* mf, co
     for (size_t k = 0; k < subs; ++k) {
         Ref r;
         if (k < mats.size()) r = refOf(mats[k]);
-        if (auto ov = o.matOverrides.find(int(k)); ov != o.matOverrides.end()) r = ov->second;
+        // A placed model's renderer lives in the model, so a material set in
+        // the scene is only an override; it beats the model's own.
+        const auto ov = o.matOverrides.find(int(k));
+        const bool overridden = ov != o.matOverrides.end();
+        if (overridden) r = ov->second;
         const bool embedded = !r.guid.empty() && extOf(m_index.path(r.guid)) != ".mat";
-        if ((!mr && k < modelMats.size()) || (embedded && k < modelMats.size())) mc.materials.push_back(modelMats[k]);
+        if ((!mr && !overridden && k < modelMats.size()) || (embedded && k < modelMats.size())) mc.materials.push_back(modelMats[k]);
         else mc.materials.push_back(materialOf(r, path));
     }
     return mc;

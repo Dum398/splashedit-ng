@@ -18,8 +18,9 @@ fixture = os.path.join(here, 'skin')
 fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 W = lambda n: ['--wait', str(n)]
-# Scrolls the inspector to its end, where the Agent section is.
-DOWN = ['--wheel', '1420,600,-30'] + W(4)
+# Scrolls the inspector to its end, where the Agent section is: to its last
+# control, as Arm's Flat colour row makes the inspector taller.
+DOWN = ['--scroll-to', '@obj.aglua'] + W(4)
 
 
 def check(name, ok, detail=''):

@@ -20,6 +20,9 @@ enum class VertexColorMode : uint8_t { Baked, Flat, Mesh };
 enum class ColliderKind : uint8_t { None, Static, Dynamic };
 enum class LightKind : uint8_t { Directional, Point, Spot };
 enum class DynamicLighting : uint8_t { Auto, On, Off, Smooth };
+// A shadow under the object on the console (core/shadow.hh). Silhouette is
+// reserved in the splashpack (mode 2).
+enum class ShadowMode : uint8_t { Off, Blob };
 enum class SceneType : uint8_t { Exterior = 0, Interior = 1 };
 enum class NavPartition : uint8_t { Watershed = 0, Monotone = 1, Layer = 2 };
 
@@ -54,6 +57,9 @@ struct MeshComponent {
     int uvOffsetMaterial = 0;
     // Auto: lit by runtime lights whose range reaches the mesh bounds.
     DynamicLighting dynamicLighting = DynamicLighting::Auto;
+    ShadowMode shadow = ShadowMode::Off;
+    float shadowSize = 0.5f;     // blob radius on the floor, metres
+    float shadowDarkness = 60;   // percent taken off the floor at the centre
     ExtraKeys extra;
 };
 

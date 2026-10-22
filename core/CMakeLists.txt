@@ -89,6 +89,7 @@ add_library(splashcore STATIC
     splashpack.cpp
     worldstream.cpp
     luacompile.cpp
+    luascan.cpp
     import.cpp
     unity_import.cpp
     gpudump.cpp

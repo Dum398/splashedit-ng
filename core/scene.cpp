@@ -65,6 +65,8 @@ const std::initializer_list<std::pair<const char*, DynamicLighting>> kDynamicLig
     {"on", DynamicLighting::On},
     {"off", DynamicLighting::Off},
     {"smooth", DynamicLighting::Smooth}};
+const std::initializer_list<std::pair<const char*, ShadowMode>> kShadowModes = {{"off", ShadowMode::Off},
+                                                                                  {"blob", ShadowMode::Blob}};
 const std::initializer_list<std::pair<const char*, SceneType>> kSceneTypes = {
     {"exterior", SceneType::Exterior}, {"interior", SceneType::Interior}};
 const std::initializer_list<std::pair<const char*, NavPartition>> kPartitions = {
@@ -133,6 +135,11 @@ json writeMesh(const MeshComponent& m) {
               {"smoothNormals", m.smoothNormals},
               {"uvOffsetMaterial", m.uvOffsetMaterial},
               {"dynamicLighting", enumTo(m.dynamicLighting, kDynamicLighting)}};
+    // Written only when not the default, so scenes without shadows keep their bytes.
+    const MeshComponent def;
+    if (m.shadow != def.shadow) j["shadow"] = enumTo(m.shadow, kShadowModes);
+    if (m.shadowSize != def.shadowSize) j["shadowSize"] = m.shadowSize;
+    if (m.shadowDarkness != def.shadowDarkness) j["shadowDarkness"] = m.shadowDarkness;
     putExtras(j, m.extra);
     return j;
 }
@@ -294,7 +301,15 @@ Object readObject(const json& j) {
             m.smoothNormals = c.value("smoothNormals", true);
             m.uvOffsetMaterial = c.value("uvOffsetMaterial", 0);
             if (c.contains("dynamicLighting")) m.dynamicLighting = enumFrom(c["dynamicLighting"], kDynamicLighting);
-            m.extra = extrasOf(c, writeMesh(m));
+            if (c.contains("shadow")) m.shadow = enumFrom(c["shadow"], kShadowModes);
+            m.shadowSize = c.value("shadowSize", m.shadowSize);
+            m.shadowDarkness = c.value("shadowDarkness", m.shadowDarkness);
+            {
+                // The shadow keys are the mesh's own even when they hold the default.
+                json written = writeMesh(m);
+                for (const char* k : {"shadow", "shadowSize", "shadowDarkness"}) written[k] = nullptr;
+                m.extra = extrasOf(c, written);
+            }
             o.mesh = m;
         } else if (type == "collider") {
             ColliderComponent cc;

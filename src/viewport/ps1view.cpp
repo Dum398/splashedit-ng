@@ -116,6 +116,7 @@ uniform int uClean;
 uniform vec3 uFog;
 uniform float uFogScale;  // grows with the orbit distance, so a big world is not all fog
 uniform float uFogFar;    // > 0: the scene's fog wall, in view depth
+uniform float uEdgeFar;   // > 0: the edge fade's edge, in view depth
 out vec4 oColor;
 const float kDither[16] = float[16](-4, 0, -3, 1, 2, -2, 3, -1, -3, 1, -4, 0, 3, -1, 2, -2);
 void main() {
@@ -124,13 +125,18 @@ void main() {
     vec4 t = texture(uTex, fract(uv));
     if (t.a < 0.5) discard;
     vec3 c = t.rgb * vCol * 2.0;
+    float fade;
     if (uFogFar > 0.0) {
         float fogNear = uFogFar * 0.125;
-        c = mix(c, uFog, clamp((vDepth - fogNear) / (uFogFar - fogNear), 0.0, 1.0));
+        fade = clamp((vDepth - fogNear) / (uFogFar - fogNear), 0.0, 1.0);
     } else {
-        float fog = clamp((vDepth - 10.0 * uFogScale) / (22.0 * uFogScale), 0.0, 1.0);
-        c = mix(c, uFog, fog * 0.85);
+        fade = clamp((vDepth - 10.0 * uFogScale) / (22.0 * uFogScale), 0.0, 1.0) * 0.85;
     }
+    if (uEdgeFar > 0.0) {
+        float edgeNear = uEdgeFar * 0.875;
+        fade = max(fade, clamp((vDepth - edgeNear) / (uEdgeFar - edgeNear), 0.0, 1.0));
+    }
+    c = mix(c, uFog, fade);
     if (uClean == 0) {
         ivec2 p = ivec2(gl_FragCoord.xy) & 3;
         vec3 v = floor(clamp(c * 255.0 + kDither[p.y * 4 + p.x], 0.0, 255.0));
@@ -488,12 +494,17 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     const splash::SceneSettings* set = m_doc ? &m_doc->scene().settings : nullptr;
     const bool sceneBackground = set && !m_ortho;
     const bool sceneFog = sceneBackground && set->fog.enabled;
-    float fog[3] = {0.10f, 0.11f, 0.17f}, fogFar = 0;
+    float fog[3] = {0.10f, 0.11f, 0.17f}, fogFar = 0, edgeFar = 0;
     if (sceneBackground)
         for (int i = 0; i < 3; i++) fog[i] = std::clamp(set->fog.color[i], 0.0f, 1.0f);
-    if (sceneFog) {
-        const float gte = set->gteScaling > 0 ? set->gteScaling : 100.f;
-        fogFar = 20000.0f / float(std::clamp(set->fog.density, 1, 10)) * gte / 4096.0f;
+    const float gte = set && set->gteScaling > 0 ? set->gteScaling : 100.f;
+    if (sceneFog) fogFar = 20000.0f / float(std::clamp(set->fog.density, 1, 10)) * gte / 4096.0f;
+    // The edge fade (psxsplash fade.hh edgeDepth): the last eighth of the way
+    // to the nearer of the draw distance (the largest screen Z is 65535) and
+    // the fog wall. Unknown draw distance and no fog: no edge to show.
+    if (sceneBackground && set->edgeFade) {
+        if (m_drawDistance) edgeFar = float(std::min<uint32_t>(m_drawDistance, 65535)) * gte / 4096.0f;
+        if (fogFar > 0 && (edgeFar == 0 || fogFar < edgeFar)) edgeFar = fogFar;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
     glViewport(0, 0, w, h);
@@ -529,6 +540,7 @@ unsigned Ps1View::render(int panelW, int panelH, int lines) {
     glUniform3f(glGetUniformLocation(m_prog, "uFog"), fog[0], fog[1], fog[2]);
     glUniform1f(glGetUniformLocation(m_prog, "uFogScale"), viewScale());
     glUniform1f(glGetUniformLocation(m_prog, "uFogFar"), fogFar);
+    glUniform1f(glGetUniformLocation(m_prog, "uEdgeFar"), edgeFar);
     glUniform1i(glGetUniformLocation(m_prog, "uTex"), 0);
     glActiveTexture_(GL_TEXTURE0);
     glBindVertexArray(m_vao);

@@ -572,6 +572,7 @@ json writeSettings(const SceneSettings& st) {
     if (st.orderingTableSize) j["orderingTableSize"] = st.orderingTableSize;
     if (st.bumpAllocatorSize) j["bumpAllocatorSize"] = st.bumpAllocatorSize;
     if (st.streamWorld) j["streamWorld"] = true;
+    if (!st.edgeFade) j["edgeFade"] = false;
     if (!st.loadingCanvas.empty()) j["loadingCanvas"] = st.loadingCanvas;
     if (json mc = writeMemCard(st.memCard); !mc.empty()) j["memCard"] = mc;
     putExtras(j, st.extra);
@@ -1097,11 +1098,14 @@ Scene loadScene(const fs::path& file) {
         s.settings.orderingTableSize = st.value("orderingTableSize", 0);
         s.settings.bumpAllocatorSize = st.value("bumpAllocatorSize", 0);
         s.settings.streamWorld = st.value("streamWorld", false);
+        s.settings.edgeFade = st.value("edgeFade", true);
         s.settings.loadingCanvas = st.value("loadingCanvas", "");
         if (st.contains("memCard")) s.settings.memCard = readMemCard(st["memCard"]);
         s.settings.extra = extrasOf(st, writeSettings(s.settings));
         // A memCard left at its defaults is not written back.
         std::erase_if(s.settings.extra, [](const auto& e) { return e.first == "memCard"; });
+        // Nor is an explicit "edgeFade": true (the default).
+        std::erase_if(s.settings.extra, [](const auto& e) { return e.first == "edgeFade"; });
     }
     for (const json& oj : j.value("objects", json::array())) s.objects.push_back(readObject(oj));
     for (const json& fj : j.value("fonts", json::array())) s.fonts.push_back(readFont(fj));

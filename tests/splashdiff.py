@@ -27,7 +27,7 @@ HEADER = [  # (name, fmt) in order, 160 bytes (v28+); 156 in v25-v27, 148 in v24
     ("navPortalCount", "H"), ("moveSpeed", "H"), ("sprintSpeed", "H"), ("jumpVelocity", "H"),
     ("gravity", "H"), ("playerRadius", "H"), ("fogMaskClut4", "H"), ("nameTableOffset", "I"),
     ("audioClipCount", "H"), ("fogMaskClut8", "H"), ("audioTableOffset", "I"), ("fogEnabled", "B"),
-    ("fogRGB", "3B"), ("fogDensity", "B"), ("pad3", "B"), ("roomCount", "H"), ("portalCount", "H"),
+    ("fogRGB", "3B"), ("fogDensity", "B"), ("renderFlags", "B"), ("roomCount", "H"), ("portalCount", "H"),
     ("roomTriRefCount", "H"), ("cutsceneCount", "H"), ("roomCellCount", "H"), ("cutsceneTableOffset", "I"),
     ("uiCanvasCount", "H"), ("uiFontCount", "B"), ("uiPad5", "B"), ("uiTableOffset", "I"),
     ("pixelDataOffset", "I"), ("animationCount", "H"), ("roomPortalRefCount", "H"),

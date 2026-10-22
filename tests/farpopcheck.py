@@ -1,6 +1,6 @@
 # "Far scenery pops in", driven through the GUI. A courtyard copy made into
 # tests/boot/walk.sh's world (floor 25 times larger, world streaming on) with
-# fog off: the draw distance is then a hard edge, and the export says so. Run
+# fog and the edge fade off: the draw distance is then a hard edge, and the export says so. Run
 # one: the Problems popup lists the warning and the scene inspector draws it
 # as a card ("stream: streamwarnN <title>" names which). Run two: scroll to
 # that card, press its "Turn fog on", save with Ctrl+S: fog is on at density 3,
@@ -36,6 +36,7 @@ def world(fog):
                 c['transform']['scale'] = [25.0, 1.0, 25.0]
     d['settings']['streamWorld'] = True
     d['settings']['fog'] = {'enabled': fog, 'color': [0.5, 0.5, 0.6], 'density': 10 if fog else 5}
+    d['settings']['edgeFade'] = False  # on, the edge is not hard and there is no warning
     json.dump(d, open(scene, 'w', encoding='utf-8'), indent=2)
     return project, scene
 

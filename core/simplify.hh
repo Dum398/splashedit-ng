@@ -24,8 +24,14 @@ struct SimplifyResult {
 // input's normals at that corner, so a caller wanting correct shading
 // recomputes them. Submeshes keep their order; one can end up empty. Unused
 // vertices are dropped. `target` <= 0 or at least the input's count leaves
-// the mesh as it is. A connected part (by position) can collapse away whole;
+// the mesh as it is. Collapses can leave slivers (three corners on a line,
+// see degenerateTriangle): those are dropped, and `after` counts without them.
+// A connected part (by position) can collapse away whole;
 // `partsRemoved` counts those that had more than 4 triangles.
 SimplifyResult simplifyToTriangles(Mesh& mesh, int target);
+
+// A triangle with no area to speak of: its height is under a millionth of
+// its longest edge (three corners on a line, or two on top of each other).
+bool degenerateTriangle(Vec3 a, Vec3 b, Vec3 c);
 
 }  // namespace splash

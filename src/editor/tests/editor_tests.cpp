@@ -4170,13 +4170,26 @@ splash::Mesh simplifyGrid(int w, int h, int split, bool flat, bool skin) {
     return m;
 }
 
+// True when no triangle of `m` is a sliver (degenerateTriangle).
+bool noSlivers(const splash::Mesh& m) {
+    for (const std::vector<int>& sm : m.submeshes)
+        for (size_t i = 0; i + 2 < sm.size(); i += 3)
+            if (splash::degenerateTriangle(m.positions[size_t(sm[i])], m.positions[size_t(sm[i + 1])], m.positions[size_t(sm[i + 2])]))
+                return false;
+    return true;
+}
+
 void testSimplifyToTriangles() {
+    CHECK(splash::degenerateTriangle({0, 0, 0}, {0.5f, 0, 0}, {1, 0, 0}) && splash::degenerateTriangle({0, 0, 0}, {0, 0, 0}, {0, 1, 0}));
+    CHECK(splash::degenerateTriangle({-0.9f, 0.1f, 0}, {-1.1f, 0.2f, 0}, {-1.3f, 0.3f, 0}));
+    CHECK(!splash::degenerateTriangle({0, 0, 0}, {1, 0, 0}, {0, 0.001f, 0}));
     // Shared vertices, two submeshes: the target is met, every vertex is
     // used, the material boundary (x 20) and the open border stay put, and
     // each vertex keeps its own UV.
     splash::Mesh g = simplifyGrid(40, 40, 20, false, false);
     splash::SimplifyResult r = splash::simplifyToTriangles(g, 400);
     CHECK(r.before == 3200 && r.after <= 400 && r.after >= 100);
+    CHECK(noSlivers(g));  // collapses on a flat grid leave corners on a line; those triangles go
     CHECK(g.submeshes.size() == 2 && !g.submeshes[0].empty() && !g.submeshes[1].empty());
     CHECK(int(g.submeshes[0].size() + g.submeshes[1].size()) == r.after * 3);
     std::set<int> used;
@@ -4215,6 +4228,7 @@ void testSimplifyToTriangles() {
     CHECK(flat.positions.size() == 9600);
     r = splash::simplifyToTriangles(flat, 400);
     CHECK(r.after <= 400 && r.after >= 100 && flat.positions.size() < 1000);
+    CHECK(noSlivers(flat));
     CHECK(!r.permissive);
 
     // A target at or above the count, or 0, leaves the mesh as it was.
@@ -4290,7 +4304,7 @@ void testImportTargetTriangles() {
         return n;
     };
     const splash::Mesh baked = splash::loadMesh(proj / some.mesh);
-    CHECK(int(tris(baked)) == some.triangles);
+    CHECK(int(tris(baked)) == some.triangles && noSlivers(baked));
     bool normals = !baked.normals.empty();
     for (const splash::Vec3& n : baked.normals) normals = normals && near(std::fabs(n.z), 1);
     CHECK(normals);
@@ -4302,6 +4316,17 @@ void testImportTargetTriangles() {
                       [](const std::string& w) { return w.find("recomputed normals") != std::string::npos; }));
     CHECK(std::none_of(some.warnings.begin(), some.warnings.end(),
                        [](const std::string& w) { return w.find("not the target") != std::string::npos; }));
+
+    // Recomputed normals ignore a sliver: a flat quad with a zero-area
+    // triangle along one edge still faces one way at every corner.
+    std::ofstream(dir / "sliver.obj") << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0.5 0 0\nf 1 2 3\nf 1 3 4\nf 1 5 2\n";
+    splash::ImportSettings rn;
+    rn.normals = splash::Normals::Recompute;
+    splash::ImportedModel sliver = splash::importModel(dir / "sliver.obj", proj, rn);
+    const splash::Mesh sm = splash::loadMesh(proj / sliver.mesh);
+    bool facing = sm.normals.size() == sm.positions.size() && !sm.normals.empty();
+    for (const splash::Vec3& n : sm.normals) facing = facing && near(std::fabs(n.z), 1);
+    CHECK(sliver.triangles == 3 && facing);
 
     // Every triangle its own UV island: nothing can collapse without tearing
     // the texture, so the import says how far it got.

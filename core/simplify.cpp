@@ -160,6 +160,18 @@ int partsRemoved(const Welded& w, const std::vector<unsigned int>& out) {
 
 }  // namespace
 
+bool degenerateTriangle(Vec3 a, Vec3 b, Vec3 c) {
+    // In double, so the answer does not hang on float rounding or contraction.
+    const double u[3] = {double(b.x) - a.x, double(b.y) - a.y, double(b.z) - a.z};
+    const double v[3] = {double(c.x) - a.x, double(c.y) - a.y, double(c.z) - a.z};
+    const double w[3] = {double(c.x) - b.x, double(c.y) - b.y, double(c.z) - b.z};
+    const double x = u[1] * v[2] - u[2] * v[1], y = u[2] * v[0] - u[0] * v[2], z = u[0] * v[1] - u[1] * v[0];
+    auto len2 = [](const double* d) { return d[0] * d[0] + d[1] * d[1] + d[2] * d[2]; };
+    const double longest2 = std::max({len2(u), len2(v), len2(w)});
+    // |u x v| = longest * height; height <= 1e-6 * longest.
+    return x * x + y * y + z * z <= 1e-12 * longest2 * longest2;
+}
+
 // The recipe is meshoptimizer's README ("Simplification", "Attribute-aware
 // simplification", "Permissive simplification"). Identical vertices are
 // welded so the simplifier sees the real topology; the normal is left out of
@@ -182,6 +194,16 @@ SimplifyResult simplifyToTriangles(Mesh& mesh, int target) {
         if (loose.size() < out.size()) out = std::move(loose), r.error = error, r.permissive = true;
     }
 
+    // Slivers left by collapses (corners on a line) cover nothing and have no
+    // normal: drop them.
+    {
+        auto at = [&](unsigned int v) { return Vec3{w.verts[v].p[0], w.verts[v].p[1], w.verts[v].p[2]}; };
+        size_t kept = 0;
+        for (size_t t = 0; t + 2 < out.size(); t += 3)
+            if (!degenerateTriangle(at(out[t]), at(out[t + 1]), at(out[t + 2])))
+                for (size_t k = 0; k < 3; k++) out[kept++] = out[t + k];
+        out.resize(kept);
+    }
     r.partsRemoved = partsRemoved(w, out);
 
     // Back to a Mesh: the vertices still used, in order of first use, and each

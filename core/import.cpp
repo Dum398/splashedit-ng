@@ -439,7 +439,10 @@ void recomputeNormals(Mesh& mesh, float degrees) {
     };
     for (size_t t = 0; t < tris.size(); t++) {
         const Vec3 p[3] = {mesh.positions[size_t(tris[t][0])], mesh.positions[size_t(tris[t][1])], mesh.positions[size_t(tris[t][2])]};
-        face[t] = unit(cross(p[1] - p[0], p[2] - p[0]));
+        // A sliver (three corners on a line) has no direction of its own: a
+        // zero face normal, so it neither shades its neighbours nor takes a
+        // made-up one (unit() of a zero vector is +Y).
+        face[t] = degenerateTriangle(p[0], p[1], p[2]) ? Vec3{} : unit(cross(p[1] - p[0], p[2] - p[0]));
         for (int c = 0; c < 3; c++) {
             Vec3 a = p[(c + 1) % 3] - p[c], b = p[(c + 2) % 3] - p[c];
             float la = magnitude(a), lb = magnitude(b);
@@ -459,9 +462,17 @@ void recomputeNormals(Mesh& mesh, float degrees) {
             for (int c = 0; c < 3; c++) {
                 const int v = tris[t][size_t(c)];
                 Vec3 sum{};
+                const bool sliver = sqrMagnitude(face[t]) == 0;  // takes the faces around it, any angle
                 for (auto [u, cu] : around[key(v)])
-                    if (dot(face[u], face[t]) >= limit) sum = sum + face[u] * angle[u][size_t(cu)];
-                Vec3 n = sqrMagnitude(sum) > 0 ? unit(sum) : face[t];
+                    if (sliver || dot(face[u], face[t]) >= limit) sum = sum + face[u] * angle[u][size_t(cu)];
+                // A sliver corner with no face of its own around it (a vertex
+                // only the sliver uses) takes the faces around the sliver's other corners.
+                if (sliver && sqrMagnitude(sum) == 0)
+                    for (int k = 1; k < 3; k++)
+                        for (auto [u, cu] : around[key(tris[t][size_t((c + k) % 3)])]) sum = sum + face[u] * angle[u][size_t(cu)];
+                Vec3 n = face[t];
+                if (sqrMagnitude(sum) > 0) n = unit(sum);
+                else if (sliver) n = size_t(v) < mesh.normals.size() ? mesh.normals[size_t(v)] : Vec3{0, 1, 0};
                 auto [it, fresh] = made.try_emplace({v, n.x, n.y, n.z}, int(out.positions.size()));
                 if (fresh) {
                     out.positions.push_back(mesh.positions[size_t(v)]);

@@ -24,6 +24,7 @@
 #include "editor/model_import.hh"
 #include "editor/texture_preview_view.hh"
 #include "editor/lua_editor_view.hh"
+#include "editor/terrain_edit.hh"
 #include "editor/tilemap_view.hh"
 #include "editor/ui_canvas_view.hh"
 #include "editor/linkplay.hh"
@@ -367,6 +368,11 @@ struct State {
         splash::Vec3 start, startHit;
     } agentWp;
     int agentWpHot = -1;  // the waypoint dot under the mouse or being dragged
+    // Terrain sculpting in the Scene view while a terrain is selected:
+    // terrainTool is -1 (off) or a splash::TerrainTool.
+    int terrainTool = -1;
+    splash::TerrainBrush terrainBrush;
+    editor::TerrainStroke terrainStroke;
 
     // Lua files open in the script editor, as tabs beside the Scene and UI.
     ui::ScriptTabs scripts;

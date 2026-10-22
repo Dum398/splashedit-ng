@@ -5359,6 +5359,104 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         }
     }
 
+    // Terrain brushes: a tool row under the transform tools while a terrain
+    // is selected; with a tool on, the brush circle follows the mouse over
+    // the terrain and a held button sculpts or paints (one undo step per stroke).
+    if (sel && sel->terrain && !previewing && doc.selection()) {
+        const editor::ObjectPath tpath = *doc.selection();
+        dl->ChannelsSetCurrent(kChrome);
+        const char* bIcons[5] = {icon::arrowUp, icon::arrowDown, icon::wand, icon::minus, icon::pencil};
+        const char* bTips[5] = {"Raise terrain", "Lower terrain", "Smooth terrain", "Flatten to the height where the stroke starts",
+                                "Paint the layer picked in the inspector"};
+        const ImVec2 tp = p + ImVec2(0, 40);
+        ImRect trow(tp, tp + ImVec2(5 * 30 + 4, 32));
+        dl->AddRectFilled(trow.Min, trow.Max, rgb(0x0e1014, 210), radius::button + 2);
+        dl->AddRect(trow.Min, trow.Max, rgb(0xffffff, 14), radius::button + 2);
+        nameRect("vp.terraintools", trow);
+        static const char* const kToolNames[5] = {"raise", "lower", "smooth", "flatten", "paint"};
+        for (int i = 0; i < 5; ++i) {
+            ImGui::PushID(100 + i);
+            const ImRect br(ImVec2(tp.x + 2 + i * 30, tp.y + 2), ImVec2(tp.x + 2 + i * 30 + 30, tp.y + 30));
+            nameRect(std::string("vp.terrain.") + kToolNames[i], br);
+            if (iconButton("ttool", br, bIcons[i], st.terrainTool == i, bTips[i])) st.terrainTool = st.terrainTool == i ? -1 : i;
+            ImGui::PopID();
+        }
+        static int lastTool = -2;
+        if (namedRectsOn() && lastTool != st.terrainTool) {
+            lastTool = st.terrainTool;
+            std::printf("terrain: tool %s\n", st.terrainTool < 0 ? "off" : kToolNames[st.terrainTool]);
+            std::fflush(stdout);
+        }
+        if (st.terrainTool >= 0) {
+            ImGuiContext& g = *GImGui;
+            ImGuiIO& io = ImGui::GetIO();
+            const ImGuiID wid = ImGui::GetID("##terrainbrush");
+            editor::TerrainStroke& ts = st.terrainStroke;
+            const bool active = g.ActiveId == wid && ts.active;
+            if (active) ImGui::KeepAliveID(wid);
+            viewport::Vec3 ro, rd;
+            view.ray(io.MousePos, r.Min, r.GetSize(), &ro, &rd);
+            const splash::Vec3 wo{ro.x, ro.y, -ro.z}, wd{rd.x, rd.y, -rd.z};
+            std::optional<splash::Vec3> hit;
+            if (r.Contains(io.MousePos)) hit = editor::terrainHit(doc, tpath, wo, wd);
+            splash::TerrainBrush brush = st.terrainBrush;
+            brush.tool = splash::TerrainTool(st.terrainTool);
+            bool started = false;
+            if (hit && (active || gizmoMayHover(false, r))) {
+                ImGui::SetHoveredID(wid);
+                if (!active && ImGui::IsMouseClicked(0)) {
+                    editor::beginTerrainStroke(ts, doc, tpath, brush, *hit);
+                    ImGui::SetActiveID(wid, g.CurrentWindow);
+                    editor::stepTerrainStroke(ts, doc, *hit, 1.f / 60.f);
+                    started = true;
+                }
+            }
+            if (started) {
+            } else if (g.ActiveId == wid && ts.active) {
+                if (ImGui::IsMouseDown(0)) {
+                    if (hit) editor::stepTerrainStroke(ts, doc, *hit, io.DeltaTime);
+                } else {
+                    if (namedRectsOn()) {
+                        std::printf("terrain: stroke %s steps %d\n", kToolNames[int(ts.brush.tool)], ts.steps);
+                        std::fflush(stdout);
+                    }
+                    editor::endTerrainStroke(ts, doc);
+                    ImGui::ClearActiveID();
+                }
+            } else if (ts.active) {
+                editor::endTerrainStroke(ts, doc);
+            }
+            // The brush circle on the ground, its inner (full strength) ring dimmer.
+            const splash::Object* so = doc.selected();
+            const splash::FlatObject* sfo = nullptr;
+            for (const splash::FlatObject& fo : flats)
+                if (fo.object == so) sfo = &fo;
+            if (hit && sfo && so && so->terrain) {
+                dl->ChannelsSetCurrent(kScene);
+                const splash::Vec3 lc = splash::inverseTransformPoint(sfo->localToWorld, *hit);
+                auto ring = [&](float rad, ImU32 col, float thick) {
+                    if (rad <= 0) return;
+                    ImVec2 pts[64];
+                    int n = 0;
+                    for (int k = 0; k < 64; k++) {
+                        const float a = float(k) / 64.f * 6.2831853f;
+                        const float lx = lc.x + std::cos(a) * rad, lz = lc.z + std::sin(a) * rad;
+                        const splash::Vec3 wp = sfo->localToWorld.point({lx, splash::terrainHeightAt(*so->terrain, lx, lz) + 0.02f, lz});
+                        ImVec2 sp;
+                        if (!view.project(toGl(wp), mn, sz, &sp)) return;
+                        pts[n++] = sp;
+                    }
+                    dl->AddPolyline(pts, n, col, ImDrawFlags_Closed, thick);
+                };
+                const ImU32 bc = st.terrainTool == int(splash::TerrainTool::Lower) ? color::bad : kind::terrain;
+                ring(brush.radius, bc, 2.0f);
+                ring(brush.radius * (1 - std::clamp(brush.falloff, 0.f, 1.f)), (bc & 0x00ffffffu) | (110u << IM_COL32_A_SHIFT), 1.2f);
+            }
+        }
+    } else if (st.terrainStroke.active) {
+        editor::endTerrainStroke(st.terrainStroke, doc);
+    }
+
     // Blob shadows on the floor, under the selection outline and the gizmo.
     if (st.gizmos) {
         dl->ChannelsSetCurrent(kScene);
@@ -5393,7 +5491,8 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                     st.gizmo.handle = -1;
                 }
                 // Content of a prefab instance does not move here: no handles.
-                if (!posed && st.tool >= 1 && st.tool <= 3 && !doc.inInstance(*doc.selection())) {
+                const bool sculpting = fo.object->terrain && st.terrainTool >= 0;
+                if (!posed && !sculpting && st.tool >= 1 && st.tool <= 3 && !doc.inInstance(*doc.selection())) {
                     const splash::Object* par = doc.parent(*doc.selection());
                     const splash::Mat34* parentToWorld = nullptr;
                     for (const splash::FlatObject& pf : flats)
@@ -8878,6 +8977,14 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         fold(section("s_mesh", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::box, kind::mesh, "Mesh", true, true, true,
                      removeFlag(editor::ComponentKind::Mesh)));
         y += 34 + space::xs;
+        if (o->terrain) {
+            // A terrain draws the mesh its grid builds; its materials are the layers.
+            const ImRect modelRow = row("lmodel", "Model", "Built from the Terrain grid below: sculpt it in the Scene view.");
+            const std::string tt = std::to_string(splash::terrainTriangles(*o->terrain)) + " tris";
+            slotField(st, -1, path, "model", modelRow, icon::layers, kind::terrain, "Terrain grid", tt.c_str());
+            st.modelField = ImRect();
+            st.modelFieldPath = path;
+        } else {
         const ImRect modelRow = row("lmodel", "Model", "The 3D model to draw. Click to pick a .glb, .gltf, .fbx, .obj or .blend file (.blend needs Blender installed), or drop one here.");
         bool pickModel = slotField(st, -1, path, "model", modelRow, icon::box, meshSt == editor::AssetStatus::Ok ? kind::mesh : color::warn,
                                     modelName.c_str(), tris.empty() ? nullptr : tris.c_str());
@@ -8894,6 +9001,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             }
             static const SDL_DialogFileFilter modelFilter[] = {{"Models", "glb;gltf;fbx;obj;blend"}};
             ui::showOpenFileDialog("model", onModelPicked, nullptr, modelFilter, 1, nullptr, false);
+        }
         }
         // An untextured material's tint, from a colour well and its picker
         // (named obj.matcol.<i> and obj.matcolpick.<i>); a drag is one undo step.
@@ -9671,6 +9779,188 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         nameRect("obj.rstats", sr);
         text(dl, ImVec2(sr.Min.x, centerY(f.regular, type::body, sr.Min.y, sr.Max.y)), f.regular, type::body, tone, line.c_str());
         report("room", "room: " + o->name + " " + line);
+        sectionEnd(top);
+    }
+    if (o->terrain) {
+        // Copies: the edits below go through doc.edit and may move the object.
+        const splash::TerrainComponent tc = *o->terrain;
+        const std::vector<splash::Material> mats = o->mesh ? o->mesh->materials : std::vector<splash::Material>{};
+        const std::string name = o->name;
+        const bool editableHere = o->prefab.empty() && !doc.inInstance(path);
+        top = y;
+        compSection("s_terrain", editor::ComponentKind::Terrain);
+        auto caption = [&](const std::string& t, ImU32 col, const char* id) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str());
+            dl->AddText(f.regular, type::caption, at, col, t.c_str(), nullptr, w);
+            if (id) nameRect(id, ImRect(at, at + ts));
+            y += ts.y + space::sm;
+        };
+        if (!splash::terrainLoaded(tc)) {
+            caption("The grid in " + (tc.data.empty() ? std::string("(no file)") : tc.data) +
+                        " does not load: it exports nothing until the file is back.",
+                    color::bad, "obj.terrainmissing");
+        } else {
+            {
+                const ImRect fr = row("ltdata", "Data file", "Where the height grid and painted layers are saved, with the scene.");
+                nameRect("obj.tdata", fr);
+                text(dl, ImVec2(fr.Min.x, centerY(f.regular, type::body, fr.Min.y, fr.Max.y)), f.regular, type::body, color::textDim,
+                     tc.data.c_str());
+            }
+            number("tsizex", "Size X", "Width of the terrain along X, centred on the object.", tc.sizeX, "m", "tsizex", 0.5f, 4000.f,
+                   [](splash::Object& ob, float v) { if (ob.terrain) ob.terrain->sizeX = v; });
+            number("tsizez", "Size Z", "Depth of the terrain along Z, centred on the object.", tc.sizeZ, "m", "tsizez", 0.5f, 4000.f,
+                   [](splash::Object& ob, float v) { if (ob.terrain) ob.terrain->sizeZ = v; });
+            {
+                // Resolution: changing it resamples the heights and layers (one undo step).
+                const ImRect fr = row("ltres", "Resolution", "Cells per side, 1 to 64. Two triangles a cell; changing it resamples the heights.");
+                nameRect("obj.tres", fr);
+                float nv = float(tc.resolution);
+                const std::string shown = std::to_string(tc.resolution);
+                const FieldEdit fe = numberField("tres", fr, shown.c_str(), "cells", 0, nullptr, &nv, true);
+                if (fe.changed && editableHere) editor::setTerrainResolution(doc, path, int(std::lround(nv)));
+                if (fe.done) doc.endMerge();
+            }
+            number("ttile", "Texture repeat", "The layer textures repeat every this many cells.", float(tc.tileCells), "cells", "ttile", 1, 256,
+                   [](splash::Object& ob, float v) { if (ob.terrain) ob.terrain->tileCells = int(std::lround(v)); }, 0);
+            // What it costs: triangles, stream regions, and the measured frame rate.
+            const int tris = splash::terrainTriangles(tc);
+            int regions = -1;
+            const std::optional<splash::ExportResult>& res = st.live.result();
+            if (res && res->ok() && doc.scene().settings.streamWorld) {
+                // Regions whose ground box meets this terrain's footprint.
+                regions = 0;
+                const float gte = doc.scene().settings.gteScaling > 0 ? doc.scene().settings.gteScaling : 100.f;
+                for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+                    if (fo.object == doc.object(path)) {
+                        float mnx = 1e30f, mnz = 1e30f, mxx = -1e30f, mxz = -1e30f;
+                        for (int k = 0; k < 4; k++) {
+                            const splash::Vec3 c = fo.localToWorld.point({(k & 1 ? 0.5f : -0.5f) * tc.sizeX, 0, (k & 2 ? 0.5f : -0.5f) * tc.sizeZ});
+                            mnx = std::min(mnx, c.x), mxx = std::max(mxx, c.x), mnz = std::min(mnz, c.z), mxz = std::max(mxz, c.z);
+                        }
+                        for (const auto& b : res->stats.streamRegionBounds) {
+                            const float x0r = b[0] * gte / 4096.f, z0r = b[1] * gte / 4096.f, x1r = b[2] * gte / 4096.f, z1r = b[3] * gte / 4096.f;
+                            if (x1r > mnx && x0r < mxx && z1r > mnz && z0r < mxz) regions++;
+                        }
+                    }
+            }
+            std::string info = editor::terrainInfoLine(tris, regions);
+            if (regions < 0) info += doc.scene().settings.streamWorld ? "" : " (not streamed: World streaming is off)";
+            caption(info + ".", color::textDim, "obj.tinfo");
+            if (tc.resolution >= 48)
+                caption("Measured on a 100 m terrain in Redux with all of it in view: 64 x 64 cells ran at about 12 fps, 32 x 32 at about 24 fps.",
+                        color::warn, "obj.tfps");
+            const float cellX = tc.sizeX / float(tc.resolution), cellZ = tc.sizeZ / float(tc.resolution);
+            std::vector<std::string> warns;
+            if (std::min(cellX, cellZ) < 0.5f)
+                warns.push_back("Cells are " + fmtShort(cellX, 2) + " x " + fmtShort(cellZ, 2) +
+                                " m, under 0.5 m: that spends triangles on detail the PS1 cannot show. Lower the resolution.");
+            if (tris > int(splash::kVisibleTriangleGuide))
+                warns.push_back(std::to_string(tris) + " triangles is over the " + std::to_string(splash::kVisibleTriangleGuide) +
+                                " a frame can draw at 30 fps when the whole terrain is in view.");
+            if (res && res->ok()) {
+                const splash::Budget ram = splash::ramBudget(res->stats);
+                // Is this terrain the scene's biggest triangle source?
+                int biggestOther = 0;
+                std::function<void(const std::vector<splash::Object>&)> walk = [&](const std::vector<splash::Object>& objs) {
+                    for (const splash::Object& ob : objs) {
+                        if (&ob != doc.object(path)) {
+                            int t = 0;
+                            if (ob.terrain) t = splash::terrainTriangles(*ob.terrain);
+                            else if (ob.mesh)
+                                if (const editor::MeshInfo* mi = doc.mesh(ob.mesh->mesh); mi && mi->status == editor::AssetStatus::Ok) t = mi->triangles;
+                            biggestOther = std::max(biggestOther, t);
+                        }
+                        walk(ob.children);
+                    }
+                };
+                walk(doc.scene().objects);
+                if (ram.used > ram.capacity && tris >= biggestOther)
+                    warns.push_back("The scene needs " + std::to_string(ram.used / 1024) + " of " + std::to_string(ram.capacity / 1024) +
+                                    " KB of RAM and this terrain is its biggest triangle source: lower the resolution, or turn on fog "
+                                    "(a shorter draw distance) with World streaming so far regions can unload.");
+            }
+            for (size_t i = 0; i < warns.size(); i++) caption(warns[i], color::warn, ("obj.twarn." + std::to_string(i)).c_str());
+
+            // Layers: the mesh component's materials, one texture each.
+            int painted[splash::kTerrainMaxLayers] = {};
+            for (uint8_t l : tc.cellLayers) painted[std::min<int>(l, std::max<int>(1, int(mats.size())) - 1)]++;
+            st.terrainBrush.layer = std::clamp(st.terrainBrush.layer, 0, std::max(0, int(mats.size()) - 1));
+            for (size_t i = 0; i < mats.size() && i < size_t(splash::kTerrainMaxLayers); i++) {
+                const std::string is = std::to_string(i);
+                const std::string& tp = mats[i].texture;
+                const editor::TextureInfo* mt = tp.empty() ? nullptr : doc.texture(tp);
+                const std::string label = "Layer " + std::to_string(i + 1);
+                const ImRect lr = row(("ltlayer." + is).c_str(), label.c_str(),
+                                      "This layer's texture (the Mesh section's material). Click to pick an image; click the dot to paint with it.");
+                // The paint pick: a dot left of the slot.
+                const ImRect dot(ImVec2(lr.Min.x, lr.Min.y + 6), ImVec2(lr.Min.x + 20, lr.Max.y - 6));
+                const ImRect slot(ImVec2(dot.Max.x + space::xs, lr.Min.y), lr.Max);
+                nameRect("obj.tpaint." + is, dot);
+                ImGui::SetCursorScreenPos(dot.Min);
+                ImGui::PushID(int(i));
+                if (ImGui::InvisibleButton("tpaint", dot.GetSize())) st.terrainBrush.layer = int(i);
+                ImGui::PopID();
+                const bool on = st.terrainBrush.layer == int(i);
+                dl->AddCircle(dot.GetCenter(), 6, on ? kind::terrain : color::textFaint, 0, 1.5f);
+                if (on) dl->AddCircleFilled(dot.GetCenter(), 3.5f, kind::terrain);
+                nameRect("obj.tlayer." + is, slot);
+                const std::string meta = std::to_string(painted[i]) + " cells";
+                if (slotField(st, static_cast<int>(AssetSlot::Texture), path, ("tlayer." + is).c_str(), slot, icon::grid, color::textDim,
+                              tp.empty() ? "None" : fileName(tp).c_str(), meta.c_str(), int(i)))
+                    pickAsset(AssetSlot::Texture, path, int(i));
+                (void)mt;
+            }
+            if (mats.size() < size_t(splash::kTerrainMaxLayers) && editableHere) {
+                float bw = 0;
+                if (button("taddlayer", ImVec2(x0 + space::sm + lw, y + space::xxs), icon::plus, "Add layer", ButtonKind::Secondary, &bw,
+                           "A new texture layer to paint with (a new material on the Mesh)."))
+                    doc.edit(path, [](splash::Object& ob) {
+                        if (ob.mesh && ob.mesh->materials.size() < size_t(splash::kTerrainMaxLayers)) ob.mesh->materials.emplace_back();
+                    });
+                nameRect("obj.taddlayer", ImRect(ImVec2(x0 + space::sm + lw, y + space::xxs), ImVec2(x0 + space::sm + lw + bw, y + size::field)));
+                y += size::field + space::sm;
+            }
+            // Brush settings for the Scene view's terrain tools (not saved).
+            const ImRect rr = row("ltradius", "Brush radius", "Size of the brush circle in the Scene view.");
+            nameRect("obj.tradius", rr);
+            {
+                float nv = st.terrainBrush.radius;
+                if (numberField("tradius", rr, fmtShort(nv, 2).c_str(), "m", 0, nullptr, &nv, true).changed)
+                    st.terrainBrush.radius = std::clamp(nv, 0.1f, 200.f);
+            }
+            const ImRect sr = row("ltstrength", "Brush strength", "Raise and Lower: metres a second at the centre. Smooth and Flatten: how fast they pull.");
+            nameRect("obj.tstrength", sr);
+            {
+                float nv = st.terrainBrush.strength;
+                if (numberField("tstrength", sr, fmtShort(nv, 2).c_str(), nullptr, 0, nullptr, &nv, true).changed)
+                    st.terrainBrush.strength = std::clamp(nv, 0.01f, 100.f);
+            }
+            const ImRect fr2 = row("ltfalloff", "Brush falloff", "0: hard edge. 1: fades out from the centre.");
+            nameRect("obj.tfalloff", fr2);
+            {
+                float nv = st.terrainBrush.falloff;
+                if (numberField("tfalloff", fr2, fmtShort(nv, 2).c_str(), nullptr, 0, nullptr, &nv, true).changed)
+                    st.terrainBrush.falloff = std::clamp(nv, 0.f, 1.f);
+            }
+            caption(st.terrainTool < 0 ? "Pick a tool at the top left of the Scene view to sculpt or paint."
+                                       : "Hold the left button over the terrain to apply the tool.",
+                    color::textFaint, "obj.thint");
+            // Scripted tests: the grid's shape.
+            float hmin = 1e30f, hmax = -1e30f;
+            double hsum = 0;
+            for (float hgt : tc.heights) hmin = std::min(hmin, hgt), hmax = std::max(hmax, hgt), hsum += hgt;
+            std::string layerCounts;
+            for (size_t i = 0; i < mats.size() && i < size_t(splash::kTerrainMaxLayers); i++)
+                layerCounts += (i ? "," : "") + std::to_string(painted[i]);
+            char buf[256];
+            std::snprintf(buf, sizeof buf, "terrain: %s res %d size %g %g tris %d hmin %.3f hmax %.3f hsum %.2f layers %s brush %d", name.c_str(),
+                          tc.resolution, double(tc.sizeX), double(tc.sizeZ), tris, double(hmin), double(hmax), hsum, layerCounts.c_str(),
+                          st.terrainBrush.layer);
+            report("terrain", buf);
+            report("terrainwarn", warns.empty() ? std::string() : "terrain: warnings " + std::to_string(warns.size()));
+        }
         sectionEnd(top);
     }
     if (o->walkoff) {

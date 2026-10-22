@@ -103,6 +103,7 @@ add_library(splasheditdoc STATIC
     src/editor/project.cpp
     src/editor/serial.cpp
     src/editor/sprites.cpp
+    src/editor/terrain_edit.cpp
     src/editor/tilemap.cpp
     src/editor/timeline.cpp
     src/editor/hardware.cpp

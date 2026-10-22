@@ -23,6 +23,18 @@ jobs:
         with:
           repository: psxsplash/psxsplash
           submodules: recursive
+      # The editor compiles Lua on the host and every engine here is NOPARSER, so the psxlua
+      # CMakeLists.txt pins must be the one this psxsplash's nugget records, or the shipped
+      # engines would misread the editor's bytecode while tests/luacheck.py stays green.
+      - uses: actions/checkout@v4
+        with:
+          path: editor
+          sparse-checkout: |
+            CMakeLists.txt
+            tools/psxluapin.sh
+          sparse-checkout-cone-mode: false
+      - name: psxlua pin matches the engine's
+        run: bash editor/tools/psxluapin.sh . editor/CMakeLists.txt
       - name: Toolchain
         run: |
           sudo apt-get update

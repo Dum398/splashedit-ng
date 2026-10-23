@@ -4113,11 +4113,12 @@ void testSkinClipSources() {
     CHECK(editor::renameSkinClip(doc, body, 0, "abcdefghijklmnopqrstuvwx").empty());  // 24 is fine
     const std::string waveBefore = bytes(proj / wave), sideBefore = bytes(side);
     CHECK(editor::renameSkinClip(doc, body, 0, " wave_in ").empty() && nameOf(wave) == "wave_in");
-    CHECK(splash::loadImportSettings(host).clipNames.at("Wave") == "wave_in");
+    CHECK((splash::loadImportSettings(host).clipNames == std::map<std::string, std::string>{{"Wave", "wave_in"}}));
     CHECK(doc.undo() && bytes(proj / wave) == waveBefore && bytes(side) == sideBefore);
     CHECK(doc.redo() && nameOf(wave) == "wave_in");
     CHECK(editor::renameSkinClip(doc, body, 1, "nod").empty() && nameOf(nod) == "nod");
-    CHECK(splash::loadImportSettings(host).clipNames.at("clips/rig_nod_gltf/Nod_Big") == "nod");
+    CHECK((splash::loadImportSettings(host).clipNames ==
+           std::map<std::string, std::string>({{"Wave", "wave_in"}, {"clips/rig_nod_gltf/Nod_Big", "nod"}})));
 
     // Importing the host again keeps both names and the added clips.
     editor::Reimported re = editor::reimportModel(doc, host);
@@ -4156,6 +4157,14 @@ void testSkinClipSources() {
     });
     a = editor::addClipSources(doc, body, {dir / "rig_nod.gltf"});
     CHECK(a.error.empty() && a.left == 1 && a.clips.empty() && doc.object(body)->skin->clips.size() == 16);
+    CHECK(doc.object(body)->skin->clipSources == std::vector<std::string>{"models/rig_nod.gltf"});
+    // The source's clips gone from the list: pruning drops the source, nothing else.
+    splash::SkinComponent pruned = *doc.object(body)->skin;
+    CHECK(editor::pruneClipSources(proj, doc.object(body)->mesh->mesh, pruned) && pruned.clipSources.empty() &&
+          pruned.clips == doc.object(body)->skin->clips);
+    pruned.clips.push_back(nod);
+    pruned.clipSources = {"models/rig_nod.gltf"};
+    CHECK(!editor::pruneClipSources(proj, doc.object(body)->mesh->mesh, pruned) && pruned.clipSources.size() == 1);
     // A mesh no model wrote has no settings to follow.
     doc.edit(body, [](splash::Object& o) { o.mesh->mesh = "hand.mesh"; });
     a = editor::addClipSources(doc, body, {dir / "rig_nod.gltf"});

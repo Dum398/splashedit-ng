@@ -20,7 +20,7 @@ namespace editor {
 // of the model that mesh came from, into models/<model>/clips/<file>/ (see
 // splash::importClips), where importing the model again leaves them. They
 // join the skin's clips (a file added again replaces its clips in place), up
-// to 16, and the file the skin's clipSources. A file sharing no joint with the
+// to 16, and the file the skin's clipSources when one of them fitted. A file sharing no joint with the
 // skeleton, or with no animation of it, is refused and the others still added.
 struct AddedClips {
     std::string error;                  // nothing could be done (no skin, a mesh from no model)
@@ -45,6 +45,11 @@ int refreshClipSources(Document& doc, const std::filesystem::path& model, std::v
 // whether `skin` changed.
 bool refreshSkinSources(const std::filesystem::path& project, const std::string& mesh, splash::SkinComponent& skin,
                         std::vector<std::string>* problems = nullptr);
+
+// Drops from `skin` (drawing `mesh`) the clip sources none of whose clips it
+// plays any more, as when the Clips field replaced the list, so importing
+// again does not bring them back. Returns whether it dropped any.
+bool pruneClipSources(const std::filesystem::path& project, const std::string& mesh, splash::SkinComponent& skin);
 
 // Gives clip `index` of the skin on `object` the name SkinnedAnim.Play takes,
 // one undo step. The name is trimmed and must be 1..24 characters (UTF-16

@@ -169,7 +169,12 @@ splash::ImportedClips importSource(const fs::path& project, const Host& h, splas
         clips.resize(16);
     }
     skin.clips = std::move(clips);
-    if (std::find(skin.clipSources.begin(), skin.clipSources.end(), source) == skin.clipSources.end()) skin.clipSources.push_back(source);
+    // A new source is kept only when one of its clips fitted.
+    const bool fitted = std::any_of(got.clips.begin(), got.clips.end(), [&](const std::string& c) {
+        return std::find(skin.clips.begin(), skin.clips.end(), c) != skin.clips.end();
+    });
+    if (fitted && std::find(skin.clipSources.begin(), skin.clipSources.end(), source) == skin.clipSources.end())
+        skin.clipSources.push_back(source);
     return got;
 }
 
@@ -328,6 +333,18 @@ bool refreshSkinSources(const fs::path& project, const std::string& mesh, splash
         }
     }
     return skin.clips != was;
+}
+
+bool pruneClipSources(const fs::path& project, const std::string& mesh, splash::SkinComponent& skin) {
+    const fs::path model = mesh.empty() ? fs::path() : modelOfMesh(project, mesh);
+    if (model.empty() || skin.clipSources.empty()) return false;
+    const std::string base = "models/" + splash::importName(model) + "/";
+    const size_t was = skin.clipSources.size();
+    std::erase_if(skin.clipSources, [&](const std::string& source) {
+        const std::string prefix = base + splash::clipFolder(fromUtf8(source)) + "/";
+        return std::none_of(skin.clips.begin(), skin.clips.end(), [&](const std::string& c) { return c.rfind(prefix, 0) == 0; });
+    });
+    return skin.clipSources.size() != was;
 }
 
 std::string renameSkinClip(Document& doc, const ObjectPath& object, size_t index, const std::string& typed) {

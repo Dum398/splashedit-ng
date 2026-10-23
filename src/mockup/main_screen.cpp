@@ -1515,6 +1515,8 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                 for (const std::string& p : append ? paths : std::vector<std::string>{})
                     if (o.skin->clips.size() < 16 && std::find(o.skin->clips.begin(), o.skin->clips.end(), p) == o.skin->clips.end())
                         o.skin->clips.push_back(p);
+                // Model files whose clips the new list left out stop being clip sources.
+                editor::pruneClipSources(doc.projectRoot(), o.mesh ? o.mesh->mesh : std::string(), *o.skin);
                 break;
             case AssetSlot::SceneLua:
             case AssetSlot::MemCardIcon:

@@ -174,7 +174,8 @@ if r.returncode == 0:
 old = os.path.join(here, 'skinimport', 'skin_saved.scene')
 re_ = os.path.join(tmp, 'old.scene')
 r = run('resave', old, re_)
-check('an old skin scene saves byte for byte', r.returncode == 0 and open(old, 'rb').read() == open(re_, 'rb').read(), r.stderr)
+# A Windows checkout may turn the fixture's line ends into CRLF; the editor writes LF.
+check('an old skin scene saves byte for byte', r.returncode == 0 and open(old, 'rb').read().replace(b'\r\n', b'\n') == open(re_, 'rb').read(), r.stderr)
 check('with no clipSources key', r.returncode == 0 and 'clipSources' not in open(re_).read())
 r = run('resave', os.path.join(host, 's.scene'), re_)
 check('clipSources survive a load and save',

@@ -22,6 +22,7 @@
 #include "disc.hh"
 #include "rooms.hh"
 #include "splashpack.hh"
+#include "path.hh"
 #include "shadow.hh"
 #include "import.hh"
 #include "editor/catalog.hh"
@@ -72,6 +73,7 @@ constexpr ImU32 portal = rgb(0xffe14d);
 constexpr ImU32 walkoff = rgb(0xff6a00);
 constexpr ImU32 agent = rgb(0xff5fa0);
 constexpr ImU32 terrain = rgb(0x8fbf5a);
+constexpr ImU32 path = rgb(0xc8f06a);
 constexpr ImU32 hearing = rgb(0x6ad8ff);
 constexpr ImU32 prefab = rgb(0x6ab0ff);  // a prefab instance, and .prefab files in the Project panel
 }  // namespace kind
@@ -1020,6 +1022,8 @@ static ObjectLook lookOf(editor::ComponentKind k) {
         case K::Walkoff: return {icon::maximize, kind::walkoff};
         case K::Agent: return {icon::eye, kind::agent};
         case K::Terrain: return {icon::layers, kind::terrain};
+        case K::Path: return {icon::move, kind::path};
+        case K::FollowPath: return {icon::magnet, kind::path};
     }
     return {icon::box, color::textDim};
 }
@@ -1028,6 +1032,7 @@ static ObjectLook lookOf(const splash::Object& o, bool expanded) {
     if (o.light) return lookOf(K::Light);
     if (o.agent) return lookOf(K::Agent);
     if (o.terrain) return lookOf(K::Terrain);
+    if (o.path && !o.mesh) return lookOf(K::Path);
     if (o.mesh) return lookOf(K::Mesh);
     if (o.script && !o.collider) return {icon::script, kind::script};
     if (o.player) return lookOf(K::Player);
@@ -5031,6 +5036,48 @@ static void agentOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImV
 // (a waypoint at the object's own position would hide under it). Past the
 // 8th they are left out of the export and drawn faint. `hot` is the one the
 // mouse is over or drags.
+// A path's curve (core/path.cpp, the one the export bakes), brighter while
+// selected, with an arrow at its start pointing the way followers go.
+static void pathOverlay(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::FlatObject& fo, bool hot) {
+    const splash::PathCurve c = splash::worldCurve(fo);
+    if (c.dense.size() < 2) return;
+    const ImU32 col = overlayCol(kind::path, hot ? 255 : 150);
+    const float w = hot ? 2.4f : 1.5f;
+    ImVec2 prev;
+    bool prevOk = false;
+    for (const splash::Vec3& p : c.dense) {
+        ImVec2 s;
+        const bool ok = view.project(toGl(p), mn, sz, &s);
+        if (ok && prevOk) dl->AddLine(prev, s, col, w);
+        prev = s, prevOk = ok;
+    }
+    if (c.length > 0) {
+        ImVec2 a, b;
+        const splash::Vec3 p0 = splash::curvePoint(c, 0), d = splash::curveDirection(c, 0);
+        const float l = std::min(0.6f, c.length * 0.25f);
+        if (view.project(toGl(p0), mn, sz, &a) && view.project(toGl(p0 + d * l), mn, sz, &b) && length(b - a) > 2) {
+            const ImVec2 u = (b - a) * (1.f / length(b - a)), n(-u.y, u.x);
+            dl->AddTriangleFilled(b + u * 4, b - u * 6 + n * 5, b - u * 6 - n * 5, col);
+        }
+    }
+}
+
+// The selected path's control points: numbered dots (vp.pathpt<i>) to drag.
+static void pathMarkers(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::FlatObject& fo, int hot) {
+    Fonts& f = fonts();
+    const std::vector<splash::Vec3> pts = splash::worldPoints(fo);
+    for (size_t i = 0; i < pts.size(); i++) {
+        ImVec2 p;
+        if (!view.project(toGl(pts[i]), mn, sz, &p)) continue;
+        const float rad = int(i) == hot ? 10.f : 8.f;
+        nameRect("vp.pathpt" + std::to_string(i), ImRect(p - ImVec2(8, 8), p + ImVec2(8, 8)));
+        dl->AddCircleFilled(p, rad, overlayCol(kind::path, 235), 20);
+        dl->AddCircle(p, rad, int(i) == hot ? rgb(0xffffff) : rgb(0x0e1014, 220), 20, int(i) == hot ? 2.f : 1.2f);
+        const std::string t = std::to_string(i + 1);
+        dl->AddText(f.semibold, type::caption, p - measure(f.semibold, type::caption, t.c_str()) * 0.5f, rgb(0x0e1014), t.c_str());
+    }
+}
+
 static void agentMarkers(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, const splash::AgentComponent& ag, int hot) {
     Fonts& f = fonts();
     for (size_t i = 0; i < ag.waypoints.size(); i++) {
@@ -5203,6 +5250,7 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
         }
         // An agent's senses and patrol only while it is selected (they cover a lot).
         if (fo.object->agent && hot) agentOverlay(dl, view, mn, sz, fo);
+        if (fo.object->path) pathOverlay(dl, view, mn, sz, fo, hot);
     }
 }
 
@@ -5349,6 +5397,70 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                         doc.edit(*doc.selection(), [i, nw](splash::Object& ob) {
                             if (ob.agent && size_t(i) < ob.agent->waypoints.size()) ob.agent->waypoints[size_t(i)] = nw;
                         }, "agent.waypoint");
+                }
+                ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+            } else {
+                doc.endMerge();
+                ImGui::ClearActiveID();
+                d.index = -1;
+            }
+        }
+    }
+
+    // The selected path's points drag the same way, on the horizontal plane
+    // at their own world height; the scene keeps them in object space.
+    if (sel && sel->path && st.gizmos && !previewing && doc.selection()) {
+        ImGuiContext& g = *GImGui;
+        ImGuiIO& io = ImGui::GetIO();
+        const ImGuiID wid = ImGui::GetID("##pathpt");
+        State::AgentWpDrag& d = st.pathPt;
+        const splash::FlatObject* pfo = nullptr;
+        const std::vector<splash::FlatObject> pflats = splash::flatten(doc.scene());
+        for (const splash::FlatObject& fo : pflats)
+            if (fo.object == sel) pfo = &fo;
+        const std::vector<splash::Vec3> wps = pfo ? splash::worldPoints(*pfo) : std::vector<splash::Vec3>{};
+        const bool active = g.ActiveId == wid && d.index >= 0;
+        if (active) ImGui::KeepAliveID(wid);
+        int hover = -1;
+        st.pathPtHot = -1;
+        if (gizmoMayHover(active, r)) {
+            float best = 10.f;
+            for (size_t i = 0; i < wps.size(); i++) {
+                ImVec2 p;
+                if (!view.project(toGl(wps[i]), mn, sz, &p)) continue;
+                const float dd = length(io.MousePos - p);
+                if (dd < best) best = dd, hover = int(i);
+            }
+        }
+        if (hover >= 0) {
+            st.pathPtHot = hover;
+            ImGui::SetHoveredID(wid);
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(0) && mouseOnPlaneY(view, r, wps[size_t(hover)].y, &d.startHit)) {
+                d.index = hover;
+                d.start = wps[size_t(hover)];
+                ImGui::SetActiveID(wid, g.CurrentWindow);
+                doc.endMerge();
+            }
+        }
+        if (g.ActiveId == wid && d.index >= 0) {
+            st.pathPtHot = d.index;
+            if (ImGui::IsMouseDown(0) && pfo && size_t(d.index) < wps.size()) {
+                splash::Vec3 hit;
+                if (mouseOnPlaneY(view, r, d.start.y, &hit)) {
+                    splash::Vec3 nw{d.start.x + hit.x - d.startHit.x, d.start.y, d.start.z + hit.z - d.startHit.z};
+                    if (st.snap || io.KeyCtrl) nw.x = std::round(nw.x / 0.25f) * 0.25f, nw.z = std::round(nw.z / 0.25f) * 0.25f;
+                    // World to the object's own space (as the waypoints of a prefab move).
+                    const splash::Quat q = pfo->worldRotation;
+                    const splash::Vec3 rl = splash::rotate({-q.x, -q.y, -q.z, q.w}, nw - pfo->worldPosition);
+                    const splash::Vec3 sc = pfo->lossyScale;
+                    auto dv = [](float a, float b) { return b != 0.f ? a / b : 0.f; };
+                    const splash::Vec3 local{dv(rl.x, sc.x), dv(rl.y, sc.y), dv(rl.z, sc.z)};
+                    const int i = d.index;
+                    if (!(nw == wps[size_t(i)]))
+                        doc.edit(*doc.selection(), [i, local](splash::Object& ob) {
+                            if (ob.path && size_t(i) < ob.path->points.size()) ob.path->points[size_t(i)] = local;
+                        }, "path.point");
                 }
                 ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
             } else {
@@ -5511,6 +5623,7 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                     if (st.tool == 3) scaleGizmo(st, dl, view, r, doc, fo);
                 }
                 if (fo.object->agent && st.gizmos) agentMarkers(dl, view, mn, sz, *drawnFo.object->agent, st.agentWpHot);
+                if (fo.object->path && st.gizmos) pathMarkers(dl, view, mn, sz, drawnFo, st.pathPtHot);
                 break;
             }
     }
@@ -8648,7 +8761,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     // A component removed from its section menu goes once drawing is done,
     // since the sections below still read it this frame.
     std::optional<editor::ComponentKind> toRemove;
-    bool removedFlags[static_cast<int>(editor::ComponentKind::Terrain) + 1] = {};
+    bool removedFlags[static_cast<int>(editor::ComponentKind::FollowPath) + 1] = {};
     auto removeFlag = [&](editor::ComponentKind k) { return &removedFlags[static_cast<int>(k)]; };
     float pos[3] = {t.position.x, t.position.y, t.position.z};
     FieldEdit fe = vec3Field("pos", row("lpos", "Position", "Where the object sits, in metres, relative to its parent."),
@@ -10553,6 +10666,195 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                             std::to_string(ag.waypoints.size()) + " clips " + clipLine + " bytes " + std::to_string(bytes) +
                             " warnings " + std::to_string(warns.size()));
         sectionEnd(top);
+    }
+
+    if (o->path) {
+        // A copy: every edit below goes through doc.edit.
+        const splash::PathComponent pc = *o->path;
+        const std::string name = o->name;
+        top = y;
+        compSection("s_path", editor::ComponentKind::Path);
+        auto caption = [&](const std::string& id, const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y + space::xs);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str());
+            dl->AddText(f.regular, type::caption, at, col, t.c_str(), nullptr, w);
+            nameRect(id, ImRect(at, at + ts));
+            y += ts.y + space::xs + space::sm;
+        };
+        // This object as the scene places it: the curve, and world <-> object space for new points.
+        const splash::Object* self = doc.object(path);
+        splash::FlatObject me{};
+        bool found = false;
+        int followers = 0;
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+            if (fo.object == self) me = fo, found = true;
+            if (fo.object->followPath && fo.object->followPath->path == name) followers++;
+        }
+        const splash::PathCurve curve = found ? splash::worldCurve(me) : splash::PathCurve{};
+        auto toLocal = [&](splash::Vec3 w) {
+            if (!found) return w;
+            const splash::Quat q = me.worldRotation;
+            const splash::Vec3 rl = splash::rotate({-q.x, -q.y, -q.z, q.w}, w - me.worldPosition);
+            auto dv = [](float a, float b) { return b != 0.f ? a / b : 0.f; };
+            return splash::Vec3{dv(rl.x, me.lossyScale.x), dv(rl.y, me.lossyScale.y), dv(rl.z, me.lossyScale.z)};
+        };
+        toggleRow("pathclosed", "Closed", "Joins the last point back to the first, so a loop has no jump.", pc.closed,
+                  [](splash::Object& ob) { ob.path->closed = !ob.path->closed; });
+        number("pathspeed", "Speed", "How fast followers ride it, in metres per second; a follower can set its own.", pc.speed, "m/s",
+               "pathspeed", 0, 100, [](splash::Object& ob, float v) { ob.path->speed = v; });
+        {
+            const char* modes[3] = {"Once", "Loop", "Ping-pong"};
+            const int cur = int(pc.mode);
+            const ImRect mr = row("lpathmode", "Mode",
+                                  "Once stops at the end. Loop starts over (an open path jumps back to its first point). Ping-pong turns round at each end.");
+            nameRect("obj.pathmode", mr);
+            const int pick = dropdownMenu("pathmode", mr, nullptr, modes[cur], {modes[0], modes[1], modes[2]}, cur);
+            if (pick >= 0 && pick != cur)
+                doc.edit(path, [pick](splash::Object& ob) { ob.path->mode = splash::PathMode(pick); });
+        }
+        toggleRow("pathauto", "Autostart", "Followers start riding when the scene loads. Off, they wait for Path.Start.", pc.autostart,
+                  [](splash::Object& ob) { ob.path->autostart = !ob.path->autostart; });
+        {
+            const ImRect hr = row("lpathpts", "Points",
+                                  "The curve passes through these, in order, in the object's own space (they move with it). "
+                                  "Drag the numbered dots in the viewport to move them.");
+            const std::string count = std::to_string(pc.points.size());
+            text(dl, ImVec2(hr.Min.x, centerY(f.regular, type::body, hr.Min.y, hr.Max.y)), f.regular, type::body,
+                 pc.points.size() < 2 ? color::warn : color::textDim, count.c_str());
+            for (size_t i = 0; i < pc.points.size(); i++) {
+                ImGui::PushID(int(i) + 4000);
+                const std::string lid = "lpathpt" + std::to_string(i), label = std::to_string(i + 1);
+                const ImRect wrow(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
+                y += rowH;
+                const ImRect wr = property(lid.c_str(), wrow, 22, label.c_str(), "A point, in the object's space, in metres.");
+                const float bs = 24, gap = 2;
+                const ImRect fr(wr.Min, ImVec2(wr.Max.x - 4 * (bs + gap), wr.Max.y));
+                const std::string wn = "obj.pathpt" + std::to_string(i);
+                nameVec3(wn, fr);
+                const splash::Vec3 p = pc.points[i];
+                float v[3] = {p.x, p.y, p.z};
+                commit(vec3Field("pathpt", fr, fmtFixed(p.x).c_str(), fmtFixed(p.y).c_str(), fmtFixed(p.z).c_str(), nullptr, v),
+                       "pathpt" + std::to_string(i), [&, i](splash::Object& ob) {
+                           if (i < ob.path->points.size()) ob.path->points[i] = {v[0], v[1], v[2]};
+                       });
+                const float cy = wr.GetCenter().y;
+                auto small = [&](int k) {
+                    const float bx0 = fr.Max.x + gap + float(k) * (bs + gap);
+                    return ImRect(ImVec2(bx0, cy - bs * 0.5f), ImVec2(bx0 + bs, cy + bs * 0.5f));
+                };
+                const ImRect ir = small(0), ur = small(1), dr = small(2), xr = small(3);
+                nameRect(wn + ".ins", ir);
+                nameRect(wn + ".up", ur);
+                nameRect(wn + ".down", dr);
+                nameRect(wn + ".del", xr);
+                if (iconButton("ins", ir, icon::plus, false, "Insert a point after this one, half way to the next", color::textDim, true))
+                    doc.edit(path, [i](splash::Object& ob) {
+                        std::vector<splash::Vec3>& pts = ob.path->points;
+                        if (i >= pts.size()) return;
+                        splash::Vec3 np;
+                        if (i + 1 < pts.size()) np = (pts[i] + pts[i + 1]) * 0.5f;
+                        else if (ob.path->closed && pts.size() > 1) np = (pts[i] + pts[0]) * 0.5f;
+                        else if (i > 0) np = pts[i] * 2.f - pts[i - 1];  // carry on the way the end points
+                        else np = pts[i] + splash::Vec3{1, 0, 0};
+                        pts.insert(pts.begin() + long(i) + 1, np);
+                    });
+                if (iconButton("up", ur, icon::arrowUp, false, "Move it earlier along the path", color::textDim, i > 0))
+                    doc.edit(path, [i](splash::Object& ob) { std::swap(ob.path->points[i], ob.path->points[i - 1]); });
+                if (iconButton("down", dr, icon::arrowDown, false, "Move it later along the path", color::textDim, i + 1 < pc.points.size()))
+                    doc.edit(path, [i](splash::Object& ob) { std::swap(ob.path->points[i], ob.path->points[i + 1]); });
+                if (iconButton("del", xr, icon::trash, false, "Delete the point", color::textDim, true))
+                    doc.edit(path, [i](splash::Object& ob) { ob.path->points.erase(ob.path->points.begin() + long(i)); });
+                ImGui::PopID();
+            }
+            const viewport::Vec3 pv = view.pivot();
+            const float hereY = found ? me.worldPosition.y : o->transform.position.y;
+            const splash::Vec3 centre = toLocal({pv.x, hereY, -pv.z});
+            const ImVec2 bat(x0 + space::sm, y + space::xs);
+            if (button("pathaddview", bat, icon::plus, "At view centre", ButtonKind::Secondary, nullptr,
+                       "Adds a point at the end, under the point the viewport camera orbits, at the object's height."))
+                doc.edit(path, [centre](splash::Object& ob) { ob.path->points.push_back(centre); });
+            y += size::field + 6 + space::xs + space::sm;
+        }
+        const float lap = pc.speed > 0 ? curve.length / pc.speed : 0;
+        {
+            const ImRect cr = row("lpathlen", "Length", "Along the curve; a lap at the path's speed takes this long.");
+            nameRect("obj.pathlen", cr);
+            const std::string t = fmtShort(curve.length) + " m, " + (pc.speed > 0 ? fmtShort(lap) + " s a lap" : std::string("not moving")) +
+                                  ", " + std::to_string(followers) + (followers == 1 ? " follower" : " followers");
+            text(dl, ImVec2(cr.Min.x, centerY(f.regular, type::body, cr.Min.y, cr.Max.y)), f.regular, type::body, color::textDim, t.c_str());
+        }
+        if (pc.points.size() < 2) caption("obj.pathfew", "A path needs 2 points or more: nothing rides it yet.", color::warn);
+        if (pc.speed > 0 && lap * 30 * (pc.mode == splash::PathMode::PingPong ? 2 : 1) > float(splash::kPathMaxFrames))
+            caption("obj.pathlong", "A lap is longer than an animation plays (8191 frames, 4.5 minutes): followers moved by animation ride faster.",
+                    color::warn);
+        caption("obj.pathlua",
+                "Lua: Path.Start(\"" + name + "\"), Path.Stop, Path.IsRunning, Path.GetProgress (percent), Path.RideCamera(\"" + name +
+                    "\") and Path.StopCamera. Objects follow it with a Follow path component.",
+                color::textFaint);
+        static const char* const kModeNames[3] = {"once", "loop", "pingpong"};
+        report("path", "path: " + name + " points " + std::to_string(pc.points.size()) + " closed " + (pc.closed ? "on" : "off") +
+                           " speed " + fmtShort(pc.speed) + " mode " + kModeNames[int(pc.mode)] + " autostart " +
+                           (pc.autostart ? "on" : "off") + " length " + fmtShort(curve.length) + " followers " + std::to_string(followers));
+        sectionEnd(top);
+    } else {
+        report("path", std::string());
+    }
+
+    if (o->followPath) {
+        const splash::FollowPathComponent fp = *o->followPath;
+        const std::string name = o->name;
+        top = y;
+        compSection("s_followpath", editor::ComponentKind::FollowPath);
+        auto caption = [&](const std::string& id, const std::string& t, ImU32 col) {
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const ImVec2 at(tx, y + space::xs);
+            const ImVec2 ts = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, t.c_str());
+            dl->AddText(f.regular, type::caption, at, col, t.c_str(), nullptr, w);
+            nameRect(id, ImRect(at, at + ts));
+            y += ts.y + space::xs + space::sm;
+        };
+        std::vector<std::string> paths;
+        for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+            if (fo.object->path && fo.object != o) paths.push_back(fo.object->name);
+        {
+            std::vector<std::string> labels{"None"};
+            int at = fp.path.empty() ? 0 : -1;
+            for (const std::string& n : paths) {
+                if (n == fp.path) at = int(labels.size());
+                labels.push_back(n);
+            }
+            std::vector<const char*> items;
+            for (const std::string& l : labels) items.push_back(l.c_str());
+            const std::string shown = fp.path.empty() ? std::string("None") : at < 0 ? fp.path + "  (no such path)" : fp.path;
+            const ImRect rr = row("lfollowpath", "Path", "The object with the Path component to ride.");
+            nameRect("obj.followpath", rr);
+            const int pick = dropdownMenu("followpath", rr, icon::move, shown.c_str(), items, at);
+            if (pick >= 0 && pick != at) {
+                const std::string pn = pick == 0 ? std::string() : paths[size_t(pick) - 1];
+                doc.edit(path, [pn](splash::Object& ob) { ob.followPath->path = pn; });
+            }
+        }
+        number("followspeed", "Speed", "Metres per second; 0 rides at the path's own speed.", fp.speed, "m/s", "followspeed", 0, 100,
+               [](splash::Object& ob, float v) { ob.followPath->speed = v; });
+        number("followoffset", "Start offset", "Where on the path it starts, 0 (the first point) to 1 (the end): spread several followers out.",
+               fp.startOffset, "", "followoffset", 0, 1, [](splash::Object& ob, float v) { ob.followPath->startOffset = v; });
+        toggleRow("followface", "Face along", "Turns the object to face the way it rides (about Y only).", fp.faceAlong,
+                  [](splash::Object& ob) { ob.followPath->faceAlong = !ob.followPath->faceAlong; });
+        const bool byAgent = bool(o->agent);
+        caption("obj.followhow",
+                byAgent ? "It has an Agent: on the PS1 it walks the nav regions to points along the path, at the agent's speed unless this one is set."
+                        : "On the PS1 it rides a looping animation the export bakes (64 keys a lap): Path.SetProgress cannot jump it.",
+                color::textFaint);
+        if (!fp.path.empty() && std::find(paths.begin(), paths.end(), fp.path) == paths.end())
+            caption("obj.followmissing", "No path named '" + fp.path + "' in this scene: it stays where it is.", color::warn);
+        if (!byAgent && !o->mesh) caption("obj.followmesh", "It has no mesh: the console has nothing to move.", color::warn);
+        report("follow", "follow: " + name + " path " + (fp.path.empty() ? std::string("-") : fp.path) + " speed " + fmtShort(fp.speed) +
+                             " offset " + fmtShort(fp.startOffset) + " face " + (fp.faceAlong ? "on" : "off") + " by " +
+                             (byAgent ? "agent" : "animation"));
+        sectionEnd(top);
+    } else {
+        report("follow", std::string());
     }
 
     for (const editor::ComponentInfo& c : editor::components())

@@ -82,7 +82,7 @@ std::string_view hatCallback(std::string_view op);
 // Button names a Button field takes, in the order Input numbers them.
 const std::vector<std::string_view>& blockButtons();
 // The palette's sections, in order: Events (every hat), Control, Objects,
-// Sound and scenes, Variables, Operators, Input, Debug.
+// Sound and scenes, Paths, Variables, Operators, Input, Debug.
 const std::vector<std::string_view>& blockCategories();
 
 // Why name can't be a variable: not an identifier, a Lua keyword, an event

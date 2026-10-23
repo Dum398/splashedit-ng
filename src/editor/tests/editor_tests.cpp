@@ -3500,7 +3500,7 @@ void testBlocksNewBlock() {
                                                                    eb::newBlock("repeat"), eb::newBlock("log")}}));
     CHECK(g.errors.empty() && g.lua.find("Debug.Log(\"\")") != std::string::npos);
     // The palette's categories, every block in one of them.
-    CHECK(splash::blockCategories().size() == 8 && splash::blockCategories().front() == "Events" &&
+    CHECK(splash::blockCategories().size() == 9 && splash::blockCategories().front() == "Events" &&
           splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories().back() == "Debug");
     bool cats = true;
     for (const splash::BlockSpec& sp : splash::blockCatalogue())

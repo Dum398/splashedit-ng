@@ -24,6 +24,8 @@ const std::vector<ComponentInfo>& components() {
         {ComponentKind::Walkoff, "Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box."},
         {ComponentKind::Agent, "Agent (NPC)", "npc enemy guard ai patrol waypoint vision hearing chase", "A character that walks the nav regions, patrols and senses the player."},
         {ComponentKind::Terrain, "Terrain", "landscape ground heightmap height field hills sculpt paint", "Ground you sculpt and paint in the Scene view."},
+        {ComponentKind::Path, "Path", "curve route rail track spline waypoints moving platform patrol camera dolly", "A curve that objects, agents and the camera ride."},
+        {ComponentKind::FollowPath, "Follow path", "ride move along curve route platform patrol", "Moves this object along a Path."},
     };
     return list;
 }
@@ -51,6 +53,8 @@ bool hasComponent(const splash::Object& o, ComponentKind k) {
         case ComponentKind::Walkoff: return o.walkoff.has_value();
         case ComponentKind::Agent: return o.agent.has_value();
         case ComponentKind::Terrain: return o.terrain.has_value();
+        case ComponentKind::Path: return o.path.has_value();
+        case ComponentKind::FollowPath: return o.followPath.has_value();
     }
     return false;
 }
@@ -94,6 +98,11 @@ bool addComponent(splash::Object& o, ComponentKind k) {
             o.collider->kind = splash::ColliderKind::Static;
             break;
         }
+        case ComponentKind::Path:
+            // Something to see and drag: a 4 m line through the object.
+            o.path.emplace().points = {{-2, 0, 0}, {2, 0, 0}};
+            break;
+        case ComponentKind::FollowPath: o.followPath.emplace(); break;
     }
     return true;
 }
@@ -121,6 +130,8 @@ bool removeComponent(splash::Object& o, ComponentKind k) {
         case ComponentKind::Walkoff: o.walkoff.reset(); break;
         case ComponentKind::Agent: o.agent.reset(); break;
         case ComponentKind::Terrain: o.terrain.reset(); break;
+        case ComponentKind::Path: o.path.reset(); break;
+        case ComponentKind::FollowPath: o.followPath.reset(); break;
     }
     return true;
 }
@@ -142,6 +153,7 @@ const std::vector<ObjectPreset>& presets() {
         {"Nav walk-off zone", "ledge pit drop edge fall navigation", "Lets the player walk off nav edges inside this box.", {K::Walkoff}},
         {"Agent (NPC)", "npc enemy guard ai patrol waypoint", "A character that walks the nav regions, patrols and senses the player.", {K::Agent}},
         {"Terrain", "landscape ground heightmap hills sculpt paint", "Ground you sculpt and paint in the Scene view.", {K::Terrain}},
+        {"Path", "curve route rail track spline moving platform patrol camera dolly", "A curve that objects, agents and the camera ride.", {K::Path}},
     };
     return list;
 }

@@ -67,6 +67,7 @@ constexpr ImU32 events = rgb(0xc98a2e);
 constexpr ImU32 control = rgb(0xc4673e);
 constexpr ImU32 objects = rgb(0x3f7dcc);
 constexpr ImU32 sound = rgb(0x9560cc);
+constexpr ImU32 paths = rgb(0x5f8f2a);
 constexpr ImU32 variables = rgb(0xc25469);
 constexpr ImU32 operators = rgb(0x3d9a66);
 constexpr ImU32 input = rgb(0x2c95a8);

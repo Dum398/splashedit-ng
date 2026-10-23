@@ -134,8 +134,10 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
 // value is committed, with it in `out`. `placeholder` shows faint while the
 // value is empty; with `maxLen`, typing stops there and a "12/32" count shows.
 // `charFilter` is textEdit's.
+// maxLen caps what can be typed and shows "n/maxLen"; countMax, when set,
+// shows "n/countMax" instead (warning colour past it) without capping input.
 bool textField(const char* id, ImRect r, const std::string& value, std::string* out, const char* placeholder = nullptr,
-               size_t maxLen = 0, ImGuiInputTextCallback charFilter = nullptr);
+               size_t maxLen = 0, ImGuiInputTextCallback charFilter = nullptr, size_t countMax = 0);
 
 void dropdown(const char* id, ImRect r, const char* icon, const char* value);
 // A dropdown that opens a themed list under it. Returns the picked index, or -1.

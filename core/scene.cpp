@@ -633,6 +633,7 @@ json writeSettings(const SceneSettings& st) {
     if (!st.edgeFade) j["edgeFade"] = false;
     if (!st.loadingCanvas.empty()) j["loadingCanvas"] = st.loadingCanvas;
     if (json mc = writeMemCard(st.memCard); !mc.empty()) j["memCard"] = mc;
+    if (!st.stringPrefixes.empty()) j["stringPrefixes"] = st.stringPrefixes;
     putExtras(j, st.extra);
     return j;
 }
@@ -825,6 +826,7 @@ json writeElement(const UIElement& e) {
     case UIElementType::Text:
         j["text"] = e.text;
         j["font"] = e.font.empty() ? json(nullptr) : json(e.font);
+        if (!e.textKey.empty()) j["textKey"] = e.textKey;
         break;
     case UIElementType::Progress:
         j["background"] = rgb(e.background);
@@ -868,6 +870,7 @@ UIElement readElement(const json& j, const std::string& canvas) {
     readRgb(j, "color", e.color);
     e.text = j.value("text", "");
     if (j.contains("font") && !j["font"].is_null()) e.font = j["font"].get<std::string>();
+    if (j.contains("textKey") && j["textKey"].is_string()) e.textKey = j["textKey"].get<std::string>();
     readInts(j, "from", e.from);
     readInts(j, "to", e.to);
     readRgb(j, "background", e.background);
@@ -1161,6 +1164,9 @@ Scene loadScene(const fs::path& file) {
         s.settings.edgeFade = st.value("edgeFade", true);
         s.settings.loadingCanvas = st.value("loadingCanvas", "");
         if (st.contains("memCard")) s.settings.memCard = readMemCard(st["memCard"]);
+        if (st.contains("stringPrefixes") && st["stringPrefixes"].is_array())
+            for (const json& p : st["stringPrefixes"])
+                if (p.is_string()) s.settings.stringPrefixes.push_back(p.get<std::string>());
         s.settings.extra = extrasOf(st, writeSettings(s.settings));
         // A memCard left at its defaults is not written back.
         std::erase_if(s.settings.extra, [](const auto& e) { return e.first == "memCard"; });

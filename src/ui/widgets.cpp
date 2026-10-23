@@ -522,19 +522,20 @@ TextEdit textEdit(const char* id, ImRect field, ImFont* font, float size, float 
 }
 
 bool textField(const char* id, ImRect r, const std::string& value, std::string* out, const char* placeholder, size_t maxLen,
-               ImGuiInputTextCallback charFilter) {
+               ImGuiInputTextCallback charFilter, size_t countMax) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // A value already past the cap stays editable, so it can be shortened.
     const size_t cap = maxLen ? std::max(maxLen, value.size()) : 255;
+    const size_t shownMax = countMax ? countMax : maxLen;
     std::string count;
-    if (maxLen) count = std::to_string(textEditing(id) ? std::strlen(textState().buf) : value.size()) + "/" + std::to_string(maxLen);
+    if (shownMax) count = std::to_string(textEditing(id) ? std::strlen(textState().buf) : value.size()) + "/" + std::to_string(shownMax);
     const float countW = count.empty() ? 0 : measure(f.regular, type::caption, count.c_str()).x;
     const float x = r.Min.x + space::sm, right = r.Max.x - space::sm - (countW > 0 ? countW + space::sm : 0);
     auto drawCount = [&](size_t len) {
         if (count.empty()) return;
         text(dl, ImVec2(r.Max.x - space::sm - countW, centerY(f.regular, type::caption, r.Min.y, r.Max.y)), f.regular,
-             type::caption, len > maxLen ? color::warn : color::textFaint, count.c_str());
+             type::caption, len > shownMax ? color::warn : color::textFaint, count.c_str());
     };
     if (textEditing(id)) {
         std::string typed;

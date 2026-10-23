@@ -141,6 +141,8 @@ Block newBlock(std::string_view op) {
     for (int i = 0; i < spec->args; i++) {
         if (booleanSlot(op, i)) b.args.push_back(Block{});
         else if (op == "log" || op == "join" || op == "load_scene") b.args.push_back(txt(""));
+        else if (op == "set_language") b.args.push_back(txt("en"));
+        else if (op == "set_ui_text") b.args.push_back(txt(""));
         else if (op == "change_var" || op == "wait") b.args.push_back(num("1"));
         else if (op == "repeat") b.args.push_back(num("10"));
         else if (op == "random") b.args.push_back(num(i == 0 ? "1" : "10"));
@@ -205,6 +207,8 @@ const char* placeholder(BlockField f) {
         case BlockField::Cutscene: return "cutscene";
         case BlockField::Light: return "light";
         case BlockField::Key: return "name";
+        case BlockField::StringKey: return "key";
+        case BlockField::UiText: return "UI text";
         default: return "";
     }
 }

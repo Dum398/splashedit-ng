@@ -150,6 +150,9 @@ private:
 
     // The Image inspector's Source vs PS1 preview, and what it last reported.
     TexturePreviewView m_texPreview;
+    std::string m_keyQuery;  // the text key picker's search
+    std::string m_langReported;  // the last "strings: preview" line printed
+    unsigned m_texStrings = 0;  // projectStrings().revision() the canvas texture was drawn with
     std::string m_texPreviewReported;
     // The Image inspector's cell picker: the sheet texture as the PS1 shows
     // it (path|bit depth|assets), and the last "image sheet" line reported.

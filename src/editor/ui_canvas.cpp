@@ -56,7 +56,7 @@ size_t utf16Units(const std::string& s) {
 
 bool sameElement(const UIElement& a, const UIElement& b) {
     return a.type == b.type && a.name == b.name && a.visible == b.visible && a.rect == b.rect && a.anchorMin == b.anchorMin &&
-           a.anchorMax == b.anchorMax && a.color == b.color && a.text == b.text && a.font == b.font && a.from == b.from &&
+           a.anchorMax == b.anchorMax && a.color == b.color && a.text == b.text && a.font == b.font && a.textKey == b.textKey && a.from == b.from &&
            a.to == b.to && a.background == b.background && a.value == b.value && a.texture == b.texture &&
            a.bitDepth == b.bitDepth && a.cutout == b.cutout && a.sheet == b.sheet && a.cell == b.cell && a.unknown == b.unknown;
 }

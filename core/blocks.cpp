@@ -96,6 +96,12 @@ const std::vector<BlockSpec> kCatalogue = {
      "Loads the scene with that number; scene 0 is the one the game starts in."},
     {"log", K::Statement, "log %1", 1, 0, F::None, "Debug",
      "Writes the value to the debug log."},
+    {"set_language", K::Statement, "set language to %1", 1, 0, F::None, "Text",
+     "Shows the game's texts in that language, a language id (\"fr\") or its number (1 is the first); the scene's keyed UI texts change at once, and the language stays across scene loads."},
+    {"save_language", K::Statement, "save language to card", 0, 0, F::None, "Text",
+     "Saves the language to the memory card in port 1, for the next time the game starts (with Remember language on memory card in the strings window); the game waits a few seconds while it writes."},
+    {"set_ui_text", K::Statement, "set UI text of %f to %1", 1, 0, F::UiText, "Text",
+     "Changes what the chosen UI text element shows to the value."},
     // Reporters.
     {"number", K::Reporter, "%f", 0, 0, F::Number, "Operators",
      "A number: whole numbers, or decimals from -524288 to 524287 with up to 9 places."},
@@ -143,6 +149,10 @@ const std::vector<BlockSpec> kCatalogue = {
      "How far along its path the chosen path's riders (or the chosen follower) are, in percent: 0 at the start, 100 at the end."},
     {"path_running", K::Boolean, "path %f running?", 0, 0, F::Object, "Paths",
      "True while the chosen path's followers (or the chosen follower) are riding."},
+    {"text_for_key", K::Reporter, "text for key %f", 0, 0, F::StringKey, "Text",
+     "The text of the chosen key of the string table in the language the game shows; the key itself when it has none."},
+    {"language", K::Reporter, "language", 0, 0, F::None, "Text",
+     "The id of the language the game shows (\"en\")."},
     {"position_x", K::Reporter, "x position of %f", 0, 0, F::Object, "Objects",
      "The object's x position, in game units."},
     {"position_y", K::Reporter, "y position of %f", 0, 0, F::Object, "Objects",
@@ -152,7 +162,7 @@ const std::vector<BlockSpec> kCatalogue = {
 };
 
 const std::vector<std::string_view> kCategories = {"Events", "Control", "Objects", "Sound and scenes", "Paths",
-                                                   "Variables", "Operators", "Input", "Debug"};
+                                                   "Variables", "Operators", "Input", "Debug", "Text"};
 
 const std::vector<std::string_view> kButtons = {"CROSS", "CIRCLE", "SQUARE", "TRIANGLE", "L1", "R1",
                                                 "L2",    "R2",     "START",  "SELECT",   "UP", "DOWN",
@@ -186,6 +196,8 @@ const std::set<std::string, std::less<>> kReserved = {
     "Actor", "Agent", "Animation", "Audio", "Camera", "Controls", "Convert", "Cutscene", "Debug", "Entity",
     "FixedPoint", "Input", "Interact", "Light", "MemCard", "Net", "Persist", "Player", "PSXMath", "Random", "Scene",
     "SkinnedAnim", "Sprite", "Tile", "Timer", "UI", "Vec3",
+    // tables the export generates
+    "Strings",
     // event functions: a local of that name would capture the function
     "onCreate", "onUpdate", "onCollideWithPlayer", "onInteract", "onButtonPress", "onButtonRelease", "onEnable",
     "onDisable", "onSceneCreationStart", "onSceneCreationEnd", "onTriggerEnter", "onTriggerExit",
@@ -509,6 +521,12 @@ struct Gen {
         // nil (no such path) reads 0, so = < > keep working.
         if (op == "path_progress") return {"(Path.GetProgress(" + object(b, at).s + ") or 0)", Atom};
         if (op == "path_running") return {"Path.IsRunning(" + object(b, at).s + ")", Atom};
+        // A literal key, so the export carries it (core/strings.cpp scans for these).
+        if (op == "text_for_key") {
+            if (b.field.empty()) error(at, "no key chosen");
+            return {"Strings.Get(" + luaString(b.field) + ")", Atom};
+        }
+        if (op == "language") return {"Strings.Language()", Atom};
         error(at, "unknown block");
         return nil();
     }
@@ -627,6 +645,17 @@ struct Gen {
                 line(out, depth, "Scene.Load(" + input(b, 0, at).s + ")");
             } else if (op == "log") {
                 line(out, depth, "Debug.Log(" + input(b, 0, at).s + ")");
+            } else if (op == "set_language") {
+                line(out, depth, "Strings.SetLanguage(" + input(b, 0, at).s + ")");
+            } else if (op == "save_language") {
+                line(out, depth, "Strings.Save()");
+            } else if (op == "set_ui_text") {
+                const size_t slash = b.field.find('/');
+                if (slash == std::string::npos || slash == 0 || slash + 1 == b.field.size()) error(at, "no UI text chosen");
+                const std::string cv = slash == std::string::npos ? b.field : b.field.substr(0, slash);
+                const std::string el = slash == std::string::npos ? std::string() : b.field.substr(slash + 1);
+                line(out, depth, "UI.SetText(UI.FindElement(UI.FindCanvas(" + luaString(cv) + "), " + luaString(el) + "), tostring(" +
+                                     input(b, 0, at).s + "))");
             } else {
                 error(at, "unknown block");
             }

@@ -112,6 +112,9 @@ struct ExportStats {
     // Game objects in the file, streaming's cut pieces included. psxsplash
     // allocates per object when the scene loads (objectLoadBytes, budget.hh).
     int gameObjects = 0;
+    // What the generated Strings library (core/strings.hh) keeps on the Lua
+    // heap, an estimate (its bytecode is in splashpackBytes).
+    size_t stringsLuaBytes = 0;
 
     // Nav bake (Player or Navigation object). psxsplash only hands the camera
     // to the player when the scene has nav regions; with none it is a free

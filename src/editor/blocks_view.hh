@@ -70,6 +70,8 @@ public:
     struct Context {
         // lights: the runtime point lights, the ones Light.Find can reach.
         std::vector<std::string> objects, sounds, cutscenes, lights;
+        // stringKeys: the project's string table; uiTexts: "Canvas/Element" text elements.
+        std::vector<std::string> stringKeys, uiTexts;
     };
     // The tab's content in `r`. `focused` is the tab's keyboard: a click in
     // `r` takes it, one elsewhere lets it go; the shortcuts need it.

@@ -91,6 +91,7 @@ add_library(splasheditdoc STATIC
     src/editor/blocks_edit.cpp
     src/editor/catalog.cpp
     src/editor/memcard.cpp
+    src/editor/strings_edit.cpp
     src/editor/document.cpp
     src/editor/pick.cpp
     src/editor/gizmo.cpp

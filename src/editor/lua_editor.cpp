@@ -24,6 +24,7 @@ const std::vector<ApiSymbol>& api() {
     static const std::vector<ApiSymbol> v = {
 #include "editor/lua_api.inc"
 #include "editor/path_api.inc"
+#include "editor/strings_api.inc"
     };
     return v;
 }

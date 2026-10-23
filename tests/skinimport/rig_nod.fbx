@@ -1,0 +1,109 @@
+; FBX 7.4.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7400
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",1
+		P: "UpAxisSign", "int", "Integer", "",1
+		P: "FrontAxis", "int", "Integer", "",2
+		P: "FrontAxisSign", "int", "Integer", "",1
+		P: "CoordAxis", "int", "Integer", "",0
+		P: "CoordAxisSign", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",1
+	}
+}
+Objects:  {
+	Model: 200, "Model::Armature", "Null" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",100,0,50
+			P: "Lcl Rotation", "Lcl Rotation", "", "A",0,90,0
+		}
+	}
+	Model: 201, "Model::Upper", "LimbNode" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,50,0
+		}
+	}
+	Model: 202, "Model::Lower", "LimbNode" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,100,0
+		}
+	}
+	Model: 204, "Model::Tail", "LimbNode" {
+		Version: 232
+		Properties70:  {
+			P: "Lcl Translation", "Lcl Translation", "", "A",0,50,0
+		}
+	}
+	NodeAttribute: 300, "NodeAttribute::Upper", "LimbNode" {
+		TypeFlags: "Skeleton"
+	}
+	NodeAttribute: 301, "NodeAttribute::Lower", "LimbNode" {
+		TypeFlags: "Skeleton"
+	}
+	NodeAttribute: 302, "NodeAttribute::Tail", "LimbNode" {
+		TypeFlags: "Skeleton"
+	}
+	AnimationStack: 700, "AnimStack::Nod/Big", "" {
+		Properties70:  {
+			P: "LocalStart", "KTime", "Time", "",0
+			P: "LocalStop", "KTime", "Time", "",46186158000
+		}
+	}
+	AnimationLayer: 701, "AnimLayer::BaseLayer", "" {
+	}
+	AnimationCurveNode: 702, "AnimCurveNode::R", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",0
+			P: "d|Y", "Number", "", "A",0
+			P: "d|Z", "Number", "", "A",0
+		}
+	}
+	AnimationCurve: 704, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *2 { a: 0,46186158000 }
+		KeyValueFloat: *2 { a: 0,45 }
+		KeyAttrFlags: *1 { a: 4 }
+		KeyAttrDataFloat: *4 { a: 0,0,0,0 }
+		KeyAttrRefCount: *1 { a: 2 }
+	}
+	AnimationCurveNode: 705, "AnimCurveNode::R", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",0
+			P: "d|Y", "Number", "", "A",0
+			P: "d|Z", "Number", "", "A",0
+		}
+	}
+	AnimationCurve: 706, "AnimCurve::", "" {
+		Default: 0
+		KeyVer: 4009
+		KeyTime: *2 { a: 0,46186158000 }
+		KeyValueFloat: *2 { a: 0,30 }
+		KeyAttrFlags: *1 { a: 4 }
+		KeyAttrDataFloat: *4 { a: 0,0,0,0 }
+		KeyAttrRefCount: *1 { a: 2 }
+	}
+}
+Connections:  {
+	C: "OO",200,0
+	C: "OO",201,200
+	C: "OO",202,201
+	C: "OO",300,201
+	C: "OO",301,202
+	C: "OO",204,202
+	C: "OO",302,204
+	C: "OO",701,700
+	C: "OO",702,701
+	C: "OP",702,201, "Lcl Rotation"
+	C: "OP",704,702, "d|X"
+	C: "OO",705,701
+	C: "OP",705,204, "Lcl Rotation"
+	C: "OP",706,705, "d|Z"
+}

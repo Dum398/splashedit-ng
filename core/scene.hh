@@ -43,6 +43,12 @@ struct Material {
 // component whose .mesh carries a skeleton.
 struct SkinComponent {
     std::vector<std::string> clips;  // project-relative .anim paths, at most 16
+    // Model files (project-relative) whose animations the skin plays besides
+    // its own model's: each one's clips are imported onto the skin's skeleton
+    // by joint name, with the import settings of the skin's model, into
+    // models/<model>/clips/<file>/ (see editor::addClipSources), and imported
+    // again when either file is. Written only when there are any.
+    std::vector<std::string> clipSources;
     int fps = 15;                    // bake rate, 1..30
     ExtraKeys extra;
 };

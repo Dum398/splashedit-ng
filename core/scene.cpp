@@ -148,6 +148,8 @@ json writeMesh(const MeshComponent& m) {
 
 json writeSkin(const SkinComponent& sk) {
     json j = {{"type", "skin"}, {"clips", sk.clips}, {"fps", sk.fps}};
+    // Only when set, so scenes from before it keep their bytes.
+    if (!sk.clipSources.empty()) j["clipSources"] = sk.clipSources;
     putExtras(j, sk.extra);
     return j;
 }
@@ -496,6 +498,7 @@ Object readObject(const json& j) {
         } else if (type == "skin") {
             SkinComponent sk;
             for (const json& cj : c.value("clips", json::array())) sk.clips.push_back(cj.get<std::string>());
+            for (const json& cj : c.value("clipSources", json::array())) sk.clipSources.push_back(cj.get<std::string>());
             sk.fps = c.value("fps", sk.fps);
             if (sk.fps < 1 || sk.fps > 30) fail("object '" + o.name + "': skin fps must be 1..30");
             sk.extra = extrasOf(c, writeSkin(sk));

@@ -96,6 +96,9 @@ struct PathBake {
         float maxError = 0;
     };
     std::vector<Group> groups;
+    // Each agent follower and the points it walks to (world metres), for the
+    // export's check against the baked nav regions.
+    std::vector<std::pair<std::string, std::vector<Vec3>>> agentRoutes;
 };
 bool sceneUsesPaths(const Scene& scene);
 // readSource reads a project script (for the RideCamera scan); may be empty.

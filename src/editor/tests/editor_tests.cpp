@@ -15068,6 +15068,22 @@ static void testPathExport() {
     splash::ExportResult w = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
     CHECK(w.ok() && std::any_of(w.warnings.begin(), w.warnings.end(),
                                 [](const std::string& s) { return s.find("'Elsewhere'") != std::string::npos; }));
+    // An agent on a path far off the courtyard's floor: the nav check names it; one on it is quiet.
+    auto navWarned = [&](const splash::ExportResult& e) {
+        return std::any_of(e.warnings.begin(), e.warnings.end(),
+                           [](const std::string& s) { return s.find("'Path Guard' follows a path that leaves the nav") != std::string::npos; });
+    };
+    scene.objects.back().followPath->path = "Patrol";
+    scene.objects.push_back(pathObject("Far", {{200, 0, 200}, {210, 0, 200}}, false, splash::PathMode::Loop));
+    scene.objects.push_back(rider("Path Guard", "Far", 0, true));
+    splash::ExportResult nv = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(nv.ok() && !nv.stats.navOutlines.empty() && navWarned(nv));
+    // A short path inside the first nav region (its centroid; regions are convex).
+    const splash::Vec3 c0 = nv.stats.navInfo.empty() ? splash::Vec3{} : nv.stats.navInfo[0].centroid;
+    scene.objects.push_back(pathObject("Near", {c0, c0 + splash::Vec3{0.05f, 0, 0}}, false, splash::PathMode::Loop));
+    scene.objects[scene.objects.size() - 2].followPath->path = "Near";
+    splash::ExportResult nq = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(nq.ok() && !navWarned(nq));
 }
 
 static void testPathBlocks() {

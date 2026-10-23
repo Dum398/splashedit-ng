@@ -856,6 +856,12 @@ function P.StopCamera()
   Camera.FollowPsxPlayer(true)
 end
 )LUA";
+    for (const PathInfo& p : paths)
+        for (const PathInfo::Agent& a : p.agents) {
+            std::vector<Vec3> route;
+            for (int i = 0; i < kLuaSamples; i++) route.push_back(curvePoint(p.curve, float(i) / float(kLuaSamples - 1)));
+            b.agentRoutes.push_back({a.name, std::move(route)});
+        }
     b.libraryPath = "<paths>/library.lua";
     b.files[b.libraryPath] = L;
 

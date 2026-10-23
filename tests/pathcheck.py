@@ -130,10 +130,13 @@ names = ('s_path', 'obj.pathclosed', 'obj.pathspeed', 'obj.pathmode', 'obj.patha
 check('the section, its fields and buttons are drawn', all(n in rects for n in names), [n for n in names if n not in rects])
 w, h, px = png_rgb(shot)
 view = rects.get('vp.view', (0, 0, w, h))
-lime = sum(near(px[y][3 * x:3 * x + 3], LIME) for y in range(max(0, view[1]), min(h, view[3]))
-           for x in range(max(0, view[0]), min(w, view[2])))
-print('lime pixels: %d' % lime)
-check('the curve is drawn in lime', lime > 150, lime)
+# The point markers are lime too: only pixels more than 16 px from every marker's centre count, so this
+# measures the curve between the points.
+dots = [((r[0] + r[2]) / 2, (r[1] + r[3]) / 2) for k, r in rects.items() if k.startswith('vp.pathpt')]
+lime = sum(near(px[y][3 * x:3 * x + 3], LIME) and all((x - cx) ** 2 + (y - cy) ** 2 > 256 for cx, cy in dots)
+           for y in range(max(0, view[1]), min(h, view[3])) for x in range(max(0, view[0]), min(w, view[2])))
+print('lime pixels away from the point markers: %d' % lime)
+check('the curve is drawn in lime between the points', lime > 120, lime)
 pts = [rects['vp.pathpt%d' % i] for i in range(3) if 'vp.pathpt%d' % i in rects]
 check('the points sit apart on screen', len(pts) == 3 and len({(p[0] // 4, p[1] // 4) for p in pts}) == 3, pts)
 

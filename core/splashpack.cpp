@@ -1929,6 +1929,29 @@ ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs
     GeneratedLua gen{pb.files, pb.libraryPath, pb.hostPath, pb.hostUserScript};
     ExportResult res;
     if (pb.errors.empty()) res = exportSplashpackBaked(pb.scene, root, out, options, &gen);
+    // An agent walks the nav regions: points of its path off them it can only get near.
+    if (!res.stats.navOutlines.empty())
+        for (const auto& [agent, route] : pb.agentRoutes) {
+            int off = 0;
+            for (const Vec3& p : route) {
+                bool in = false;
+                for (const std::vector<Vec3>& poly : res.stats.navOutlines) {
+                    bool c = false;
+                    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++)
+                        if ((poly[i].z > p.z) != (poly[j].z > p.z) &&
+                            p.x < (poly[j].x - poly[i].x) * (p.z - poly[i].z) / (poly[j].z - poly[i].z) + poly[i].x)
+                            c = !c;
+                    if (c) {
+                        in = true;
+                        break;
+                    }
+                }
+                off += !in;
+            }
+            if (off > 0)
+                res.warnings.push_back("'" + agent + "' follows a path that leaves the nav regions at " + std::to_string(off) + " of its " +
+                                       std::to_string(route.size()) + " points: it walks only as near as the nav allows there");
+        }
     res.errors.insert(res.errors.begin(), pb.errors.begin(), pb.errors.end());
     res.warnings.insert(res.warnings.begin(), pb.warnings.begin(), pb.warnings.end());
     return res;

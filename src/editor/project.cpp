@@ -14,6 +14,7 @@
 
 #include "blocks.hh"
 #include "editor/catalog.hh"
+#include "editor/skin_clips.hh"
 #include "scene.hh"
 
 namespace fs = std::filesystem;
@@ -913,6 +914,8 @@ struct Resync {
     const splash::ImportedModel& model;
     const splash::ImportSettings& settings;
     std::string nodePrefix;  // models/<name>/
+    fs::path project;        // set: skins' clip sources are imported again too
+    std::vector<std::string> problems;
     bool toMerged = false, toTree = false;
     std::map<std::string, size_t> nodeOfMesh;
     std::vector<std::vector<size_t>> childNodes;  // per node; the last entry holds the top-level nodes
@@ -964,17 +967,22 @@ struct Resync {
     }
     // The skin of an object drawing a skinned mesh of the model: the model's
     // clips (those under models/<name>/) swapped for the new ones, others
-    // kept after them. An object without a skin is left without one, so a
-    // skin taken off stays off and the mesh draws in its rest pose.
+    // kept after them, and the clips of its clip sources (under
+    // models/<name>/clips/) imported again with the model's settings now.
+    // An object without a skin is left without one, so a skin taken off stays
+    // off and the mesh draws in its rest pose.
     bool syncSkin(splash::Object& o, bool skinned) {
         if (!skinned || !o.skin) return false;
         std::optional<splash::SkinComponent> fresh = modelSkin(model);
         if (!fresh) return false;
-        std::vector<std::string> clips = fresh->clips;
+        splash::SkinComponent next = *o.skin;
+        next.clips = fresh->clips;
+        const std::string sourced = nodePrefix + "clips/";
         for (const std::string& c : o.skin->clips)
-            if (c.rfind(nodePrefix, 0) != 0 && clips.size() < 16) clips.push_back(c);
-        if (clips == o.skin->clips) return false;
-        o.skin->clips = std::move(clips);
+            if ((c.rfind(nodePrefix, 0) != 0 || c.rfind(sourced, 0) == 0) && next.clips.size() < 16) next.clips.push_back(c);
+        if (!project.empty() && o.mesh) refreshSkinSources(project, o.mesh->mesh, next, &problems);
+        if (next.clips == o.skin->clips) return false;
+        o.skin->clips = std::move(next.clips);
         return true;
     }
     // An object made from node `n`: transform, mesh and materials, then its
@@ -1088,6 +1096,7 @@ Reimported applyReimport(Document& doc, StagedModel& s, std::optional<bool> wasM
     }
 
     Resync sync(r.model, settings, "models/" + splash::importName(file) + "/");
+    sync.project = s.project;
     sync.toMerged = wasMerged && !*wasMerged && settings.mergeMeshes;
     sync.toTree = wasMerged && *wasMerged && !settings.mergeMeshes;
     std::vector<std::pair<ObjectPath, splash::Object>> trees;
@@ -1096,6 +1105,13 @@ Reimported applyReimport(Document& doc, StagedModel& s, std::optional<bool> wasM
         if (sync.walk(copy)) trees.push_back({ObjectPath{int(i)}, std::move(copy)});
     }
     r.objects = doc.replaceTrees(std::move(trees));
+    for (const std::string& p : sync.problems) r.model.warnings.push_back("clips from another file were not imported again: " + p);
+    // Clip sources' clips rewritten in place: what shows them reads them again.
+    std::vector<std::string> clips;
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+        if (fo.object->skin && !fo.object->skin->clipSources.empty())
+            clips.insert(clips.end(), fo.object->skin->clips.begin(), fo.object->skin->clips.end());
+    if (!clips.empty()) doc.refreshAssets(clips);
     doc.setImportWarnings(file, r.model.warnings);
     return r;
 }

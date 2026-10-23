@@ -53,6 +53,7 @@
 #include "editor/project.hh"
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
+#include "editor/skin_clips.hh"
 #include "editor/texture_preview.hh"
 #include "editor/strings_edit.hh"
 #include "editor/timeline.hh"
@@ -4043,6 +4044,122 @@ void testClipLoopImportAndEdit() {
     int files = 0;
     for (const auto& e : fs::directory_iterator(proj / "models" / "rig")) files += e.path().extension() == ".anim" ? 0 : e.path().filename().string()[0] == '.';
     CHECK(files == 0);
+}
+
+// Clips from other model files on a skin (#237): tests/skinimport/rig_host.gltf
+// (Wave) placed, then rig_nod.gltf (Nod/Big on the bare armature, plus a Tail
+// joint the host lacks) and rig_alien.gltf (other joint names) added to Body's
+// skin. Names given in the editor survive importing either file again.
+void testSkinClipSources() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path dir = g_outDir / "skinclipsources";
+    fs::remove_all(dir, ec);
+    fs::path proj = dir / "game";
+    fs::create_directories(proj, ec);
+    const fs::path rigs = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skinimport";
+    for (const char* n : {"rig_host.gltf", "rig_nod.gltf", "rig_alien.gltf"}) fs::copy_file(rigs / n, dir / n, ec);
+    auto bytes = [](const fs::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    auto nameOf = [&](const std::string& rel) {
+        try {
+            return splash::loadAnim(proj / rel).name;
+        } catch (const std::exception&) {
+            return std::string("(unreadable)");
+        }
+    };
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    editor::PlacedModel p = editor::placeModel(doc, dir / "rig_host.gltf", std::nullopt, {0}, {0, 0, 0});
+    CHECK(p.error.empty());
+    const editor::ObjectPath body{0, 0, 1};
+    const std::string wave = "models/rig_host/Wave.anim", nod = "models/rig_host/clips/rig_nod_gltf/Nod_Big.anim";
+    const fs::path host = proj / "models" / "rig_host.gltf", side = splash::importSettingsPath(host);
+    CHECK(doc.object(body) && doc.object(body)->skin && doc.object(body)->skin->clips == std::vector<std::string>{wave});
+    if (!doc.object(body) || !doc.object(body)->skin) return;
+
+    // Wave renamed to the name the added clip would take: that one is numbered.
+    CHECK(editor::renameSkinClip(doc, body, 0, "Nod_Big").empty() && nameOf(wave) == "Nod_Big");
+    const size_t steps = doc.historySize();
+    editor::AddedClips a = editor::addClipSources(doc, body, {dir / "rig_nod.gltf", dir / "rig_alien.gltf"});
+    CHECK(a.error.empty() && a.left == 0 && a.clips == std::vector<std::string>{nod});
+    CHECK(a.refused.size() == 1 && a.refused[0].rfind("rig_alien.gltf shares no joint with the skeleton", 0) == 0);
+    for (const std::string& r : a.refused) std::fprintf(stderr, "  refused: %s\n", r.c_str());
+    // One warning for the left-out joint (and the cubic-spline one Nod/Big always has).
+    int notJoint = 0;
+    for (const std::string& w : a.warnings)
+        notJoint += w.find("not a joint") != std::string::npos ? (w.find("1 animated node is not a joint") != std::string::npos &&
+                                                                  w.find("'Tail'") != std::string::npos ? 1 : 100)
+                                                               : 0;
+    CHECK(notJoint == 1 && a.warnings.size() == 2);
+    CHECK(!fs::exists(proj / "models" / "rig_alien.gltf") && !fs::exists(proj / "models" / "rig_alien.gltf.import.json"));
+    const splash::SkinComponent* sk = &*doc.object(body)->skin;
+    CHECK(sk->clips == std::vector<std::string>({wave, nod}) && sk->clipSources == std::vector<std::string>{"models/rig_nod.gltf"});
+    CHECK(nameOf(nod) == "Nod_Big_2");
+    CHECK(doc.historySize() == steps + 1 && editor::isClipSource(doc, proj / "models" / "rig_nod.gltf") &&
+          !editor::isClipSource(doc, host));
+    // The file it came from, for ModelWatcher.
+    CHECK(fs::path(splash::loadImportSettings(proj / "models" / "rig_nod.gltf").source) == fs::absolute(dir / "rig_nod.gltf"));
+    CHECK(doc.undo() && doc.object(body)->skin->clips == std::vector<std::string>{wave} && doc.object(body)->skin->clipSources.empty());
+    CHECK(doc.redo() && doc.object(body)->skin->clips == std::vector<std::string>({wave, nod}));
+
+    // Rename: checked, then kept in the .anim and the host's sidecar, one undo step.
+    CHECK(editor::renameSkinClip(doc, body, 0, "abcdefghijklmnopqrstuvwxy") ==
+          "'abcdefghijklmnopqrstuvwxy' is longer than 24 characters, the most psxsplash keeps");
+    CHECK(editor::renameSkinClip(doc, body, 0, "NOD_big_2") == "another clip of this skin is named 'Nod_Big_2'");
+    CHECK(!editor::renameSkinClip(doc, body, 0, "   ").empty() && nameOf(wave) == "Nod_Big");
+    CHECK(editor::renameSkinClip(doc, body, 0, "abcdefghijklmnopqrstuvwx").empty());  // 24 is fine
+    const std::string waveBefore = bytes(proj / wave), sideBefore = bytes(side);
+    CHECK(editor::renameSkinClip(doc, body, 0, " wave_in ").empty() && nameOf(wave) == "wave_in");
+    CHECK(splash::loadImportSettings(host).clipNames.at("Wave") == "wave_in");
+    CHECK(doc.undo() && bytes(proj / wave) == waveBefore && bytes(side) == sideBefore);
+    CHECK(doc.redo() && nameOf(wave) == "wave_in");
+    CHECK(editor::renameSkinClip(doc, body, 1, "nod").empty() && nameOf(nod) == "nod");
+    CHECK(splash::loadImportSettings(host).clipNames.at("clips/rig_nod_gltf/Nod_Big") == "nod");
+
+    // Importing the host again keeps both names and the added clips.
+    editor::Reimported re = editor::reimportModel(doc, host);
+    CHECK(re.error.empty() && doc.object(body)->skin->clips == std::vector<std::string>({wave, nod}));
+    CHECK(nameOf(wave) == "wave_in" && nameOf(nod) == "nod");
+    // So does importing the clip source again.
+    std::vector<std::string> problems;
+    editor::refreshClipSources(doc, proj / "models" / "rig_nod.gltf", &problems);
+    CHECK(problems.empty() && doc.object(body)->skin->clips == std::vector<std::string>({wave, nod}) && nameOf(nod) == "nod");
+    // The host's settings reach the added clips: Z up turns their keys too.
+    const std::string nodBefore = bytes(proj / nod);
+    splash::ImportSettings hs = splash::loadImportSettings(host);
+    hs.up = splash::UpAxis::ZUp;
+    splash::saveImportSettings(host, hs);
+    re = editor::reimportModel(doc, host);
+    CHECK(re.error.empty() && bytes(proj / nod) != nodBefore && nameOf(nod) == "nod" &&
+          doc.object(body)->skin->clips == std::vector<std::string>({wave, nod}));
+
+    // A clip added by hand: renamed in its .anim alone.
+    fs::create_directories(proj / "anims", ec);
+    fs::copy_file(fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "skin" / "raise.anim", proj / "anims" / "raise.anim", ec);
+    doc.edit(body, [](splash::Object& o) { o.skin->clips.push_back("anims/raise.anim"); });
+    const std::string sideNow = bytes(side);
+    CHECK(editor::renameSkinClip(doc, body, 2, "lift").empty() && nameOf("anims/raise.anim") == "lift" && bytes(side) == sideNow);
+    CHECK(editor::renameSkinClip(doc, body, 2, "lift").empty());  // already so named: no step
+    CHECK(doc.undo() && nameOf("anims/raise.anim") == "raise");
+    // It stays through a reimport of the host, after the model's clips.
+    re = editor::reimportModel(doc, host);
+    CHECK(re.error.empty() && doc.object(body)->skin->clips == std::vector<std::string>({wave, nod, "anims/raise.anim"}));
+
+    // The 16 cap: a skin full of clips takes none, and says how many it left.
+    doc.edit(body, [](splash::Object& o) {
+        while (o.skin->clips.size() < 16) o.skin->clips.push_back("anims/raise.anim");
+        o.skin->clips.erase(o.skin->clips.begin() + 1);  // the source's clip out
+        o.skin->clips.push_back("anims/raise.anim");
+    });
+    a = editor::addClipSources(doc, body, {dir / "rig_nod.gltf"});
+    CHECK(a.error.empty() && a.left == 1 && a.clips.empty() && doc.object(body)->skin->clips.size() == 16);
+    // A mesh no model wrote has no settings to follow.
+    doc.edit(body, [](splash::Object& o) { o.mesh->mesh = "hand.mesh"; });
+    a = editor::addClipSources(doc, body, {dir / "rig_nod.gltf"});
+    CHECK(a.error.find("was not imported from a model file") != std::string::npos);
 }
 
 // Dropping a skinned model (tests/skinimport/rig.gltf): the object drawing the
@@ -15621,6 +15738,7 @@ int main(int argc, char** argv) {
     testPlaceSkinnedModel();
     testDefaultClipLoop();
     testClipLoopImportAndEdit();
+    testSkinClipSources();
     testImportSettings();
     testSimplifyToTriangles();
     testImportTargetTriangles();

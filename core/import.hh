@@ -5,6 +5,8 @@
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
+#include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -80,6 +82,12 @@ struct ImportSettings {
     // Absolute path of the file the model was copied into the project from;
     // empty when it was in the project already.
     std::string source;
+    // Names given to the model's clips in the editor, by the clip's file
+    // under models/<name>/ without .anim ("Walk", "clips/run_fbx/mixamo_com"):
+    // the import writes that name into the .anim, the file keeping the one it
+    // makes from the take, so a rename survives importing again. Saved only
+    // when there are any.
+    std::map<std::string, std::string> clipNames;
     ExtraKeys extra;
 };
 
@@ -148,5 +156,36 @@ struct ImportCancelled : std::runtime_error {
 ImportedModel importModel(const std::filesystem::path& source, const std::filesystem::path& project,
                           const ImportSettings& settings = {}, const std::filesystem::path& as = {},
                           ImportProgress* progress = nullptr);
+
+// Animations from another file for a skinned model's skeleton (Mixamo writes
+// one animation per file, all on the same joint names).
+struct ClipTarget {
+    std::vector<std::string> joints;  // the skeleton's joint names, as in its .mesh
+    std::string model;                // the skinned model's importName: the clips go under models/<model>/
+    std::string folder;               // under that: clipFolder(source file)
+    std::set<std::string> taken;      // clip names, lower case, the skin's other clips have
+};
+struct ImportedClips {
+    std::vector<std::string> clips;      // every .anim written, project-relative, in file order
+    std::vector<std::string> clipTakes;  // beside clips: each one's name in the file
+    int droppedJoints = 0;               // animated nodes not in the skeleton, left out
+    std::vector<std::string> warnings;
+};
+// "clips/<file name, extension too, made file-safe>": models/run.fbx -> clips/run_fbx.
+std::string clipFolder(const std::filesystem::path& source);
+// Reads only the animations of `source` and writes each one that moves a
+// joint of `target` as models/<model>/<folder>/<clip>.anim, after clearing
+// that folder's clips. The file's nodes named like a joint of the skeleton
+// are its joints, so each key lands in the same joint space importModel puts
+// the model's own clips in, and `settings` (the skinned model's: scale, up
+// axis, units) apply as they do there; channels on other nodes are left out
+// with one warning giving their count. The file name is the take made
+// file-safe and unique in the file, as importModel names clips; the clip's
+// name is settings.clipNames["<folder>/<file stem>"] when there is one, else
+// the file name, numbered (_2, at most 24 characters) away from `taken`.
+// Throws std::runtime_error when the file shares no joint name with the
+// skeleton or has no animation that moves one.
+ImportedClips importClips(const std::filesystem::path& source, const std::filesystem::path& project, const ImportSettings& settings,
+                          const ClipTarget& target, ImportProgress* progress = nullptr);
 
 }  // namespace splash

@@ -10,6 +10,9 @@
 # X, which glTF ignores for a skinned mesh. FBX: Y up, centimetres, Body at
 # the root moved 30 cm along X, which FBX does not ignore, so its control
 # points sit 30 cm short of where they end up. Both give the same vertices.
+# rig_host, rig_nod and rig_alien (.gltf and .fbx) are variations for adding
+# clips from other files (see EXTRA and multiclipcheck.py); skin_saved.scene
+# is tests/skin/skin.scene as the editor saved it before skins had clipSources.
 # Regenerate with: python3 make_rig.py
 import base64, json, math, os, struct
 
@@ -76,7 +79,12 @@ def axis_angle(ax, deg):
     return [ax[0] * s, ax[1] * s, ax[2] * s, math.cos(math.radians(deg) / 2)]
 
 
-def gltf():
+def gltf(anims=('Wave', 'Nod/Big'), mesh=True, tail=False, names=('Upper', 'Lower')):
+    """The rig as glTF. Other files for importing clips onto it (see
+    multiclipcheck.py): `anims` picks the animations, without `mesh` it is the
+    armature alone (no mesh, no skin, as Mixamo's "Without Skin"), `tail` adds
+    joint "Tail" under Lower that Nod/Big turns 30 degrees about Z, and
+    `names` renames Upper and Lower."""
     pts, weights, quads = boxes()
     pos, nrm, joints, wts, idx = [], [], [], [], []
     for q in quads:  # four vertices per face, so normals stay flat
@@ -103,13 +111,14 @@ def gltf():
         accs.append(a)
         return len(accs) - 1
 
-    P = acc('f', 5126, 'VEC3', pos, {'min': [min(p[k] for p in pos) for k in range(3)], 'max': [max(p[k] for p in pos) for k in range(3)]})
-    N = acc('f', 5126, 'VEC3', nrm)
-    J = acc('H', 5123, 'VEC4', joints)
-    W = acc('f', 5126, 'VEC4', wts)
-    I = acc('H', 5123, 'SCALAR', idx)
-    ibm = [[inverse(m)[r][c] for c in range(4) for r in range(4)] for m in JOINTS]  # column-major
-    IB = acc('f', 5126, 'MAT4', ibm)
+    if mesh:
+        P = acc('f', 5126, 'VEC3', pos, {'min': [min(p[k] for p in pos) for k in range(3)], 'max': [max(p[k] for p in pos) for k in range(3)]})
+        N = acc('f', 5126, 'VEC3', nrm)
+        J = acc('H', 5123, 'VEC4', joints)
+        W = acc('f', 5126, 'VEC4', wts)
+        I = acc('H', 5123, 'SCALAR', idx)
+        ibm = [[inverse(m)[r][c] for c in range(4) for r in range(4)] for m in JOINTS]  # column-major
+        IB = acc('f', 5126, 'MAT4', ibm)
     q90 = axis_angle((0, 1, 0), 90)
     q45 = axis_angle((1, 0, 0), 45)
     t3 = acc('f', 5126, 'SCALAR', [0, 0.5, 1], {'min': [0], 'max': [1]})
@@ -119,33 +128,45 @@ def gltf():
     wave_t = acc('f', 5126, 'VEC3', [[0, 0.5, 0], [0, 0.75, 0]])
     # Cubic spline: in-tangent, value, out-tangent per key.
     nod_r = acc('f', 5126, 'VEC4', [[0, 0, 0, 0], [0, 0, 0, 1], [0.1, 0, 0, 0], [0.1, 0, 0, 0], q45, [0, 0, 0, 0]])
+    nodes = [
+        {'name': 'Armature', 'translation': [1, 0, 0.5], 'rotation': [0, S45, 0, S45], 'children': [1, 3] if mesh else [1]},
+        {'name': names[0], 'translation': [0, 0.5, 0], 'children': [2]},
+        {'name': names[1], 'translation': [0, 1, 0]},
+    ]
+    if mesh: nodes.append({'name': 'Body', 'mesh': 0, 'skin': 0, 'translation': [5, 0, 0]})
+    animations = [
+        {'name': 'Wave', 'samplers': [{'input': t3, 'output': wave_r}, {'input': t2, 'output': wave_t, 'interpolation': 'STEP'}],
+         'channels': [{'sampler': 0, 'target': {'node': 2, 'path': 'rotation'}},
+                      {'sampler': 1, 'target': {'node': 1, 'path': 'translation'}}]},
+        {'name': 'Nod/Big', 'samplers': [{'input': t01, 'output': nod_r, 'interpolation': 'CUBICSPLINE'}],
+         'channels': [{'sampler': 0, 'target': {'node': 1, 'path': 'rotation'}}]},
+    ]
+    if tail:
+        nodes[2]['children'] = [len(nodes)]
+        nodes.append({'name': 'Tail', 'translation': [0, 0.5, 0]})
+        tail_r = acc('f', 5126, 'VEC4', [[0, 0, 0, 1], axis_angle((0, 0, 1), 30)])
+        animations[1]['samplers'].append({'input': t01, 'output': tail_r})
+        animations[1]['channels'].append({'sampler': 1, 'target': {'node': len(nodes) - 1, 'path': 'rotation'}})
     j = {
         'asset': {'version': '2.0'}, 'scene': 0, 'scenes': [{'nodes': [0]}],
-        'nodes': [
-            {'name': 'Armature', 'translation': [1, 0, 0.5], 'rotation': [0, S45, 0, S45], 'children': [1, 3]},
-            {'name': 'Upper', 'translation': [0, 0.5, 0], 'children': [2]},
-            {'name': 'Lower', 'translation': [0, 1, 0]},
-            {'name': 'Body', 'mesh': 0, 'skin': 0, 'translation': [5, 0, 0]},
-        ],
-        'meshes': [{'primitives': [{'attributes': {'POSITION': P, 'NORMAL': N, 'JOINTS_0': J, 'WEIGHTS_0': W}, 'indices': I}]}],
-        'skins': [{'joints': [1, 2], 'inverseBindMatrices': IB}],
-        'animations': [
-            {'name': 'Wave', 'samplers': [{'input': t3, 'output': wave_r}, {'input': t2, 'output': wave_t, 'interpolation': 'STEP'}],
-             'channels': [{'sampler': 0, 'target': {'node': 2, 'path': 'rotation'}},
-                          {'sampler': 1, 'target': {'node': 1, 'path': 'translation'}}]},
-            {'name': 'Nod/Big', 'samplers': [{'input': t01, 'output': nod_r, 'interpolation': 'CUBICSPLINE'}],
-             'channels': [{'sampler': 0, 'target': {'node': 1, 'path': 'rotation'}}]},
-        ],
+        'nodes': nodes,
+    }
+    if mesh:
+        j['meshes'] = [{'primitives': [{'attributes': {'POSITION': P, 'NORMAL': N, 'JOINTS_0': J, 'WEIGHTS_0': W}, 'indices': I}]}]
+        j['skins'] = [{'joints': [1, 2], 'inverseBindMatrices': IB}]
+    j.update({
+        'animations': [a for a in animations if a['name'] in anims],
         'accessors': accs, 'bufferViews': views,
         'buffers': [{'byteLength': len(bin_), 'uri': 'data:application/octet-stream;base64,' + base64.b64encode(bytes(bin_)).decode()}],
-    }
+    })
     return json.dumps(j, indent=1)
 
 
 KTIME = 46186158000  # FBX time units per second
 
 
-def fbx():
+def fbx(anims=('Wave', 'Nod/Big'), mesh=True, tail=False, names=('Upper', 'Lower')):
+    """The rig as FBX, with the options gltf() has (Tail turns about Z in Nod/Big)."""
     pts, weights, quads = boxes()
     body = 0.3  # metres along X
     cp = [((p[0] - body) * 100, p[1] * 100, p[2] * 100) for p in pts]
@@ -156,7 +177,7 @@ def fbx():
     # transform in the bone's space, TransformLink the bone's world.
     cm = lambda m: [m[r][c] * (100 if r < 3 and c == 3 else 1) for c in range(4) for r in range(4)]
     clusters = ''
-    for j, name in enumerate(('Upper', 'Lower')):
+    for j, name in enumerate(names):
         ix = [i for i, w in enumerate(weights) if any(x[0] == j for x in w)]
         ws = [dict(weights[i])[j] for i in ix]  # 3 and 1, not normalised
         clusters += '''	Deformer: %d, "SubDeformer::%s", "Cluster" {
@@ -187,6 +208,80 @@ def fbx():
 %s		}
 	}
 ''' % (mid, name, kind, ''.join('			P: %s\n' % p for p in props))
+    attr = lambda aid, name: '''	NodeAttribute: %d, "NodeAttribute::%s", "LimbNode" {
+		TypeFlags: "Skeleton"
+	}
+''' % (aid, name)
+    rotNode = lambda cid: '''	AnimationCurveNode: %d, "AnimCurveNode::R", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",0
+			P: "d|Y", "Number", "", "A",0
+			P: "d|Z", "Number", "", "A",0
+		}
+	}
+''' % cid
+    geometry = '''	Geometry: 100, "Geometry::Body", "Mesh" {
+		Vertices: *%d { a: %s }
+		PolygonVertexIndex: *%d { a: %s }
+		GeometryVersion: 124
+		LayerElementNormal: 0 {
+			Version: 101
+			Name: ""
+			MappingInformationType: "ByPolygonVertex"
+			ReferenceInformationType: "Direct"
+			Normals: *%d { a: %s }
+		}
+		Layer: 0 {
+			Version: 100
+			LayerElement:  { Type: "LayerElementNormal" TypedIndex: 0 }
+		}
+	}
+''' % (len(cp) * 3, num(c for p in cp for c in p), len(pvi), num(pvi), len(normals), num(normals))
+    objects = geometry if mesh else ''
+    objects += model(200, 'Armature', 'Null', ['"Lcl Translation", "Lcl Translation", "", "A",100,0,50',
+                                               '"Lcl Rotation", "Lcl Rotation", "", "A",0,90,0'])
+    objects += model(201, names[0], 'LimbNode', ['"Lcl Translation", "Lcl Translation", "", "A",0,50,0'])
+    objects += model(202, names[1], 'LimbNode', ['"Lcl Translation", "Lcl Translation", "", "A",0,100,0'])
+    if mesh: objects += model(203, 'Body', 'Mesh', ['"Lcl Translation", "Lcl Translation", "", "A",%g,0,0' % (body * 100)])
+    if tail: objects += model(204, 'Tail', 'LimbNode', ['"Lcl Translation", "Lcl Translation", "", "A",0,50,0'])
+    objects += attr(300, names[0]) + attr(301, names[1]) + (attr(302, 'Tail') if tail else '')
+    if mesh:
+        objects += '''	Deformer: 500, "Deformer::Skin", "Skin" {
+		Version: 101
+		Link_DeformAcuracy: 50
+	}
+''' + clusters
+    stack = lambda sid, name: '''	AnimationStack: %d, "AnimStack::%s", "" {
+		Properties70:  {
+			P: "LocalStart", "KTime", "Time", "",0
+			P: "LocalStop", "KTime", "Time", "",%d
+		}
+	}
+	AnimationLayer: %d, "AnimLayer::BaseLayer", "" {
+	}
+''' % (sid, name, KTIME, sid + 1)
+    links = ['"OO",200,0', '"OO",201,200', '"OO",202,201']
+    if mesh: links.append('"OO",203,0')
+    links += ['"OO",300,201', '"OO",301,202']
+    if mesh: links += ['"OO",100,203', '"OO",500,100', '"OO",510,500', '"OO",511,500', '"OO",201,510', '"OO",202,511']
+    if tail: links += ['"OO",204,202', '"OO",302,204']
+    if 'Wave' in anims:
+        objects += stack(600, 'Wave') + rotNode(602) + '''	AnimationCurveNode: 603, "AnimCurveNode::T", "" {
+		Properties70:  {
+			P: "d|X", "Number", "", "A",0
+			P: "d|Y", "Number", "", "A",50
+			P: "d|Z", "Number", "", "A",0
+		}
+	}
+''' + curve(604, [0, 0.5, 1], [0, 90, 0], linear) + curve(605, [0, 0.5], [50, 75], constant)
+        links += ['"OO",601,600', '"OO",602,601', '"OO",603,601', '"OP",602,202, "Lcl Rotation"', '"OP",603,201, "Lcl Translation"',
+                  '"OP",604,602, "d|Y"', '"OP",605,603, "d|Y"']
+    if 'Nod/Big' in anims:
+        objects += stack(700, 'Nod/Big') + rotNode(702) + curve(704, [0, 1], [0, 45], linear)
+        links += ['"OO",701,700', '"OO",702,701', '"OP",702,201, "Lcl Rotation"', '"OP",704,702, "d|X"']
+        if tail:
+            objects += rotNode(705) + curve(706, [0, 1], [0, 30], linear)
+            links += ['"OO",705,701', '"OP",705,204, "Lcl Rotation"', '"OP",706,705, "d|Z"']
     return '''; FBX 7.4.0 project file
 FBXHeaderExtension:  {
 	FBXHeaderVersion: 1003
@@ -205,106 +300,25 @@ GlobalSettings:  {
 	}
 }
 Objects:  {
-	Geometry: 100, "Geometry::Body", "Mesh" {
-		Vertices: *%d { a: %s }
-		PolygonVertexIndex: *%d { a: %s }
-		GeometryVersion: 124
-		LayerElementNormal: 0 {
-			Version: 101
-			Name: ""
-			MappingInformationType: "ByPolygonVertex"
-			ReferenceInformationType: "Direct"
-			Normals: *%d { a: %s }
-		}
-		Layer: 0 {
-			Version: 100
-			LayerElement:  { Type: "LayerElementNormal" TypedIndex: 0 }
-		}
-	}
-%s%s%s%s	NodeAttribute: 300, "NodeAttribute::Upper", "LimbNode" {
-		TypeFlags: "Skeleton"
-	}
-	NodeAttribute: 301, "NodeAttribute::Lower", "LimbNode" {
-		TypeFlags: "Skeleton"
-	}
-	Deformer: 500, "Deformer::Skin", "Skin" {
-		Version: 101
-		Link_DeformAcuracy: 50
-	}
-%s	AnimationStack: 600, "AnimStack::Wave", "" {
-		Properties70:  {
-			P: "LocalStart", "KTime", "Time", "",0
-			P: "LocalStop", "KTime", "Time", "",%d
-		}
-	}
-	AnimationLayer: 601, "AnimLayer::BaseLayer", "" {
-	}
-	AnimationCurveNode: 602, "AnimCurveNode::R", "" {
-		Properties70:  {
-			P: "d|X", "Number", "", "A",0
-			P: "d|Y", "Number", "", "A",0
-			P: "d|Z", "Number", "", "A",0
-		}
-	}
-	AnimationCurveNode: 603, "AnimCurveNode::T", "" {
-		Properties70:  {
-			P: "d|X", "Number", "", "A",0
-			P: "d|Y", "Number", "", "A",50
-			P: "d|Z", "Number", "", "A",0
-		}
-	}
-%s%s	AnimationStack: 700, "AnimStack::Nod/Big", "" {
-		Properties70:  {
-			P: "LocalStart", "KTime", "Time", "",0
-			P: "LocalStop", "KTime", "Time", "",%d
-		}
-	}
-	AnimationLayer: 701, "AnimLayer::BaseLayer", "" {
-	}
-	AnimationCurveNode: 702, "AnimCurveNode::R", "" {
-		Properties70:  {
-			P: "d|X", "Number", "", "A",0
-			P: "d|Y", "Number", "", "A",0
-			P: "d|Z", "Number", "", "A",0
-		}
-	}
 %s}
 Connections:  {
-	C: "OO",200,0
-	C: "OO",201,200
-	C: "OO",202,201
-	C: "OO",203,0
-	C: "OO",300,201
-	C: "OO",301,202
-	C: "OO",100,203
-	C: "OO",500,100
-	C: "OO",510,500
-	C: "OO",511,500
-	C: "OO",201,510
-	C: "OO",202,511
-	C: "OO",601,600
-	C: "OO",602,601
-	C: "OO",603,601
-	C: "OP",602,202, "Lcl Rotation"
-	C: "OP",603,201, "Lcl Translation"
-	C: "OP",604,602, "d|Y"
-	C: "OP",605,603, "d|Y"
-	C: "OO",701,700
-	C: "OO",702,701
-	C: "OP",702,201, "Lcl Rotation"
-	C: "OP",704,702, "d|X"
+%s}
+''' % (objects, ''.join('\tC: %s\n' % l for l in links))
+
+
+# The files multiclipcheck.py imports clips from: the host with Wave alone,
+# Nod/Big alone on the armature (no mesh) with an extra joint the host lacks,
+# and an armature whose joints are named otherwise.
+EXTRA = {
+    'host': dict(anims=('Wave',)),
+    'nod': dict(anims=('Nod/Big',), mesh=False, tail=True),
+    'alien': dict(anims=('Nod/Big',), mesh=False, names=('BoneA', 'BoneB')),
 }
-''' % (len(cp) * 3, num(c for p in cp for c in p), len(pvi), num(pvi), len(normals), num(normals),
-       model(200, 'Armature', 'Null', ['"Lcl Translation", "Lcl Translation", "", "A",100,0,50',
-                                       '"Lcl Rotation", "Lcl Rotation", "", "A",0,90,0']),
-       model(201, 'Upper', 'LimbNode', ['"Lcl Translation", "Lcl Translation", "", "A",0,50,0']),
-       model(202, 'Lower', 'LimbNode', ['"Lcl Translation", "Lcl Translation", "", "A",0,100,0']),
-       model(203, 'Body', 'Mesh', ['"Lcl Translation", "Lcl Translation", "", "A",%g,0,0' % (body * 100)]),
-       clusters, KTIME,
-       curve(604, [0, 0.5, 1], [0, 90, 0], linear), curve(605, [0, 0.5], [50, 75], constant),
-       KTIME, curve(704, [0, 1], [0, 45], linear))
 
 
 if __name__ == '__main__':
     open(os.path.join(here, 'rig.gltf'), 'w').write(gltf() + '\n')
     open(os.path.join(here, 'rig.fbx'), 'w').write(fbx())
+    for name, opts in EXTRA.items():
+        open(os.path.join(here, 'rig_%s.gltf' % name), 'w').write(gltf(**opts) + '\n')
+        open(os.path.join(here, 'rig_%s.fbx' % name), 'w').write(fbx(**opts))

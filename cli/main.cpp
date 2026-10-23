@@ -1,6 +1,7 @@
 // splashpack-cli: export a scene file to a splashpack without the editor.
 #include <bit>
 #include <cmath>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -64,6 +65,9 @@ static int usage() {
                  "    [--triangles <n>]\n"
                  "  writes models/<name>.mesh and its textures into the project, as the editor does;\n"
                  "  the settings start from <model>.import.json beside the model when there is one\n"
+                 "usage: splashpack-cli import-clips <file> --project <dir> --model <models/name.ext>\n"
+                 "  writes the file's animations for the skeleton of models/<name>.mesh, by joint name and with\n"
+                 "  the model's import settings, into models/<name>/clips/<file>/, as the editor's Add clips does\n"
                  "usage: splashpack-cli import-unity <unityProject> <destDir> [--scenes Name1,Name2,...]\n"
                  "    [--cd-track N=<audio file>]...\n"
                  "  makes a new project in <destDir> (new or empty) from the scenes of a Unity SplashEdit\n"
@@ -384,6 +388,48 @@ static int importCmd(int argc, char** argv) {
     }
 }
 
+// import-clips <file> --project <dir> --model <models/x.ext>: the file's
+// animations onto the skeleton of models/<x>.mesh, with that model's import
+// settings, into models/<x>/clips/<file>/, as the editor's Add clips from
+// model does. The model's own clips' names are taken.
+static int importClipsCmd(int argc, char** argv) {
+    if (argc < 6) return usage();
+    try {
+        const fs::path source = argv[2];
+        fs::path project, model;
+        for (int i = 3; i < argc; i++) {
+            std::string a = argv[i];
+            if (a == "--project" && i + 1 < argc) project = argv[++i];
+            else if (a == "--model" && i + 1 < argc) model = argv[++i];
+            else return usage();
+        }
+        if (project.empty() || model.empty()) return usage();
+        const fs::path modelFile = project / model;
+        const splash::ImportSettings s = splash::loadImportSettings(modelFile);
+        splash::ClipTarget t;
+        t.model = splash::importName(modelFile);
+        t.folder = splash::clipFolder(source);
+        const splash::Mesh mesh = splash::loadMesh(project / "models" / (t.model + ".mesh"));
+        if (!mesh.skin) throw std::runtime_error("models/" + t.model + ".mesh has no skeleton");
+        for (const splash::Joint& j : mesh.skin->joints) t.joints.push_back(j.name);
+        std::error_code ec;
+        for (fs::directory_iterator it(project / "models" / t.model, ec), end; !ec && it != end; it.increment(ec))
+            if (it->path().extension() == ".anim") {
+                std::string n = splash::loadAnim(it->path()).name;
+                for (char& c : n) c = char(std::tolower(static_cast<unsigned char>(c)));
+                t.taken.insert(n);
+            }
+        splash::ImportedClips c = splash::importClips(source, project, s, t);
+        for (size_t i = 0; i < c.clips.size(); i++) std::printf("clip %s take %s\n", c.clips[i].c_str(), c.clipTakes[i].c_str());
+        std::printf("dropped %d\n", c.droppedJoints);
+        for (const std::string& w : c.warnings) std::printf("warning: %s\n", w.c_str());
+        return 0;
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "error: %s\n", e.what());
+        return 1;
+    }
+}
+
 static int luac(int argc, char** argv) {
     if (argc != 5 || std::strcmp(argv[3], "-o") != 0) return usage();
     try {
@@ -597,6 +643,7 @@ int main(int argc, char** argv) {
     if (argc >= 2 && std::strcmp(argv[1], "gpudump") == 0) return gpudumpCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "import") == 0) return importCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "import-unity") == 0) return importUnity(argc, argv);
+    if (argc >= 2 && std::strcmp(argv[1], "import-clips") == 0) return importClipsCmd(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "resave") == 0) return resave(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "audio") == 0) return audio(argc, argv);
     if (argc >= 2 && std::strcmp(argv[1], "luac") == 0) return luac(argc, argv);

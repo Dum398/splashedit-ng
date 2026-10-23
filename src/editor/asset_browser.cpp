@@ -110,8 +110,10 @@ void visitObjectPaths(SceneT& o, const std::string& names, std::vector<int>& pat
         fn("Mesh", names, path, o.mesh->mesh);
         for (auto& m : o.mesh->materials) fn("Texture", names, path, m.texture);
     }
-    if (o.skin)
+    if (o.skin) {
         for (auto& c : o.skin->clips) fn("Skin clip", names, path, c);
+        for (auto& c : o.skin->clipSources) fn("Skin clip source", names, path, c);
+    }
     if (o.script) fn("Script", names, path, o.script->lua);
     if (o.trigger) fn("Trigger script", names, path, o.trigger->lua);
     if (o.audio) fn("Audio clip", names, path, o.audio->clip);

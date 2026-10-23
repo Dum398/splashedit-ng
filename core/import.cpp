@@ -51,6 +51,11 @@ void checkpoint(float fraction = -1) {
 // Every this many triangles of one mesh, the import checks for a cancel.
 constexpr size_t kCheckEvery = 8192;
 
+// The running importClips' target on this thread, null for importModel, and
+// the animated nodes it left out, by name.
+thread_local const ClipTarget* t_clips = nullptr;
+thread_local std::set<std::string>* t_dropped = nullptr;
+
 std::string lower(std::string s) {
     for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
     return s;
@@ -420,6 +425,59 @@ std::string safeName(const std::string& name) {
     std::string s;
     for (char c : name) s += std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ? c : '_';
     return s.empty() ? std::string("node") : s;
+}
+
+// `want` cut to the 24 characters psxsplash keeps, then numbered (_2, _3,
+// still at most 24) until no name in `taken` (lower case) matches it in any
+// case; the result goes into `taken`.
+std::string uniqueClipName(const std::string& want, std::set<std::string>& taken) {
+    const std::string base = want.substr(0, 24);
+    std::string name = base;
+    for (int k = 2; taken.count(lower(name)); k++) {
+        const std::string suffix = "_" + std::to_string(k);
+        name = base.substr(0, 24 - suffix.size()) + suffix;
+    }
+    taken.insert(lower(name));
+    return name;
+}
+
+// Each clip's file stem and name, in order. Clip names are what
+// SkinnedAnim.Play takes. The stem is the take made file-safe and unique
+// (in any case) among the clips; the name is the one settings.clipNames
+// gives "<prefix><stem>", else the stem numbered away from those names and
+// from `taken`, so two clips never share a name.
+std::vector<std::pair<std::string, std::string>> nameClips(const std::vector<AnimClip>& clips, const ImportSettings& settings,
+                                                           const std::string& prefix, std::set<std::string> taken) {
+    std::vector<std::pair<std::string, std::string>> out;
+    std::set<std::string> stems;
+    for (const AnimClip& c : clips) out.push_back({uniqueClipName(safeName(c.name), stems), {}});
+    for (auto& [stem, name] : out) {
+        auto it = settings.clipNames.find(prefix + stem);
+        if (it != settings.clipNames.end()) taken.insert(lower(name = it->second));
+    }
+    for (auto& [stem, name] : out)
+        if (name.empty()) name = uniqueClipName(stem, taken);
+    return out;
+}
+
+// For importClips: the joints are the nodes named like a joint of the
+// target skeleton, whatever skins the file has, so keys go into the same
+// joint spaces as the skeleton's own clips. Fails when there is none.
+template <class Nodes>
+void clipJoints(Nodes& tree, const std::string& what) {
+    if (!t_clips) return;
+    const std::set<std::string> names(t_clips->joints.begin(), t_clips->joints.end());
+    bool any = false;
+    for (auto& nb : tree) any |= nb.joint = names.count(nb.name) > 0;
+    if (!any)
+        fail(what + " shares no joint with the skeleton" +
+             (t_clips->joints.empty() ? std::string() : " (its joints are named like '" + t_clips->joints.front() + "')") +
+             ": only animations made for the same rig, with the same joint names, can be added");
+}
+
+// For importClips: an animated node that is not a joint, left out.
+void dropped(const std::string& node) {
+    if (t_dropped) t_dropped->insert(node);
 }
 
 // Normals from the faces: each corner gets the sum of the face normals at its
@@ -808,6 +866,26 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
     checkpoint(0.55f);
     std::vector<AnimClip> clips = buildRig(out, baked, nodes, rig, settings);
     applySettings(baked, nodes, clips, settings);
+    if (t_clips) {
+        // importClips: the clips alone, into their folder.
+        if (clips.empty()) fail(what + " has no animation that moves a joint of the skeleton");
+        const fs::path dir = fs::path("models") / t_clips->model / t_clips->folder;
+        std::error_code ec;
+        for (fs::directory_iterator it(project / dir, ec), end; !ec && it != end; it.increment(ec))
+            if (it->path().extension() == ".anim") fs::remove(it->path(), ec);
+        ec.clear();
+        fs::create_directories(project / dir, ec);
+        if (ec) fail("cannot create " + projectPath(dir) + ": " + ec.message());
+        const auto names = nameClips(clips, settings, t_clips->folder + "/", t_clips->taken);
+        for (size_t i = 0; i < clips.size(); i++) {
+            out.clipTakes.push_back(clips[i].name);
+            clips[i].name = names[i].second;
+            const fs::path file = dir / (names[i].first + ".anim");
+            saveAnim(clips[i], project / file);
+            out.clips.push_back(projectPath(file));
+        }
+        return;
+    }
     placeRootSpaceNodes(nodes);
     checkpoint(0.6f);
     out.sourceTriangles = baked.triangles();
@@ -878,22 +956,15 @@ void finishImport(ImportedModel& out, Sink& baked, std::vector<NodeBuild>& nodes
         if (ec) fail("cannot create " + projectPath(project / nodeDir) + ": " + ec.message());
         madeDir = true;
     };
-    // Clip names are what SkinnedAnim.Play takes: file-safe, unique, and at
-    // most 24 characters, which psxsplash keeps.
-    std::set<std::string> clipNames;
-    for (AnimClip& c : clips) {
-        const std::string base = safeName(c.name).substr(0, 24);
-        std::string name = base;
-        for (int k = 2; clipNames.count(lower(name)); k++) {
-            const std::string suffix = "_" + std::to_string(k);
-            name = base.substr(0, 24 - suffix.size()) + suffix;
-        }
-        clipNames.insert(lower(name));
-        out.clipTakes.push_back(c.name);
-        c.name = name;
+    // Clip names: file-safe, unique, at most 24 characters (which psxsplash
+    // keeps), or the ones given in the editor (see nameClips).
+    const auto names = nameClips(clips, settings, "", {});
+    for (size_t i = 0; i < clips.size(); i++) {
+        out.clipTakes.push_back(clips[i].name);
+        clips[i].name = names[i].second;
         makeDir();
-        const fs::path file = nodeDir / (name + ".anim");
-        saveAnim(c, project / file);
+        const fs::path file = nodeDir / (names[i].first + ".anim");
+        saveAnim(clips[i], project / file);
         out.clips.push_back(projectPath(file));
     }
     std::set<std::string> taken;
@@ -1064,6 +1135,7 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
         skinIndex[sk] = int(rig.skins.size());
         rig.skins.push_back(std::move(src));
     }
+    clipJoints(tree, what);
 
     Sink baked;
     std::map<const cgltf_material*, int> materialIndex;
@@ -1199,6 +1271,8 @@ ImportedModel importGltf(const fs::path& source, const fs::path& project, const 
             const cgltf_animation_channel& ch = an.channels[c];
             auto it = ch.target_node ? indexOf.find(ch.target_node) : indexOf.end();
             if (ch.target_path == cgltf_animation_path_type_weights) morph = true;
+            if (it != indexOf.end() && !tree[size_t(it->second)].joint && ch.target_path != cgltf_animation_path_type_weights)
+                dropped(tree[size_t(it->second)].name);
             if (it == indexOf.end() || !tree[size_t(it->second)].joint || !ch.sampler) continue;
             ChannelSource src;
             src.node = it->second;
@@ -1439,6 +1513,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
         }
         rig.skins.push_back(std::move(src));
     }
+    clipJoints(tree, what);
     auto remap = [&](Sink& sink) {
         for (Influence& inf : sink.influences)
             for (auto& w : inf.weights) w.first = w.first >= 0 && size_t(w.first) < treeOf.size() ? treeOf[size_t(w.first)] : -1;
@@ -1448,7 +1523,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
         if (nb.local) remap(*nb.local);
 
     // Animation stacks, baked by ufbx to linear keys at 30 Hz or less.
-    if (!skinnedNodes.empty())
+    if (!skinnedNodes.empty() || t_clips)
         for (const ufbx_anim_stack* stack : scene->anim_stacks) {
             ufbx_bake_opts bo{};
             bo.resample_rate = 30;
@@ -1467,6 +1542,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
             clip.length = float(std::max(0.0, bakedAnim->playback_duration));
             for (const ufbx_baked_node& bn : bakedAnim->nodes) {
                 const int node = bn.typed_id < treeOf.size() ? treeOf[bn.typed_id] : -1;
+                if (node >= 0 && !tree[size_t(node)].joint) dropped(tree[size_t(node)].name);
                 if (node < 0 || !tree[size_t(node)].joint) continue;
                 auto vec3s = [&](const ufbx_baked_vec3_list& keys, AnimProperty prop) {
                     ChannelSource src;
@@ -1562,6 +1638,45 @@ ImportedModel importModel(const fs::path& source, const fs::path& project, const
     return out;
 }
 
+std::string clipFolder(const fs::path& source) {
+    std::u8string u = source.filename().u8string();
+    return "clips/" + safeName(std::string(u.begin(), u.end()));
+}
+
+ImportedClips importClips(const fs::path& source, const fs::path& project, const ImportSettings& settings, const ClipTarget& target,
+                          ImportProgress* progress) {
+    if (!canImportModel(source))
+        fail(projectPath(source.filename()) + ": animations come from .glb, .gltf, .fbx, .obj and .blend files");
+    if (target.model.empty() || target.folder.empty()) fail("no folder for the clips");
+    std::set<std::string> left;
+    struct Scope {
+        const ClipTarget* clips;
+        std::set<std::string>* dropped;
+        ~Scope() { t_clips = clips, t_dropped = dropped; }
+    } scope{t_clips, t_dropped};
+    t_clips = &target;
+    t_dropped = &left;
+    // importModel names nothing after `as` in this mode: the folder is the target's.
+    ImportedModel m = importModel(source, project, settings, {}, progress);
+    ImportedClips out;
+    out.clips = std::move(m.clips);
+    out.clipTakes = std::move(m.clipTakes);
+    out.droppedJoints = int(left.size());
+    if (!left.empty())
+        out.warnings.push_back(std::to_string(left.size()) + (left.size() == 1 ? " animated node is" : " animated nodes are") +
+                               " not a joint of the skeleton, its keys were left out (the first: '" + *left.begin() +
+                               "'): the files must share the rig");
+    // What concerns the animations; the rest is about the file's meshes.
+    static const char* const kAbout[] = {"moves no joint", "non-uniform scale", "could not be read", "cubic-spline", "morph target"};
+    for (const std::string& w : m.warnings)
+        for (const char* k : kAbout)
+            if (w.find(k) != std::string::npos) {
+                out.warnings.push_back(w);
+                break;
+            }
+    return out;
+}
+
 namespace {
 
 // Same float handling as the scene files.
@@ -1599,6 +1714,11 @@ json settingsJson(const ImportSettings& s) {
     if (s.targetTriangles > 0) j["targetTriangles"] = s.targetTriangles;
     if (!s.convertUnits) j["convertUnits"] = false;
     if (s.targetTriangles > 0 && s.sourceTriangles > 0) j["sourceTriangles"] = s.sourceTriangles;
+    if (!s.clipNames.empty()) {
+        json names = json::object();
+        for (const auto& [k, v] : s.clipNames) names[k] = v;
+        j["clipNames"] = names;
+    }
     return j;
 }
 
@@ -1643,6 +1763,11 @@ ImportSettings loadImportSettings(const fs::path& model) {
         };
         s.targetTriangles = count("targetTriangles", "target triangles");
         s.sourceTriangles = count("sourceTriangles", "source triangles");
+        if (j.contains("clipNames")) {
+            const json& names = j["clipNames"];
+            if (!names.is_object()) fail(what + ": clipNames must be an object");
+            for (auto& [k, v] : names.items()) s.clipNames[k] = v.get<std::string>();
+        }
         json written = settingsJson(s);
         for (auto& [k, v] : j.items())
             if (!written.contains(k) && k != "targetTriangles" && k != "sourceTriangles") s.extra.push_back({k, v.dump()});

@@ -61,6 +61,8 @@ struct StringTable {
 inline constexpr const char* kStringsCardKey = "LANG";
 // The Persist slot holding the active language (index + 1; 0/nil = unset).
 inline constexpr const char* kStringsPersistKey = "__strings_lang";
+// What a UI text keeps (psxsplash UI.SetText; splashpack.cpp kUiTextMax).
+inline constexpr size_t kStringUiTextMax = 63;
 
 bool validLanguageId(const std::string& id);
 bool validStringKey(const std::string& key);

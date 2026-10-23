@@ -85,16 +85,19 @@ def typed(handle, text):
 # ---- The window: a key added, renamed, its texts typed; a key deleted and undone.
 out, d, shot = run(OPEN + ['--click', '@strings.addkey'] + W + typed('@strings.key/new.key', 'menu.quit') +
                    typed('@strings.cell/menu.quit/en', 'QUIT') + typed('@strings.cell/menu.quit/fr', 'QUITTER') +
-                   ['--click', '@strings.del/hud.title'] + W + ['--key', 'ctrl+z'] + W)
+                   ['--click', '@strings.del/hud.title'] + W + ['--key', 'ctrl+z'] + W +
+                   typed('@strings.cell/hud.big/fr', 'L' * 70))
 t = table(d)
 check('the window opens and lists the table', 'strings: table languages en=English,fr=Francais keys 3' in out, out[-400:])
 check('the new key is renamed and both its texts are saved',
       t['strings'].get('menu.quit') == {'en': 'QUIT', 'fr': 'QUITTER'} and 'new.key' not in t['strings'], t['strings'])
+check('a text past 63 bytes is kept whole and counted against 63 in the warning colour',
+      t['strings']['hud.big']['fr'] == 'L' * 70 and 'strings: cell hud.big/fr 70/63 warn' in out, t['strings']['hud.big'])
 check('Ctrl+Z in the window brings the deleted key back', t['strings'].get('hud.title') == {'en': 'TITLE', 'fr': 'TITRE'}, t['strings'])
 tables = [l for l in out.splitlines() if l.startswith('strings: table ')]
 # open, add, rename, en, fr, delete, undo: one line (one revision) per edit.
-check('one undo step per edit (7 table states, the last with redo)', len(tables) == 7 and tables[-1].endswith('undo 1 redo 1') and
-      'keys 3' in tables[-2] and 'keys 4' in tables[-1], tables)
+check('one undo step per edit (8 table states, the last a new edit after the undo)', len(tables) == 8 and
+      tables[-1].endswith('undo 1 redo 0') and 'keys 3' in tables[-3] and 'keys 4' in tables[-2], tables)
 
 # ---- A language added and named; the search; Import CSV's dialog.
 out, d, shot = run(OPEN + ['--click', '@strings.addlang'] + W + typed('@strings.langid/lang', 'de') +

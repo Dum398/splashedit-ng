@@ -386,7 +386,7 @@ size_t stringsLuaHeapBytes(size_t textBytes, size_t cells, size_t elements) {
 
 namespace {
 
-constexpr size_t kTextMax = 63;  // splashpack.cpp kUiTextMax
+constexpr size_t kTextMax = kStringUiTextMax;
 
 struct Keyed {
     const UICanvas* canvas;

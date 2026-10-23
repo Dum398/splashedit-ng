@@ -11943,8 +11943,16 @@ static void stringsWindow(State& st, editor::Document& doc, ImVec2 size) {
             const ImRect cr(ImVec2(colX(l), y), ImVec2(colX(l) + colW, y + size::field + 2));
             nameRect("strings.cell/" + e.key + "/" + lid, cr);
             const std::string& v = size_t(l) < e.text.size() ? e.text[size_t(l)] : std::string();
-            if (textField(("strcell/" + e.key + "/" + lid).c_str(), cr, v, &typed, l == 0 ? "(empty)" : "(default)", 255))
+            // Counted against what a UI text keeps (63 bytes, the warning colour past it); Lua-only
+            // strings may be longer, so the field takes up to 255.
+            if (textField(("strcell/" + e.key + "/" + lid).c_str(), cr, v, &typed, l == 0 ? "(empty)" : "(default)", 255, nullptr,
+                          splash::kStringUiTextMax))
                 act = [&, k = e.key, l, typed] { sd.setText(k, l, typed); };
+            if (ImGui::IsItemHovered() && v.size() > splash::kStringUiTextMax)
+                tooltip("A UI text shows the first 63 bytes; Strings.Get returns it whole.");
+            if (v.size() > splash::kStringUiTextMax)
+                scriptLine(("strings.long/" + e.key + "/" + lid).c_str(),
+                           "strings: cell " + e.key + "/" + lid + " " + std::to_string(v.size()) + "/63 warn");
         }
         const ImRect dr(ImVec2(o.x + inner - delW + 4, y + 2), ImVec2(o.x + inner, y + 24));
         nameRect("strings.del/" + e.key, dr);

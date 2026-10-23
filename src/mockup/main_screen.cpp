@@ -8901,6 +8901,17 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                                            "1 keeps the size in the file, in metres."),
                                             fmtShort(cur.scale).c_str(), nullptr, 0, nullptr, &sv);
                 scrub(sfe, sv, [](splash::ImportSettings& s, float v) { s.scale = splash::clampv(v, 0.001f, 1000.0f); });
+                ImRect uv = irow("liunits", "Convert units",
+                                 "Scale the file's units to metres, like Unity's Convert Units. Off takes the numbers in the file "
+                                 "as metres (an FBX in centimetres then comes in 100 times larger).");
+                const ImRect ut(ImVec2(uv.Min.x, uv.GetCenter().y - 8), ImVec2(uv.Min.x + 30, uv.GetCenter().y + 8));
+                nameRect("iunits", ut);  // --click @iunits
+                if (toggle("iunits", ut, cur.convertUnits)) {
+                    splash::ImportSettings next = ip.settings;
+                    next.convertUnits = !next.convertUnits;
+                    apply(next);
+                }
+                scriptLine("import.units", std::string("import convert units: ") + (cur.convertUnits ? "on" : "off"));
                 const splash::UpAxis ups[3] = {splash::UpAxis::File, splash::UpAxis::YUp, splash::UpAxis::ZUp};
                 const char* upNames[3] = {"From file", "Y up", "Z up"};
                 int upCur = (int)(std::find(std::begin(ups), std::end(ups), cur.up) - std::begin(ups));

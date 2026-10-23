@@ -51,6 +51,10 @@ enum class UpAxis : uint8_t { File, YUp, ZUp };
 enum class Normals : uint8_t { Import, Recompute };
 struct ImportSettings {
     float scale = 1;  // multiplies every position and node translation
+    // An FBX's own unit turned into metres, on top of `scale`, as Unity's
+    // Convert Units does: into every position and node translation, node
+    // scales as written. Off: the file's numbers are taken as metres.
+    bool convertUnits = true;
     // File: the axes the file declares. YUp, ZUp: the data is taken as
     // right-handed Y up (+Z front) or Z up (-Y front) whatever the file says.
     UpAxis up = UpAxis::File;

@@ -13908,6 +13908,113 @@ void testUnityPlacedMaterial() {
         for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
 }
 
+// Convert Units (the .meta's useFileScale) and globalScale, as Unity 6000.3
+// sizes them (#223): the file's unit goes into vertices and node positions,
+// node scales stay. Fixture: unity-models' units.unity and Assets/Units, cm
+// FBXs (unit_cm and unit_skin with node scale 1, unit_node100 Blender's
+// default 100). World sizes are Unity's, from each mesh's vertices.
+void testUnityUnitScale() {
+    using namespace splash::unity;
+    using namespace unitytest;
+    const fs::path proj = fs::path(SPLASHEDIT_SOURCE_DIR) / "tests" / "fixtures" / "unity-models";
+    const fs::path dest = g_outDir / "unity-unit-scale";
+    fs::remove_all(dest);
+    fs::create_directories(dest);
+    ImportReport r;
+    const splash::Scene s = convertScene(proj, indexGuids(proj), proj / "Assets" / "Scenes" / "units.unity", dest, r);
+    // The world-space bounds size of an object's meshes, children included.
+    struct M { float m[3][3]; splash::Vec3 t; };
+    std::function<void(const splash::Object&, const M&, splash::Vec3&, splash::Vec3&)> walk =
+        [&](const splash::Object& o, const M& p, splash::Vec3& lo, splash::Vec3& hi) {
+            M w;
+            const splash::Transform& tr = o.transform;
+            const splash::Vec3 ax[3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+            const float sc[3] = {tr.scale.x, tr.scale.y, tr.scale.z};
+            float l[3][3];
+            for (int c = 0; c < 3; c++) {
+                const splash::Vec3 col = splash::rotate(tr.rotation, ax[c]);
+                l[0][c] = col.x * sc[c], l[1][c] = col.y * sc[c], l[2][c] = col.z * sc[c];
+            }
+            for (int i = 0; i < 3; i++)
+                for (int c = 0; c < 3; c++) w.m[i][c] = p.m[i][0] * l[0][c] + p.m[i][1] * l[1][c] + p.m[i][2] * l[2][c];
+            const float t[3] = {tr.position.x, tr.position.y, tr.position.z};
+            float wt[3];
+            for (int i = 0; i < 3; i++) wt[i] = p.m[i][0] * t[0] + p.m[i][1] * t[1] + p.m[i][2] * t[2] + p.t[i];
+            w.t = {wt[0], wt[1], wt[2]};
+            if (o.mesh && !o.mesh->mesh.empty())
+                for (const splash::Vec3& v : splash::loadMesh(dest / o.mesh->mesh).positions) {
+                    float q[3];
+                    for (int i = 0; i < 3; i++) q[i] = w.m[i][0] * v.x + w.m[i][1] * v.y + w.m[i][2] * v.z + w.t[i];
+                    lo = {std::min(lo.x, q[0]), std::min(lo.y, q[1]), std::min(lo.z, q[2])};
+                    hi = {std::max(hi.x, q[0]), std::max(hi.y, q[1]), std::max(hi.z, q[2])};
+                }
+            for (const splash::Object& c : o.children) walk(c, w, lo, hi);
+        };
+    auto sized = [&](const char* name, float x, float y, float z) {
+        const splash::Object* o = findObj(s.objects, name);
+        if (!o) return false;
+        splash::Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        walk(*o, M{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, {}}, lo, hi);
+        const float want[3] = {x, y, z}, got[3] = {hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
+        bool ok = true;
+        for (int i = 0; i < 3; i++) ok = ok && std::fabs(got[i] - want[i]) <= 1e-3f * want[i];
+        if (!ok) std::fprintf(stderr, "  %s: %g %g %g, Unity %g %g %g\n", name, got[0], got[1], got[2], x, y, z);
+        return ok;
+    };
+    // A cm file at node scale 1, its lone node merged into the root: 0.01
+    // with Convert Units, the file's numbers without; globalScale on top.
+    CHECK(sized("unit_cm_on1", 0.01f, 0.03f, 0.02f));
+    CHECK(sized("unit_cm_off1", 1, 3, 2));
+    CHECK(sized("unit_cm_on05", 0.005f, 0.015f, 0.01f));
+    // Blender's default export: cm and a node scale of 100, which the root keeps.
+    CHECK(sized("unit_node100_on1", 1, 3, 2));
+    CHECK(sized("unit_node100_off1", 100, 300, 200));
+    const splash::Object* n100 = findObj(s.objects, "unit_node100_on1");
+    CHECK(n100 && std::fabs(n100->transform.scale.x - 100) < 1e-3f);
+    // Skinned, two top-level nodes (Mixamo's layout): mesh and joints alike.
+    CHECK(sized("unit_skin_on1", 0.01f, 0.04f, 0.01f));
+    CHECK(sized("unit_skin_off1", 1, 4, 1));
+    auto spineY = [&](const char* name) {
+        const splash::Object* o = findObj(s.objects, name);
+        o = o ? findObj(o->children, "Rig") : nullptr;
+        o = o ? findObj(o->children, "Hips") : nullptr;
+        o = o ? findObj(o->children, "Spine") : nullptr;
+        return o ? o->transform.position.y : -1.0f;
+    };
+    CHECK(std::fabs(spineY("unit_skin_on1") - 0.02f) < 1e-5f);
+    CHECK(std::fabs(spineY("unit_skin_off1") - 2) < 1e-4f);
+    // A plain object whose MeshFilter uses a model's mesh: the mesh as Unity
+    // imported it.
+    CHECK(sized("meshfilter_on1", 0.01f, 0.02f, 0.03f));
+    CHECK(sized("meshfilter_on05", 0.005f, 0.01f, 0.015f));
+    if (g_failures)
+        for (const auto& it : r.items) std::fprintf(stderr, "  item %d %s: %s\n", int(it.kind), it.object.c_str(), it.what.c_str());
+
+    // Without a .meta (a model dropped into the editor) units convert, as
+    // with Unity's default; a sidecar can turn that off, and keeps it.
+    const fs::path proj2 = g_outDir / "fbx-units";
+    fs::remove_all(proj2);
+    fs::create_directories(proj2);
+    auto extent = [&](const splash::ImportedModel& im) {
+        splash::Vec3 lo{1e30f, 1e30f, 1e30f}, hi{-1e30f, -1e30f, -1e30f};
+        for (const splash::Vec3& v : splash::loadMesh(proj2 / im.mesh).positions)
+            lo = {std::min(lo.x, v.x), std::min(lo.y, v.y), std::min(lo.z, v.z)}, hi = {std::max(hi.x, v.x), std::max(hi.y, v.y), std::max(hi.z, v.z)};
+        return splash::Vec3{hi.x - lo.x, hi.y - lo.y, hi.z - lo.z};
+    };
+    const fs::path cm = proj / "Assets" / "Units" / "unit_cm_on1.fbx";
+    const splash::Vec3 conv = extent(splash::importModel(cm, proj2));
+    CHECK(std::fabs(conv.x - 0.01f) < 1e-5f && std::fabs(conv.y - 0.03f) < 1e-5f && std::fabs(conv.z - 0.02f) < 1e-5f);
+    splash::ImportSettings raw;
+    raw.convertUnits = false;
+    const splash::Vec3 kept = extent(splash::importModel(cm, proj2, raw, "raw.fbx"));
+    CHECK(std::fabs(kept.x - 1) < 1e-4f && std::fabs(kept.y - 3) < 1e-4f && std::fabs(kept.z - 2) < 1e-4f);
+    const fs::path side = proj2 / "side.fbx";
+    splash::saveImportSettings(side, raw);
+    CHECK(!splash::loadImportSettings(side).convertUnits);
+    splash::saveImportSettings(side, {});
+    CHECK(splash::loadImportSettings(side).convertUnits);
+}
+
 void testUnityPrimitives() {
     using namespace splash::unity;
     auto outward = [](const splash::Mesh& m) {
@@ -15587,6 +15694,7 @@ int main(int argc, char** argv) {
     testUnityModelIds();
     testUnitySkinned();
     testUnityPlacedMaterial();
+    testUnityUnitScale();
     testUnityPrimitives();
     testUnityReport();
     testUnityUi();

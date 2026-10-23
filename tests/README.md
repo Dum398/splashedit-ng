@@ -986,6 +986,14 @@ at most 800 triangles, and the screenshot must show the share in the good colour
 
     python3 importtrianglescheck.py <splashedit> [screenshot.png]
 
+`importunitscheck.py` drops `unit_cm.fbx` (a 1 x 3 x 2 cm box from `fixtures/unity-models`) on the
+courtyard example's viewport: it must come in converted to metres (0.01 x 0.03 x 0.02). A second run
+clicks the inspector's Import settings Convert units toggle off: the sidecar must keep
+`convertUnits: false` and the model must be imported again at the file's numbers (1 x 3 x 2)
+(CI runs it under `xvfb-run` on Linux).
+
+    python3 importunitscheck.py <splashedit> [screenshot.png]
+
 `timelineeditcheck.py` checks the Timeline's edits beyond keys on copies of the courtyard example
 with two cutscenes: renaming one in the scene inspector (double-click the name) and from the
 timeline's sequence picker, undo of a rename, a taken name and a 25-character one refused, the

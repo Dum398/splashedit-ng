@@ -1478,6 +1478,10 @@ Importer::Unit Importer::instantiateModel(const Ref& source, const YNode& mod) {
                 const int p = n.parent >= 0 ? nodeObj[size_t(n.parent)] : root;
                 m_objs[size_t(o)].parent = p;
                 m_objs[size_t(p)].children.push_back(o);
+            } else {
+                // The root takes the node's transform, so its scale (and a
+                // 100 from Blender's FBX export) holds where no override sets it.
+                m_objs[size_t(root)].t = n.transform;
             }
             if (!n.mesh.empty()) {
                 m_objs[size_t(o)].modelMesh = n.mesh;
@@ -1639,11 +1643,12 @@ ModelAsset* Importer::model(const std::string& guid, const std::string& path) {
         const fs::path copy = m_dest / fromUtf8(rel);
         ImportSettings s;
         s.source = generic(fs::absolute(src));
-        // Unity's model import scale, when the .meta sets one.
+        // Unity's model import scale and Convert Units, when the .meta sets them.
         for (const YDoc& d : parseYaml(readText(fs::path(src) += ".meta")))
             if (const YNode* mi = d.body.find("ModelImporter"))
                 if (const YNode* meshes = mi->find("meshes")) {
                     s.scale = float((*meshes)["globalScale"].num(1));
+                    s.convertUnits = (*meshes)["useFileScale"].flag(true);
                     ma->preserveHierarchy = (*meshes)["preserveHierarchy"].flag(false);
                 }
         // The .meta's material remaps (the Materials tab's On Demand Remap,

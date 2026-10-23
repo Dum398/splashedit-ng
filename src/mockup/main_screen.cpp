@@ -31,6 +31,7 @@
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
 #include "editor/sprites.hh"
+#include "editor/strings_edit.hh"
 #include "editor/tilemap.hh"
 #include "editor/texture_preview.hh"
 #include "terrain.hh"
@@ -2811,6 +2812,7 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(separator());
             m.push_back(heading("Panels"));
             m.push_back(item("Project", "", true, [&] { toggleProjectTab(st); }, st.assets.open && projectInFront(st)));
+            m.push_back(item("Strings", "", !doc.projectRoot().empty(), [&] { st.strings.open = true; }));
             m.push_back(item("Frame Debugger", "", true, [&] {
                 if (frameInFront(st)) {
                     st.frame.open = false;
@@ -10973,6 +10975,12 @@ static BlocksView::Context blockContext(const editor::Document& doc) {
     for (const splash::Cutscene& cs : doc.scene().cutscenes) add(c.cutscenes, cs.name);
     for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
         if (fo.activeInHierarchy && fo.object->light && fo.object->light->runtime) add(c.lights, fo.object->name);
+    // The project's string keys and the scene's UI text elements ("Canvas/Element").
+    editor::projectStrings().sync(doc.projectRoot());
+    for (const splash::StringEntry& e : editor::projectStrings().table().entries) add(c.stringKeys, e.key);
+    for (const splash::UICanvas& cv : doc.scene().canvases)
+        for (const splash::UIElement& e : cv.elements)
+            if (e.type == splash::UIElementType::Text && !cv.name.empty() && !e.name.empty()) add(c.uiTexts, cv.name + "/" + e.name);
     return c;
 }
 
@@ -11677,6 +11685,297 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
     }
 }
 
+// ---- View > Strings: the project's string table ----
+// A grid of keys (rows) by languages (columns) over strings.json, through
+// editor::projectStrings(): every edit is one undo step of the table's own
+// history (Ctrl+Z / Ctrl+Y here) and is saved at once. Scripted runs print
+// "strings: table ..." and "strings: key <key> [<text>]..." whenever the table
+// changes, and "strings: refused|note <message>".
+static std::mutex g_stringsCsvMutex;
+static std::optional<std::pair<int, std::string>> g_stringsCsv;  // 0 import, 1 export: the file picked
+static void SDLCALL onStringsCsv(void* which, const char* const* files, int) {
+    if (!files || !files[0]) return;
+    std::lock_guard<std::mutex> lock(g_stringsCsvMutex);
+    g_stringsCsv = std::make_pair(int(reinterpret_cast<intptr_t>(which)), std::string(files[0]));
+}
+
+static void stringsLines(State& st, const editor::StringsDoc& sd) {
+    if (!namedRectsOn() || st.strings.reported == sd.revision()) return;
+    st.strings.reported = sd.revision();
+    const splash::StringTable& t = sd.table();
+    std::string langs;
+    for (const splash::StringLanguage& l : t.languages) langs += (langs.empty() ? "" : ",") + l.id + "=" + l.name;
+    std::printf("strings: table languages %s keys %zu card %d undo %d redo %d\n", langs.empty() ? "-" : langs.c_str(), t.entries.size(),
+                t.rememberOnCard ? 1 : 0, sd.canUndo() ? 1 : 0, sd.canRedo() ? 1 : 0);
+    for (const splash::StringEntry& e : t.entries) {
+        std::string row = "strings: key " + e.key;
+        for (const std::string& x : e.text) row += " [" + x + "]";
+        std::printf("%s\n", row.c_str());
+    }
+    std::fflush(stdout);
+}
+
+static void stringsWindow(State& st, editor::Document& doc, ImVec2 size) {
+    State::StringsWindow& sw = st.strings;
+    editor::StringsDoc& sd = editor::projectStrings();
+    sd.sync(doc.projectRoot());
+    auto say = [&](std::string m, bool bad) {
+        sw.message = std::move(m);
+        sw.messageBad = bad;
+        if (namedRectsOn()) {
+            std::printf("strings: %s %s\n", bad ? "refused" : "note", sw.message.c_str());
+            std::fflush(stdout);
+        }
+    };
+    {
+        std::lock_guard<std::mutex> lock(g_stringsCsvMutex);
+        if (g_stringsCsv) {
+            const int which = g_stringsCsv->first;
+            const std::string file = g_stringsCsv->second;
+            g_stringsCsv.reset();
+            if (which == 0) {
+                std::ifstream in(fromUtf8(file), std::ios::binary);
+                const std::string csv((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                std::string err;
+                if (!in.good() && csv.empty()) say("cannot read " + file, true);
+                else if (sd.importCsv(csv, &err)) say("imported " + file, false);
+                else say(file + ": " + err, true);
+            } else {
+                std::ofstream out(fromUtf8(file), std::ios::binary | std::ios::trunc);
+                out << sd.exportCsv();
+                out.close();
+                if (out.fail()) say("cannot write " + file, true);
+                else say("exported " + file, false);
+            }
+        }
+    }
+    const char* id = "##strings";
+    if (sw.open) {
+        sw.open = false;
+        sw.message.clear();
+        ImGui::OpenPopup(id);
+    }
+    const float w = std::min(1080.0f, size.x - 80), h = std::min(640.0f, size.y - 80);
+    ImGui::SetNextWindowPos(ImVec2(size.x * 0.5f, size.y * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(w, h));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopupModal(id, nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoMove |
+                                                               ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    sw.shown = open;
+    if (!open) return;
+    stringsLines(st, sd);
+    Fonts& f = fonts();
+    ImGuiIO& io = ImGui::GetIO();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 o = ImGui::GetCursorScreenPos();
+    const float inner = w - space::lg * 2;
+    const float bottom = ImGui::GetWindowPos().y + h - space::lg;
+    const splash::StringTable& t = sd.table();
+    // One edit a frame, made after drawing (the table is drawn from).
+    std::function<void()> act;
+    bool close = false;
+
+    // ---- Title, actions ----
+    text(dl, o, f.semibold, type::title, color::text, "Strings");
+    const std::string sub = "strings.json in the project: " + std::to_string(t.entries.size()) +
+                            (t.entries.size() == 1 ? " key, " : " keys, ") + std::to_string(t.languages.size()) +
+                            (t.languages.size() == 1 ? " language" : " languages") + ". The first language is the default; the export writes it.";
+    text(dl, ImVec2(o.x, o.y + 28), f.regular, type::caption, color::textDim, sub.c_str());
+    {
+        const float cw = buttonWidth(icon::x, "Close");
+        const ImVec2 at(o.x + inner - cw, o.y);
+        nameRect("strings.close", ImRect(at, ImVec2(at.x + cw, at.y + size::field + 6)));
+        if (button("strclose", at, icon::x, "Close", ButtonKind::Ghost)) close = true;
+    }
+    float bx = o.x;
+    const float by = o.y + 54;
+    auto actButton = [&](const char* bid, const char* name, const char* ic, const char* label, bool enabled, const char* tip) {
+        const float bw = buttonWidth(ic, label);
+        nameRect(name, ImRect(ImVec2(bx, by), ImVec2(bx + bw, by + size::field + 6)));
+        ImGui::BeginDisabled(!enabled);
+        const bool hit = button(bid, ImVec2(bx, by), ic, label, ButtonKind::Secondary, nullptr, tip);
+        ImGui::EndDisabled();
+        bx += bw + space::sm;
+        return hit && enabled;
+    };
+    const bool haveProject = !doc.projectRoot().empty();
+    if (actButton("straddkey", "strings.addkey", icon::plus, "Add key", haveProject && !t.languages.empty(),
+                  "A new key with empty texts; type its name in the Key column"))
+        act = [&] {
+            std::string err;
+            if (!sd.addKey(sd.freeKey("new.key"), &err)) say(err, true);
+        };
+    if (actButton("straddlang", "strings.addlang", icon::plus, "Add language", haveProject, "A new language column; type its id (\"fr\") and name"))
+        act = [&] {
+            std::string lid = t.languages.empty() ? "en" : "lang";
+            for (int i = 2; t.languageIndex(lid) >= 0; i++) lid = "lang" + std::to_string(i);
+            std::string err;
+            if (!sd.addLanguage(lid, t.languages.empty() ? "English" : "New language", &err)) say(err, true);
+        };
+    static const SDL_DialogFileFilter kCsv[] = {{"CSV", "csv"}};
+    const std::string folder = utf8(doc.projectRoot());
+    if (actButton("strimport", "strings.import", icon::folderOpen, "Import CSV", haveProject,
+                  "Replaces the table with a CSV file: a header \"key,<id>,<id>...\" then a row per key (one undo step)"))
+        ui::showOpenFileDialog("strings-import", onStringsCsv, reinterpret_cast<void*>(intptr_t(0)), kCsv, 1, folder.c_str(), false);
+    if (actButton("strexport", "strings.export", icon::hardDrive, "Export CSV", haveProject && !t.languages.empty(),
+                  "Writes the table as a CSV file for translators or a spreadsheet"))
+        ui::showSaveFileDialog("strings-export", onStringsCsv, reinterpret_cast<void*>(intptr_t(1)), kCsv, 1,
+                               utf8(doc.projectRoot() / "strings.csv").c_str());
+    if (actButton("strundo", "strings.undo", icon::undo, "Undo", sd.canUndo(), "Undo the last change to the table (Ctrl+Z)")) act = [&] { sd.undo(); };
+    if (actButton("strredo", "strings.redo", icon::redo, "Redo", sd.canRedo(), "Redo (Ctrl+Y)")) act = [&] { sd.redo(); };
+    {
+        // Remember the language on the memory card (the boot read).
+        const char* lab = "Remember language on memory card";
+        const float lw = measure(f.regular, type::body, lab).x;
+        const ImRect tg(ImVec2(o.x + inner - 36, by + 4), ImVec2(o.x + inner, by + 24));
+        nameRect("strings.card", tg);
+        text(dl, ImVec2(tg.Min.x - space::sm - lw, centerY(f.regular, type::body, tg.Min.y, tg.Max.y)), f.regular, type::body,
+             color::textDim, lab);
+        if (toggle("strcard", tg, t.rememberOnCard) && haveProject) {
+            const bool on = !t.rememberOnCard;
+            act = [&sd, on] { sd.setRememberOnCard(on); };
+        }
+        if (ImGui::IsItemHovered())
+            tooltip("At boot the game reads the language Strings.Save() wrote (about 0.5 s on a card without the save). "
+                    "Off: every boot starts in the default language.");
+    }
+    const ImRect search(ImVec2(o.x, by + size::field + 18), ImVec2(o.x + 320, by + size::field + 18 + size::field + 4));
+    nameRect("strings.search", search);
+    searchField("strsearch", search, "Search keys and texts", nullptr, &sw.query);
+    {
+        // The open scene's String prefixes: keys it reads by a computed name (Strings.Get("menu." .. n)).
+        const splash::SceneSettings& set = doc.scene().settings;
+        const std::string lab = "Prefixes " + doc.sceneStem() + " reads by computed names";
+        const float lx = search.Max.x + space::lg;
+        text(dl, ImVec2(lx, centerY(f.regular, type::body, search.Min.y, search.Max.y)), f.regular, type::body, color::textDim, lab.c_str());
+        const float fx = lx + measure(f.regular, type::body, lab.c_str()).x + space::sm;
+        const ImRect pr(ImVec2(fx, search.Min.y), ImVec2(std::max(fx + 160, o.x + inner), search.Max.y));
+        nameRect("strings.prefixes", pr);
+        std::string joined;
+        for (const std::string& p : set.stringPrefixes) joined += (joined.empty() ? "" : ", ") + p;
+        std::string typedP;
+        if (textField("strprefixes", pr, joined, &typedP, "menu., hud.")) {
+            std::vector<std::string> list;
+            size_t a = 0;
+            while (a <= typedP.size()) {
+                size_t b = typedP.find(',', a);
+                if (b == std::string::npos) b = typedP.size();
+                std::string part = typedP.substr(a, b - a);
+                while (!part.empty() && part.front() == ' ') part.erase(part.begin());
+                while (!part.empty() && part.back() == ' ') part.pop_back();
+                if (!part.empty() && std::find(list.begin(), list.end(), part) == list.end()) list.push_back(part);
+                a = b + 1;
+            }
+            doc.editSettings([list](splash::SceneSettings& s) { s.stringPrefixes = list; });
+        }
+        if (ImGui::IsItemHovered())
+            tooltip("The scene carries the keys it names (keyed UI texts, Strings.Get(\"key\"), Text blocks) plus every key "
+                    "starting with one of these, comma separated. A scene setting, saved with the scene (one undo step there).");
+        scriptLine("strings.prefixes", "strings: scene prefixes " + (joined.empty() ? std::string("-") : joined));
+    }
+
+    // ---- The grid ----
+    const float gy = search.Max.y + space::md;
+    const float keyW = 220, delW = 28;
+    const int nl = int(t.languages.size());
+    const float colW = nl ? std::max(150.0f, (inner - keyW - delW - space::sm * float(nl + 1)) / float(nl)) : 0;
+    auto colX = [&](int l) { return o.x + keyW + space::sm + float(l) * (colW + space::sm); };
+    const float headH = 56;
+    text(dl, ImVec2(o.x + space::xs, gy + 6), f.medium, type::label, color::textDim, "Key");
+    for (int l = 0; l < nl; l++) {
+        const splash::StringLanguage& lang = t.languages[size_t(l)];
+        const float x = colX(l);
+        const ImRect idR(ImVec2(x, gy), ImVec2(x + 64, gy + size::field + 2));
+        const ImRect nameR(ImVec2(x + 68, gy), ImVec2(x + colW - 26, gy + size::field + 2));
+        const ImRect delR(ImVec2(x + colW - 22, gy + 2), ImVec2(x + colW, gy + 24));
+        nameRect("strings.langid/" + lang.id, idR);
+        nameRect("strings.langname/" + lang.id, nameR);
+        nameRect("strings.dellang/" + lang.id, delR);
+        std::string typed;
+        if (textField(("strlid/" + lang.id).c_str(), idR, lang.id, &typed))
+            act = [&, l, typed, nm = lang.name] {
+                std::string err;
+                if (!sd.setLanguage(l, typed, nm, &err) && !err.empty()) say(err, true);
+            };
+        if (textField(("strlname/" + lang.id).c_str(), nameR, lang.name, &typed))
+            act = [&, l, typed, lid = lang.id] {
+                std::string err;
+                if (!sd.setLanguage(l, lid, typed, &err) && !err.empty()) say(err, true);
+            };
+        if (iconButton(("strdellang/" + lang.id).c_str(), delR, icon::x, false, "Delete this language and its texts (Ctrl+Z brings it back)"))
+            act = [&, l] { sd.deleteLanguage(l, nullptr); };
+        text(dl, ImVec2(x + space::xs, gy + size::field + 8), f.regular, type::caption, l == 0 ? color::accent : color::textFaint,
+             l == 0 ? "default" : "falls back on the default");
+    }
+    const ImRect rowsR(ImVec2(o.x, gy + headH), ImVec2(o.x + inner, bottom - 30));
+    dl->AddLine(ImVec2(rowsR.Min.x, rowsR.Min.y - 4), ImVec2(rowsR.Max.x, rowsR.Min.y - 4), color::border);
+    const std::vector<int> shown = editor::filterStrings(t, sw.query);
+    const float rowH = size::field + 8;
+    const float contentH = rowH * float(shown.size());
+    if (ImGui::IsMouseHoveringRect(rowsR.Min, rowsR.Max) && io.MouseWheel != 0) sw.scroll -= io.MouseWheel * rowH * 3;
+    sw.scroll = std::clamp(sw.scroll, 0.0f, std::max(0.0f, contentH - rowsR.GetHeight()));
+    dl->PushClipRect(rowsR.Min, rowsR.Max, true);
+    for (size_t i = 0; i < shown.size(); i++) {
+        const float y = rowsR.Min.y + rowH * float(i) - sw.scroll;
+        if (y + rowH < rowsR.Min.y || y > rowsR.Max.y) continue;
+        const splash::StringEntry& e = t.entries[size_t(shown[i])];
+        const ImRect kr(ImVec2(o.x, y), ImVec2(o.x + keyW, y + size::field + 2));
+        nameRect("strings.key/" + e.key, kr);
+        std::string typed;
+        if (textField(("strkey/" + e.key).c_str(), kr, e.key, &typed))
+            act = [&, from = e.key, typed] {
+                std::string err;
+                if (!sd.renameKey(from, typed, &err)) {
+                    if (!err.empty()) say(err, true);
+                    return;
+                }
+                // The open scene's elements follow the key (scene undo steps of their own).
+                const auto& cvs = doc.scene().canvases;
+                for (size_t c = 0; c < cvs.size(); c++)
+                    for (size_t k = 0; k < cvs[c].elements.size(); k++)
+                        if (cvs[c].elements[k].textKey == from)
+                            editor::uic::editElement(doc, int(c), int(k), [&](splash::UIElement& el) { el.textKey = typed; });
+            };
+        for (int l = 0; l < nl; l++) {
+            const std::string& lid = t.languages[size_t(l)].id;
+            const ImRect cr(ImVec2(colX(l), y), ImVec2(colX(l) + colW, y + size::field + 2));
+            nameRect("strings.cell/" + e.key + "/" + lid, cr);
+            const std::string& v = size_t(l) < e.text.size() ? e.text[size_t(l)] : std::string();
+            if (textField(("strcell/" + e.key + "/" + lid).c_str(), cr, v, &typed, l == 0 ? "(empty)" : "(default)", 255))
+                act = [&, k = e.key, l, typed] { sd.setText(k, l, typed); };
+        }
+        const ImRect dr(ImVec2(o.x + inner - delW + 4, y + 2), ImVec2(o.x + inner, y + 24));
+        nameRect("strings.del/" + e.key, dr);
+        if (iconButton(("strdel/" + e.key).c_str(), dr, icon::trash, false, "Delete this key (Ctrl+Z brings it back)"))
+            act = [&, k = e.key] { sd.deleteKey(k); };
+    }
+    dl->PopClipRect();
+    if (t.languages.empty())
+        text(dl, ImVec2(rowsR.Min.x + space::xs, rowsR.Min.y + space::sm), f.regular, type::body, color::textFaint,
+             "No languages yet. Add language makes the first one, the default.");
+    else if (shown.empty())
+        text(dl, ImVec2(rowsR.Min.x + space::xs, rowsR.Min.y + space::sm), f.regular, type::body, color::textFaint,
+             t.entries.empty() ? "No keys yet. Add key makes one." : "No key or text matches the search.");
+    // ---- Footer ----
+    const std::string foot = !sw.message.empty() ? sw.message
+                                                 : "Each edit is saved to strings.json at once; Ctrl+Z / Ctrl+Y undo and redo here. "
+                                                   "UI texts pick a key in their inspector; Lua reads Strings.Get(\"key\").";
+    text(dl, ImVec2(o.x, bottom - 18), f.regular, type::caption, sw.messageBad ? color::bad : color::textFaint, foot.c_str());
+    ImGui::Dummy(ImVec2(inner, h - space::lg * 2));
+
+    if (!io.WantTextInput) {
+        if (io.KeyCtrl && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, true)) act = [&] { sd.undo(); };
+        if (io.KeyCtrl && ((io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_Z, true)) || ImGui::IsKeyPressed(ImGuiKey_Y, true)))
+            act = [&] { sd.redo(); };
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) close = true;
+    }
+    if (act) act();
+    if (close) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 // Document-wide shortcuts. Skipped while a text field has the keyboard.
 static void shortcuts(State& st, editor::Document& doc) {
     ImGuiIO& io = ImGui::GetIO();
@@ -11686,12 +11985,12 @@ static void shortcuts(State& st, editor::Document& doc) {
     // The script editor keeps the keyboard, but Play and Run on hardware still answer.
     // Not gated on WantTextInput: the editor asks for text input itself, so it is set.
     if (st.scripts.hasKeyboard()) {
-        if (st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.menuOpen >= 0) return;
+        if (st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.strings.shown || st.menuOpen >= 0) return;
         if (!shift && pressed(ImGuiKey_F5)) ctrl ? toggleRun(st, doc) : togglePlay(st, doc);
         if (ctrl && shift && pressed(ImGuiKey_F5)) restartPlay(st, doc);
         return;
     }
-    if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.menuOpen >= 0) return;
+    if (io.WantTextInput || st.unsavedShown || st.newProject.shown || st.unityImport.shown || st.strings.shown || st.menuOpen >= 0) return;
     // While the game has the viewport its keys are the controller; only Play/Stop stays.
     if (st.play.gameFocus && st.play.cons[0].game.attached()) {
         if (!ctrl && pressed(ImGuiKey_F5)) togglePlay(st, doc);
@@ -11990,6 +12289,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     unsavedPrompt(st, doc, size);
     newProjectModal(st, doc, size);
     unityImportModal(st, doc, size);
+    stringsWindow(st, doc, size);
     ImGui::End();
     return bar;
 }

@@ -320,6 +320,9 @@ jobs:
       - name: Paths in the editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/pathcheck.py build/splashedit
+      - name: Localised strings in the editor
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/stringseditorcheck.py build/splashedit
       - name: Skin clip loop switches and the plays-once warning
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/cliploopcheck.py build/splashedit

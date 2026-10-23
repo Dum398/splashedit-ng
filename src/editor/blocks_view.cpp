@@ -37,6 +37,7 @@ ImU32 categoryColor(std::string_view c) {
     if (c == "Variables") return blocks::variables;
     if (c == "Operators") return blocks::operators;
     if (c == "Input") return blocks::input;
+    if (c == "Text") return blocks::strings;
     return blocks::debug;
 }
 
@@ -262,6 +263,8 @@ bool BlocksView::known(splash::BlockField f, const std::string& value, const Con
         case splash::BlockField::Sound: return in(c.sounds);
         case splash::BlockField::Cutscene: return in(c.cutscenes);
         case splash::BlockField::Light: return in(c.lights);
+        case splash::BlockField::StringKey: return in(c.stringKeys);
+        case splash::BlockField::UiText: return in(c.uiTexts);
         default: return true;
     }
 }
@@ -507,7 +510,8 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                     if (auto out = blk::setField(cur, h.path, b->field == "true" ? "false" : "true")) edit(std::move(*out), &res);
                 } else if (spec->field == splash::BlockField::Button || spec->field == splash::BlockField::Variable ||
                            spec->field == splash::BlockField::Object || spec->field == splash::BlockField::Sound ||
-                           spec->field == splash::BlockField::Cutscene || spec->field == splash::BlockField::Light) {
+                           spec->field == splash::BlockField::Cutscene || spec->field == splash::BlockField::Light ||
+                           spec->field == splash::BlockField::StringKey || spec->field == splash::BlockField::UiText) {
                     m_picking = h.path;
                     m_pickQuery.clear();
                     ImGui::OpenPopup(kPickId);
@@ -738,6 +742,18 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
                 col = blocks::objects;
                 all = context.lights;
                 break;
+            case splash::BlockField::StringKey:
+                title = "Key";
+                ic = icon::type;
+                col = blocks::strings;
+                all = context.stringKeys;
+                break;
+            case splash::BlockField::UiText:
+                title = "UI text";
+                ic = icon::type;
+                col = blocks::strings;
+                all = context.uiTexts;
+                break;
             default: break;
         }
         // The value the field has, kept in the list when it is not one of them.
@@ -754,6 +770,7 @@ BlocksView::Result BlocksView::draw(ImDrawList* dl, ImRect r, bool* focused, con
             const bool odd = stray && l == value;
             const char* blurb = odd ? (kind == splash::BlockField::Variable ? "Not a variable of this script"
                                        : kind == splash::BlockField::Light  ? "Not a runtime light in this scene"
+                                       : kind == splash::BlockField::StringKey ? "Not in the string table"
                                                                             : "Not in this scene")
                                 : l == "self" && kind == splash::BlockField::Object ? "The object this script is on"
                                                                                      : "";

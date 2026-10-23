@@ -301,6 +301,16 @@ struct State {
         bool open = false;    // open the modal next frame
         bool shown = false;   // the modal is up; document shortcuts wait
     } unityImport;
+    // View > Strings: the project's string table (editor::projectStrings()).
+    struct StringsWindow {
+        bool open = false;   // open the modal next frame
+        bool shown = false;  // the modal is up; document shortcuts wait
+        std::string query;   // the search
+        std::string message;  // the last refusal or import/export result
+        bool messageBad = false;
+        float scroll = 0;    // rows scrolled, in pixels
+        unsigned reported = 0;  // projectStrings().revision() last printed as "strings:" lines
+    } strings;
 
     // The inspector's Import settings: the model the shown object's mesh came
     // from and its sidecar, looked up again about once a second. `editing`

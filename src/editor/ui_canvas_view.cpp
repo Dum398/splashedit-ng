@@ -1,6 +1,7 @@
 #include "editor/ui_canvas_view.hh"
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <climits>
 #include <cmath>
@@ -16,6 +17,7 @@
 
 #include "editor/document.hh"
 #include "editor/project.hh"
+#include "editor/strings_edit.hh"
 #include "font.hh"
 #include "gl.h"
 #include "ui/file_dialog.h"
@@ -453,10 +455,22 @@ void CanvasView::list(ImDrawList* dl, ImRect r, editor::Document& doc) {
 }
 
 void CanvasView::upload(const editor::Document& doc, const std::vector<bool>& show) {
-    if (m_tex && doc.revision() == m_texRev && doc.loadId() == m_texLoad && doc.assetsId() == m_texAssets && show == m_texShow) return;
+    // Keyed texts show the preview language (projectStrings().previewLanguage()).
+    editor::StringsDoc& strs = editor::projectStrings();
+    strs.sync(doc.projectRoot());
+    if (m_tex && doc.revision() == m_texRev && doc.loadId() == m_texLoad && doc.assetsId() == m_texAssets && show == m_texShow &&
+        strs.revision() == m_texStrings)
+        return;
+    m_texStrings = strs.revision();
     std::vector<uint8_t> covered;
     int tiles = -1;
-    std::vector<uint32_t> px = uic::render(doc.scene(), show, m_screen, m_assets, 0, &covered, &tiles);
+    const bool anyKeyed = !strs.table().languages.empty() &&
+                          std::any_of(doc.scene().canvases.begin(), doc.scene().canvases.end(), [](const UICanvas& cv) {
+                              return std::any_of(cv.elements.begin(), cv.elements.end(), [](const UIElement& e) { return !e.textKey.empty(); });
+                          });
+    std::vector<uint32_t> px =
+        anyKeyed ? uic::render(editor::previewScene(doc.scene(), strs.table(), strs.previewLanguage()), show, m_screen, m_assets, 0, &covered, &tiles)
+                 : uic::render(doc.scene(), show, m_screen, m_assets, 0, &covered, &tiles);
     if (namedRectsOn()) {
         // Scripted runs: the tilemap layer under the canvases, each time it is built.
         std::printf("ui: tilemap layer %s\n", tiles < 0 ? "none" : ("tiles " + std::to_string(tiles)).c_str());
@@ -544,7 +558,31 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     const ImRect pctR(ImVec2(x - pctW, by0), ImVec2(x, by1));
     if (pctW > 0) x -= pctW + 2;
     const ImRect outR(ImVec2(x - bw, by0), ImVec2(x, by1));
-    const float tools = outR.Min.x;
+    // The preview language, when the project has a string table: keyed texts
+    // show that language's text (the console starts in the first).
+    editor::StringsDoc& strs = editor::projectStrings();
+    strs.sync(doc.projectRoot());
+    const std::vector<splash::StringLanguage>& langs = strs.table().languages;
+    const float langW = 96;
+    const bool showLang = !langs.empty() && outR.Min.x - space::md - langW > head.Min.x + space::md;
+    const ImRect langR(ImVec2(outR.Min.x - space::md - langW, by0), ImVec2(outR.Min.x - space::md, by1));
+    const float tools = showLang ? langR.Min.x : outR.Min.x;
+    if (showLang) {
+        std::vector<const char*> ids;
+        for (const splash::StringLanguage& l : langs) ids.push_back(l.id.c_str());
+        const int cur = strs.previewLanguage();
+        nameRect("uipreviewlang", langR);
+        const int picked = dropdownMenu("uipreviewlang", langR, icon::type, ids[size_t(cur)], ids, cur);
+        if (ImGui::IsItemHovered()) tooltip("Preview language: keyed UI texts show this language's text");
+        if (picked >= 0) strs.setPreviewLanguage(picked);
+        if (reportLayout || namedRectsOn()) {
+            const std::string line = std::string("strings: preview ") + ids[size_t(strs.previewLanguage())];
+            if (m_langReported != line) {
+                std::printf("%s\n", (m_langReported = line).c_str());
+                std::fflush(stdout);
+            }
+        }
+    }
     const bool showRes = head.Min.x + space::md + resW + space::sm <= tools;
     const float textX = showRes ? head.Min.x + space::md + resW + space::lg : head.Min.x + space::md;
     if (showRes)
@@ -1345,9 +1383,56 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                       : e.type == UIElementType::Progress ? "Progress bar" : e.type == UIElementType::Line ? "Line" : "Box";
     if (rows.sectionHead("uilook", typeIcon(e.type), tc, title)) {
         if (e.type == UIElementType::Text) {
-            ImRect tf = rows.row("ltext", "Text", "ASCII, at most 63 bytes. Lua's UI.SetText changes it while playing.");
+            // Text key: a key of the project's string table (View > Strings).
+            editor::StringsDoc& strs = editor::projectStrings();
+            strs.sync(doc.projectRoot());
+            const splash::StringTable& stab = strs.table();
+            const int plang = strs.previewLanguage();
+            const bool keyed = !e.textKey.empty() && stab.find(e.textKey) && !stab.languages.empty();
+            {
+                ImRect kf = rows.row("ltextkey", "Text key",
+                                     "None, or a key of the project's string table (View > Strings): the element then shows the "
+                                     "key's text in the language the game shows, and the export writes the default language's.");
+                nameRect("ui.textkey", kf);
+                const std::string kl = e.textKey.empty() ? std::string("None") : e.textKey;
+                if (pickField("textkey", kf, icon::type, e.textKey.empty() || keyed ? rgb(0x9a8b2a) : color::warn, kl.c_str())) {
+                    m_keyQuery.clear();
+                    ImGui::OpenPopup("##textkeys");
+                }
+                std::vector<std::string> labels{"None"};
+                std::vector<std::string> blurbs{"Plain text, typed here"};
+                for (const splash::StringEntry& se : stab.entries) {
+                    labels.push_back(se.key);
+                    blurbs.push_back(se.text.empty() ? std::string() : se.text[0]);
+                }
+                std::vector<int> shown;
+                for (size_t i = 0; i < labels.size(); i++) {
+                    std::string lk = labels[i], lq = m_keyQuery;
+                    for (char& ch : lk) ch = char(std::tolower((unsigned char)ch));
+                    for (char& ch : lq) ch = char(std::tolower((unsigned char)ch));
+                    if (lq.empty() || lk.find(lq) != std::string::npos) shown.push_back(int(i));
+                }
+                std::vector<PickerItem> items;
+                for (int i : shown)
+                    items.push_back({i == 0 ? icon::x : icon::type, i == 0 ? color::textDim : rgb(0x9a8b2a), labels[size_t(i)].c_str(),
+                                     blurbs[size_t(i)].c_str(), nullptr});
+                const int pick = picker("##textkeys", ImVec2(kf.Min.x, kf.Max.y + space::xs), 280, "Key", &m_keyQuery, items);
+                if (pick >= 0 && size_t(pick) < shown.size()) {
+                    const std::string k = shown[size_t(pick)] == 0 ? std::string() : labels[size_t(shown[size_t(pick)])];
+                    uic::editElement(doc, c, ei, [&](UIElement& el) { el.textKey = k; });
+                }
+            }
+            const char* tip = keyed ? "The key's text in the preview language (the canvas header picks it); typing here edits "
+                                      "the string table (View > Strings)."
+                                    : "ASCII, at most 63 bytes. Lua's UI.SetText changes it while playing.";
+            ImRect tf = rows.row("ltext", keyed ? ("Text (" + stab.languages[size_t(plang)].id + ")").c_str() : "Text", tip);
+            const std::string shownText = keyed ? *stab.text(e.textKey, plang) : e.text;
             std::string t;
-            if (textField("text", tf, e.text, "(empty)", &t)) uic::editElement(doc, c, ei, [&](UIElement& el) { el.text = t; });
+            if (keyed) {
+                if (textField("text", tf, shownText, "(empty)", &t)) strs.setText(e.textKey, plang, t);
+            } else if (textField("text", tf, e.text, "(empty)", &t)) {
+                uic::editElement(doc, c, ei, [&](UIElement& el) { el.text = t; });
+            }
             // No font of its own: its canvas's default font, else the system
             // font. With a canvas default there is no way to pick the system
             // font for one element (as in Unity's PSXCanvas).
@@ -1375,7 +1460,7 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
             }
             popMenuStyle();
             // The width of the font it draws with (its own or its canvas's default).
-            const int tw = uic::textWidth(doc.scene(), m_assets, splash::effectiveFont(doc.scene().canvases[size_t(c)], e), e.text);
+            const int tw = uic::textWidth(doc.scene(), m_assets, splash::effectiveFont(doc.scene().canvases[size_t(c)], e), shownText);
             if (reportLayout) {
                 // Scripted tests: what the Font field shows and the width it resolves to.
                 const std::string line = fl + " width " + std::to_string(tw);
@@ -1385,7 +1470,7 @@ void CanvasView::elementInspector(ImDrawList* dl, ImRect r, float y, editor::Doc
                 }
             }
             char info[96];
-            std::snprintf(info, sizeof info, "%d px wide, %d of %d bytes", tw, int(std::min<size_t>(e.text.size(), 999)), uic::kTextMax);
+            std::snprintf(info, sizeof info, "%d px wide, %d of %d bytes", tw, int(std::min<size_t>(shownText.size(), 999)), uic::kTextMax);
             text(dl, ImVec2(x0 + space::sm + rows.lw, rows.y - 4), f.regular, type::caption, color::textFaint, info);
             rows.y += 16;
         }

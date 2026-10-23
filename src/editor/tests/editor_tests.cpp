@@ -54,6 +54,7 @@
 #include "editor/psxmon.hh"
 #include "editor/serial.hh"
 #include "editor/texture_preview.hh"
+#include "editor/strings_edit.hh"
 #include "editor/timeline.hh"
 #include "editor/unirom.hh"
 #include "audio.hh"
@@ -3501,8 +3502,9 @@ void testBlocksNewBlock() {
                                                                    eb::newBlock("repeat"), eb::newBlock("log")}}));
     CHECK(g.errors.empty() && g.lua.find("Debug.Log(\"\")") != std::string::npos);
     // The palette's categories, every block in one of them.
-    CHECK(splash::blockCategories().size() == 9 && splash::blockCategories().front() == "Events" &&
-          splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories().back() == "Debug");
+    CHECK(splash::blockCategories().size() == 10 && splash::blockCategories().front() == "Events" &&
+          splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories()[8] == "Debug" &&
+          splash::blockCategories().back() == "Text");
     bool cats = true;
     for (const splash::BlockSpec& sp : splash::blockCatalogue())
         cats = cats && std::find(splash::blockCategories().begin(), splash::blockCategories().end(), sp.category) != splash::blockCategories().end() &&
@@ -15326,6 +15328,76 @@ static void testStringsExport() {
     CHECK(k.ok() && pack2.find("Jamais") != std::string::npos);
 }
 
+static void testStringsBlocks() {
+    splash::LuaGen g = splash::blocksToLua(blockScript(
+        {}, {{blk("on_create"), blk("log", "", {blk("text_for_key", "menu.start")}), blk("set_language", "", {blk("text", "fr")}),
+              blk("set_ui_text", "Hud/Title", {blk("join", "", {blk("language"), blk("text", "!")})}), blk("save_language")}}));
+    CHECK(g.errors.empty());
+    for (const char* want : {"Debug.Log(Strings.Get(\"menu.start\"))", "Strings.SetLanguage(\"fr\")",
+                             "UI.SetText(UI.FindElement(UI.FindCanvas(\"Hud\"), \"Title\"), tostring(", "Strings.Language()",
+                             "Strings.Save()"})
+        CHECK(g.lua.find(want) != std::string::npos);
+    CHECK(splash::compileLua(g.lua, "strings.blocks").size() > 0);
+    // The key a block names is one the export carries.
+    CHECK(splash::scanStringRefs(g.lua).keys == std::vector<std::string>{"menu.start"});
+    // No key, no element: located errors.
+    splash::LuaGen bad = splash::blocksToLua(blockScript({}, {{blk("on_create"), blk("log", "", {blk("text_for_key", "")}),
+                                                               blk("set_ui_text", "Hud", {blk("text", "x")})}}));
+    CHECK(bad.errors.size() == 2 && bad.errors[0].find("no key chosen") != std::string::npos &&
+          bad.errors[1].find("no UI text chosen") != std::string::npos);
+    // Their own palette category, after Debug.
+    CHECK(splash::findBlockSpec("text_for_key")->category == "Text" && splash::findBlockSpec("set_ui_text")->field == splash::BlockField::UiText);
+    CHECK(!splash::blockNameError("Strings").empty());
+}
+
+static void testStringsDoc() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "strings-doc";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    editor::StringsDoc d;
+    d.sync(dir);
+    CHECK(d.table().languages.empty() && !d.canUndo());
+    std::string err;
+    CHECK(d.addKey("k", &err) && !d.addKey("k", &err) && err.find("already") != std::string::npos);  // no language needed
+    CHECK(d.addLanguage("en", "English", &err) && d.addLanguage("fr", "", &err) && d.table().languages[1].name == "fr");
+    CHECK(!d.addLanguage("en", "again", &err) && err.find("already") != std::string::npos);
+    CHECK(!d.addLanguage("e n", "", &err));
+    CHECK(d.addKey(d.freeKey("new.key"), &err) && d.freeKey("new.key") == "new.key_2");
+    CHECK(d.setText("new.key", 1, "Bonjour") && !d.setText("new.key", 1, "Bonjour") && !d.setText("nope", 0, "x"));
+    CHECK(d.renameKey("new.key", "hello", &err) && !d.renameKey("hello", "", &err) && d.table().find("hello"));
+    // Saved at once, read back by a fresh doc.
+    editor::StringsDoc e;
+    e.sync(dir);
+    CHECK(e.table().find("hello") && e.table().find("hello")->text[1] == "Bonjour");
+    // One undo step per edit, the file following.
+    const size_t steps = 6;  // k, en, fr, new.key, text, rename
+    size_t undone = 0;
+    while (d.undo()) undone++;
+    CHECK(undone == steps && d.table().languages.empty() && splash::readStringTable(splash::stringTablePath(dir)).languages.empty());
+    // Redo replays in order: k, then en, then fr.
+    CHECK(d.redo() && d.redo() && d.table().languages.size() == 1);
+    CHECK(d.redo() && d.table().languages.size() == 2 && d.canRedo());
+    CHECK(d.deleteLanguage(0, &err) && d.table().languages.size() == 1 && d.table().languages[0].id == "fr" && !d.canRedo());
+    // The preview scene shows a key's text in the preview language.
+    splash::Scene sc;
+    splash::UICanvas cv;
+    splash::UIElement el;
+    el.type = splash::UIElementType::Text;
+    el.text = "own";
+    el.textKey = "k2";
+    cv.elements = {el};
+    sc.canvases = {cv};
+    splash::StringTable t;
+    t.languages = {{"en", "English"}, {"fr", "French"}};
+    t.entries = {{"k2", {"Hi", ""}}};
+    CHECK(editor::previewScene(sc, t, 0).canvases[0].elements[0].text == "Hi");
+    CHECK(editor::previewScene(sc, t, 1).canvases[0].elements[0].text == "Hi");  // empty fr: the default
+    t.entries[0].text = {"", "Salut"};
+    CHECK(editor::previewScene(sc, t, 0).canvases[0].elements[0].text == "own");  // no default text: its own, as exported
+    CHECK(editor::filterStrings(t, "SAL") == std::vector<int>{0} && editor::filterStrings(t, "zz").empty());
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -15535,6 +15607,8 @@ int main(int argc, char** argv) {
     testStringScan();
     testStringsBake();
     testStringsExport();
+    testStringsBlocks();
+    testStringsDoc();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

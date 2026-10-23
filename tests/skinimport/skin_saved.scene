@@ -1,0 +1,79 @@
+{
+  "format": "splashedit-ng/scene",
+  "version": 1,
+  "settings": {
+    "gteScaling": 100.0,
+    "sceneType": "exterior",
+    "fog": {
+      "enabled": false,
+      "color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "density": 5
+    },
+    "networkId": "",
+    "script": "play.lua"
+  },
+  "objects": [
+    {
+      "name": "Arm",
+      "active": true,
+      "transform": {
+        "position": [
+          0.0,
+          -1.0,
+          4.0
+        ],
+        "rotation": [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "components": [
+        {
+          "type": "mesh",
+          "mesh": "arm.mesh",
+          "materials": [
+            {
+              "texture": null,
+              "color": [
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ]
+            }
+          ],
+          "bitDepth": 8,
+          "vertexColors": "flat",
+          "flatColor": [
+            200,
+            120,
+            60
+          ],
+          "smoothNormals": true,
+          "uvOffsetMaterial": 0,
+          "dynamicLighting": "auto"
+        },
+        {
+          "type": "skin",
+          "clips": [
+            "bend.anim",
+            "raise.anim"
+          ],
+          "fps": 15
+        }
+      ],
+      "children": []
+    }
+  ]
+}

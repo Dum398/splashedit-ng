@@ -136,6 +136,7 @@ jobs:
           "$py" tests/cutscenecheck.py "$cli"
           "$py" tests/skincheck.py "$cli"
           "$py" tests/animcheck.py "$cli"
+          "$py" tests/multiclipcheck.py "$cli"
           "$py" tests/lightcheck.py "$cli"
           "$py" tests/interactcheck.py "$cli"
           "$py" tests/agentcheck.py "$cli"

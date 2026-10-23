@@ -10,6 +10,9 @@
 # X, which glTF ignores for a skinned mesh. FBX: Y up, centimetres, Body at
 # the root moved 30 cm along X, which FBX does not ignore, so its control
 # points sit 30 cm short of where they end up. Both give the same vertices.
+# rig_host, rig_nod and rig_alien (.gltf and .fbx) are variations for adding
+# clips from other files (see EXTRA and multiclipcheck.py); skin_saved.scene
+# is tests/skin/skin.scene as the editor saved it before skins had clipSources.
 # Regenerate with: python3 make_rig.py
 import base64, json, math, os, struct
 

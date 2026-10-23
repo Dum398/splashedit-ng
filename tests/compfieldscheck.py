@@ -237,7 +237,7 @@ check('one Ctrl+Z takes the typed name back; sample rate is clamped to 4000',
       f"{audio(comp(mid, 'Bell', 'audio'))} then {audio(comp(s, 'Bell', 'audio'))} | " + out[-200:])
 
 # Mesh: Smooth normals (on by default) and a spot light's inner angle, clamped to the spot angle.
-s, out = run('Crate', click('obj.smooth'))
+s, out = run('Crate', ['--scroll-to', '@obj.smooth', '--wait', '3'] + click('obj.smooth'))
 check('Smooth normals turns off', comp(s, 'Crate', 'mesh')['smoothNormals'] is False, str(comp(s, 'Crate', 'mesh')) + ' | ' + out[-200:])
 s, out = run('Torch Light', typed('obj.linner', '25'))
 check('the spot light\'s inner angle lands in the saved scene', comp(s, 'Torch Light', 'light')['innerSpotAngle'] == 25,

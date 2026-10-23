@@ -451,9 +451,17 @@ Args parse(int argc, char** argv) {
             act.waitFrames = std::atoi(next());
             a.actions.push_back(act);
         } else if (!std::strcmp(argv[i], "--drop-now")) {
-            // --drop-now <file>@x,y: releases a file there at this point of the script.
+            // --drop-now <file>@x,y: releases a file there at this point of the script;
+            // <file>@@name[,dx,dy] on the control ui::nameRect() named.
             Action act(Action::Drop);
             std::string v = next();
+            const size_t named = v.find("@@");
+            if (named != std::string::npos) {
+                parseTarget(v.c_str() + named + 1, act);
+                act.text = v.substr(0, named);
+                a.actions.push_back(act);
+                continue;
+            }
             size_t at = v.rfind('@');
             if (at == std::string::npos || std::sscanf(v.c_str() + at + 1, "%f,%f", &act.x0, &act.y0) != 2) {
                 std::fprintf(stderr, "--drop-now wants <file>@x,y\n");

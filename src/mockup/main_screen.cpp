@@ -30,6 +30,7 @@
 #include "editor/gizmo.hh"
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
+#include "editor/skin_clips.hh"
 #include "editor/sprites.hh"
 #include "editor/strings_edit.hh"
 #include "editor/tilemap.hh"
@@ -1371,7 +1372,7 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 // SceneLua and MemCardIcon: no target object. MemCardIcon replaces icon frame
 // `index`, or with index -1 adds the picked files as new frames.
 // UiTexture: a UI image's Texture; the target is {canvas, element}.
-enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture };
+enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, ClipModels };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
 static int g_assetIndex = 0;
@@ -1395,12 +1396,38 @@ static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int inde
     static const SDL_DialogFileFilter lua[] = {{"Lua scripts", "lua"}};
     static const SDL_DialogFileFilter wav[] = {{"Audio (WAV, AIFF, MP3, Ogg, FLAC)", splash::kAudioExtensions}};
     static const SDL_DialogFileFilter anim[] = {{"Animation clips", "anim"}};
+    static const SDL_DialogFileFilter models[] = {{"Models", "glb;gltf;fbx;obj;blend"}};
     const SDL_DialogFileFilter* filter = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon ? images
                                          : slot == AssetSlot::Clip    ? wav
                                          : slot == AssetSlot::SkinClips ? anim
+                                         : slot == AssetSlot::ClipModels ? models
                                                                         : lua;
     ui::showOpenFileDialog("asset", onAssetPicked, nullptr, filter, 1, nullptr,
-                           slot == AssetSlot::SkinClips || (slot == AssetSlot::MemCardIcon && index < 0));
+                           slot == AssetSlot::SkinClips || slot == AssetSlot::ClipModels || (slot == AssetSlot::MemCardIcon && index < 0));
+}
+
+// The skin's Add clips from model: the files' animations onto the object's
+// skeleton (editor::addClipSources), one undo step, and what came of it in
+// the status bar. Scripted runs print
+//   skinclips: added <n> left <n> refused <n>, then a skinclips: line per file left out or warned about.
+static void addClipModels(State& st, editor::Document& doc, const editor::ObjectPath& target, const std::vector<std::string>& files) {
+    std::vector<std::filesystem::path> paths;
+    for (const std::string& f : files) paths.push_back(fromUtf8(f));
+    const editor::AddedClips a = editor::addClipSources(doc, target, paths);
+    if (!a.error.empty()) {
+        scriptLine(nullptr, "skinclips: error " + a.error);
+        notify(st, "Can't add clips: " + a.error, true);
+        return;
+    }
+    scriptLine(nullptr, "skinclips: added " + std::to_string(a.clips.size()) + " left " + std::to_string(a.left) + " refused " +
+                            std::to_string(a.refused.size()));
+    for (const std::string& r : a.refused) scriptLine(nullptr, "skinclips: refused " + r);
+    for (const std::string& w : a.warnings) scriptLine(nullptr, "skinclips: warning " + w);
+    std::string msg = a.clips.size() == 1 ? std::string("Added 1 clip") : "Added " + std::to_string(a.clips.size()) + " clips";
+    if (a.left > 0) msg += "; " + std::to_string(a.left) + (a.left == 1 ? " clip" : " clips") + " did not fit, a skin plays at most 16";
+    for (const std::string& r : a.refused) msg += ". Left out " + r;
+    for (const std::string& w : a.warnings) msg += ". " + w;
+    notify(st, msg, a.clips.empty() || !a.refused.empty());
 }
 
 // Sets `files` on the field `slot` of the object at `target` (or the scene's
@@ -1412,6 +1439,10 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
                             const std::vector<std::string>& files, bool append = false, int index = -1) {
     const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
+    if (slot == AssetSlot::ClipModels) {
+        addClipModels(st, doc, target, files);
+        return;
+    }
     const char* folder = slot == AssetSlot::Texture || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture ? "textures"
                          : slot == AssetSlot::Clip      ? "audio"
                          : slot == AssetSlot::SkinClips ? "anims"
@@ -1488,6 +1519,7 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
             case AssetSlot::SceneLua:
             case AssetSlot::MemCardIcon:
             case AssetSlot::UiTexture:
+            case AssetSlot::ClipModels:
                 break;
         }
     });
@@ -1523,6 +1555,7 @@ static bool slotTakes(int slot, editor::AssetType t) {
         case AssetSlot::SceneLua: return t == T::Script;
         case AssetSlot::Clip: return t == T::Audio;
         case AssetSlot::SkinClips: return t == T::Animation;
+        case AssetSlot::ClipModels: return t == T::Model;
         case AssetSlot::MemCardIcon:
         case AssetSlot::UiTexture: return t == T::Texture;
     }
@@ -3063,6 +3096,14 @@ static void importPending(State& st, editor::Document& doc, const viewport::Ps1V
     std::vector<std::pair<std::string, ImVec2>> files;
     files.swap(st.drop.files);
     for (const auto& [file, pos] : files) {
+        // On a skin's Add clips from model: its animations, not a new object.
+        const State::AssetSlotTarget* clipSlot = nullptr;
+        for (const State::AssetSlotTarget& t : st.assetSlots)
+            if (t.slot == static_cast<int>(AssetSlot::ClipModels) && t.rect.Contains(pos)) clipSlot = &t;
+        if (clipSlot) {
+            addClipModels(st, doc, clipSlot->path, {file});
+            continue;
+        }
         ModelTarget to;
         if (st.modelField.GetWidth() > 0 && st.modelField.Contains(pos))
             to.replace = st.modelFieldPath;
@@ -8531,13 +8572,17 @@ static void sceneInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     }
 }
 
-// Whether the clip file `file` loops, read again only when its time or size
-// changes; nullopt when it does not read.
-static std::optional<bool> clipLoops(const std::filesystem::path& file) {
+// The name and loop flag of the clip file `file`, read again only when its
+// time or size changes; nullopt when it does not read.
+struct ClipInfo {
+    std::string name;
+    bool loop = false;
+};
+static std::optional<ClipInfo> clipInfo(const std::filesystem::path& file) {
     struct Seen {
         std::filesystem::file_time_type time;
         uintmax_t size = 0;
-        std::optional<bool> loop;
+        std::optional<ClipInfo> info;
     };
     static std::map<std::filesystem::path, Seen> cache;
     std::error_code ec;
@@ -8546,14 +8591,20 @@ static std::optional<bool> clipLoops(const std::filesystem::path& file) {
     const uintmax_t size = std::filesystem::file_size(file, ec);
     if (ec) return std::nullopt;
     auto it = cache.find(file);
-    if (it != cache.end() && it->second.time == time && it->second.size == size) return it->second.loop;
+    if (it != cache.end() && it->second.time == time && it->second.size == size) return it->second.info;
     Seen s{time, size, std::nullopt};
     try {
-        s.loop = splash::loadAnim(file).loop;
+        const splash::AnimClip c = splash::loadAnim(file);
+        s.info = ClipInfo{c.name, c.loop};
     } catch (const std::exception&) {
     }
     cache[file] = s;
-    return s.loop;
+    return s.info;
+}
+// Whether the clip file `file` loops; nullopt when it does not read.
+static std::optional<bool> clipLoops(const std::filesystem::path& file) {
+    const std::optional<ClipInfo> i = clipInfo(file);
+    return i ? std::optional<bool>(i->loop) : std::nullopt;
 }
 
 // `t` cut with "..." to fit `w` at the label size.
@@ -8879,6 +8930,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     ip.editing.reset();
                     const bool was = ip.settings.mergeMeshes;
                     try {
+                        // Clip names renamed since these settings were read stay.
+                        next.clipNames = splash::loadImportSettings(ip.model).clipNames;
                         splash::saveImportSettings(ip.model, next);
                     } catch (const std::exception& ex) {
                         notify(st, std::string("Import settings not saved: ") + ex.what(), true);
@@ -10404,15 +10457,54 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (slotField(st, static_cast<int>(AssetSlot::SkinClips), path, "clips", row("lclips", "Clips", "Animation clips, at most 16. Click to pick the .anim files; the pick replaces the list."),
                        icon::play, kind::camera, clips.c_str(), nullptr))
             pickAsset(AssetSlot::SkinClips, path);
-        // Each clip's loop flag, kept in its .anim file: a row per clip,
-        // named obj.skinloop.<i>. A flip rewrites the file as one undo step.
+        // Animations from other model files (Mixamo: one per file), named
+        // obj.skinaddclips; a click picks the files, a model dropped on it adds its clips.
+        {
+            const size_t n = sk.clipSources.size();
+            const std::string meta = n == 0 ? std::string() : std::to_string(n) + (n == 1 ? " file" : " files");
+            const ImRect ar = row("lclipmodels", "From models",
+                                  "Adds the animations of other model files made for the same rig (Mixamo writes one animation per "
+                                  "file): matched by joint name and converted with this model's import settings. Click to pick "
+                                  "the files, or drop them here. Changing either file imports them again.");
+            nameRect("obj.skinaddclips", ar);
+            if (slotField(st, static_cast<int>(AssetSlot::ClipModels), path, "clipmodels", ar, icon::box, kind::mesh, "Add clips from model...",
+                          meta.empty() ? nullptr : meta.c_str()))
+                pickAsset(AssetSlot::ClipModels, path);
+        }
+        // A row per clip: its name (obj.skinclip.<i>; double-click to rename,
+        // the name SkinnedAnim.Play takes) and its loop flag, kept in its
+        // .anim file (obj.skinloop.<i>). Either change is one undo step.
         static const char* const kLoopTip = "Looping clips start over when they end. A clip that plays once holds its last frame "
                                             "when it ends. Kept in the clip's .anim file.";
         for (size_t i = 0; i < sk.clips.size(); i++) {
             ImGui::PushID(int(i));
-            const std::string label = fitWidth(std::filesystem::path(sk.clips[i]).stem().string(), lw - space::sm);
-            const ImRect lr = row("lskinloop", label.c_str(), kLoopTip);
-            const std::optional<bool> loops = clipLoops(doc.projectRoot() / std::filesystem::path(sk.clips[i]));
+            const std::filesystem::path clipFile = doc.projectRoot() / std::filesystem::path(sk.clips[i]);
+            const std::optional<ClipInfo> info = clipInfo(clipFile);
+            const std::string clipName = info ? info->name : std::filesystem::path(sk.clips[i]).stem().string();
+            const bool renaming = textEditing("skinclipname");
+            const std::string label = renaming ? std::string() : fitWidth(clipName, lw - space::sm);
+            const std::string nameTip = "SkinnedAnim.Play(\"" + clipName + "\") plays it. Double-click to rename, at most 24 characters. " +
+                                        sk.clips[i];
+            const ImRect lr = row("lskinloop", label.c_str(), nameTip.c_str());
+            const ImRect nr(ImVec2(x0 + space::sm, lr.Min.y), ImVec2(lr.Min.x - space::xs, lr.Max.y));
+            if (!renaming) {
+                nameRect("obj.skinclip." + std::to_string(i), nr);
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) beginTextEdit("skinclipname", clipName);
+            }
+            std::string typed;
+            const ImRect field(ImVec2(nr.Min.x - space::xs, lr.Min.y), lr.Max);
+            const TextEdit te = textEdit("skinclipname", field, f.regular, type::body, field.Min.x + space::xs, field.Max.x - space::xs, &typed, 96);
+            if (te == TextEdit::Commit && typed != clipName) {
+                const std::string why = editor::renameSkinClip(doc, path, i, typed);
+                scriptLine(nullptr, why.empty() ? "skinclip: renamed " + clipName + " -> " + typed : "skinclip: rename refused: " + why);
+                if (!why.empty()) notify(st, "Can't rename the clip: " + why, true);
+                st.importPanel.checked = -1;  // its sidecar may hold the name now
+            }
+            if (te != TextEdit::Inactive) {
+                ImGui::PopID();
+                continue;
+            }
+            const std::optional<bool> loops = info ? std::optional<bool>(info->loop) : std::nullopt;
             const float cy = lr.GetCenter().y;
             if (loops) {
                 const ImRect sw(ImVec2(lr.Min.x, cy - 8), ImVec2(lr.Min.x + 30, cy + 8));
@@ -10600,7 +10692,10 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                         for (const auto& c : k.clips) names.push_back(c.name);
             if (names.size() != sk.clips.size()) {
                 names.clear();
-                for (const std::string& c : sk.clips) names.push_back(std::filesystem::path(c).stem().string());
+                for (const std::string& c : sk.clips) {
+                    const std::optional<ClipInfo> ci = clipInfo(doc.projectRoot() / std::filesystem::path(c));
+                    names.push_back(ci ? ci->name : std::filesystem::path(c).stem().string());
+                }
             }
             // Whether each clip loops, from its file: a state's clip takes
             // its loop from there on the console.
@@ -12082,6 +12177,19 @@ static void updateModels(State& st, editor::Document& doc) {
         for (const std::filesystem::path& m : st.watcher.poll(doc.projectRoot())) todo.push_back({m, std::nullopt});
     }
     for (const State::Reimport& r : todo) {
+        // A file a skin takes clips from: those clips imported again, here (they
+        // are quick). It is imported as a model too only when it was one.
+        if (editor::isClipSource(doc, r.model)) {
+            std::vector<std::string> problems;
+            const int n = editor::refreshClipSources(doc, r.model, &problems);
+            scriptLine(nullptr, "skinclips: refreshed " + utf8(r.model.filename()) + " objects " + std::to_string(n) + " problems " +
+                                    std::to_string(problems.size()));
+            for (const std::string& p : problems) notify(st, "Clips not imported again: " + p, true);
+            if (problems.empty()) notify(st, "Imported the clips from " + utf8(r.model.filename()) + " again", false);
+            std::error_code ec;
+            const std::filesystem::path abs = r.model.is_absolute() ? r.model : doc.projectRoot() / r.model;
+            if (!std::filesystem::exists(abs.parent_path() / fromUtf8(splash::importName(abs) + ".mesh"), ec)) continue;
+        }
         editor::ModelImports::Request q;
         q.reimport = r.model;
         q.wasMerged = r.wasMerged;

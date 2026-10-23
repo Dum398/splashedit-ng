@@ -471,8 +471,8 @@ for kw in ('o', 'g'):
     ok, why = composes(proj, nodes, json.load(open(os.path.join(proj, 'models', 'pair_%s.mesh' % kw))))
     check('obj `%s`: node meshes give the baked mesh' % kw, ok, why)
 
-# The FBX above (Z-up centimetres): ufbx's axis and unit conversion lives on
-# its root node and must reach the top-level node's transform.
+# The FBX above (Z-up centimetres): ufbx's axis conversion lives on its root
+# node and must reach the top-level node's transform.
 r = run('import', os.path.join(fbxdir, 'Wall.fbx'), '--project', proj)
 nodes = nodes_of(r.stdout)
 ok, why = composes(proj, nodes, json.load(open(os.path.join(proj, 'models', 'Wall.mesh'))))
@@ -782,10 +782,9 @@ for fmt in ('gltf', 'fbx'):
     err = maxerr(skinned(body), P)
     check('%s rig: rest pose through the inverse binds gives the rest vertices (1e-3)' % fmt, err < 1e-3, err)
     ib0 = sk['inverseBind'][0:12]
-    # ufbx keeps the centimetre-to-metre scale in the joints, so an FBX joint's
-    # world is the rig's with its axes 0.01 long.
-    f = 0.01 if fmt == 'fbx' else 1
-    want = inv34([[row[c] * (-1 if (r == 0) != (c == 0) else 1) * (f if c < 3 else 1) for c in range(4)]
+    # The FBX's centimetres go into the import scale, so both formats give the
+    # rig's own inverse binds.
+    want = inv34([[row[c] * (-1 if (r == 0) != (c == 0) else 1) for c in range(4)]
                   for r, row in enumerate(make_rig.UPPER[:3])])
     check('%s rig: Upper inverse bind is S G^-1 S of the rig (1e-4)' % fmt,
           max(abs(a - b) for a, b in zip(ib0, [x for row in want for x in row])) < 1e-4, ib0)

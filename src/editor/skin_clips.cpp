@@ -226,12 +226,13 @@ AddedClips addClipSources(Document& doc, const ObjectPath& object, const std::ve
             r.refused.push_back(name + ": it is the skin's own model, whose clips the skin has already");
             continue;
         }
-        // Where it came from, so a change to that file is noticed (ModelWatcher).
+        // A sidecar, so ModelWatcher notices a change to the file, and naming
+        // where it was copied from, so a change there is noticed too.
         const fs::path side = splash::importSettingsPath(copy);
-        const bool newSidecar = a.copied && !fs::exists(side, ec);
+        const bool newSidecar = !fs::exists(side, ec);
         if (newSidecar) {
             splash::ImportSettings s;
-            s.source = utf8(fs::absolute(file, ec));
+            if (a.copied) s.source = utf8(fs::absolute(file, ec));
             try {
                 splash::saveImportSettings(copy, s);
             } catch (const std::exception&) {

@@ -62,6 +62,7 @@
 #include "luacompile.hh"
 #include "luascan.hh"
 #include "path.hh"
+#include "strings.hh"
 #include "simplify.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
@@ -15135,6 +15136,196 @@ static void testPathTimeline() {
     CHECK(editor::samplePreview(d, ref, 30).objects.empty());  // no such path: nothing posed
 }
 
+// ---- Localisation (splashedit-ng#209, core/strings.hh)
+namespace stringstest {
+namespace fs = std::filesystem;
+
+splash::StringTable table2() {
+    splash::StringTable t;
+    t.languages = {{"en", "English"}, {"fr", "Francais"}};
+    t.entries = {{"menu.start", {"Start", "Jouer"}},
+                 {"menu.quit", {"Quit", ""}},
+                 {"hud.score", {"Score, \"total\"", "Points\nmultiligne"}},
+                 {"unused", {"Never", "Jamais"}}};
+    return t;
+}
+
+bool has(const std::vector<std::string>& v, const std::string& a, const std::string& b = {}) {
+    return std::any_of(v.begin(), v.end(), [&](const std::string& s) {
+        return s.find(a) != std::string::npos && (b.empty() || s.find(b) != std::string::npos);
+    });
+}
+
+splash::UIElement textElement(const std::string& name, const std::string& key, int w = 200) {
+    splash::UIElement e;
+    e.type = splash::UIElementType::Text;
+    e.name = name;
+    e.text = "own text";
+    e.textKey = key;
+    e.rect = {10, 10, w, 16};
+    return e;
+}
+
+void writeFile(const fs::path& p, const std::string& text) {
+    fs::create_directories(p.parent_path());
+    std::ofstream out(p, std::ios::binary);
+    out << text;
+}
+
+}  // namespace stringstest
+
+static void testStringTable() {
+    using namespace stringstest;
+    const fs::path dir = g_outDir / "strings-table";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::StringTable t = table2();
+    t.rememberOnCard = true;
+    // strings.json keeps the author's order, the languages and the card setting.
+    CHECK(splash::writeStringTable(splash::stringTablePath(dir), t));
+    splash::StringTable r = splash::readStringTable(splash::stringTablePath(dir));
+    CHECK(r.languages.size() == 2 && r.languages[1].id == "fr" && r.languages[1].name == "Francais" && r.rememberOnCard);
+    CHECK(r.entries.size() == 4 && r.entries[0].key == "menu.start" && r.entries[3].key == "unused");
+    CHECK(r.entries[2].text[1] == "Points\nmultiligne" && r.entries[1].text[1].empty());
+    CHECK(splash::readStringTable(dir / "missing.json").languages.empty());
+    // Text: the language's, or the default's when empty; none for an unknown key.
+    CHECK(*r.text("menu.quit", 1) == "Quit" && *r.text("menu.start", 1) == "Jouer" && !r.text("nope", 0));
+    CHECK(r.languageIndex("fr") == 1 && r.languageIndex("de") == -1);
+    CHECK(splash::validLanguageId("pt-BR") && !splash::validLanguageId("") && !splash::validLanguageId("e n"));
+    // CSV round trip: quotes, commas and newlines survive; names of known languages are kept.
+    const std::string csv = splash::stringTableToCsv(t);
+    CHECK(csv.rfind("key,en,fr\r\n", 0) == 0 && csv.find("\"Score, \"\"total\"\"\"") != std::string::npos);
+    splash::StringTable c;
+    c.languages = {{"fr", "French (kept)"}};
+    std::string err;
+    CHECK(splash::stringTableFromCsv(csv, c, &err) && err.empty());
+    CHECK(c.languages.size() == 2 && c.languages[0].name == "en" && c.languages[1].name == "French (kept)");
+    CHECK(c.entries.size() == 4 && c.entries[2].text[0] == "Score, \"total\"" && c.entries[2].text[1] == "Points\nmultiligne");
+    // A BOM and short rows are fine; bad tables leave the target alone.
+    CHECK(splash::stringTableFromCsv("\xEF\xBB\xBFkey,en,de\nа,b\n", c, &err) && c.entries.size() == 1 &&
+          c.entries[0].text[1].empty() && c.languages[1].id == "de");
+    CHECK(!splash::stringTableFromCsv("id,en\na,b\n", c, &err) && err.find("key") != std::string::npos && c.languages.size() == 2);
+    CHECK(!splash::stringTableFromCsv("key,en\na,1\na,2\n", c, &err) && err.find("twice") != std::string::npos);
+    CHECK(!splash::stringTableFromCsv("key,e n\n", c, &err) && err.find("language id") != std::string::npos);
+    CHECK(!splash::stringTableFromCsv("key,en\n\"a,1\n", c, &err));
+}
+
+static void testStringScan() {
+    splash::StringRefs r = splash::scanStringRefs(
+        "local a = Strings.Get(\"menu.start\")\n"
+        "local b = Strings.Get('hud.score')\n"
+        "-- Strings.Get(\"commented\")\n"
+        "--[[ Strings.Get(\"block comment\") ]]\n"
+        "local s = \"Strings.Get('in a string')\"\n"
+        "local c = Strings.Get(\"item_\" .. n)\n"
+        "local d = Strings . Get ( \"spaced\" )\n"
+        "local e = t.Strings.Get(\"field\")\n"
+        "local f = Strings.Get \"bare\"\n"
+        "Strings.SetLanguage(2)\n"
+        "local g = Strings.Get(key)\n");
+    CHECK(r.uses && r.keys == (std::vector<std::string>{"menu.start", "hud.score", "spaced", "bare"}));
+    CHECK(r.computedLines == (std::vector<int>{6, 11}));
+    splash::StringRefs none = splash::scanStringRefs("local Get = 1 -- Strings\nprint('Strings')\n");
+    CHECK(!none.uses && none.keys.empty());
+    CHECK(splash::scanStringRefs("Strings.SetLanguage(1)").uses);
+    CHECK(splash::luaQuote("a\"b\\c\n\x01\xC3\xA9") == "\"a\\\"b\\\\c\\n\\001\\195\\169\"");
+}
+
+static void testStringsBake() {
+    using namespace stringstest;
+    splash::Scene scene;
+    splash::UICanvas cv;
+    cv.name = "Menu";
+    cv.elements = {textElement("Start", "menu.start"), textElement("Score", "hud.score", 40), textElement("Lost", "no.such"),
+                   textElement("Plain", "")};
+    scene.canvases.push_back(cv);
+    scene.settings.script = "scripts/scene.lua";
+    std::map<std::string, std::string> files = {{"scripts/scene.lua", "function onSceneCreationStart() print(Strings.Get(\"menu.quit\")) "
+                                                                      "print(Strings.Get(\"gone\")) print(Strings.Get(k)) end\n"}};
+    auto read = [&](const std::string& p) {
+        auto it = files.find(p);
+        if (it == files.end()) throw std::runtime_error("no " + p);
+        return it->second;
+    };
+    splash::StringTable t = table2();
+    t.entries.push_back({"menu.long", {std::string(70, 'x'), "y\xC3\xA9"}});
+    splash::StringsBake b = splash::bakeStrings(scene, t, {}, read);
+    // Carried: keyed elements + literal Get keys, in table order; not the unused key.
+    CHECK(b.keys == (std::vector<std::string>{"menu.start", "menu.quit", "hud.score"}));
+    CHECK(b.libraryPath == "<strings>/library.lua" && b.library.find("_G.Strings = S") != std::string::npos);
+    CHECK(b.library.find("\"unused\"") == std::string::npos && b.library.find("[\"menu.quit\"]=\"Quit\"") != std::string::npos);
+    CHECK(b.library.find("{\"Menu\", \"Start\", \"menu.start\"}") != std::string::npos);
+    CHECK(b.library.find("local CARD = false") != std::string::npos && b.library.find("MemCard") != std::string::npos);
+    // Empty non-default cells are left out (the default shows): en 3 + fr 2.
+    CHECK(b.cells == 5);
+    // Text bytes en 5+4+14, fr 5+17; two element rows ('Lost' names no key in the table, 'Plain' none).
+    CHECK(b.luaHeapBytes == splash::stringsLuaHeapBytes(5 + 4 + 14 + 5 + 17, 5, 2));
+    // The pack shows the default language; unkeyed and unknown keys keep their own text.
+    const auto& el = b.scene.canvases[0].elements;
+    CHECK(el[0].text == "Start" && el[1].text == "Score, \"total\"" && el[2].text == "own text" && el[3].text == "own text");
+    // Warnings, naming language, key and element.
+    CHECK(has(b.warnings, "element 'Lost'", "'no.such' is not in the string table"));
+    CHECK(has(b.warnings, "scripts/scene.lua", "Strings.Get(\"gone\"): no such key"));
+    CHECK(has(b.warnings, "scripts/scene.lua' line 1", "computed key"));
+    CHECK(has(b.warnings, "element 'Score', key 'hud.score', language 'en'", "112 px wide, the element 40 px"));
+    CHECK(has(b.warnings, "element 'Score', key 'hud.score', language 'fr'", "0x20-0x7E"));
+    CHECK(has(b.warnings, "language 'fr': 'menu.quit' has no text"));
+    CHECK(!has(b.warnings, "language 'en'", "no text"));
+    // A prefix carries the keys under it, and silences the computed-key warning.
+    scene.settings.stringPrefixes = {"menu."};
+    scene.canvases[0].elements[0].textKey = "menu.long";
+    b = splash::bakeStrings(scene, t, {}, read);
+    CHECK(std::find(b.keys.begin(), b.keys.end(), "menu.long") != b.keys.end() && !has(b.warnings, "computed key"));
+    CHECK(has(b.warnings, "element 'Start', key 'menu.long', language 'en'", "70 bytes, cut to 63"));
+    CHECK(has(b.warnings, "key 'menu.long', language 'fr'", "\"\xC3\xA9\" shows as '?'"));
+    // Card remembered: the boot read is in.
+    t.rememberOnCard = true;
+    CHECK(splash::bakeStrings(scene, t, {}, read).library.find("local CARD = true") != std::string::npos);
+    // No strings anywhere: nothing generated; strings without a table: one warning.
+    splash::Scene plain;
+    CHECK(splash::bakeStrings(plain, t, {}, read).library.empty());
+    splash::StringsBake nt = splash::bakeStrings(scene, splash::StringTable{}, {}, read);
+    CHECK(nt.library.empty() && has(nt.warnings, "no string table"));
+}
+
+static void testStringsExport() {
+    using namespace stringstest;
+    const fs::path project = g_outDir / "strings-export";
+    fs::remove_all(project);
+    fs::copy(fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard", project, fs::copy_options::recursive);
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    splash::UICanvas cv;
+    cv.name = "Hud";
+    cv.elements = {textElement("Title", "menu.start")};
+    scene.canvases.push_back(cv);
+    const fs::path out = project / "out" / "scene.splashpack";
+    fs::create_directories(out.parent_path());
+    // Without strings.json: a warning, the element's own text.
+    splash::ExportResult r0 = splash::exportSplashpack(scene, project, out);
+    CHECK(r0.ok() && has(r0.warnings, "no string table") && r0.stats.stringsLuaBytes == 0);
+    CHECK(splash::writeStringTable(splash::stringTablePath(project), table2()));
+    splash::ExportResult r = splash::exportSplashpack(scene, project, out);
+    CHECK(r.ok() && r.stats.stringsLuaBytes > 0);
+    CHECK(splash::ramBudget(r.stats).used == splash::ramBudget(r0.stats).used - r0.stats.splashpackBytes + r.stats.splashpackBytes +
+                                                 r.stats.stringsLuaBytes);
+    std::ifstream in(out, std::ios::binary);
+    const std::string pack((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(pack.find("_G.Strings = S") != std::string::npos && pack.find("Jouer") != std::string::npos);
+    CHECK(pack.find("Start") != std::string::npos && pack.find("own text") == std::string::npos);
+    // Bytecode: the generated library compiles.
+    splash::ExportOptions bc;
+    bc.luaBytecode = true;
+    CHECK(splash::exportSplashpack(scene, project, project / "out" / "bc.splashpack", bc).ok());
+    // A Blocks script's literal key is found through its Lua.
+    writeFile(project / "scripts" / "keys.lua", "function onCreate(self) Debug.Log(Strings.Get(\"unused\")) end\n");
+    scene.objects[0].script.emplace();
+    scene.objects[0].script->lua = "scripts/keys.lua";
+    splash::ExportResult k = splash::exportSplashpack(scene, project, out, bc);
+    std::ifstream in2(out, std::ios::binary);
+    const std::string pack2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    CHECK(k.ok() && pack2.find("Jamais") != std::string::npos);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -15340,6 +15531,10 @@ int main(int argc, char** argv) {
     testPathExport();
     testPathBlocks();
     testPathTimeline();
+    testStringTable();
+    testStringScan();
+    testStringsBake();
+    testStringsExport();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

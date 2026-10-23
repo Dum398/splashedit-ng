@@ -81,6 +81,7 @@ add_library(splashcore STATIC
     font.cpp
     scene.cpp
     path.cpp
+    strings.cpp
     terrain.cpp
     skin.cpp
     texture.cpp

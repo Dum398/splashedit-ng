@@ -86,9 +86,12 @@ inline size_t objectLoadBytes(const ExportStats& s) {
 // before the .splashpack, which stays resident, so the peak is the largest of
 // the three. A streamed scene adds its slots (WorldStreamer::init). Then come
 // the per-object allocations above and the rest of what loading makes.
+// The localised strings the scene carries stay on the Lua heap
+// (stringsLuaHeapBytes, measured in ng-deps/loc/value.md).
 inline Budget ramBudget(const ExportStats& s) {
     return {s.rendererBytes() + s.visibleListBytes() + s.streamPoolBytes() +
-                std::max({s.splashpackBytes, s.vramFileBytes, s.spuFileBytes}) + objectLoadBytes(s) + kEngineLoadBytes,
+                std::max({s.splashpackBytes, s.vramFileBytes, s.spuFileBytes}) + objectLoadBytes(s) + kEngineLoadBytes +
+                s.stringsLuaBytes,
             kEngineHeapBytes};
 }
 

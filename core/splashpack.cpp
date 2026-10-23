@@ -25,6 +25,7 @@
 #include "luascan.hh"
 #include "navregion.hh"
 #include "path.hh"
+#include "strings.hh"
 #include "shadow.hh"
 #include "skin.hh"
 #include "texture.hh"
@@ -1914,19 +1915,47 @@ std::vector<uint8_t> memCardTable(const MemCardSettings& mc, ImageFor& imageFor,
 }  // namespace
 
 // Paths (core/path.hh): Lua files the export makes, by their virtual paths.
+// Strings (core/strings.hh): the strings library, loaded first so every script
+// sees _G.Strings when it runs.
 struct GeneratedLua {
     std::map<std::string, std::string> files;
-    std::string library, host, hostUser;
+    std::string library, host, hostUser, strings;
 };
 
 static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& root, const fs::path& out,
                                           const ExportOptions& options, const GeneratedLua* gen);
 
+static ExportResult exportSplashpackPaths(const Scene& scene, const fs::path& root, const fs::path& out,
+                                          const ExportOptions& options, const StringsBake& sb);
+
 ExportResult exportSplashpack(const Scene& scene, const fs::path& root, const fs::path& out,
                               const ExportOptions& options) {
-    if (!sceneUsesPaths(scene)) return exportSplashpackBaked(scene, root, out, options, nullptr);
+    // Localised strings first: keyed UI texts take the default language, and
+    // the scene's keys become the strings library.
+    const StringTable table = readStringTable(stringTablePath(root));
+    StringsBake sb = bakeStrings(scene, table, root, [&](const std::string& p) {
+        std::string src = readFile(root / p);
+        if (fs::path(p).extension() == ".blocks") src = blocksFileToLua(src, p);
+        return src;
+    });
+    ExportResult res = exportSplashpackPaths(sb.scene, root, out, options, sb);
+    if (!sb.library.empty()) res.stats.stringsLuaBytes = sb.luaHeapBytes;
+    res.warnings.insert(res.warnings.begin(), sb.warnings.begin(), sb.warnings.end());
+    return res;
+}
+
+static ExportResult exportSplashpackPaths(const Scene& scene, const fs::path& root, const fs::path& out,
+                                          const ExportOptions& options, const StringsBake& sb) {
+    GeneratedLua strings;
+    if (!sb.library.empty()) {
+        strings.files[sb.libraryPath] = sb.library;
+        strings.strings = sb.libraryPath;
+    }
+    const GeneratedLua* str = sb.library.empty() ? nullptr : &strings;
+    if (!sceneUsesPaths(scene)) return exportSplashpackBaked(scene, root, out, options, str);
     PathBake pb = bakePaths(scene, [&](const std::string& p) { return readFile(root / p); });
-    GeneratedLua gen{pb.files, pb.libraryPath, pb.hostPath, pb.hostUserScript};
+    GeneratedLua gen{pb.files, pb.libraryPath, pb.hostPath, pb.hostUserScript, strings.strings};
+    gen.files.insert(strings.files.begin(), strings.files.end());
     ExportResult res;
     if (pb.errors.empty()) res = exportSplashpackBaked(pb.scene, root, out, options, &gen);
     // An agent walks the nav regions: points of its path off them it can only get near.
@@ -2360,6 +2389,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     auto addLua = [&](const std::string& p) {
         if (!p.empty() && std::find(luaFiles.begin(), luaFiles.end(), p) == luaFiles.end()) luaFiles.push_back(p);
     };
+    if (gen && !gen->strings.empty()) addLua(gen->strings);
     // Trigger boxes and interactables: active objects only (FindObjectsByType
     // skips inactive ones), in canonical order.
     std::vector<const FlatObject*> triggers, interactables, audioSources, agents;

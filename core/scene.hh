@@ -358,6 +358,10 @@ struct SceneSettings {
     // is left out of the splashpack.
     std::string loadingCanvas;
     MemCardSettings memCard;
+    // Key prefixes (e.g. "menu.") of the strings this scene fetches by a
+    // computed name (Strings.Get(prefix .. n)): the generated Strings library
+    // carries the keys the scene names plus every key starting with one of these.
+    std::vector<std::string> stringPrefixes;
     ExtraKeys extra;
 };
 
@@ -417,6 +421,10 @@ struct UIElement {
     // Text
     std::string text;
     std::string font;  // UIFont name, empty = system font
+    // A key of the project's string table (strings.json, core/strings.hh):
+    // the element shows that key's text in the active language. The export
+    // writes the default language's text into the pack; empty = plain text.
+    std::string textKey;
     // Line, in screen pixels (anchors and rect do not apply)
     std::array<int, 2> from{0, 0}, to{0, 0};
     // Progress

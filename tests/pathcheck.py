@@ -130,13 +130,24 @@ names = ('s_path', 'obj.pathclosed', 'obj.pathspeed', 'obj.pathmode', 'obj.patha
 check('the section, its fields and buttons are drawn', all(n in rects for n in names), [n for n in names if n not in rects])
 w, h, px = png_rgb(shot)
 view = rects.get('vp.view', (0, 0, w, h))
-# The point markers are lime too: only pixels more than 16 px from every marker's centre count, so this
-# measures the curve between the points.
-dots = [((r[0] + r[2]) / 2, (r[1] + r[3]) / 2) for k, r in rects.items() if k.startswith('vp.pathpt')]
-lime = sum(near(px[y][3 * x:3 * x + 3], LIME) and all((x - cx) ** 2 + (y - cy) ** 2 > 256 for cx, cy in dots)
-           for y in range(max(0, view[1]), min(h, view[3])) for x in range(max(0, view[0]), min(w, view[2])))
-print('lime pixels away from the point markers: %d' % lime)
-check('the curve is drawn in lime between the points', lime > 120, lime)
+# The curve itself, not the point markers (lime too), the nav outlines (a near green) or the gizmo: the
+# exact curve colour (tolerance 24) inside a 10 px tube along the screen line from point 1 to point 2,
+# more than 16 px from both markers. The first segment of an open path leaves point 1 along that line.
+dots = {i: ((r[0] + r[2]) / 2, (r[1] + r[3]) / 2) for i, r in ((i, rects.get('vp.pathpt%d' % i)) for i in range(3)) if r}
+def tube(a, b, x, y):
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    t = ((x - a[0]) * dx + (y - a[1]) * dy) / max(dx * dx + dy * dy, 1e-9)
+    return 0 < t < 1 and abs((x - a[0]) * dy - (y - a[1]) * dx) / max((dx * dx + dy * dy) ** 0.5, 1e-9) < 10
+lime = 0
+if 0 in dots and 1 in dots:
+    a, b = dots[0], dots[1]
+    for y in range(int(min(a[1], b[1])) - 12, int(max(a[1], b[1])) + 13):
+        for x in range(int(min(a[0], b[0])) - 12, int(max(a[0], b[0])) + 13):
+            if 0 <= x < w and 0 <= y < h and tube(a, b, x, y) and near(px[y][3 * x:3 * x + 3], LIME, 24) and \
+                    all((x - cx) ** 2 + (y - cy) ** 2 > 256 for cx, cy in dots.values()):
+                lime += 1
+print('curve-colour pixels along point 1 -> 2: %d (screen %s -> %s)' % (lime, dots.get(0), dots.get(1)))
+check('the curve is drawn in lime between points 1 and 2', lime > 30, lime)
 pts = [rects['vp.pathpt%d' % i] for i in range(3) if 'vp.pathpt%d' % i in rects]
 check('the points sit apart on screen', len(pts) == 3 and len({(p[0] // 4, p[1] // 4) for p in pts}) == 3, pts)
 

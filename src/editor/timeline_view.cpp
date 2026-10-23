@@ -574,6 +574,13 @@ void TimelinePanel::trackMenu(editor::Document& doc) {
                     }
                     ImGui::EndMenu();
                 }
+            } else if (t.type == TrackType::FollowPath) {
+                const std::vector<std::string> paths = editor::pathNames(doc);
+                if (ImGui::BeginMenu("Follow instead", !paths.empty())) {
+                    for (const std::string& pn : paths)
+                        if (ImGui::MenuItem(pn.c_str(), nullptr, pn == t.path)) editor::setTrackPath(doc, m_ref, ti, pn);
+                    ImGui::EndMenu();
+                }
             } else {
                 ImGui::MenuItem("Drive instead", nullptr, false, false);
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Camera and rumble tracks have no target");
@@ -619,6 +626,24 @@ void TimelinePanel::addTrackPopup(editor::Document& doc) {
                     if (ImGui::MenuItem(name.c_str(), nullptr, false, !has(t, name))) add(t, name);
                 ImGui::EndMenu();
             }
+        }
+        // Follow Path (editor only: the export bakes it into a position track): who rides, then which path.
+        ImGui::Separator();
+        const std::vector<std::string> paths = editor::pathNames(doc);
+        if (ImGui::BeginMenu(editor::trackTypeName(TrackType::FollowPath), !paths.empty())) {
+            std::vector<std::string> riders;
+            if (m_ref.kind == editor::SeqKind::Cutscene) riders.push_back("");
+            for (const std::string& n : editor::targetsFor(doc, TrackType::ObjectPosition)) riders.push_back(n);
+            for (const std::string& who : riders)
+                if (ImGui::BeginMenu(who.empty() ? "Camera" : who.c_str(), !has(TrackType::FollowPath, who))) {
+                    for (const std::string& pn : paths)
+                        if (ImGui::MenuItem(pn.c_str())) {
+                            const int i = editor::addFollowPathTrack(doc, m_ref, who, pn);
+                            if (i >= 0) m_scrollY = std::max(0.0f, (i + 1) * kLaneH - 4 * kLaneH);
+                        }
+                    ImGui::EndMenu();
+                }
+            ImGui::EndMenu();
         }
         ImGui::EndPopup();
     }

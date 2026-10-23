@@ -69,6 +69,8 @@ const std::initializer_list<std::pair<const char*, ShadowMode>> kShadowModes = {
                                                                                   {"blob", ShadowMode::Blob}};
 const std::initializer_list<std::pair<const char*, SceneType>> kSceneTypes = {
     {"exterior", SceneType::Exterior}, {"interior", SceneType::Interior}};
+const std::initializer_list<std::pair<const char*, PathMode>> kPathModes = {
+    {"once", PathMode::Once}, {"loop", PathMode::Loop}, {"pingPong", PathMode::PingPong}};
 const std::initializer_list<std::pair<const char*, NavPartition>> kPartitions = {
     {"watershed", NavPartition::Watershed}, {"monotone", NavPartition::Monotone}, {"layer", NavPartition::Layer}};
 
@@ -250,6 +252,22 @@ json writeAgent(const AgentComponent& ag) {
               {"waypoints", wps},
               {"stateClips", clips}};
     putExtras(j, ag.extra);
+    return j;
+}
+
+json writePath(const PathComponent& p) {
+    json pts = json::array();
+    for (const Vec3& v : p.points) pts.push_back(vec3(v));
+    json j = {{"type", "path"},   {"points", pts},     {"closed", p.closed},
+              {"speed", p.speed}, {"mode", enumTo(p.mode, kPathModes)}, {"autostart", p.autostart}};
+    putExtras(j, p.extra);
+    return j;
+}
+
+json writeFollowPath(const FollowPathComponent& f) {
+    json j = {{"type", "followPath"}, {"path", f.path}, {"speed", f.speed}, {"startOffset", f.startOffset},
+              {"faceAlong", f.faceAlong}};
+    putExtras(j, f.extra);
     return j;
 }
 
@@ -454,6 +472,27 @@ Object readObject(const json& j) {
             if (t.tileCells < 1 || t.tileCells > 256) fail("object '" + o.name + "': terrain tileCells must be 1..256");
             t.extra = extrasOf(c, writeTerrain(t));
             o.terrain = t;
+        } else if (type == "path") {
+            PathComponent pc;
+            for (const json& pj : c.value("points", json::array())) pc.points.push_back(vec3(pj));
+            pc.closed = c.value("closed", pc.closed);
+            pc.speed = c.value("speed", pc.speed);
+            if (c.contains("mode")) pc.mode = enumFrom(c["mode"], kPathModes);
+            pc.autostart = c.value("autostart", pc.autostart);
+            if (!(pc.speed >= 0)) fail("object '" + o.name + "': path speed must be 0 or more");
+            pc.extra = extrasOf(c, writePath(pc));
+            o.path = pc;
+        } else if (type == "followPath") {
+            FollowPathComponent fp;
+            fp.path = c.value("path", fp.path);
+            fp.speed = c.value("speed", fp.speed);
+            fp.startOffset = c.value("startOffset", fp.startOffset);
+            fp.faceAlong = c.value("faceAlong", fp.faceAlong);
+            if (!(fp.speed >= 0)) fail("object '" + o.name + "': follow path speed must be 0 or more");
+            if (!(fp.startOffset >= 0 && fp.startOffset <= 1))
+                fail("object '" + o.name + "': follow path startOffset must be 0..1");
+            fp.extra = extrasOf(c, writeFollowPath(fp));
+            o.followPath = fp;
         } else if (type == "skin") {
             SkinComponent sk;
             for (const json& cj : c.value("clips", json::array())) sk.clips.push_back(cj.get<std::string>());
@@ -503,6 +542,8 @@ json writeObject(const Object& o) {
     if (o.skin) comps.push_back(writeSkin(*o.skin));
     if (o.agent) comps.push_back(writeAgent(*o.agent));
     if (o.terrain) comps.push_back(writeTerrain(*o.terrain));
+    if (o.path) comps.push_back(writePath(*o.path));
+    if (o.followPath) comps.push_back(writeFollowPath(*o.followPath));
     for (const std::string& c : o.unknownComponents) comps.push_back(json::parse(c));
     j["components"] = comps;
     json kids = json::array();
@@ -877,7 +918,7 @@ const std::initializer_list<std::pair<const char*, TrackType>> kTrackTypes = {
     {"rumbleLarge", TrackType::RumbleLarge},       {"objectUVOffset", TrackType::ObjectUVOffset},
     {"lightPosition", TrackType::LightPosition},   {"lightColor", TrackType::LightColor},
     {"lightIntensity", TrackType::LightIntensity}, {"lightRadius", TrackType::LightRadius},
-    {"lightEnabled", TrackType::LightEnabled}};
+    {"lightEnabled", TrackType::LightEnabled},     {"followPath", TrackType::FollowPath}};
 const std::initializer_list<std::pair<const char*, Interp>> kInterps = {
     {"linear", Interp::Linear}, {"step", Interp::Step}, {"easeIn", Interp::EaseIn},
     {"easeOut", Interp::EaseOut}, {"easeInOut", Interp::EaseInOut}};
@@ -891,6 +932,7 @@ json writeTrack(const CutsceneTrack& t) {
         keys.push_back(kj);
     }
     json j = {{"type", enumTo(t.type, kTrackTypes)}, {"target", t.target}, {"keyframes", keys}};
+    if (t.type == TrackType::FollowPath) j["path"] = t.path;
     putExtras(j, t.extra);
     return j;
 }
@@ -933,6 +975,7 @@ CutsceneTrack readTrack(const json& tj, const Bad& bad) {
     CutsceneTrack t;
     t.type = enumFrom(tj.at("type"), kTrackTypes);
     t.target = tj.value("target", "");
+    if (t.type == TrackType::FollowPath) t.path = tj.value("path", "");
     for (const json& kj : tj.value("keyframes", json::array())) {
         Keyframe k;
         k.frame = kj.value("frame", 0);

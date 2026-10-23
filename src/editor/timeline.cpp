@@ -12,6 +12,7 @@
 #include <span>
 
 #include "blocks.hh"
+#include "path.hh"
 #include "editor/document.hh"
 #include "editor/gizmo.hh"
 #include "editor/lua_editor.hh"
@@ -45,6 +46,7 @@ const char* trackTypeName(TrackType t) {
         case TrackType::LightIntensity: return "Light Intensity";
         case TrackType::LightRadius: return "Light Radius";
         case TrackType::LightEnabled: return "Light Enabled";
+        case TrackType::FollowPath: return "Follow Path";
     }
     return "Track";
 }
@@ -71,6 +73,7 @@ static const char* propertyName(TrackType t) {
         case TrackType::LightIntensity: return "Intensity";
         case TrackType::LightRadius: return "Radius";
         case TrackType::LightEnabled: return "Enabled";
+        case TrackType::FollowPath: return "Follow path";
     }
     return "Track";
 }
@@ -96,8 +99,9 @@ bool isDiscrete(TrackType t) {
 }
 
 bool needsTarget(TrackType t) {
+    // Follow Path names its object or none (the camera): addFollowPathTrack sets it.
     return !(t == TrackType::CameraPosition || t == TrackType::CameraRotation || t == TrackType::CameraH ||
-             t == TrackType::RumbleSmall || t == TrackType::RumbleLarge);
+             t == TrackType::RumbleSmall || t == TrackType::RumbleLarge || t == TrackType::FollowPath);
 }
 
 bool allowedIn(SeqKind kind, TrackType t) {
@@ -108,6 +112,7 @@ bool allowedIn(SeqKind kind, TrackType t) {
 std::string trackLabel(const CutsceneTrack& t) {
     std::string who = t.target;
     if (who.empty()) who = (t.type == TrackType::RumbleSmall || t.type == TrackType::RumbleLarge) ? "Rumble" : "Camera";
+    if (t.type == TrackType::FollowPath) return who + ": Follow " + (t.path.empty() ? std::string("(no path)") : t.path);
     return who + ": " + propertyName(t.type);
 }
 
@@ -860,6 +865,41 @@ int addTrack(Document& doc, SeqRef ref, TrackType type, const std::string& targe
     return added;
 }
 
+int addFollowPathTrack(Document& doc, SeqRef ref, const std::string& target, const std::string& path) {
+    int added = -1;
+    editSeq(doc, ref, [&](SeqMut& m) {
+        if (ref.kind == SeqKind::Animation && target.empty()) return false;  // animations have no camera
+        if (int(m.tracks->size()) >= kMaxTimelineTracks) return false;
+        for (const CutsceneTrack& tr : *m.tracks)
+            if (tr.type == TrackType::FollowPath && tr.target == target) return false;
+        CutsceneTrack tr;
+        tr.type = TrackType::FollowPath;
+        tr.target = target;
+        tr.path = path;
+        m.tracks->push_back(std::move(tr));
+        added = int(m.tracks->size()) - 1;
+        return true;
+    });
+    return added;
+}
+
+bool setTrackPath(Document& doc, SeqRef ref, int track, const std::string& path) {
+    return editSeq(doc, ref, [&](SeqMut& m) {
+        if (!trackOk(m, track)) return false;
+        CutsceneTrack& t = (*m.tracks)[size_t(track)];
+        if (t.type != TrackType::FollowPath || t.path == path) return false;
+        t.path = path;
+        return true;
+    });
+}
+
+std::vector<std::string> pathNames(const Document& doc) {
+    std::vector<std::string> out;
+    for (const splash::FlatObject& fo : splash::flatten(doc.scene()))
+        if (fo.activeInHierarchy && fo.object->path) out.push_back(fo.object->name);
+    return out;
+}
+
 bool removeTrack(Document& doc, SeqRef ref, int track) {
     return editSeq(doc, ref, [&](SeqMut& m) {
         if (!trackOk(m, track)) return false;
@@ -1495,6 +1535,7 @@ KeyValue sampleAt(const Document& doc, SeqRef ref, int track, float frame) {
     const std::vector<CutsceneTrack>* tracks = seqTracks(doc, ref);
     if (!tracks || track < 0 || track >= int(tracks->size())) return {0, 0, 0};
     const CutsceneTrack& t = (*tracks)[size_t(track)];
+    if (t.type == TrackType::FollowPath) return sample(t, frame);  // progress along the path, 0..1
     return sampleFixed(t, frame, initialValue(doc, t), doc.scene().settings.gteScaling);
 }
 
@@ -1509,6 +1550,16 @@ Preview samplePreview(const Document& doc, SeqRef ref, float frame) {
     for (int i = 0; i < int(tracks->size()); ++i) {
         const CutsceneTrack& t = (*tracks)[size_t(i)];
         if (t.keyframes.empty()) continue;  // nothing to pose: the target shows as it is
+        if (t.type == TrackType::FollowPath) {
+            // What the console plays: the export's bake of it (core/path.cpp), sampled as the runtime does.
+            const CutsceneTrack baked = splash::bakeFollowTrack(doc.scene(), t);
+            if (baked.keyframes.empty()) continue;
+            const KeyValue v = sampleFixed(baked, frame, initialValue(doc, baked), doc.scene().settings.gteScaling);
+            const splash::Vec3 v3{v[0], v[1], v[2]};
+            if (t.target.empty()) p.cameraPosition = v3;
+            else p.objects[t.target].position = v3;
+            continue;
+        }
         const KeyValue v = sampleAt(doc, ref, i, frame);
         const splash::Vec3 v3{v[0], v[1], v[2]};
         switch (t.type) {

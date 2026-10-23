@@ -61,6 +61,7 @@
 #include "blocks.hh"
 #include "luacompile.hh"
 #include "luascan.hh"
+#include "path.hh"
 #include "simplify.hh"
 #include "editor/ui_canvas.hh"
 #include "ui/dialog_gate.hh"
@@ -3499,7 +3500,7 @@ void testBlocksNewBlock() {
                                                                    eb::newBlock("repeat"), eb::newBlock("log")}}));
     CHECK(g.errors.empty() && g.lua.find("Debug.Log(\"\")") != std::string::npos);
     // The palette's categories, every block in one of them.
-    CHECK(splash::blockCategories().size() == 8 && splash::blockCategories().front() == "Events" &&
+    CHECK(splash::blockCategories().size() == 9 && splash::blockCategories().front() == "Events" &&
           splash::blockCategories()[3] == "Sound and scenes" && splash::blockCategories().back() == "Debug");
     bool cats = true;
     for (const splash::BlockSpec& sp : splash::blockCatalogue())
@@ -14759,6 +14760,381 @@ void testTerrain() {
     }
 }
 
+// Paths (splashedit-ng#208): the sampler, the scene file, the export bake, the
+// Lua it generates, Blocks and the timeline's Follow Path track.
+static splash::Object pathObject(const char* name, std::vector<splash::Vec3> pts, bool closed, splash::PathMode mode) {
+    splash::Object o = named(name);
+    splash::PathComponent pc;
+    pc.points = std::move(pts);
+    pc.closed = closed;
+    pc.mode = mode;
+    pc.speed = 2;
+    o.path = pc;
+    return o;
+}
+
+static splash::Object rider(const char* name, const char* path, float offset, bool agent = false) {
+    splash::Object o = named(name);
+    o.mesh = splash::MeshComponent{};
+    o.mesh->mesh = "meshes/crate.mesh";
+    o.mesh->materials.emplace_back();
+    splash::FollowPathComponent f;
+    f.path = path;
+    f.startOffset = offset;
+    o.followPath = f;
+    if (agent) o.agent = splash::AgentComponent{};
+    return o;
+}
+
+static float dist(splash::Vec3 a, splash::Vec3 b) { return splash::magnitude(a - b); }
+
+static void testPathSampler() {
+    using splash::Vec3;
+    // A straight open path: arc length is the distance, t walks it evenly.
+    splash::PathCurve line = splash::buildCurve({{0, 0, 0}, {10, 0, 0}}, false);
+    CHECK(std::fabs(line.length - 10) < 1e-3f);
+    CHECK(dist(splash::curvePoint(line, 0.25f), {2.5f, 0, 0}) < 1e-3f);
+    CHECK(dist(splash::curveDirection(line, 0.5f), {1, 0, 0}) < 1e-4f);
+    CHECK(dist(splash::curvePoint(line, 2.f), {10, 0, 0}) < 1e-4f);  // clamped
+    // The curve passes through every control point; a closed one ends where it starts.
+    const std::vector<Vec3> sq{{0, 0, 0}, {4, 0, 0}, {4, 0, 4}, {0, 0, 4}};
+    splash::PathCurve c = splash::buildCurve(sq, true);
+    CHECK(c.closed && c.length > 16.f && c.length < 18.f);  // a little outside the square at its corners
+    CHECK(dist(splash::curvePoint(c, 0), sq[0]) < 1e-4f && dist(splash::curvePoint(c, 1), sq[0]) < 1e-3f);
+    for (const Vec3& p : sq) {
+        float best = 1e9f;
+        for (const Vec3& d : c.dense) best = std::min(best, dist(d, p));
+        CHECK(best < 1e-4f);
+    }
+    // Repeated points make no NaN.
+    splash::PathCurve dup = splash::buildCurve({{0, 0, 0}, {0, 0, 0}, {1, 0, 0}}, false);
+    CHECK(std::isfinite(dup.length) && std::isfinite(splash::curvePoint(dup, 0.5f).x));
+    CHECK(splash::buildCurve({}, false).length == 0 && splash::buildCurve({{1, 2, 3}}, false).length == 0);
+    CHECK(dist(splash::curvePoint(splash::buildCurve({{1, 2, 3}}, false), 0.5f), {1, 2, 3}) < 1e-6f);
+    // Time mapping per mode.
+    using splash::PathMode;
+    CHECK(splash::modeProgress(PathMode::Once, 1.5f) == 1.f && splash::modeProgress(PathMode::Once, 0.25f) == 0.25f);
+    CHECK(std::fabs(splash::modeProgress(PathMode::Loop, 1.25f) - 0.25f) < 1e-5f);
+    CHECK(std::fabs(splash::modeProgress(PathMode::PingPong, 1.25f) - 0.75f) < 1e-5f);
+    CHECK(std::fabs(splash::modeProgress(PathMode::PingPong, 2.5f) - 0.5f) < 1e-5f);
+    // Quaternion.Euler: yaw 90 faces +X, positive pitch looks down.
+    CHECK(std::fabs(splash::yawDegrees({1, 0, 0}) - 90) < 1e-4f && std::fabs(splash::yawDegrees({0, 0, 1})) < 1e-4f);
+    CHECK(std::fabs(splash::pitchDegrees({0, -1, 1}) - 45) < 1e-3f);
+    // Keys: a straight run needs only its ends; a curve takes what it is given and says how far off it is.
+    std::vector<std::vector<float>> run, wave;
+    for (int i = 0; i <= 100; i++) {
+        run.push_back({float(i), 2.f * float(i), 0});
+        wave.push_back({float(i), std::sin(float(i) * 0.3f), 0});
+    }
+    float e = 1;
+    CHECK(splash::fitKeys(run, 64, &e) == std::vector<int>({0, 100}) && e < 1e-4f);
+    std::vector<int> k = splash::fitKeys(wave, 5, &e);
+    CHECK(k.size() == 5 && k.front() == 0 && k.back() == 100 && e > 0.1f && std::is_sorted(k.begin(), k.end()));
+    std::vector<int> all = splash::fitKeys(wave, 200, &e);
+    CHECK(e == 0 && all.size() == 101);
+}
+
+static void testPathScene() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "paths-scene";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Scene s;
+    splash::Object p = pathObject("Track", {{0, 0, 0}, {1, 2, 3}, {4, 0, 1}}, true, splash::PathMode::PingPong);
+    p.path->autostart = false;
+    p.path->extra = {{"future", "7"}};
+    p.unknownComponents.push_back(R"({"type":"wobble","amount":3})");
+    s.objects.push_back(p);
+    splash::Object f = rider("Cart", "Track", 0.25f);
+    f.followPath->speed = 1.5f;
+    f.followPath->faceAlong = false;
+    s.objects.push_back(f);
+    splash::Cutscene cs;
+    cs.name = "ride";
+    splash::CutsceneTrack t;
+    t.type = splash::TrackType::FollowPath;
+    t.path = "Track";
+    t.keyframes.push_back({0, {0, 0, 0}});
+    t.keyframes.push_back({60, {1, 0, 0}});
+    cs.tracks.push_back(t);
+    s.cutscenes.push_back(cs);
+    splash::saveScene(s, dir / "a.scene");
+    std::ifstream in(dir / "a.scene");
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(text.find("\"followPath\"") != std::string::npos && text.find("\"pingPong\"") != std::string::npos);
+    splash::Scene r = splash::loadScene(dir / "a.scene");
+    const splash::Object& rp = r.objects[0];
+    CHECK(rp.path && rp.path->points.size() == 3 && rp.path->closed && rp.path->mode == splash::PathMode::PingPong);
+    CHECK(rp.path->points[1].z == 3 && !rp.path->autostart && rp.path->speed == 2);
+    CHECK(rp.path->extra.size() == 1 && rp.path->extra[0].first == "future");
+    CHECK(rp.unknownComponents.size() == 1 && rp.unknownComponents[0].find("wobble") != std::string::npos);
+    const splash::Object& rf = r.objects[1];
+    CHECK(rf.followPath && rf.followPath->path == "Track" && rf.followPath->speed == 1.5f &&
+          rf.followPath->startOffset == 0.25f && !rf.followPath->faceAlong);
+    CHECK(r.cutscenes[0].tracks[0].type == splash::TrackType::FollowPath && r.cutscenes[0].tracks[0].path == "Track");
+    splash::saveScene(r, dir / "b.scene");
+    std::ifstream in2(dir / "b.scene");
+    const std::string text2((std::istreambuf_iterator<char>(in2)), std::istreambuf_iterator<char>());
+    CHECK(text2 == text);  // byte-identical round trip
+    // A start offset outside 0..1 is refused.
+    std::string bad = text;
+    const size_t at = bad.find("\"startOffset\": 0.25");
+    CHECK(at != std::string::npos);
+    if (at != std::string::npos) {
+        bad.replace(at, 19, "\"startOffset\": 1.5");
+        std::ofstream(dir / "bad.scene") << bad;
+        bool threw = false;
+        try {
+            splash::loadScene(dir / "bad.scene");
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
+static void testPathBake() {
+    using splash::Vec3;
+    splash::Scene s;
+    splash::Object p = pathObject("Loop", {{0, 0, 0}, {6, 0, 0}, {6, 0, 6}, {0, 0, 6}}, true, splash::PathMode::Loop);
+    p.transform.position = {10, 0, 0};  // points are object space
+    s.objects.push_back(p);
+    for (int i = 0; i < 5; i++) s.objects.push_back(rider(("R" + std::to_string(i)).c_str(), "Loop", float(i) / 5.f));
+    s.objects.push_back(rider("Guard", "Loop", 0.5f, true));
+    s.objects.push_back(rider("Lost", "Nowhere", 0));
+    splash::PathBake b = splash::bakePaths(s);
+    CHECK(b.errors.empty());
+    // 5 riders facing along = 10 tracks: two animations (8 tracks at most each).
+    CHECK(b.groups.size() == 2 && b.scene.animations.size() == 2);
+    CHECK(b.groups[0].followers.size() == 4 && b.groups[1].followers.size() == 1);
+    const splash::PathCurve c = splash::buildCurve({{10, 0, 0}, {16, 0, 0}, {16, 0, 6}, {10, 0, 6}}, true);
+    const int lap = int(std::lround(c.length / 2.f * 30.f));
+    CHECK(b.groups[0].lapFrames == lap && b.scene.animations[0].durationFrames == lap);
+    bool keysOk = true;
+    for (const splash::Animation& a : b.scene.animations)
+        for (const splash::CutsceneTrack& t : a.tracks)
+            keysOk = keysOk && !t.keyframes.empty() && t.keyframes.size() <= 64 && t.keyframes.front().frame == 0 &&
+                     t.keyframes.back().frame == lap;
+    CHECK(keysOk);
+    // R2 starts 40% along, in world space; its yaw keys run continuously (no 360 jumps).
+    const splash::CutsceneTrack& r2 = b.scene.animations[0].tracks[4];
+    CHECK(r2.target == "R2" && r2.type == splash::TrackType::ObjectPosition);
+    const Vec3 k0{r2.keyframes[0].value[0], r2.keyframes[0].value[1], r2.keyframes[0].value[2]};
+    CHECK(dist(k0, splash::curvePoint(c, 0.4f)) < 1e-3f);
+    const splash::CutsceneTrack& r2rot = b.scene.animations[0].tracks[5];
+    bool smooth = r2rot.type == splash::TrackType::ObjectRotation;
+    for (size_t i = 1; i < r2rot.keyframes.size(); i++) smooth = smooth && std::fabs(r2rot.keyframes[i].value[1] - r2rot.keyframes[i - 1].value[1]) < 90;
+    CHECK(smooth && std::fabs(r2rot.keyframes.back().value[1] - r2rot.keyframes.front().value[1]) > 300);
+    // Between keys the curve stays within 5 cm of the real one.
+    CHECK(b.groups[0].maxError < 0.05f);
+    // The lost follower is named in a warning; the path object hosts the tick.
+    CHECK(std::any_of(b.warnings.begin(), b.warnings.end(), [](const std::string& w) { return w.find("'Lost'") != std::string::npos; }));
+    CHECK(b.scene.objects[0].script && b.scene.objects[0].script->lua == b.hostPath && b.hostUserScript.empty());
+    const std::string& lib = b.files[b.libraryPath];
+    CHECK(lib.find("_G.Path = P") != std::string::npos && lib.find("def({ name = \"Loop\"") != std::string::npos);
+    CHECK(lib.find("{ \"Guard\",") != std::string::npos && lib.find("n = 64") != std::string::npos);  // the agent's samples
+    CHECK(lib.find("\"~path1\"") != std::string::npos && lib.find("\"~path2\"") != std::string::npos);
+    CHECK(b.files[b.hostPath].find("Path._tick(dt)") != std::string::npos);
+    // The library compiles for the PS1 (no float literals, nothing psxlua rejects).
+    bool compiles = true;
+    try {
+        splash::compileLua(lib, "paths");
+        splash::compileLua("do local x = 1\nend\n" + b.files[b.hostPath], "host");
+    } catch (const std::exception&) {
+        compiles = false;
+    }
+    CHECK(compiles);
+
+    // Ping-pong: forward and back in one animation, the far end half way.
+    splash::Scene pp;
+    pp.objects.push_back(pathObject("Line", {{0, 0, 0}, {8, 0, 0}}, false, splash::PathMode::PingPong));
+    pp.objects.push_back(rider("Shuttle", "Line", 0));
+    splash::PathBake bp = splash::bakePaths(pp);
+    CHECK(bp.scene.animations.size() == 1 && bp.scene.animations[0].durationFrames == 2 * 120);
+    const splash::CutsceneTrack& sh = bp.scene.animations[0].tracks[0];
+    float far = 0;
+    for (const splash::Keyframe& kf : sh.keyframes) far = std::max(far, kf.value[0]);
+    CHECK(std::fabs(far - 8) < 1e-3f && std::fabs(sh.keyframes.back().value[0]) < 1e-3f);
+    // A straight line there and back: the ends, and the turn (facing flips there in a frame).
+    CHECK(sh.keyframes.size() <= 5);
+    // Once with an offset plays only the rest of the way.
+    pp.objects[0].path->mode = splash::PathMode::Once;
+    pp.objects[1].followPath->startOffset = 0.5f;
+    splash::PathBake bo = splash::bakePaths(pp);
+    CHECK(bo.scene.animations.size() == 1 && bo.scene.animations[0].durationFrames == 60);
+
+    // 15 animations of the scene's own leave room for one more: the rest are left out, named.
+    splash::Scene full = s;
+    for (int i = 0; i < 15; i++) {
+        splash::Animation a;
+        a.name = "mine" + std::to_string(i);
+        full.animations.push_back(a);
+    }
+    splash::PathBake bf = splash::bakePaths(full);
+    CHECK(bf.scene.animations.size() == 16);
+    CHECK(std::any_of(bf.warnings.begin(), bf.warnings.end(),
+                      [](const std::string& w) { return w.find("do not ride: R4") != std::string::npos; }));
+    // Two paths of one name: an error.
+    splash::Scene twice = s;
+    twice.objects.push_back(pathObject("Loop", {{0, 0, 0}, {1, 0, 0}}, false, splash::PathMode::Loop));
+    CHECK(!splash::bakePaths(twice).errors.empty());
+    // A path with a script of its own: the tick follows it.
+    splash::Scene own = s;
+    own.objects[0].script = splash::ScriptComponent{"scripts/mine.lua", {}};
+    splash::PathBake bown = splash::bakePaths(own);
+    CHECK(bown.hostUserScript == "scripts/mine.lua" && bown.scene.objects[0].script->lua == bown.hostPath);
+    // The camera's samples only when a script asks for a ride.
+    splash::Scene cam;
+    cam.objects.push_back(pathObject("Dolly", {{0, 0, 0}, {5, 0, 0}}, false, splash::PathMode::Once));
+    cam.objects.push_back(named("Director"));
+    cam.objects.back().script = splash::ScriptComponent{"scripts/director.lua", {}};
+    splash::PathBake bn = splash::bakePaths(cam);
+    CHECK(bn.files[bn.libraryPath].find("n = 0 })") != std::string::npos);
+    splash::PathBake bc = splash::bakePaths(cam, [](const std::string&) { return std::string("Path.RideCamera(\"Dolly\")"); });
+    CHECK(bc.files[bc.libraryPath].find("n = 64, inc = ") != std::string::npos);
+}
+
+static void testPathTrackBake() {
+    splash::Scene s;
+    s.objects.push_back(pathObject("Rail", {{0, 0, 0}, {10, 0, 0}, {10, 0, 10}}, false, splash::PathMode::Once));
+    s.objects.push_back(rider("Cart", "Rail", 0));
+    splash::CutsceneTrack t;
+    t.type = splash::TrackType::FollowPath;
+    t.target = "Cart";
+    t.path = "Rail";
+    t.keyframes.push_back({30, {0, 0, 0}});
+    t.keyframes.push_back({330, {1, 0, 0}});
+    std::string problem;
+    splash::CutsceneTrack b = splash::bakeFollowTrack(s, t, &problem);
+    CHECK(problem.empty() && b.type == splash::TrackType::ObjectPosition && b.target == "Cart");
+    CHECK(b.keyframes.size() <= 64 && b.keyframes.front().frame == 30 && b.keyframes.back().frame == 330);
+    CHECK(std::fabs(b.keyframes.back().value[0] - 10) < 1e-3f && std::fabs(b.keyframes.back().value[2] - 10) < 1e-3f);
+    // The camera when no target; a missing path says so.
+    t.target.clear();
+    CHECK(splash::bakeFollowTrack(s, t).type == splash::TrackType::CameraPosition);
+    t.path = "Gone";
+    CHECK(splash::bakeFollowTrack(s, t, &problem).keyframes.empty() && problem.find("Gone") != std::string::npos);
+    // A wiggle too fine for 64 keys: the cap is reported.
+    std::vector<splash::Vec3> zig;
+    for (int i = 0; i < 200; i++) zig.push_back({float(i), 0, (i % 2) ? 1.f : -1.f});
+    s.objects.push_back(pathObject("Zig", zig, false, splash::PathMode::Once));
+    t.path = "Zig";
+    t.keyframes = {{0, {0, 0, 0}}, {2000, {1, 0, 0}}};
+    problem.clear();
+    CHECK(splash::bakeFollowTrack(s, t, &problem).keyframes.size() == 64 && problem.find("cap") != std::string::npos);
+    // In a scene bake the track becomes the position track; an animation's camera follow is left out.
+    splash::Scene sc = s;
+    t.path = "Rail";
+    t.target = "Cart";
+    t.keyframes = {{0, {0, 0, 0}}, {60, {1, 0, 0}}};
+    splash::Cutscene cs;
+    cs.name = "go";
+    cs.tracks.push_back(t);
+    sc.cutscenes.push_back(cs);
+    splash::Animation an;
+    an.name = "cam";
+    splash::CutsceneTrack ct = t;
+    ct.target.clear();
+    an.tracks.push_back(ct);
+    sc.animations.push_back(an);
+    sc.objects[1].followPath.reset();
+    splash::PathBake pb = splash::bakePaths(sc);
+    CHECK(pb.scene.cutscenes[0].tracks.size() == 1 && pb.scene.cutscenes[0].tracks[0].type == splash::TrackType::ObjectPosition);
+    CHECK(pb.scene.animations[0].tracks.empty());
+    CHECK(std::any_of(pb.warnings.begin(), pb.warnings.end(), [](const std::string& w) { return w.find("no camera") != std::string::npos; }));
+}
+
+static void testPathExport() {
+    namespace fs = std::filesystem;
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "paths-export";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::Scene scene = splash::loadScene(project / "courtyard.scene");
+    scene.objects.push_back(pathObject("Patrol", {{0, 0, 0}, {3, 0, 0}, {3, 0, 3}}, true, splash::PathMode::Loop));
+    scene.objects.push_back(rider("Path Crate", "Patrol", 0.5f));
+    splash::ExportResult r = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(r.ok());
+    std::ifstream in(dir / "scene.splashpack", std::ios::binary);
+    const std::string pack((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    CHECK(pack.find("_G.Path = P") != std::string::npos && pack.find("Path._tick(dt)") != std::string::npos);
+    CHECK(pack.find("~path1") != std::string::npos && pack.find("Path Crate") != std::string::npos);
+    // Bytecode too: the generated Lua compiles.
+    splash::ExportOptions bc;
+    bc.luaBytecode = true;
+    CHECK(splash::exportSplashpack(scene, project, dir / "bc.splashpack", bc).ok());
+    // A follower of a path that is not there exports, with a warning.
+    scene.objects.back().followPath->path = "Elsewhere";
+    splash::ExportResult w = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(w.ok() && std::any_of(w.warnings.begin(), w.warnings.end(),
+                                [](const std::string& s) { return s.find("'Elsewhere'") != std::string::npos; }));
+    // An agent on a path far off the courtyard's floor: the nav check names it; one on it is quiet.
+    auto navWarned = [&](const splash::ExportResult& e) {
+        return std::any_of(e.warnings.begin(), e.warnings.end(),
+                           [](const std::string& s) { return s.find("'Path Guard' follows a path that leaves the nav") != std::string::npos; });
+    };
+    scene.objects.back().followPath->path = "Patrol";
+    scene.objects.push_back(pathObject("Far", {{200, 0, 200}, {210, 0, 200}}, false, splash::PathMode::Loop));
+    scene.objects.push_back(rider("Path Guard", "Far", 0, true));
+    splash::ExportResult nv = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(nv.ok() && !nv.stats.navOutlines.empty() && navWarned(nv));
+    // A short path inside the first nav region (its centroid; regions are convex).
+    const splash::Vec3 c0 = nv.stats.navInfo.empty() ? splash::Vec3{} : nv.stats.navInfo[0].centroid;
+    scene.objects.push_back(pathObject("Near", {c0, c0 + splash::Vec3{0.05f, 0, 0}}, false, splash::PathMode::Loop));
+    scene.objects[scene.objects.size() - 2].followPath->path = "Near";
+    splash::ExportResult nq = splash::exportSplashpack(scene, project, dir / "scene.splashpack");
+    CHECK(nq.ok() && !navWarned(nq));
+}
+
+static void testPathBlocks() {
+    splash::LuaGen g = splash::blocksToLua(blockScript(
+        {}, {{blk("on_scene_start"), blk("path_start", "Patrol"), blk("path_stop", "Patrol"),
+              blk("path_set_progress", "Guard", {bnum("50")}), blk("camera_ride", "Dolly"), blk("camera_stop_ride"),
+              blk("log", "", {blk("path_progress", "Patrol")}),
+              blk("if", "", {blk("path_running", "Patrol")}, {{blk("log", "", {blk("text", "on")})}})}}));
+    CHECK(g.errors.empty());
+    for (const char* want : {"Path.Start(Entity.Find(\"Patrol\"))", "Path.Stop(Entity.Find(\"Patrol\"))",
+                             "Path.SetProgress(Entity.Find(\"Guard\"), 50)", "Path.RideCamera(Entity.Find(\"Dolly\"))",
+                             "Path.StopCamera()", "Debug.Log((Path.GetProgress(Entity.Find(\"Patrol\")) or 0))",
+                             "if Path.IsRunning(Entity.Find(\"Patrol\")) then"})
+        CHECK(g.lua.find(want) != std::string::npos);
+    CHECK(!splash::blocksToLua(blockScript({}, {{blk("on_scene_start"), blk("path_start")}})).errors.empty());
+    // The script editor knows the Path table.
+    bool found = false;
+    for (const editor::lua::ApiSymbol& a : editor::lua::api())
+        if (std::string(a.table) == "Path" && std::string(a.name) == "RideCamera") found = true;
+    CHECK(found);
+}
+
+static void testPathTimeline() {
+    using splash::TrackType;
+    splash::Scene sc;
+    sc.objects.push_back(pathObject("Rail", {{0, 0, 0}, {10, 0, 0}}, false, splash::PathMode::Once));
+    sc.objects.push_back(rider("Cart", "Rail", 0));
+    splash::Cutscene cs;
+    cs.name = "go";
+    sc.cutscenes.push_back(cs);
+    splash::Animation an;
+    an.name = "loop";
+    sc.animations.push_back(an);
+    editor::Document d;
+    d.reset(sc);
+    const editor::SeqRef ref{editor::SeqKind::Cutscene, 0};
+    CHECK(editor::pathNames(d) == std::vector<std::string>{"Rail"});
+    CHECK(editor::addFollowPathTrack(d, ref, "Cart", "Rail") == 0);
+    CHECK(editor::addFollowPathTrack(d, ref, "Cart", "Rail") == -1);
+    CHECK(editor::addFollowPathTrack(d, ref, "", "Rail") == 1);  // the camera
+    CHECK(editor::addFollowPathTrack(d, {editor::SeqKind::Animation, 0}, "", "Rail") == -1);
+    CHECK(editor::trackLabel(d.scene().cutscenes[0].tracks[1]) == "Camera: Follow Rail");
+    CHECK(editor::addKey(d, ref, 0, 0, editor::KeyValue{0, 0, 0}) && editor::addKey(d, ref, 0, 60, editor::KeyValue{1, 0, 0}));
+    CHECK(std::fabs(editor::sampleAt(d, ref, 0, 30)[0] - 0.5f) < 1e-4f);  // the lane shows progress
+    const editor::Preview p = editor::samplePreview(d, ref, 30);
+    CHECK(p.objects.count("Cart") && p.objects.at("Cart").position && std::fabs(p.objects.at("Cart").position->x - 5) < 0.01f);
+    CHECK(!p.cameraPosition);  // the camera track has no keys yet
+    CHECK(editor::setTrackPath(d, ref, 0, "Other") && d.scene().cutscenes[0].tracks[0].path == "Other");
+    CHECK(editor::samplePreview(d, ref, 30).objects.empty());  // no such path: nothing posed
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -14957,6 +15333,13 @@ int main(int argc, char** argv) {
     testShadows();
     testListScroll();
     testTerrain();
+    testPathSampler();
+    testPathScene();
+    testPathBake();
+    testPathTrackBake();
+    testPathExport();
+    testPathBlocks();
+    testPathTimeline();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

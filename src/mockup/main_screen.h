@@ -368,6 +368,9 @@ struct State {
         splash::Vec3 start, startHit;
     } agentWp;
     int agentWpHot = -1;  // the waypoint dot under the mouse or being dragged
+    // The selected path's control points drag the same way (object space in the scene).
+    AgentWpDrag pathPt;
+    int pathPtHot = -1;
     // Terrain sculpting in the Scene view while a terrain is selected:
     // terrainTool is -1 (off) or a splash::TerrainTool.
     int terrainTool = -1;

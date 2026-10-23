@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <optional>
 #include <set>
 
 #include "editor/document.hh"
@@ -545,6 +546,9 @@ void AssetBrowser::files(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
     const bool hoverArea = r.Contains(io.MousePos) && !popup;
     bool overItem = false;
+    // A rename commits after the loop: it rescans the index, which frees the
+    // entries `items` points at (the rest of the loop would read them).
+    std::optional<std::string> renameTo;
     for (size_t i = 0; i < items.size(); ++i) {
         const AssetEntry& e = *items[i];
         const int col = static_cast<int>(i) % cols, row = static_cast<int>(i) / cols;
@@ -641,8 +645,7 @@ void AssetBrowser::files(ImDrawList* dl, ImRect r, editor::Document& doc) {
             std::string typed;
             TextEdit res = textEdit("rename", nameField, f.regular, m_list ? type::body : type::label, nameX, nameField.Max.x - 4, &typed);
             if (res == TextEdit::Commit) {
-                commitRename(doc, typed);
-                m_renaming.clear();
+                renameTo = typed;
             } else if (res == TextEdit::Cancel || res == TextEdit::Inactive) {
                 m_renaming.clear();
             }
@@ -655,6 +658,10 @@ void AssetBrowser::files(ImDrawList* dl, ImRect r, editor::Document& doc) {
             tooltip(tip.c_str());
         }
         ImGui::PopID();
+    }
+    if (renameTo) {
+        commitRename(doc, *renameTo);
+        m_renaming.clear();
     }
     // A click on empty space clears the selection; a right-click opens the folder's menu.
     if (hoverArea && !overItem) {

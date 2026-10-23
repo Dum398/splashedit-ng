@@ -33,6 +33,7 @@ ImU32 categoryColor(std::string_view c) {
     if (c == "Control") return blocks::control;
     if (c == "Objects") return blocks::objects;
     if (c == "Sound and scenes") return blocks::sound;
+    if (c == "Paths") return blocks::paths;
     if (c == "Variables") return blocks::variables;
     if (c == "Operators") return blocks::operators;
     if (c == "Input") return blocks::input;

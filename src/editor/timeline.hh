@@ -172,6 +172,13 @@ bool removeSequence(Document& doc, SeqRef ref);
 // already there, or the sequence has kMaxTimelineTracks.
 int addTrack(Document& doc, SeqRef ref, splash::TrackType type, const std::string& target);
 bool removeTrack(Document& doc, SeqRef ref, int track);
+// A Follow Path track: target is the object that rides (empty = the camera,
+// cutscenes only), path the path object's name. -1 when not added (the same
+// target already follows a path here, or the track limit).
+int addFollowPathTrack(Document& doc, SeqRef ref, const std::string& target, const std::string& path);
+bool setTrackPath(Document& doc, SeqRef ref, int track, const std::string& path);
+// The scene's path objects that export (the names Follow Path tracks take).
+std::vector<std::string> pathNames(const Document& doc);
 // Points the track at another target, keys unchanged. Refused for tracks
 // with no target (camera, rumble), an empty or unchanged target, or one the
 // sequence already drives with this type.

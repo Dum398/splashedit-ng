@@ -1264,7 +1264,8 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     // converts units, the data is taken as Y up as it is, and Z up is turned
     // in applySettings like a glTF.
     if (settings.up == UpAxis::File) opts.target_axes = ufbx_axes_right_handed_y_up;
-    opts.target_unit_meters = 1;
+    // Units are not left to ufbx, which would put them in the root node's
+    // scale: the file's unit goes into the import scale (see convertUnits).
     opts.load_external_files = true;  // the .mtl of an .obj
     opts.ignore_missing_external_files = true;
     opts.obj_search_mtl_by_filename = true;
@@ -1289,6 +1290,9 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
     if (!loaded) fail(what + ": " + std::string(err.description.data, err.description.length));
     checkpoint(0.15f);
     std::unique_ptr<ufbx_scene, void (*)(ufbx_scene*)> scene(loaded, ufbx_free_scene);
+    // An .obj has no unit, read as 0.
+    ImportSettings scaled = settings;
+    if (settings.convertUnits && scene->settings.unit_meters > 0) scaled.scale *= float(scene->settings.unit_meters);
 
     ImportedModel out;
     Sink baked;
@@ -1517,7 +1521,7 @@ ImportedModel importUfbx(const fs::path& source, const fs::path& project, const 
         }
         mats.push_back(std::move(sm));
     }
-    finishImport(out, baked, tree, mats, rig, source, project, settings, stem);
+    finishImport(out, baked, tree, mats, rig, source, project, scaled, stem);
     return out;
 }
 
@@ -1593,6 +1597,7 @@ json settingsJson(const ImportSettings& s) {
               {"source", s.source}};
     // Only when set, so a sidecar without a target stays as it was.
     if (s.targetTriangles > 0) j["targetTriangles"] = s.targetTriangles;
+    if (!s.convertUnits) j["convertUnits"] = false;
     if (s.targetTriangles > 0 && s.sourceTriangles > 0) j["sourceTriangles"] = s.sourceTriangles;
     return j;
 }
@@ -1617,6 +1622,7 @@ ImportSettings loadImportSettings(const fs::path& model) {
         json j = json::parse(in);
         if (!j.is_object()) fail(what + ": not a JSON object");
         s.scale = j.value("scale", s.scale);
+        s.convertUnits = j.value("convertUnits", s.convertUnits);
         if (j.contains("up")) s.up = enumFrom(j["up"], kUpAxes, "up axis");
         if (j.contains("normals")) s.normals = enumFrom(j["normals"], kNormals, "normals");
         s.smoothingAngle = j.value("smoothingAngle", s.smoothingAngle);

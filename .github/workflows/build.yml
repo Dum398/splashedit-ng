@@ -132,6 +132,7 @@ jobs:
           "$py" tests/audiocheck.py "$cli"
           "$py" tests/audioformatcheck.py "$cli"
           "$py" tests/uicheck.py "$cli"
+          "$py" tests/stringscheck.py "$cli"
           "$py" tests/cutscenecheck.py "$cli"
           "$py" tests/skincheck.py "$cli"
           "$py" tests/animcheck.py "$cli"

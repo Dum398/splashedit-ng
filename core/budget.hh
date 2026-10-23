@@ -87,7 +87,7 @@ inline size_t objectLoadBytes(const ExportStats& s) {
 // the three. A streamed scene adds its slots (WorldStreamer::init). Then come
 // the per-object allocations above and the rest of what loading makes.
 // The localised strings the scene carries stay on the Lua heap
-// (stringsLuaHeapBytes, measured in ng-deps/loc/value.md).
+// (stringsLuaHeapBytes, measured in Redux).
 inline Budget ramBudget(const ExportStats& s) {
     return {s.rendererBytes() + s.visibleListBytes() + s.streamPoolBytes() +
                 std::max({s.splashpackBytes, s.vramFileBytes, s.spuFileBytes}) + objectLoadBytes(s) + kEngineLoadBytes +

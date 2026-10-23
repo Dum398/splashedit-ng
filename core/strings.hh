@@ -8,8 +8,8 @@
 //
 // On the PS1 the strings are a generated Lua library (a key -> text table per
 // language) that publishes _G.Strings: Get(key), Language(), SetLanguage(id
-// or 1-based index), Languages(), Save(). Measured in Redux
-// (ng-deps/loc/value.md), 300 keys x 3 languages took +165 KB of peak heap, so
+// or 1-based index), Languages(), Save(). Measured in Redux, 300 keys x 3
+// languages took +165 KB of peak heap, so
 // each scene carries only the keys it references: its keyed UI elements, the
 // literal keys of Strings.Get("...") in its scripts (Blocks compile to that),
 // and every key starting with one of the scene's stringPrefixes. The active
@@ -106,7 +106,7 @@ struct StringsBake {
     std::vector<std::string> warnings;
 };
 // The Lua heap the library keeps: per carried text its bytes + 68, and 1.2 KB
-// (a linear fit of t50 and t300, ng-deps/loc/value.md: 98 B per cell of ~30
+// (a linear fit of Redux runs at 50 and 300 keys: 98 B per cell of ~30
 // byte texts, +1.2 KB fixed), and ~48 B per keyed UI element (its handle row).
 size_t stringsLuaHeapBytes(size_t textBytes, size_t cells, size_t elements);
 // readSource reads a project script by its project-relative path (.blocks

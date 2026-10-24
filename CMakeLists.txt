@@ -115,7 +115,8 @@ add_library(splasheditdoc STATIC
     src/editor/texture_preview.cpp
     src/editor/tv_preview.cpp
     src/editor/unirom.cpp
-    src/editor/ui_canvas.cpp)
+    src/editor/ui_canvas.cpp
+    src/editor/vertex_paint.cpp)
 target_include_directories(splasheditdoc PUBLIC src)
 # src/editor/psxsplash.d.lua (tools/gen_lua_api.py) goes into the editor as
 # bytes for "Set up external editor (VS Code)"; a change to it reconfigures.

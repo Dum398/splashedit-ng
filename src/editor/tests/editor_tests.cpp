@@ -60,6 +60,7 @@
 #include "editor/timeline.hh"
 #include "editor/tv_preview.hh"
 #include "editor/unirom.hh"
+#include "editor/vertex_paint.hh"
 #include "audio.hh"
 #include "blend.hh"
 #include "blocks.hh"
@@ -11999,6 +12000,356 @@ void testMeshColours() {
     CHECK(d.hasWarning(*d.object({0})));
 }
 
+// The painted layer's text form (#199): rrggbb per vertex, read back exactly;
+// and a byte as the exporter reads it, (byte + 0.5) / 255, ships as that byte.
+void testVertexPaintEncoding() {
+    std::vector<std::array<uint8_t, 3>> p;
+    for (int i = 0; i < 300; i++) p.push_back({uint8_t(i * 7), uint8_t(255 - i), uint8_t(i * 13 + 1)});
+    const std::string s = splash::encodeVertexPaint(p);
+    CHECK(s.size() == p.size() * 6);
+    CHECK(splash::encodeVertexPaint({{0x12, 0xab, 0xff}}) == "12abff");
+    CHECK(splash::decodeVertexPaint(s) == p);
+    CHECK((splash::decodeVertexPaint("12ABFF") == std::vector<std::array<uint8_t, 3>>({{0x12, 0xab, 0xff}})));
+    CHECK(splash::decodeVertexPaint("")->empty());
+    CHECK(!splash::decodeVertexPaint("12abf"));
+    CHECK(!splash::decodeVertexPaint("12abfg"));
+    CHECK(!splash::decodeVertexPaint("12 bff"));
+    bool exact = true;
+    for (int k = 0; k < 256; k++) exact = exact && splash::colorToPsx((float(k) + 0.5f) / 255.f) == k;
+    CHECK(exact);
+}
+
+namespace {
+
+using roomtest::readAll;
+
+// A flat n x n grid of vertices `size` metres across on the XZ plane, facing up.
+splash::Mesh paintGrid(int n, float size) {
+    splash::Mesh m;
+    for (int z = 0; z < n; z++)
+        for (int x = 0; x < n; x++) {
+            m.positions.push_back({size * float(x) / float(n - 1) - size / 2, 0, size * float(z) / float(n - 1) - size / 2});
+            m.normals.push_back({0, 1, 0});
+        }
+    std::vector<int> tris;
+    for (int z = 0; z + 1 < n; z++)
+        for (int x = 0; x + 1 < n; x++) {
+            const int a = z * n + x, b = a + 1, c = a + n, d = c + 1;
+            tris.insert(tris.end(), {a, c, b, b, c, d});
+        }
+    m.submeshes = {tris};
+    return m;
+}
+
+// A grid object at x with a mesh component in `mode`.
+splash::Object paintObject(const char* name, float x, splash::VertexColorMode mode) {
+    splash::Object o = named(name, x);
+    o.mesh.emplace();
+    o.mesh->mesh = "grid.mesh";
+    o.mesh->materials.push_back({});
+    o.mesh->vertexColors = mode;
+    o.mesh->flatColor = {40, 90, 200};
+    return o;
+}
+
+splash::Object paintLamp() {
+    splash::Object o = named("Lamp", 0);
+    o.transform.position = {0.5f, 2, 0.3f};
+    splash::LightComponent l;
+    l.kind = splash::LightKind::Point;
+    l.range = 8;
+    l.intensity = 1.5f;
+    o.light = l;
+    return o;
+}
+
+}  // namespace
+
+// Scenes saved before painting keep their bytes; a painted layer saves as
+// "paintColors" in the mesh component and loads back as it was.
+void testVertexPaintSave() {
+    const fs::path project = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "vpaintsave";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    {
+        // The sample was written by hand and before several keys every save
+        // writes now, so a save is compared with a save: the second is the
+        // first byte for byte, and neither has a painted layer.
+        splash::Scene s = splash::loadScene(project / "courtyard.scene");
+        splash::saveScene(s, dir / "courtyard.scene");
+        const std::string saved = readAll(dir / "courtyard.scene");
+        CHECK(saved.find("paint") == std::string::npos);
+        splash::saveScene(splash::loadScene(dir / "courtyard.scene"), dir / "again.scene");
+        CHECK(readAll(dir / "again.scene") == saved);
+    }
+    splash::Scene s;
+    s.objects.push_back(paintObject("Grid", 0, splash::VertexColorMode::Painted));
+    s.objects[0].mesh->paint = {{1, 2, 3}, {255, 0, 128}, {16, 32, 64}};
+    s.objects.push_back(paintObject("Plain", 2, splash::VertexColorMode::Flat));
+    splash::saveScene(s, dir / "painted.scene");
+    const std::string text = readAll(dir / "painted.scene");
+    CHECK(text.find("\"paintColors\": \"010203ff0080102040\"") != std::string::npos);
+    CHECK(text.find("\"vertexColors\": \"painted\"") != std::string::npos);
+    CHECK(text.find("paintColors") == text.rfind("paintColors"));  // the unpainted mesh has none
+    splash::Scene back = splash::loadScene(dir / "painted.scene");
+    CHECK(back.objects.size() == 2 && back.objects[0].mesh->paint == s.objects[0].mesh->paint);
+    CHECK(back.objects[0].mesh->vertexColors == splash::VertexColorMode::Painted && back.objects[1].mesh->paint.empty());
+    CHECK(back.objects[0].mesh->extra.empty());
+    splash::saveScene(back, dir / "painted2.scene");
+    CHECK(readAll(dir / "painted2.scene") == text);
+    // Copy and paste carry it.
+    std::optional<std::vector<splash::Object>> pasted = splash::readObjectsText(splash::writeObjectsText({s.objects[0]}));
+    CHECK(pasted && pasted->size() == 1 && (*pasted)[0].mesh->paint == s.objects[0].mesh->paint);
+}
+
+// Painted from what another mode exports gives the same splashpack, byte
+// for byte: the courtyard (baked), and a flat and a mesh-coloured grid.
+void testVertexPaintExportSame() {
+    const fs::path courtyard = fs::path(SPLASHEDIT_SOURCE_DIR) / "examples" / "courtyard";
+    const fs::path dir = g_outDir / "vpaintexport";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    fs::copy(courtyard, dir / "courtyard", fs::copy_options::recursive);
+    {
+        editor::Document d;
+        d.reset(splash::loadScene(dir / "courtyard" / "courtyard.scene"), dir / "courtyard");
+        CHECK(splash::exportSplashpack(d.scene(), dir / "courtyard", dir / "baked.splashpack").ok());
+        const std::string baked = readAll(dir / "baked.splashpack");
+        // Bytes that differ, and whether all of them by one step at most.
+        auto compare = [&](const std::string& pack, bool* withinOne) {
+            int n = 0;
+            *withinOne = pack.size() == baked.size();
+            for (size_t i = 0; *withinOne && i < pack.size(); i++)
+                if (pack[i] != baked[i]) n++, *withinOne = std::abs(int(uint8_t(pack[i])) - int(uint8_t(baked[i]))) == 1;
+            return n;
+        };
+        // One mesh at a time: the same bytes, except where the exporter cuts
+        // faces at texture repeats and interpolates the colour: one step off
+        // at most there. The crates' faces are not cut.
+        std::vector<std::string> exact;
+        bool allWithinOne = true;
+        int paintable = 0;
+        for (const editor::ObjectPath& p : d.flatPaths()) {
+            if (!editor::paintRefusal(d, p).empty()) continue;
+            paintable++;
+            CHECK(editor::setPaintedMode(d, p));
+            CHECK(splash::exportSplashpack(d.scene(), dir / "courtyard", dir / "one.splashpack").ok());
+            bool within = false;
+            if (compare(readAll(dir / "one.splashpack"), &within) == 0) exact.push_back(d.object(p)->name);
+            allWithinOne = allWithinOne && within;
+            CHECK(d.undo());
+        }
+        CHECK(paintable == 9);  // floor, walls, pillars, platform, crates
+        CHECK(allWithinOne);
+        CHECK(std::count(exact.begin(), exact.end(), "Crate") == 1 && std::count(exact.begin(), exact.end(), "Crate (3)") == 1);
+        int inPainted = 0;
+        for (const editor::ObjectPath& p : d.flatPaths())
+            if (editor::paintRefusal(d, p).empty()) inPainted += editor::setPaintedMode(d, p);
+        CHECK(inPainted == 9);
+        CHECK(splash::exportSplashpack(d.scene(), dir / "courtyard", dir / "painted.splashpack").ok());
+        bool within = false;
+        const int differ = compare(readAll(dir / "painted.splashpack"), &within);
+        CHECK(within && differ > 0 && differ < int(baked.size()) / 50);
+        // Painting something else does change it: the comparison can fail.
+        const editor::ObjectPath floor = d.flatPaths()[1];
+        CHECK(d.object(floor)->name == "Floor");
+        CHECK(editor::fillPaint(d, {floor}, {255, 0, 0}) == 1);
+        CHECK(splash::exportSplashpack(d.scene(), dir / "courtyard", dir / "red.splashpack").ok());
+        CHECK(compare(readAll(dir / "red.splashpack"), &within) > 0 && !within);
+    }
+    splash::Mesh grid = paintGrid(4, 2);
+    grid.colors.assign(grid.positions.size(), {0.25f, 0.5f, 0.75f, 1});
+    for (size_t i = 0; i < grid.colors.size(); i++) grid.colors[i][0] = float(i) / 17.f;
+    splash::saveMesh(grid, dir / "grid.mesh");
+    for (splash::VertexColorMode mode : {splash::VertexColorMode::Flat, splash::VertexColorMode::Mesh, splash::VertexColorMode::Baked}) {
+        splash::Scene s;
+        s.objects.push_back(paintObject("Grid", 0, mode));
+        s.objects.push_back(paintLamp());
+        editor::Document d;
+        d.reset(s, dir);
+        CHECK(splash::exportSplashpack(d.scene(), dir, dir / "before.splashpack").ok());
+        CHECK(editor::setPaintedMode(d, {0}));
+        CHECK(d.object({0})->mesh->paint.size() == grid.positions.size());
+        CHECK(splash::exportSplashpack(d.scene(), dir, dir / "after.splashpack").ok());
+        CHECK(readAll(dir / "after.splashpack") == readAll(dir / "before.splashpack"));
+        // Back to the first mode keeps the layer; Painted again uses it as it is.
+        d.edit({0}, [mode](splash::Object& ob) { ob.mesh->vertexColors = mode; });
+        CHECK(!d.object({0})->mesh->paint.empty());
+        CHECK(editor::clearPaint(d, {0}) && d.object({0})->mesh->paint.empty() && d.object({0})->mesh->vertexColors == mode);
+    }
+}
+
+// A stroke (#199): vertices inside the radius take the colour by the brush
+// weight, the rest keep what they exported; the first stroke on a baked mesh
+// switches it to Painted; the whole stroke is one undo step.
+void testVertexPaintStroke() {
+    const fs::path dir = g_outDir / "vpaintstroke";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const splash::Mesh grid = paintGrid(11, 10);  // a vertex every metre
+    splash::saveMesh(grid, dir / "grid.mesh");
+    splash::Scene s;
+    s.objects.push_back(paintObject("Grid", 0, splash::VertexColorMode::Baked));
+    s.objects.push_back(paintLamp());
+    editor::Document d;
+    d.reset(s, dir);
+    d.select(editor::ObjectPath{0});
+    CHECK(editor::paintTargets(d) == std::vector<editor::ObjectPath>({{0}}));
+    const std::vector<editor::Rgb> baked = editor::currentPaint(d, {0});
+    CHECK(baked.size() == grid.positions.size());
+
+    // The ray from above the centre hits the grid there; the sample is the baked colour under it.
+    std::optional<editor::PaintHit> hit = editor::paintHit(d, editor::paintTargets(d), {0, 5, 0}, {0, -1, 0});
+    CHECK(hit && hit->path == editor::ObjectPath({0}) && std::fabs(hit->world.y) < 1e-4f && std::fabs(hit->world.x) < 1e-4f);
+    CHECK(hit && hit->color == baked[60]);  // vertex 60 is the centre
+    CHECK(!editor::paintHit(d, editor::paintTargets(d), {20, 5, 0}, {0, -1, 0}));
+
+    editor::PaintBrush brush;
+    brush.color = {255, 0, 0};
+    brush.radius = 1.5f;
+    brush.strength = 1;
+    brush.falloff = 0;
+    const size_t before = d.historySize();
+    editor::PaintStroke st;
+    editor::beginPaintStroke(st, d, editor::paintTargets(d), brush);
+    CHECK(editor::stepPaintStroke(st, d, {-2, 0, 0}));
+    CHECK(!editor::stepPaintStroke(st, d, {-2, 0, 0}));  // the same spot again changes nothing
+    for (float x = -2; x <= 2.01f; x += 0.25f) editor::stepPaintStroke(st, d, {x, 0, 0});
+    editor::endPaintStroke(st, d);
+    CHECK(d.historySize() == before + 1);
+    const splash::MeshComponent& mc = *d.object({0})->mesh;
+    CHECK(mc.vertexColors == splash::VertexColorMode::Painted && mc.paint.size() == grid.positions.size());
+    int red = 0, kept = 0, wrong = 0;
+    for (size_t i = 0; i < grid.positions.size(); i++) {
+        const splash::Vec3 p = grid.positions[i];
+        // Distance to the stroke's line from x -2 to 2 along z 0.
+        const float dx = p.x < -2 ? -2 - p.x : p.x > 2 ? p.x - 2 : 0;
+        const float dist = std::sqrt(dx * dx + p.z * p.z);
+        if (dist < 1.4f) red += mc.paint[i] == editor::Rgb{255, 0, 0}, wrong += mc.paint[i] != editor::Rgb{255, 0, 0};
+        else if (dist > 1.6f) kept += mc.paint[i] == baked[i], wrong += mc.paint[i] != baked[i];
+    }
+    // 5 x 3 along the line and one past each end; the four diagonals 1.41 m
+    // past the ends (red too) are in neither band.
+    CHECK(red == 17 && wrong == 0);
+    CHECK(kept == 121 - 21);
+    // One Ctrl+Z puts the mode and colours back.
+    CHECK(d.undo());
+    CHECK(d.object({0})->mesh->vertexColors == splash::VertexColorMode::Baked && d.object({0})->mesh->paint.empty());
+    CHECK(d.historySize() == before + 1 && !d.canUndo());
+    CHECK(d.redo() && d.object({0})->mesh->paint == mc.paint);
+
+    // A second stroke is its own step; strength and falloff blend from what it was.
+    brush.color = {0, 0, 255};
+    brush.strength = 0.5f;
+    brush.falloff = 1;
+    brush.radius = 2;
+    const std::vector<editor::Rgb> was = d.object({0})->mesh->paint;
+    editor::beginPaintStroke(st, d, editor::paintTargets(d), brush);
+    CHECK(editor::stepPaintStroke(st, d, {3, 0, 3}));
+    editor::endPaintStroke(st, d);
+    const std::vector<editor::Rgb>& now = d.object({0})->mesh->paint;
+    const size_t c = 8 * 11 + 8;  // the vertex at (3, 3)
+    CHECK(now[c][2] >= 127 && now[c][2] <= 128 + was[c][2] / 2 + 1 && now[c][0] <= was[c][0] / 2 + 1);
+    CHECK(now[c + 2] == was[c + 2]);  // two metres away: the rim, weight 0
+    CHECK(editor::paintWeight(brush, 0) == 0.5f && editor::paintWeight(brush, 2) == 0 && editor::paintWeight(brush, 1) == 0.25f);
+    CHECK(d.undo() && d.object({0})->mesh->paint == was);
+
+    // Ctrl+click samples what is painted.
+    hit = editor::paintHit(d, editor::paintTargets(d), {0, 5, 0}, {0, -1, 0});
+    CHECK(hit && hit->color == editor::Rgb({255, 0, 0}));
+}
+
+// Several selected meshes are painted by one stroke, one undo step; the
+// unselected one and a selected one the brush never reached stay as they were.
+void testVertexPaintMulti() {
+    const fs::path dir = g_outDir / "vpaintmulti";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::saveMesh(paintGrid(11, 10), dir / "grid.mesh");
+    splash::Scene s;
+    s.objects.push_back(paintObject("Left", -5, splash::VertexColorMode::Baked));
+    s.objects.push_back(paintObject("Right", 5, splash::VertexColorMode::Flat));
+    s.objects.push_back(paintObject("Other", 5, splash::VertexColorMode::Baked));  // the same place, not selected
+    s.objects.push_back(paintObject("Far", 40, splash::VertexColorMode::Baked));
+    s.objects.push_back(paintLamp());
+    splash::Object skinned = paintObject("Skinned", 0, splash::VertexColorMode::Baked);
+    skinned.skin.emplace();
+    s.objects.push_back(skinned);
+    splash::Object lamp = paintLamp();  // selected, no mesh
+    s.objects.push_back(lamp);
+    editor::Document d;
+    d.reset(s, dir);
+    d.selectMany(editor::ObjectPath{0}, {{1}, {3}, {5}, {6}});
+    CHECK(editor::paintTargets(d).size() == 3);  // not the skinned one or the lamp
+    CHECK(editor::paintRefusal(d, {5}).find("skinned") != std::string::npos);
+    CHECK(editor::paintRefusal(d, {6}).find("no mesh") != std::string::npos);
+    const size_t before = d.historySize();
+    editor::PaintBrush brush;
+    brush.color = {0, 255, 0};
+    brush.radius = 0.6f;
+    brush.falloff = 0;
+    editor::PaintStroke st;
+    editor::beginPaintStroke(st, d, editor::paintTargets(d), brush);
+    // Along the seam where Left (x -10..0) meets Right (0..10).
+    for (float z = -3; z <= 3; z += 0.5f) editor::stepPaintStroke(st, d, {0, 0, z});
+    editor::endPaintStroke(st, d);
+    CHECK(d.historySize() == before + 1);
+    auto greens = [&](const editor::ObjectPath& p) {
+        int n = 0;
+        for (const editor::Rgb& c : d.object(p)->mesh->paint) n += c == editor::Rgb{0, 255, 0};
+        return n;
+    };
+    CHECK(greens({0}) == 7 && greens({1}) == 7);  // the edge column at x 0 of each, z -3..3
+    CHECK(d.object({0})->mesh->vertexColors == splash::VertexColorMode::Painted);
+    CHECK(d.object({1})->mesh->vertexColors == splash::VertexColorMode::Painted);
+    // Right was Flat: its unpainted vertices keep the flat colour.
+    CHECK(d.object({1})->mesh->paint[10 * 11 + 10] == editor::Rgb({40, 90, 200}));
+    CHECK(d.object({2})->mesh->vertexColors == splash::VertexColorMode::Baked && d.object({2})->mesh->paint.empty());
+    CHECK(d.object({3})->mesh->vertexColors == splash::VertexColorMode::Baked && d.object({3})->mesh->paint.empty());
+    CHECK(d.object({5})->mesh->paint.empty());
+    CHECK(d.undo());
+    CHECK(d.object({0})->mesh->paint.empty() && d.object({1})->mesh->paint.empty());
+    CHECK(d.object({1})->mesh->vertexColors == splash::VertexColorMode::Flat);
+    // Fill: every vertex of every selected mesh, one step.
+    CHECK(editor::fillPaint(d, editor::paintTargets(d), {9, 8, 7}) == 3);
+    CHECK(greens({0}) == 0 && d.object({3})->mesh->paint == std::vector<editor::Rgb>(121, {9, 8, 7}));
+    CHECK(d.object({1})->mesh->paint == std::vector<editor::Rgb>(121, {9, 8, 7}));
+    CHECK(editor::fillPaint(d, editor::paintTargets(d), {9, 8, 7}) == 0);  // nothing to change
+    CHECK(d.undo() && d.object({3})->mesh->paint.empty() && d.object({0})->mesh->paint.empty());
+}
+
+// Painted with a layer that does not fit the mesh exports baked lighting
+// and is a warning, like Mesh colours on a mesh without any.
+void testVertexPaintMismatch() {
+    const fs::path dir = g_outDir / "vpaintmismatch";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    splash::saveMesh(paintGrid(3, 2), dir / "grid.mesh");
+    splash::Scene s;
+    s.objects.push_back(paintObject("Grid", 0, splash::VertexColorMode::Baked));
+    s.objects.push_back(paintLamp());
+    CHECK(splash::exportSplashpack(s, dir, dir / "baked.splashpack").ok());
+    s.objects[0].mesh->vertexColors = splash::VertexColorMode::Painted;
+    s.objects[0].mesh->paint.assign(4, {255, 255, 255});  // the mesh has 9 vertices
+    editor::Document d;
+    d.reset(s, dir);
+    CHECK(d.mesh("grid.mesh") && d.mesh("grid.mesh")->vertices == 9);
+    CHECK(d.paintMismatch(*d.object({0})->mesh) && d.hasWarning(*d.object({0})));
+    CHECK(splash::exportSplashpack(d.scene(), dir, dir / "mismatch.splashpack").ok());
+    CHECK(readAll(dir / "mismatch.splashpack") == readAll(dir / "baked.splashpack"));
+    // Painting starts from what it shows (baked) and fits the mesh again.
+    CHECK(editor::currentPaint(d, {0}).size() == 9);
+    CHECK(editor::fillPaint(d, {{0}}, {1, 2, 3}) == 1);
+    CHECK(!d.paintMismatch(*d.object({0})->mesh) && !d.hasWarning(*d.object({0})));
+    CHECK(d.undo() && d.hasWarning(*d.object({0})));
+    // No layer at all: the same.
+    d.edit({0}, [](splash::Object& ob) { ob.mesh->paint.clear(); });
+    CHECK(d.paintMismatch(*d.object({0})->mesh));
+    d.edit({0}, [](splash::Object& ob) { ob.mesh->vertexColors = splash::VertexColorMode::Baked; });
+    CHECK(!d.paintMismatch(*d.object({0})->mesh) && !d.hasWarning(*d.object({0})));
+}
+
 // couldBe4bpp over every material: true only when each textured material's
 // texture reads and fits 16 colours, and together they shrink at 4 bpp.
 void testMaterials4bpp() {
@@ -16196,6 +16547,12 @@ int main(int argc, char** argv) {
     testAudioFormats();
     testDiscMusic();
     testMeshColours();
+    testVertexPaintEncoding();
+    testVertexPaintSave();
+    testVertexPaintExportSame();
+    testVertexPaintStroke();
+    testVertexPaintMulti();
+    testVertexPaintMismatch();
     testMaterials4bpp();
     testUvOffsetSlots();
     testSceneNetworkId();

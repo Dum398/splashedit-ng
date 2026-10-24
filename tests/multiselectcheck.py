@@ -81,6 +81,7 @@ def project_copy():
 
 W = lambda n: ['--wait', str(n)]
 mid = None  # with SAVE_MID in the script: the lamps as saved at that point
+mid_rot = None  # and their rotations
 
 
 def lamps(s):
@@ -99,7 +100,7 @@ def run(name, args, save=True, select='LampA'):
     """A fresh copy with `select` selected, then `args` (and Ctrl+S); returns
     the saved lamps, the output lines, the named controls' rects and the
     screenshot."""
-    global mid
+    global mid, mid_rot
     project = project_copy()
     scene = os.path.join(project, 'courtyard.scene')
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
@@ -109,6 +110,8 @@ def run(name, args, save=True, select='LampA'):
         (['--key', 'ctrl+s'] + W(10) if save else []) + ['--screenshot', shot]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=240)
     mid = lamps(json.load(open(snap, encoding='utf-8'))) if os.path.exists(snap) else None
+    mid_rot = {o['name']: [float(v) for v in o['transform']['rotation']] for o in json.load(open(snap, encoding='utf-8'))['objects']
+               if o['name'] in LAMPS} if os.path.exists(snap) else None
     lines = (r.stdout + r.stderr).strip().splitlines()
     missing = [l for l in lines if 'no such control drawn' in l or 'no object named' in l]
     check(name + ': every control the script names was drawn', not missing, missing)
@@ -259,6 +262,39 @@ if mid:
 else:
     check('the drag was saved', False, mid)
 check('one Ctrl+Z undoes the whole drag for all of them', s == ORIG, s)
+
+# The rotate gizmo with two selected: LampA (0,1,2) and LampB (2,3,2) turn
+# about world Y through their centre (1,2,2): the same turn for both, each
+# origin swung round the centre by it, one undo step.
+def qrot(q, v):
+    x, y, z, w = q
+    tx, ty, tz = 2 * (y * v[2] - z * v[1]), 2 * (z * v[0] - x * v[2]), 2 * (x * v[1] - y * v[0])
+    return [v[0] + w * tx + (y * tz - z * ty), v[1] + w * ty + (z * tx - x * tz), v[2] + w * tz + (x * ty - y * tx)]
+
+
+# Where the Y ring's grab point and the centre are; the drag goes 40 degrees round the centre.
+_, _, rects, _ = run('rotprobe', ctrl('LampB') + ['--key', 'e'] + W(8), save=False)
+import math
+p, c0 = centre('vp.rotate.y'), centre('vp.selcentre')
+check('the rotate ring and the selection centre are drawn', p is not None and c0 is not None, (p, c0))
+p, c0 = p or (0, 0), c0 or (0, 0)
+a = math.radians(40)
+q = (c0[0] + (p[0] - c0[0]) * math.cos(a) - (p[1] - c0[1]) * math.sin(a), c0[1] + (p[0] - c0[0]) * math.sin(a) + (p[1] - c0[1]) * math.cos(a))
+s, _, _, _ = run('rotate', ctrl('LampB') + ['--key', 'e'] + W(8) +
+                 ['--drag', '@vp.rotate.y,0,0,%d,%d' % (round(q[0] - p[0]), round(q[1] - p[1]))] + W(5) + SAVE_MID + UNDO)
+print('rotated:', mid, mid_rot)
+if mid and mid_rot:
+    qa, qb = mid_rot['LampA'], mid_rot['LampB']
+    c = [1.0, 2.0, 2.0]
+    check('the drag turns both about Y', abs(qa[1]) > 0.05 and abs(qa[0]) < 1e-3 and abs(qa[2]) < 1e-3, qa)
+    check('both take the same turn', near(qa, qb, 1e-4), (qa, qb))
+    for n in ('LampA', 'LampB'):
+        want_p = [c[i] + v for i, v in enumerate(qrot(qa, [LAMPS[n]['pos'][i] - c[i] for i in range(3)]))]
+        check(n + ' swings round the selection centre by that turn', near(mid[n][0], want_p, 2e-3), (mid[n][0], want_p))
+    check('LampC (not selected) stays put', mid['LampC'][0] == LAMPS['LampC']['pos'], mid['LampC'])
+else:
+    check('the rotate drag was saved', False, mid)
+check('one Ctrl+Z undoes the turn for both', s == ORIG, s)
 
 # Scale lock with two selected: LampA 1/2/1 and LampB 2/1/3 each keep their proportions.
 TWO = ctrl('LampB')

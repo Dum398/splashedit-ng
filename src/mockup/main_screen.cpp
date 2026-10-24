@@ -4151,6 +4151,29 @@ static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRe
         }
     }
 
+    // Scripted tests: a grab point on each ring, the middle of the segment
+    // facing the camera that lies farthest from the other rings on screen.
+    if (gf.visible && namedRectsOn()) {
+        static const char* names[3] = {"vp.rotate.x", "vp.rotate.y", "vp.rotate.z"};
+        for (int i = 0; i < 3; ++i) {
+            if (!ringOk[i]) continue;
+            int best = -1;
+            float bestD = -1;
+            for (int k = 0; k < kSeg; ++k) {
+                if (!facing[i][k]) continue;
+                const ImVec2 m = (ring[i][k] + ring[i][(k + 1) % kSeg]) * 0.5f;
+                float d = 1e9f;
+                for (int j = 0; j < 3; ++j)
+                    if (j != i && ringOk[j])
+                        for (int q = 0; q < kSeg; ++q) d = std::min(d, length(ring[j][q] - m));
+                if (d > bestD) bestD = d, best = k;
+            }
+            if (best < 0) continue;
+            const ImVec2 m = (ring[i][best] + ring[i][(best + 1) % kSeg]) * 0.5f;
+            nameRect(names[i], ImRect(m - ImVec2(2, 2), m + ImVec2(2, 2)));
+        }
+    }
+
     // Hover: the nearest ring, front halves preferred where rings cross.
     int hover = -1, hoverSeg = 0;
     if (gf.visible && gizmoMayHover(active, r)) {
@@ -9084,7 +9107,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const ImRect tr(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28));
         nameRect("obj.active", tr);
         if (toggle("objactive", tr, allOn)) editAll([allOn](splash::Object& ob) { ob.active = !allOn; });
-        tooltip("Off leaves these objects out of the game entirely. Some on and some off: a click turns them all off... or on, when any is off.");
+        tooltip("Off leaves these objects out of the game entirely. When some are off, a click turns them all on.");
         y += 40 + space::lg;
     }
     if (std::any_of(paths.begin(), paths.end(), [&](const editor::ObjectPath& p) { return doc.inInstance(p); })) {

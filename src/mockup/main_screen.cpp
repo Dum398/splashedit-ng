@@ -4687,6 +4687,66 @@ static std::optional<editor::relay::Connection> relayConnection(const State::Pla
     return std::nullopt;
 }
 
+// Where a console's frame shows in `pic`: 4:3 like a TV, or square pixels
+// (Game view display bar). Also tells the console's view whether the
+// frame's lines are tall enough on screen for the look's scanlines.
+static ImRect gameFrameRect(State::Play& p, GameView& game, ImRect pic) {
+    const editor::tv::Rect d =
+        editor::tv::displayRect({pic.Min.x, pic.Min.y, pic.Max.x, pic.Max.y}, game.width(), game.height(), p.tools.tvAspect);
+    game.setLook(editor::tv::Look(std::clamp(p.tools.look, 0, 2)), game.height() > 0 && d.h() >= 2.0f * float(game.height()));
+    return ImRect(d.x0, d.y0, d.x1, d.y1);
+}
+
+// The Game view's display bar, from `x` on the row of the view's tag (`tag`),
+// up to `maxX`: the safe-area guides, 4:3 or square pixels, and the RGB,
+// S-video or composite look. Without room the look goes to a second row
+// from the tag's left (up to `rowMaxX`), then gives way, then the aspect.
+// Saved with Play's tools.
+static void gameDisplayBar(State& st, ImRect tag, float x, float maxX, float rowMaxX) {
+    State::Play& p = st.play;
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float h = size::field + 2, y = std::floor(tag.GetCenter().y - h / 2);
+    auto segW = [&](std::initializer_list<const char*> items) {
+        float w = 4;
+        for (const char* it : items) w += measure(f.medium, type::label, it).x + space::md * 2;
+        return w;
+    };
+    const float safeW = 28, aspectW = segW({"4:3", "1:1"}), lookW = segW({"RGB", "S-video", "Composite"});
+    const bool showSafe = x + safeW <= maxX, showAspect = x + safeW + space::sm + aspectW <= maxX,
+               lookInRow = showAspect && x + safeW + space::sm + aspectW + space::sm + lookW <= maxX,
+               showLook = lookInRow || tag.Min.x + lookW <= rowMaxX;
+    bool changed = false;
+    if (showSafe) {
+        const ImRect sr(ImVec2(x, y), ImVec2(x + safeW, y + h));
+        dl->AddRectFilled(sr.Min, sr.Max, rgb(0x0e1014, 210), radius::button + 2);
+        if (iconButton("game.safearea", sr, icon::squareDashed, p.tools.safeArea,
+                       p.tools.safeArea ? "Safe area guides: on. Orange: action safe (90%), blue: title safe (80%). A TV may crop outside them"
+                                        : "Show the safe area guides: what a TV's overscan may crop"))
+            p.tools.safeArea = !p.tools.safeArea, changed = true;
+        nameRect("game.safearea", sr);
+        x = sr.Max.x + space::sm;
+    }
+    if (showAspect) {
+        const int a = segmented("game.aspect", ImVec2(x, y), {"4:3", "1:1"}, p.tools.tvAspect ? 0 : 1);
+        if ((a == 0) != p.tools.tvAspect) p.tools.tvAspect = a == 0, changed = true;
+        if (ImGui::IsMouseHoveringRect(ImVec2(x, y), ImVec2(x + aspectW, y + h)))
+            tooltip("4:3: as a TV shows every PS1 mode, whatever its width. 1:1: square pixels");
+        x += aspectW + space::sm;
+    }
+    if (showLook) {
+        const ImVec2 at = lookInRow ? ImVec2(x, y) : ImVec2(tag.Min.x, y + h + space::xs);
+        const int l = segmented("game.look", at, {"RGB", "S-video", "Composite"}, std::clamp(p.tools.look, 0, 2));
+        if (l != p.tools.look) p.tools.look = l, changed = true;
+        if (ImGui::IsMouseHoveringRect(at, at + ImVec2(lookW, h)))
+            tooltip("The picture through an RGB, S-video or composite cable: chroma blurred across, scanlines in 240-line modes");
+    }
+    if (changed && !p.settingsFile.empty()) editor::savePlayTools(p.settingsFile, p.tools);
+    scriptLine("game.display", std::string("game: display safe ") + (p.tools.safeArea ? "on" : "off") + " aspect " +
+                                   (p.tools.tvAspect ? "4:3" : "square") + " look " +
+                                   editor::tv::lookName(editor::tv::Look(std::clamp(p.tools.look, 0, 2))));
+}
+
 // One of the linked consoles: its picture, a "Console N" tag, the keys while
 // it has them (the focused one is outlined), and its status line below: its
 // relay slot and whose the room's authority is when relayed, then what its
@@ -4698,12 +4758,12 @@ static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
     const bool focused = p.focus == i;
     const ImRect pic(r.Min, ImVec2(r.Max.x, r.Max.y - kLinkStatusH));
     dl->AddRectFilled(pic.Min, pic.Max, IM_COL32_BLACK, radius::window);
-    const float w = pic.GetWidth(), h = pic.GetHeight();
-    const float gw = std::min(w, h * 4 / 3), gh = gw * 3 / 4;
-    const ImVec2 c = pic.GetCenter();
-    if (unsigned tex = game.texture())
-        ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, c - ImVec2(gw / 2, gh / 2), c + ImVec2(gw / 2, gh / 2));
-    else if (i > 0 && !p.linkError.empty() && !consoleEmu(p, i).running())
+    const ImRect g = gameFrameRect(p, p.cons[size_t(i)].game, pic);
+    if (unsigned tex = game.texture()) {
+        ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.Min, g.Max);
+        if (p.tools.safeArea) safeAreaGuides(dl, g);
+        nameRect("game.console" + std::to_string(i + 1) + ".frame", g);
+    } else if (i > 0 && !p.linkError.empty() && !consoleEmu(p, i).running())
         textCentered(dl, pic, f.regular, type::body, color::bad,
                      cutTo(f.regular, type::body, p.linkError, pic.GetWidth() - space::md * 2).c_str());
     else {
@@ -4720,6 +4780,11 @@ static void consolePanel(State& st, ImDrawList* dl, ImRect r, int i) {
     const bool active = focused && p.gameFocus;
     dl->AddRectFilled(tag.Min, tag.Max, active ? color::accent : rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, tag, f.medium, type::label, active ? IM_COL32_WHITE : color::textDim, name.c_str());
+    // The display bar on the focused console, short of where Capture frame goes.
+    if (focused)
+        gameDisplayBar(st, tag, tag.Max.x + space::sm,
+                       pic.Max.x - space::md - (p.captureScript.empty() ? 0 : buttonWidth(icon::camera, "Capturing...") + space::sm),
+                       pic.Max.x - space::md);
     // The keys, shortened when the picture is narrow; the other console says how to take them.
     const char* full = "Arrows  \xc2\xb7  Z X A S  \xc2\xb7  Q W 1 2  \xc2\xb7  Enter Start  \xc2\xb7  Backspace Select";
     const char* brief = "Arrows  \xc2\xb7  Z X A S  \xc2\xb7  Enter Start";
@@ -4793,13 +4858,12 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
         return;
     }
     dl->AddRectFilled(r.Min, r.Max, IM_COL32_BLACK, radius::window);
-    float w = r.GetWidth(), h = r.GetHeight();
-    float gw = std::min(w, h * 4 / 3), gh = gw * 3 / 4;
-    ImVec2 c = r.GetCenter();
-    ImRect g(c - ImVec2(gw / 2, gh / 2), c + ImVec2(gw / 2, gh / 2));
-    if (unsigned tex = p.cons[0].game.texture())
+    const ImRect g = gameFrameRect(p, p.cons[0].game, r);
+    if (unsigned tex = p.cons[0].game.texture()) {
         ui::addTextureImage(dl, (ImTextureID)(intptr_t)tex, g.Min, g.Max);
-    else
+        if (p.tools.safeArea) safeAreaGuides(dl, g);
+        nameRect("game.frame", g);
+    } else
         textCentered(dl, r, f.regular, type::body, color::textDim, "Waiting for pcsx-redux...");
     // The keyboard is the controller only while the Game view has focus; a gamepad always is.
     p.cons[0].game.setPads(hostPad(p.gameFocus), 0xffff);
@@ -4808,6 +4872,9 @@ static void gamePanel(State& st, ImDrawList* dl, ImRect r) {
     ImRect tag(r.Min + ImVec2(space::md, space::md), r.Min + ImVec2(space::md + ls.x + 20, space::md + 24));
     dl->AddRectFilled(tag.Min, tag.Max, rgb(0x0e1014, 190), radius::pill);
     textCentered(dl, tag, f.medium, type::label, p.gameFocus ? color::text : color::textDim, label);
+    gameDisplayBar(st, tag, tag.Max.x + space::sm,
+                   r.Max.x - space::md - (p.captureScript.empty() ? 0 : buttonWidth(icon::camera, "Capturing...") + space::sm),
+                   r.Max.x - space::md);
     const char* info = p.gameFocus ? "Arrows  ·  Z X A S  ·  Q W 1 2  ·  Enter Start  ·  Backspace Select"
                                    : "Click to control the game with the keyboard";
     ImVec2 is = measure(f.regular, type::caption, info);
@@ -4864,6 +4931,7 @@ static ImRect splitViewport(State& st, ImDrawList* dl, ImRect r) {
                         : ImRect(ImVec2(r.Min.x, r.Min.y + at), ImVec2(r.Max.x, r.Min.y + at + g));
     ImGui::SetCursorScreenPos(bar.Min);
     ImGui::InvisibleButton("##vpsplit", ImMax(bar.GetSize(), ImVec2(1, 1)));
+    nameRect("viewport.split", bar);  // scripted tests drag it (--mousedown @viewport.split)
     if (ImGui::IsItemHovered() || ImGui::IsItemActive())
         ImGui::SetMouseCursor(across ? ImGuiMouseCursor_ResizeEW : ImGuiMouseCursor_ResizeNS);
     if (ImGui::IsItemActive()) {
@@ -12541,7 +12609,14 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
         viewportPanel(st, dl, body, doc, view);
         st.viewportRect = body;
     } else if (st.scripts.uiShown()) {
+        // Its safe-area toggle is saved with Play's tools, like the Game view's.
+        st.canvasView.safeArea = st.play.tools.uiSafeArea;
         st.canvasView.draw(dl, body, doc);
+        if (st.canvasView.safeArea != st.play.tools.uiSafeArea) {
+            st.play.tools.uiSafeArea = st.canvasView.safeArea;
+            if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
+        }
+        scriptLine("ui.safearea", std::string("uicanvas: safe area ") + (st.play.tools.uiSafeArea ? "on" : "off"));
         if (!st.canvasView.status.empty()) {
             notify(st, st.canvasView.status, st.canvasView.statusBad);
             st.canvasView.status.clear();

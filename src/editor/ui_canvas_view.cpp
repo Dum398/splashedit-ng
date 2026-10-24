@@ -543,12 +543,14 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     std::snprintf(res, sizeof res, "%d x %d", s.w, s.h);
     const float resW = measure(f.medium, type::label, res).x;
     const float bw = 26, by0 = head.Min.y + 5, by1 = head.Max.y - 5;
-    const float fullW = 6 + bw + 12 + bw + 2 + bw + 2 + 50 + 2 + bw;  // 178
+    const float fullW = 6 + bw + 2 + bw + 12 + bw + 2 + bw + 2 + 50 + 2 + bw;  // 206
     const bool compact = head.Min.x + space::md + resW + space::sm + fullW > head.Max.x;
     const float snapGap = compact ? 6 : 12, pctW0 = compact ? 40 : 50;
-    const float needPct = 6 + bw + snapGap + bw + 2 + bw + 2 + pctW0 + 2 + bw;
+    const float needPct = 6 + bw + 2 + bw + snapGap + bw + 2 + bw + 2 + pctW0 + 2 + bw;
     const float pctW = head.Min.x + space::xs + needPct <= head.Max.x ? pctW0 : 0;
     float x = head.Max.x - 6;
+    const ImRect safeR(ImVec2(x - bw, by0), ImVec2(x, by1));
+    x -= bw + 2;
     const ImRect snapR(ImVec2(x - bw, by0), ImVec2(x, by1));
     x -= bw + snapGap;
     const ImRect fitR(ImVec2(x - bw, by0), ImVec2(x, by1));
@@ -591,6 +593,11 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     if (iconButton("snap", snapR, icon::magnet, m_snap,
                    m_snap ? "Snapping to the screen and other elements: on" : "Snapping: off (Ctrl snaps while dragging)"))
         m_snap = !m_snap;
+    if (iconButton("safearea", safeR, icon::squareDashed, safeArea,
+                   safeArea ? "Safe area guides: on. Orange: action safe (90%), blue: title safe (80%). A TV may crop outside them"
+                            : "Show the safe area guides: what a TV's overscan may crop"))
+        safeArea = !safeArea;
+    nameRect("ui.safearea", safeR);
     const bool canZoom = sel.canvas >= 0;
     if (iconButton("zoomfit", fitR, icon::maximize, m_zoom <= 0, "Fit the screen in the view (Ctrl+0)", color::textDim, canZoom))
         m_zoom = 0, m_pan = ImVec2(0, 0);
@@ -610,7 +617,7 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
     }
     if (iconButton("zoomout", outR, icon::minus, false, "Zoom out (Ctrl+-, wheel)", color::textDim, canZoom))
         zoomAt(stepZoom(m_scale, -1), area.GetCenter());
-    const char* hint = "Drag to move, handles resize, arrows nudge, wheel zooms, middle-drag or Space pans";
+    const char* hint = "Drag moves, handles resize, arrows nudge, wheel zooms, Space/mid-drag pans";
     const float hw = measure(f.regular, type::caption, hint).x;
     const bool showHint = tools - space::md - hw >= textX;
     if (showHint)
@@ -631,7 +638,7 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
                            span(pctW > 0, pctR.GetCenter().x - measure(f.medium, type::caption, pct).x * 0.5f,
                                 pctR.GetCenter().x + measure(f.medium, type::caption, pct).x * 0.5f) +
                            " zoomin " + span(true, inR.Min.x, inR.Max.x) + " zoomfit " + span(true, fitR.Min.x, fitR.Max.x) + " snap " +
-                           span(true, snapR.Min.x, snapR.Max.x);
+                           span(true, snapR.Min.x, snapR.Max.x) + " safe " + span(true, safeR.Min.x, safeR.Max.x);
         if (m_headReported != line) {
             m_headReported = line;
             std::printf("%s\n", line.c_str());
@@ -709,6 +716,8 @@ void CanvasView::canvas(ImDrawList* dl, ImRect r, editor::Document& doc) {
                               ImVec2(std::min(end.x, o.x + (cx + 1) * cell), std::min(end.y, o.y + (cy + 1) * cell)), rgb(0x16181d));
     ui::addTextureImage(dl, (ImTextureID)(intptr_t)m_tex, o, end);
     dl->AddRect(o - ImVec2(1, 1), end + ImVec2(1, 1), color::borderStrong);
+    if (safeArea) safeAreaGuides(dl, ImRect(o, end));
+    nameRect("ui.screen", ImRect(o, end));
     // Centre marks.
     dl->AddLine(ImVec2(o.x + size.x * 0.5f, o.y - 6), ImVec2(o.x + size.x * 0.5f, o.y - 1), color::textFaint);
     dl->AddLine(ImVec2(o.x - 6, o.y + size.y * 0.5f), ImVec2(o.x - 1, o.y + size.y * 0.5f), color::textFaint);

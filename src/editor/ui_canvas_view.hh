@@ -70,6 +70,10 @@ public:
     // canvas's eye are whenever that changes.
     static bool reportLayout;
 
+    // The safe-area guides over the screen (the header's toggle). The app
+    // loads it from and saves it to Play's tools.
+    bool safeArea = false;
+
 private:
     void list(ImDrawList* dl, ImRect r, editor::Document& doc);
     void canvas(ImDrawList* dl, ImRect r, editor::Document& doc);

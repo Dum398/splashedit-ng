@@ -1,5 +1,5 @@
 # The UI tab at a small editor window (1024x768): the canvas header must lay
-# its toolbar (fit/zoom in/out buttons, the zoom label, the snap switch) out
+# its toolbar (fit/zoom in/out buttons, the zoom label, the snap and safe area switches) out
 # without overlapping the resolution and hint text it shares the bar with, and
 # the screen must fit at a better than 25% scale. The editor prints the header
 # layout (and the canvas transform) with --ui; we read the rectangles back.
@@ -70,7 +70,7 @@ if not h:
     sys.exit(1)
 
 # The buttons and the zoom label are always drawn and must sit inside the bar.
-buttons = ['zoomout', 'zoomin', 'zoomfit', 'snap']
+buttons = ['zoomout', 'zoomin', 'zoomfit', 'snap', 'safe']
 for b in buttons:
     check(f'the {b} button is present', h.get(b) is not None, h)
 inside = all(h[b] and h['header'][0] <= h[b][0] and h[b][1] <= h['header'][1] for b in buttons)
@@ -78,7 +78,7 @@ check('every header button sits inside the bar', inside, h)
 
 # Nothing in the header overlaps anything else: the buttons, the zoom box and
 # its text, and whatever of the resolution and hint text survives.
-items = {k: h[k] for k in ('res', 'hint', 'zoomout', 'pct', 'pcttext', 'zoomin', 'zoomfit', 'snap') if h.get(k)}
+items = {k: h[k] for k in ('res', 'hint', 'zoomout', 'pct', 'pcttext', 'zoomin', 'zoomfit', 'snap', 'safe') if h.get(k)}
 bad = []
 keys = list(items)
 for i in range(len(keys)):

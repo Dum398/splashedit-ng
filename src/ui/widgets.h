@@ -112,11 +112,14 @@ struct FieldEdit {
 // scrub (faster for larger values, Shift for fine steps), double-click to
 // type (Enter or clicking away commits, Esc cancels). `value` is the text shown.
 // An `integer` field (pixels, frames) scrubs one per pixel (ui/scrub.hh).
+// A `mixed` field stands for several objects whose values differ (#263):
+// `value` is drawn faint, typing starts empty, and any typed number counts
+// as a change even when it equals *edit.
 FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0,
-                      const char* axisLabel = nullptr, float* edit = nullptr, bool integer = false);
-// Three numberFields; `edit` points at three floats.
+                      const char* axisLabel = nullptr, float* edit = nullptr, bool integer = false, bool mixed = false);
+// Three numberFields; `edit` points at three floats, `mixed` (when given) at three flags.
 FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit = nullptr,
-                    float* edit = nullptr);
+                    float* edit = nullptr, const bool* mixed = nullptr);
 
 // In-place text editing, styled as a focused field well. beginTextEdit()
 // arms the editor for `id` (in the current ID scope); textEdit() draws it over
@@ -172,7 +175,8 @@ struct ColorFieldHit {
 // menu of that hex value (#176); Paste is offered only while the clipboard
 // holds a colour. Scripted checks find its rows as <name>.menu/Copy and
 // <name>.menu/Paste (`name` defaults to `id`).
-ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name = nullptr);
+// `mixed`: it stands for several colours (#263); it reads "mixed" over a grey swatch.
+ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name = nullptr, bool mixed = false);
 void slider(const char* id, ImRect r, float t, const char* value);
 
 // Problem card with an inline fix action (none when fixLabel is null).

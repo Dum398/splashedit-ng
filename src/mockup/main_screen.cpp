@@ -3692,8 +3692,9 @@ static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn,
 }
 
 // A clickable marker for an object without geometry. Returns true when clicked.
+// `picked`: one of several selected objects (#263), ringed in the selection colour.
 static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col,
-                      const std::string& name = {}) {
+                      const std::string& name = {}, bool picked = false) {
     ImVec2 c;
     if (!view.project(p, mn, sz, &c)) return false;
     if (!ImRect(mn, mn + sz).Contains(c)) return false;
@@ -3704,6 +3705,7 @@ static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2
     ImU32 ringA = (ImU32)(0x90 + (0xff - 0x90) * h.hover);
     dl->AddCircle(c, 13, (col & 0x00ffffffu) | (ringA << IM_COL32_A_SHIFT), 24, 1.2f + 0.6f * h.hover);
     textCentered(dl, ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)), fonts().medium, type::icon - 1, col, ic);
+    if (picked) dl->AddCircle(c, 16, rgb(0xb3a8ff, 230), 28, 2.0f);
     return h.clicked;
 }
 
@@ -3989,6 +3991,12 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
                  view.project(toGl(wpos + splash::Vec3{pl, 0, pl}), mn, sz, &quad[2]) &&
                  view.project(toGl(wpos + splash::Vec3{0, 0, pl}), mn, sz, &quad[3]);
         quad[0] = c;
+    }
+    if (visible && namedRectsOn()) {
+        static const char* names[3] = {"vp.move.x", "vp.move.y", "vp.move.z"};
+        nameRect("vp.move.c", ImRect(c - ImVec2(4, 4), c + ImVec2(4, 4)));
+        for (int i = 0; i < 3; ++i)
+            if (tipOk[i]) nameRect(names[i], ImRect(tips[i] - ImVec2(4, 4), tips[i] + ImVec2(4, 4)));
     }
 
     // Hover: arrows over the plane, nearest arrow wins.
@@ -6163,7 +6171,8 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
         if (!ic) continue;
         ImGui::PushID((int)i);
-        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name) && i < paths.size()) {
+        const bool picked = multi && i < paths.size() && doc.isSelected(paths[i]);
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name, picked) && i < paths.size()) {
             const ImGuiIO& io = ImGui::GetIO();
             if (io.KeyCtrl || io.KeyShift) doc.toggleSelected(pickTarget(doc, paths[i]));
             else doc.select(pickTarget(doc, paths[i]));
@@ -9017,6 +9026,420 @@ static std::string fitWidth(const std::string& t, float w) {
     return s + "...";
 }
 
+// Several objects selected (#263): the inspector shows what they all have.
+// A field whose values differ reads "mixed"; an edit sets the value on every
+// one of them as one undo step (a scrub merges into one until released).
+// Typed transform values set that one axis on all (all on the same Y). The
+// components whose inspectors are files, lists or painting are edited one
+// object at a time: they are named in a card at the end.
+static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
+    Fonts& f = fonts();
+    std::vector<editor::ObjectPath> paths;
+    std::vector<const splash::Object*> objs;
+    for (const editor::ObjectPath& p : doc.selectedPaths())
+        if (const splash::Object* o = doc.object(p)) paths.push_back(p), objs.push_back(o);
+    if (objs.empty()) return;
+    const splash::Object& prim = *objs.back();  // the primary is last
+    auto all = [&](const std::function<bool(const splash::Object&)>& pred) {
+        for (const splash::Object* o : objs)
+            if (!pred(*o)) return false;
+        return true;
+    };
+    // Scripted tests: what each field shows, once per change.
+    auto reportField = [&](const std::string& id, const std::string& shown) {
+        if (!namedRectsOn()) return;
+        static std::map<std::string, std::string> last;
+        std::string& l = last[id];
+        if (l == shown) return;
+        l = shown;
+        std::printf("inspector: %s %s\n", id.c_str(), shown.c_str());
+        std::fflush(stdout);
+    };
+    auto editAll = [&](const std::function<void(splash::Object&)>& fn, const std::string& key = {}) { doc.editMany(paths, fn, key); };
+
+    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    nameRect("obj.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
+    static float scroll = 0;
+    static std::vector<editor::ObjectPath> scrolled;
+    if (scrolled != paths) {
+        scrolled = paths;
+        scroll = 0;
+    }
+    const float top0 = y;
+    y -= scroll;
+    float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
+
+    // Header: how many, which one is primary, and their on/off switch.
+    {
+        ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
+        dl->AddRectFilled(ic.Min, ic.Max, (color::accentHover & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
+        textCentered(dl, ic, f.medium, type::icon + 3, color::accentHover, icon::layers);
+        const std::string title = std::to_string(objs.size()) + " objects";
+        const ImVec2 np(ic.Max.x + space::md, y + 2);
+        text(dl, np, f.semibold, type::title, color::text, title.c_str());
+        nameRect("obj.multi", ImRect(np, np + measure(f.semibold, type::title, title.c_str())));
+        const std::string sub = "Last picked: " + prim.name;
+        text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, sub.c_str());
+        const bool allOn = all([](const splash::Object& o) { return o.active; });
+        const ImRect tr(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28));
+        nameRect("obj.active", tr);
+        if (toggle("objactive", tr, allOn)) editAll([allOn](splash::Object& ob) { ob.active = !allOn; });
+        tooltip("Off leaves these objects out of the game entirely. Some on and some off: a click turns them all off... or on, when any is off.");
+        y += 40 + space::lg;
+    }
+    if (std::any_of(paths.begin(), paths.end(), [&](const editor::ObjectPath& p) { return doc.inInstance(p); })) {
+        const char* note = "Some of these are part of a prefab: edits here leave them as they are.";
+        text(dl, ImVec2(x0, y), f.regular, type::caption, color::warn, note);
+        y += 16 + space::md;
+    }
+
+    const float lw = 96, rowH = 32;
+    auto row = [&](const char* id, const char* label, const char* tip) {
+        ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
+        y += rowH;
+        return property(id, rr, lw, label, tip);
+    };
+    bool folded = false;
+    auto fold = [&](bool open) {
+        folded = !open;
+        if (folded) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+    };
+    auto sectionEnd = [&](float top) {
+        if (folded) {
+            ImGui::PopClipRect();
+            folded = false;
+            y = top + 34 + space::md;
+            return;
+        }
+        dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+        y += space::sm + space::md;
+    };
+    // The three fields of a Vec3 row, named obj.<id>.x/y/z.
+    auto nameVec3 = [&](const char* id, ImRect rr) {
+        const float w = (rr.GetWidth() - space::xs * 2) / 3;
+        for (int i = 0; i < 3; ++i)
+            nameRect(std::string("obj.") + id + "." + "xyz"[i],
+                     ImRect(ImVec2(rr.Min.x + i * (w + space::xs), rr.Min.y), ImVec2(rr.Min.x + i * (w + space::xs) + w, rr.Max.y)));
+    };
+    // A Vec3 row: each axis shows the primary's value or "mixed"; an edit sets
+    // that axis alone on every object (`set` gets the axis and the value).
+    auto vec3Row = [&](const char* id, const char* lid, const char* label, const char* tip,
+                       const std::function<splash::Vec3(const splash::Object&)>& get, std::string (*fmt)(float),
+                       const std::function<void(splash::Object&, int, float)>& set, ImRect* rowOut = nullptr) {
+        const splash::Vec3 pv = get(prim);
+        std::string shown[3];
+        bool mixed[3] = {};
+        float ed[3] = {pv.x, pv.y, pv.z};
+        for (int i = 0; i < 3; ++i) {
+            shown[i] = fmt(ed[i]);
+            for (const splash::Object* o : objs)
+                if (fmt(get(*o)[i]) != shown[i]) mixed[i] = true;
+            reportField(std::string(id) + "." + "xyz"[i], mixed[i] ? "mixed" : shown[i]);
+        }
+        const ImRect rr = row(lid, label, tip);
+        nameVec3(id, rr);
+        if (rowOut) *rowOut = rr;
+        FieldEdit fe = vec3Field(id, rr, mixed[0] ? "mixed" : shown[0].c_str(), mixed[1] ? "mixed" : shown[1].c_str(),
+                                 mixed[2] ? "mixed" : shown[2].c_str(), nullptr, ed, mixed);
+        return std::make_pair(fe, std::array<float, 3>{ed[0], ed[1], ed[2]});
+    };
+    auto fmtF = [](float v) { return fmtFixed(v); };
+    auto fmtS = [](float v) { return fmtShort(v); };
+
+    // Transform.
+    float top = y;
+    fold(section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false));
+    y += 34 + space::xs;
+    {
+        auto [fe, v] = vec3Row("pos", "lpos", "Position", "Where each object sits, in metres, relative to its parent.",
+                               [](const splash::Object& o) { return o.transform.position; }, fmtF, nullptr);
+        if (fe.changed) {
+            const int i = fe.index;
+            const float nv = v[i];
+            editAll([i, nv](splash::Object& ob) { component(ob.transform.position, i) = nv; }, "mpos." + std::to_string(i));
+        }
+        if (fe.done) doc.endMerge();
+    }
+    {
+        auto [fe, v] = vec3Row("rot", "lrot", "Rotation", "Rotation around each axis, in degrees.",
+                               [](const splash::Object& o) { return eulerDegrees(o.transform.rotation); }, fmtS, nullptr);
+        if (fe.changed) {
+            const int i = fe.index;
+            const float nv = v[i];
+            editAll([i, nv](splash::Object& ob) {
+                splash::Vec3 e = eulerDegrees(ob.transform.rotation);
+                component(e, i) = nv;
+                ob.transform.rotation = quatFromEuler(e);
+            }, "mrot." + std::to_string(i));
+        }
+        if (fe.done) doc.endMerge();
+    }
+    {
+        // The Scale lock, as with one object: each object keeps its own proportions.
+        const float lx = x0 + space::sm + lw - 4, ly = y + rowH * 0.5f;
+        const ImRect lr(ImVec2(lx - 22, ly - 11), ImVec2(lx, ly + 11));
+        nameRect("obj.scllock", lr);
+        bool& on = st.play.tools.scaleLock;
+        ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
+        const bool flip = iconButton("scllock", lr, on ? icon::lock : icon::link, on,
+                                     on ? "Scale locked: editing one axis scales all three by the same factor, each object from its own scale"
+                                        : "Lock the scale's proportions: editing one axis scales all three by the same factor");
+        ImGui::PopItemFlag();
+        if (flip) {
+            on = !on;
+            st.scaleLockFromMany.clear();
+            if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
+        }
+    }
+    {
+        auto [fe, v] = vec3Row("scl", "lscl", "Scale", "Size multiplier on each axis.", [](const splash::Object& o) { return o.transform.scale; },
+                               fmtF, nullptr);
+        if (fe.changed) {
+            const int i = fe.index;
+            const float nv = v[i];
+            if (st.play.tools.scaleLock) {
+                // Every frame of a scrub scales each object from where the edit began.
+                bool same = st.scaleLockFromMany.size() == paths.size();
+                for (size_t k = 0; same && k < paths.size(); ++k) same = st.scaleLockFromMany[k].first == paths[k];
+                if (!same) {
+                    st.scaleLockFromMany.clear();
+                    for (size_t k = 0; k < paths.size(); ++k) st.scaleLockFromMany.push_back({paths[k], objs[k]->transform.scale});
+                }
+                doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
+                    splash::Vec3 from = ob.transform.scale;
+                    for (const auto& [lp, s] : st.scaleLockFromMany)
+                        if (lp == p) from = s;
+                    ob.transform.scale = editor::lockedScale(from, i, nv);
+                }, "mscl." + std::to_string(i));
+            } else {
+                editAll([i, nv](splash::Object& ob) { component(ob.transform.scale, i) = nv; }, "mscl." + std::to_string(i));
+            }
+        }
+        if (fe.done) {
+            st.scaleLockFromMany.clear();
+            doc.endMerge();
+        }
+    }
+    sectionEnd(top);
+
+    // A dropdown over every object: "mixed" while they differ.
+    auto pickRow = [&](const char* id, const char* lid, const char* label, const char* tip, int cur, bool mixed,
+                       const char* curLabel, std::initializer_list<const char*> items) {
+        const ImRect rr = row(lid, label, tip);
+        nameRect(std::string("obj.") + id, rr);
+        reportField(id, mixed ? "mixed" : curLabel);
+        return dropdownMenu(id, rr, nullptr, mixed ? "mixed" : curLabel, items, mixed ? -1 : cur);
+    };
+    // A number over every object.
+    auto num = [&](const char* id, const char* label, const char* tip, const std::function<float(const splash::Object&)>& get,
+                   const char* unit, float lo, float hi, const std::function<void(splash::Object&, float)>& set, int decimals = 2) {
+        const float pv = get(prim);
+        const std::string shown = fmtShort(pv, decimals);
+        bool mixed = false;
+        for (const splash::Object* o : objs)
+            if (fmtShort(get(*o), decimals) != shown) mixed = true;
+        reportField(id, mixed ? "mixed" : shown);
+        float nv = pv;
+        const std::string lid = std::string("l") + id;
+        const ImRect fr = row(lid.c_str(), label, tip);
+        nameRect(std::string("obj.") + id, fr);
+        FieldEdit fe = numberField(id, fr, mixed ? "mixed" : shown.c_str(), unit, 0, nullptr, &nv, false, mixed);
+        if (fe.changed) {
+            const float v = splash::clampv(nv, lo, hi);
+            editAll([&](splash::Object& ob) { set(ob, v); }, std::string("m.") + id);
+        }
+        if (fe.done) doc.endMerge();
+    };
+    // A switch over every object: on when all are on; a click sets all to the other.
+    auto toggleAll = [&](const char* id, const char* label, const char* tip, const std::function<bool(const splash::Object&)>& get,
+                         const std::function<void(splash::Object&, bool)>& set) {
+        const bool allOn = all(get);
+        const bool mixed = !allOn && !all([&](const splash::Object& o) { return !get(o); });
+        reportField(id, mixed ? "mixed" : allOn ? "on" : "off");
+        const std::string lid = std::string("l") + id;
+        ImRect fr = row(lid.c_str(), label, tip);
+        ImRect sw(ImVec2(fr.Min.x, fr.GetCenter().y - 8), ImVec2(fr.Min.x + 30, fr.GetCenter().y + 8));
+        nameRect(std::string("obj.") + id, sw);
+        if (toggle(id, sw, allOn)) editAll([&](splash::Object& ob) { set(ob, !allOn); });
+        if (mixed) text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, fr.Min.y, fr.Max.y)), f.regular, type::caption,
+                        color::textFaint, "mixed");
+    };
+    auto compSection = [&](const char* id, editor::ComponentKind k) {
+        ObjectLook lk = lookOf(k);
+        fold(section(id, ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), lk.icon, lk.color, editor::info(k).label, true, true, false));
+        y += 34 + space::xs;
+    };
+    auto has = [&](editor::ComponentKind k) { return all([k](const splash::Object& o) { return editor::hasComponent(o, k); }); };
+
+    // Collider.
+    if (has(editor::ComponentKind::Collider)) {
+        top = y;
+        compSection("s_col", editor::ComponentKind::Collider);
+        const splash::ColliderKind kinds[3] = {splash::ColliderKind::Static, splash::ColliderKind::Dynamic, splash::ColliderKind::None};
+        const splash::ColliderKind pk = prim.collider->kind;
+        const bool mixed = !all([pk](const splash::Object& o) { return o.collider->kind == pk; });
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), pk) - std::begin(kinds));
+        int pick = pickRow("shape", "lshape", "Shape", "Static never moves. Dynamic can be moved by scripts. None turns collision off.", cur,
+                           mixed, colliderLabel(pk), {"Static", "Dynamic", "None"});
+        if (pick >= 0) editAll([&](splash::Object& ob) { ob.collider->kind = kinds[pick]; });
+        sectionEnd(top);
+    }
+
+    // Light.
+    if (has(editor::ComponentKind::Light)) {
+        const splash::LightComponent& l = *prim.light;
+        top = y;
+        const bool allOn = all([](const splash::Object& o) { return o.light->enabled; });
+        bool flipLight = false;
+        fold(section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, allOn, false, nullptr,
+                     &flipLight));
+        if (flipLight) editAll([allOn](splash::Object& ob) { ob.light->enabled = !allOn; });
+        y += 34 + space::xs;
+        const splash::LightKind kinds[3] = {splash::LightKind::Point, splash::LightKind::Spot, splash::LightKind::Directional};
+        const bool kindMixed = !all([&](const splash::Object& o) { return o.light->kind == l.kind; });
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), l.kind) - std::begin(kinds));
+        int pick = pickRow("lkind", "llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away.", cur,
+                           kindMixed, lightKindLabel(l.kind), {"Point", "Spot", "Directional"});
+        if (pick >= 0) editAll([&](splash::Object& ob) {
+            ob.light->kind = kinds[pick];
+            if (ob.light->kind != splash::LightKind::Point) ob.light->runtime = false;
+        });
+        if (all([](const splash::Object& o) { return o.light->kind == splash::LightKind::Point; }))
+            toggleAll("lruntime", "Runtime",
+                      "Lit on the console instead of baked into vertex colours, so scripts and timelines can find these lights by name. At most 16 per scene.",
+                      [](const splash::Object& o) { return o.light->runtime; }, [](splash::Object& ob, bool v) { ob.light->runtime = v; });
+        const bool colMixed = !all([&](const splash::Object& o) { return o.light->color == l.color; });
+        reportField("lcol", colMixed ? "mixed" : colourHex(l.color));
+        const ImRect colRow = row("llcol", "Colour", "The colour of the lights. Click to pick one for all of them.");
+        nameRect("obj.lcol", colRow);
+        const ColorFieldHit lHit = colorField("lcol", colRow, l.color, "obj.lcol", colMixed);
+        if (lHit.clicked) ImGui::OpenPopup("##lcolpick");
+        if (lHit.pasted) editAll([&](splash::Object& ob) { ob.light->color = *lHit.pasted; });
+        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        pushPopupStyle();
+        if (ImGui::BeginPopup("##lcolpick")) {
+            float c[3] = {l.color[0], l.color[1], l.color[2]};
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::ColorPicker3("##lcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                          ImGuiColorEditFlags_NoAlpha))
+                editAll([&](splash::Object& ob) { ob.light->color = {c[0], c[1], c[2]}; }, "mlcol");
+            if (ImGui::IsItemDeactivated()) doc.endMerge();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(4);
+        ImGui::PopStyleColor(2);
+        num("lint", "Intensity", "How bright the lights are. 1 is normal.", [](const splash::Object& o) { return o.light->intensity; }, nullptr, 0,
+            1e9f, [](splash::Object& ob, float v) { ob.light->intensity = v; });
+        if (all([](const splash::Object& o) { return o.light->kind != splash::LightKind::Directional; }))
+            num("lrange", "Range", "How far the lights reach before they fade out.", [](const splash::Object& o) { return o.light->range; }, "m", 0,
+                1e9f, [](splash::Object& ob, float v) { ob.light->range = v; });
+        if (all([](const splash::Object& o) { return o.light->kind == splash::LightKind::Spot; })) {
+            num("lspot", "Spot angle", "Width of the cone of light.", [](const splash::Object& o) { return o.light->spotAngle; }, "\xc2\xb0", 1,
+                179, [](splash::Object& ob, float v) { ob.light->spotAngle = v; });
+            num("linner", "Inner angle", "Inside this cone the light is at full strength. 0 fades from 80% of the spot angle.",
+                [](const splash::Object& o) { return o.light->innerSpotAngle; }, "\xc2\xb0", 0, 179,
+                [](splash::Object& ob, float v) { ob.light->innerSpotAngle = std::min(v, ob.light->spotAngle); });
+        }
+        sectionEnd(top);
+    }
+
+    // Components with a few plain numbers and switches.
+    if (has(editor::ComponentKind::Interactable)) {
+        top = y;
+        compSection("s_interact", editor::ComponentKind::Interactable);
+        num("iradius", "Radius", "How close the player has to be.", [](const splash::Object& o) { return o.interactable->radius; }, "m", 0, 1000,
+            [](splash::Object& ob, float v) { ob.interactable->radius = v; });
+        toggleAll("irepeat", "Repeatable", "Can be used more than once.", [](const splash::Object& o) { return o.interactable->repeatable; },
+                  [](splash::Object& ob, bool v) { ob.interactable->repeatable = v; });
+        num("icooldown", "Cooldown", "Wait before it can be used again, in frames (60 a second; 50 on PAL).",
+            [](const splash::Object& o) { return float(o.interactable->cooldownFrames); }, "frames", 0, 65535,
+            [](splash::Object& ob, float v) { ob.interactable->cooldownFrames = static_cast<decltype(ob.interactable->cooldownFrames)>(std::lround(v)); }, 0);
+        num("iangle", "Facing angle", "How far to either side of straight ahead the object can be and still count as faced.",
+            [](const splash::Object& o) { return o.interactable->facingAngle; }, "deg", 0, 180,
+            [](splash::Object& ob, float v) { ob.interactable->facingAngle = v; });
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::Portal)) {
+        top = y;
+        compSection("s_portal", editor::ComponentKind::Portal);
+        num("pw", "Width", "The opening's width along each object's X axis, before scale.", [](const splash::Object& o) { return o.portal->width; },
+            "m", 0.01f, 1000, [](splash::Object& ob, float v) { ob.portal->width = v; });
+        num("ph", "Height", "The opening's height along each object's Y axis, before scale.",
+            [](const splash::Object& o) { return o.portal->height; }, "m", 0.01f, 1000, [](splash::Object& ob, float v) { ob.portal->height = v; });
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::Agent)) {
+        top = y;
+        compSection("s_agent", editor::ComponentKind::Agent);
+        num("agspeed", "Move speed", "How fast they walk, in metres per second.", [](const splash::Object& o) { return o.agent->moveSpeed; }, "m/s",
+            0, 100, [](splash::Object& ob, float v) { ob.agent->moveSpeed = v; });
+        num("agstop", "Stop distance", "How close to a waypoint or target counts as arrived.",
+            [](const splash::Object& o) { return o.agent->stopDistance; }, "m", 0, 100, [](splash::Object& ob, float v) { ob.agent->stopDistance = v; });
+        toggleAll("agvision", "Vision", "Sees the player (or its target) inside its cone.", [](const splash::Object& o) { return o.agent->vision; },
+                  [](splash::Object& ob, bool v) { ob.agent->vision = v; });
+        num("agrange", "Vision range", "How far they see (a square around each agent). 0 sees nothing.",
+            [](const splash::Object& o) { return o.agent->visionRange; }, "m", 0, 1000, [](splash::Object& ob, float v) { ob.agent->visionRange = v; });
+        num("agfov", "Field of view", "The whole cone, in degrees. 360 sees all around.", [](const splash::Object& o) { return o.agent->fov; },
+            "deg", 1, 360, [](splash::Object& ob, float v) { ob.agent->fov = v; });
+        num("aghear", "Hearing range", "How far they hear. 0 hears nothing.", [](const splash::Object& o) { return o.agent->hearingRange; }, "m",
+            0, 1000, [](splash::Object& ob, float v) { ob.agent->hearingRange = v; });
+        num("agalert", "Alert timeout", "Frames after it last sensed the target before onTargetLost runs.",
+            [](const splash::Object& o) { return float(o.agent->alertTimeout); }, "frames", 0, 65535,
+            [](splash::Object& ob, float v) { ob.agent->alertTimeout = int(std::lround(v)); }, 0);
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::Path)) {
+        top = y;
+        compSection("s_path", editor::ComponentKind::Path);
+        num("pathspeed", "Speed", "How fast followers ride them, in metres per second.", [](const splash::Object& o) { return o.path->speed; },
+            "m/s", 0, 100, [](splash::Object& ob, float v) { ob.path->speed = v; });
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::FollowPath)) {
+        top = y;
+        compSection("s_followpath", editor::ComponentKind::FollowPath);
+        num("followspeed", "Speed", "Metres per second; 0 rides at the path's own speed.", [](const splash::Object& o) { return o.followPath->speed; },
+            "m/s", 0, 100, [](splash::Object& ob, float v) { ob.followPath->speed = v; });
+        num("followoffset", "Start offset", "Where on the path each starts, 0 to 1.", [](const splash::Object& o) { return o.followPath->startOffset; },
+            "", 0, 1, [](splash::Object& ob, float v) { ob.followPath->startOffset = v; });
+        toggleAll("followface", "Face along", "Turns each object to face the way it rides (about Y only).",
+                  [](const splash::Object& o) { return o.followPath->faceAlong; }, [](splash::Object& ob, bool v) { ob.followPath->faceAlong = v; });
+        sectionEnd(top);
+    }
+
+    // Shared components edited one object at a time.
+    {
+        using K = editor::ComponentKind;
+        const K handled[] = {K::Collider, K::Light, K::Interactable, K::Portal, K::Agent, K::Path, K::FollowPath};
+        std::string names;
+        for (const editor::ComponentInfo& c : editor::components()) {
+            if (std::find(std::begin(handled), std::end(handled), c.kind) != std::end(handled) || !has(c.kind)) continue;
+            names += (names.empty() ? "" : ", ") + std::string(c.label);
+        }
+        reportField("singleonly", names.empty() ? "-" : names);
+        if (!names.empty()) {
+            const std::string body = "They all have " + names + ". Select one object to edit " + (names.find(',') == std::string::npos ? "it." : "those.");
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const float h = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, body.c_str()).y;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y), color::textDim, body.c_str(), nullptr, w);
+            nameRect("obj.multisingle", ImRect(ImVec2(tx, y), ImVec2(tx + w, y + h)));
+            y += h + space::md;
+        }
+    }
+    ImGui::PopClipRect();
+    {
+        const float content = y + space::xl - (top0 - scroll), view = r.Max.y - top0;
+        const float maxScroll = std::max(0.0f, content - view);
+        if (maxScroll > 0 && ImGui::IsMouseHoveringRect(r.Min, r.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+            scroll -= ImGui::GetIO().MouseWheel * 48.0f;
+        scroll = std::clamp(scroll, 0.0f, maxScroll);
+        if (maxScroll > 0) {
+            const float bh = view * view / content, t = top0 + (view - bh) * (scroll / maxScroll);
+            dl->AddRectFilled(ImVec2(r.Max.x - 5, t + 2), ImVec2(r.Max.x - 2, t + bh - 2), rgb(0xffffff, 40), 2);
+        }
+    }
+}
+
 static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
     Fonts& f = fonts();
     panel(dl, r);
@@ -9038,6 +9461,27 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                    pinned || doc.selection()))
         doc.pin(pinned ? std::nullopt : doc.selection());
 
+    // Scripted tests: the selection, once per change (#263): how many, the
+    // primary, and every selected object in the Scene panel's order.
+    if (namedRectsOn()) {
+        static std::string last;
+        std::string line = "selection: " + std::to_string(doc.selectionCount());
+        if (const splash::Object* p = doc.selected()) line += " primary=" + p->name;
+        std::string names;
+        for (const editor::ObjectPath& p : doc.flatPaths())
+            if (doc.isSelected(p)) names += (names.empty() ? "" : ";") + doc.object(p)->name;
+        line += " all=" + names;
+        if (line != last) {
+            last = line;
+            std::printf("%s\n", line.c_str());
+            std::fflush(stdout);
+        }
+    }
+    // Several selected (and the inspector not pinned): what they share.
+    if (!doc.pinned() && doc.selectionCount() > 1) {
+        multiInspector(st, dl, r, y, doc);
+        return;
+    }
     const std::optional<editor::ObjectPath> target = doc.pinned() ? doc.pinned() : doc.selection();
     const splash::Object* o = target ? doc.object(*target) : nullptr;
     if (!o) {

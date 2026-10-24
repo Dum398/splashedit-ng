@@ -37,6 +37,8 @@ struct PlayTools {
     bool safeArea = false, tvAspect = true;
     int look = 0;
     bool uiSafeArea = false;
+    // The inspector's Scale lock (#264): one axis edited scales all three.
+    bool scaleLock = false;
 };
 inline constexpr int kMaxPlayers = 10;
 // Whether a Play with these tools runs its consoles through the relay.
@@ -45,7 +47,8 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 // key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
 // overlay_rooms=, boot_logo= (1 or 0), players= (1 to kMaxPlayers, clamped),
 // relay= (1 or 0), game_safe_area= (1 or 0), game_aspect= (4:3 or square),
-// game_look= (rgb, svideo or composite), ui_safe_area= (1 or 0). A missing
+// game_look= (rgb, svideo or composite), ui_safe_area= (1 or 0),
+// scale_lock= (1 or 0). A missing
 // file or key reads as empty or off, but boot_logo as on, players as 1 (also
 // for a value that is not a number) and game_aspect as 4:3.
 PlayTools loadPlayTools(const std::filesystem::path& file);

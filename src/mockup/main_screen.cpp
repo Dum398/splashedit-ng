@@ -4223,9 +4223,10 @@ static void gizmoCube(ImDrawList* dl, const viewport::Ps1View& view, ImRect r, s
 }
 
 // The scale gizmo: three handles along the object's own axes (scale is
-// local) ending in cubes, and a centre cube for uniform scale. Dragging a
+// local) ending in cubes, a centre cube for uniform scale, and a square
+// between each pair of handles that scales that pair together. Dragging a
 // handle by its own screen length doubles that axis; the centre scales by
-// the drag up and to the right. Snapping rounds to 0.1, and no component
+// the drag up and to the right, a square by the drag out through it. Snapping rounds to 0.1, and no component
 // ever reaches zero or changes sign. One drag is one undo step.
 static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo) {
     ImGuiContext& g = *GImGui;
@@ -4263,8 +4264,61 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
             tipPx[i] = l;
             tips[i] = gf.c + dirS[i] * (l * stretch[i]);
         }
+    // Plane handles (#264): handle 4 + k is a square in the plane of the two
+    // axes other than k, from kPlaneIn to kPlaneOut of the handle length
+    // along both (stretching with them while dragging); in perspective it
+    // projects to a trapezoid. It scales those two axes together and leaves
+    // axis k alone, and takes axis k's colour, as in Unity. A plane seen
+    // nearly edge-on is too thin to grab and is not drawn.
+    constexpr float kPlaneIn = 0.25f, kPlaneOut = 0.5f;
+    ImVec2 quad[3][4];
+    bool quadOk[3] = {};
+    if (gf.visible)
+        for (int k = 0; k < 3; ++k) {
+            const int a = (k + 1) % 3, b = (k + 2) % 3;
+            if (!tipOk[a] || !tipOk[b]) continue;
+            const float ca[4] = {kPlaneIn, kPlaneOut, kPlaneOut, kPlaneIn}, cb[4] = {kPlaneIn, kPlaneIn, kPlaneOut, kPlaneOut};
+            bool ok = true;
+            for (int j = 0; j < 4 && ok; ++j)
+                ok = view.project(toGl(gf.wpos + dirs[a] * (gf.len * ca[j] * stretch[a]) + dirs[b] * (gf.len * cb[j] * stretch[b])), mn, sz,
+                                  &quad[k][j]);
+            if (!ok) continue;
+            float area = 0;
+            for (int j = 0; j < 4; ++j) {
+                const ImVec2 p = quad[k][j], q = quad[k][(j + 1) % 4];
+                area += p.x * q.y - q.x * p.y;
+            }
+            quadOk[k] = std::fabs(area) * 0.5f >= 40;
+        }
+    auto inQuad = [&](int k, ImVec2 m) {
+        float sign = 0;
+        for (int j = 0; j < 4; ++j) {
+            const ImVec2 p = quad[k][j], q = quad[k][(j + 1) % 4];
+            const float c = (q.x - p.x) * (m.y - p.y) - (q.y - p.y) * (m.x - p.x);
+            if (c == 0) continue;
+            if (sign == 0) sign = c;
+            else if ((c < 0) != (sign < 0)) return false;
+        }
+        return true;
+    };
+    auto quadCentre = [&](int k) { return (quad[k][0] + quad[k][1] + quad[k][2] + quad[k][3]) * 0.25f; };
+    if (gf.visible && namedRectsOn()) {
+        static const char* axisNames[3] = {"vp.scale.x", "vp.scale.y", "vp.scale.z"};
+        static const char* planeNames[3] = {"vp.scale.yz", "vp.scale.xz", "vp.scale.xy"};
+        nameRect("vp.scale.xyz", ImRect(gf.c - ImVec2(6, 6), gf.c + ImVec2(6, 6)));
+        for (int i = 0; i < 3; ++i)
+            if (tipOk[i]) nameRect(axisNames[i], ImRect(tips[i] - ImVec2(5, 5), tips[i] + ImVec2(5, 5)));
+        for (int k = 0; k < 3; ++k) {
+            if (!quadOk[k]) continue;
+            const ImVec2 qc = quadCentre(k);
+            nameRect(planeNames[k], ImRect(qc - ImVec2(3, 3), qc + ImVec2(3, 3)));
+            ImRect box(quad[k][0], quad[k][0]);
+            for (int j = 1; j < 4; ++j) box.Add(quad[k][j]);
+            nameRect(std::string(planeNames[k]) + ".area", box);
+        }
+    }
 
-    // Hover: the centre cube first, then the nearest handle.
+    // Hover: the centre cube first, then the nearest handle, then a plane.
     int hover = -1;
     if (gf.visible && gizmoMayHover(active, r)) {
         if (length(io.MousePos - gf.c) < 10) {
@@ -4276,6 +4330,8 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
                 float dist = distToSegment(io.MousePos, gf.c + dirS[i] * 10, tips[i] + dirS[i] * 7);
                 if (dist < best) best = dist, hover = i;
             }
+            for (int k = 0; k < 3 && hover < 0; ++k)
+                if (quadOk[k] && inQuad(k, io.MousePos)) hover = 4 + k;
         }
     }
     if (hover >= 0) {
@@ -4287,6 +4343,14 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
             drag.startScale = cur;
             drag.axisDir = hover < 3 ? dirS[hover] : ImVec2(0.70710678f, -0.70710678f);
             drag.handlePx = hover < 3 ? tipPx[hover] : 76.0f;
+            if (hover >= 4) {
+                // A plane: outwards through the square's middle; dragging by
+                // the distance to its outer corner doubles the two axes.
+                const ImVec2 d = quadCentre(hover - 4) - gf.c;
+                const float l = length(d);
+                if (l > 1e-3f) drag.axisDir = d * (1.0f / l);
+                drag.handlePx = std::max(length(quad[hover - 4][2] - gf.c), 30.0f);
+            }
             drag.shown = hover < 3 ? cur[hover] : 1.0f;
             ImGui::SetActiveID(gid, g.CurrentWindow);
             doc.endMerge();  // a new drag never merges into an earlier edit
@@ -4303,6 +4367,12 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
             if (drag.handle < 3) {
                 component(ns, drag.handle) = editor::scaleAxis(drag.startScale[drag.handle], factor, snap);
                 drag.shown = ns[drag.handle];
+            } else if (drag.handle >= 4) {
+                const int k = drag.handle - 4, a = (k + 1) % 3, b = (k + 2) % 3;
+                ns = editor::scalePlane(drag.startScale, a, b, factor, snap);
+                drag.shown = 1;
+                if (std::fabs(drag.startScale[a]) > 1e-6f) drag.shown = ns[a] / drag.startScale[a];
+                else if (std::fabs(drag.startScale[b]) > 1e-6f) drag.shown = ns[b] / drag.startScale[b];
             } else {
                 ns = editor::scaleUniform(drag.startScale, factor, snap);
                 drag.shown = 1;
@@ -4326,8 +4396,19 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
     // Draw far handles first so near ones overlap them; the centre cube last.
     const bool dragging = g.ActiveId == gid && drag.handle >= 0;
     const int lit = dragging ? drag.handle : hover;
-    float t[4];
-    for (int i = 0; i < 4; ++i) t[i] = anim(gid + 1 + (ImGuiID)i, lit == i);
+    float t[7];
+    for (int i = 0; i < 7; ++i) t[i] = anim(gid + 1 + (ImGuiID)i, lit == i);
+    // Plane squares first, under the handles: translucent in their axis's
+    // colour, lit like the handles when hovered or dragged.
+    for (int k = 0; k < 3; ++k) {
+        if (!quadOk[k]) continue;
+        const float tk = t[4 + k];
+        int fillA = 56 + (int)(96 * tk), lineA = 150 + (int)(105 * tk);
+        if (dragging && drag.handle != 4 + k) fillA = 20, lineA = 60;
+        const ImU32 base = lerpColor(axisCols[k], rgb(0xffffff), 0.35f * tk) & 0x00ffffff;
+        dl->AddConvexPolyFilled(quad[k], 4, base | ((ImU32)fillA << IM_COL32_A_SHIFT));
+        dl->AddPolyline(quad[k], 4, base | ((ImU32)lineA << IM_COL32_A_SHIFT), ImDrawFlags_Closed, 1.2f + 0.8f * tk);
+    }
     int order[3] = {0, 1, 2};
     float dist[3];
     for (int i = 0; i < 3; ++i) dist[i] = splash::sqrMagnitude(gf.wpos + dirs[i] * gf.len - eye);
@@ -4335,16 +4416,19 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
     const float cube = gf.len * 0.075f;
     for (int i : order) {
         if (!tipOk[i]) continue;
-        ImU32 col = lerpColor(axisCols[i], rgb(0xffffff), 0.35f * t[i]);
+        // A lit plane lights its two axes too; dragging it leaves the third faint.
+        const float ti = lit >= 4 && i != lit - 4 ? std::max(t[i], t[lit]) : t[i];
+        ImU32 col = lerpColor(axisCols[i], rgb(0xffffff), 0.35f * ti);
         if (dragging && drag.handle < 3 && i != drag.handle) col = (col & 0x00ffffff) | 0x60000000;
-        float wdt = 2.5f + 1.5f * t[i];
+        if (dragging && drag.handle >= 4 && i == drag.handle - 4) col = (col & 0x00ffffff) | 0x60000000;
+        float wdt = 2.5f + 1.5f * ti;
         ImVec2 a = gf.c + dirS[i] * 10, b = tips[i] - dirS[i] * 5;
         if (length(b - gf.c) > 10) {
             dl->AddLine(a, b, rgb(0x000000, 90), wdt + 2);
             dl->AddLine(a, b, col, wdt);
         }
         splash::Vec3 at = gf.wpos + dirs[i] * (gf.len * stretch[i]);
-        gizmoCube(dl, view, r, at, dirs, cube * (1 + 0.25f * t[i]), col, eye);
+        gizmoCube(dl, view, r, at, dirs, cube * (1 + 0.25f * ti), col, eye);
     }
     gizmoCube(dl, view, r, gf.wpos, dirs, cube * (1.15f + 0.25f * t[3]), lerpColor(rgb(0xd8dbe2), rgb(0xffffff), t[3]), eye);
     if (dragging) {
@@ -4353,6 +4437,10 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
         if (drag.handle < 3) {
             std::snprintf(v, sizeof v, "%.2f", (double)drag.shown);
             gizmoLabel(dl, r, gf.c, io.MousePos, tags[drag.handle], axisCols[drag.handle], v);
+        } else if (drag.handle >= 4) {
+            static const char* planes[3] = {"YZ", "XZ", "XY"};
+            std::snprintf(v, sizeof v, "\xc3\x97%.2f", (double)drag.shown);
+            gizmoLabel(dl, r, gf.c, io.MousePos, planes[drag.handle - 4], axisCols[drag.handle - 4], v);
         } else {
             std::snprintf(v, sizeof v, "\xc3\x97%.2f", (double)drag.shown);
             gizmoLabel(dl, r, gf.c, io.MousePos, "XYZ", color::text, v);
@@ -8895,8 +8983,44 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                    fmtShort(e.z).c_str(), nullptr, rot);
     commit(fe, "rot", [&](splash::Object& ob) { ob.transform.rotation = quatFromEuler({rot[0], rot[1], rot[2]}); });
     float scl[3] = {t.scale.x, t.scale.y, t.scale.z};
-    fe = vec3Field("scl", row("lscl", "Scale", "Size multiplier on each axis."), fmtFixed(t.scale.x).c_str(), fmtFixed(t.scale.y).c_str(),
-                   fmtFixed(t.scale.z).c_str(), nullptr, scl);
+    // The lock sits at the end of the label column, in the row's own height,
+    // so nothing below moves. Drawn before the row so it takes the hover
+    // from the label's tooltip area under it.
+    {
+        const float lx = x0 + space::sm + lw - 4, ly = y + rowH * 0.5f;
+        const ImRect lr(ImVec2(lx - 22, ly - 11), ImVec2(lx, ly + 11));
+        nameRect("obj.scllock", lr);
+        // Saved with Play's tools, like the Game view's toggles.
+        // Tab goes from Rotation Z straight to Scale X past it (#158).
+        bool& on = st.play.tools.scaleLock;
+        ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
+        const bool flip = iconButton("scllock", lr, on ? icon::lock : icon::link, on,
+                                     on ? "Scale locked: editing one axis scales all three by the same factor"
+                                        : "Lock the scale's proportions: editing one axis scales all three by the same factor");
+        ImGui::PopItemFlag();
+        if (flip) {
+            on = !on;
+            st.scaleLockFrom.reset();
+            if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
+        }
+    }
+    const ImRect sclRow = row("lscl", "Scale", "Size multiplier on each axis.");
+    {
+        const float w = (sclRow.GetWidth() - space::xs * 2) / 3;
+        for (int i = 0; i < 3; ++i)
+            nameRect(std::string("obj.scl.") + "xyz"[i], ImRect(ImVec2(sclRow.Min.x + i * (w + space::xs), sclRow.Min.y),
+                                                                ImVec2(sclRow.Min.x + i * (w + space::xs) + w, sclRow.Max.y)));
+    }
+    fe = vec3Field("scl", sclRow, fmtFixed(t.scale.x).c_str(), fmtFixed(t.scale.y).c_str(), fmtFixed(t.scale.z).c_str(), nullptr, scl);
+    if (fe.changed && st.play.tools.scaleLock) {
+        // Every frame of a scrub scales from where the edit began, so the
+        // proportions survive a pass through zero; a typed value is one frame.
+        if (!st.scaleLockFrom || !(t.scale == st.scaleLockWrote)) st.scaleLockFrom = t.scale;
+        const splash::Vec3 ns = editor::lockedScale(*st.scaleLockFrom, fe.index, scl[fe.index]);
+        scl[0] = ns.x, scl[1] = ns.y, scl[2] = ns.z;
+        st.scaleLockWrote = ns;
+    }
+    if (fe.done) st.scaleLockFrom.reset();
     commit(fe, "scl", [&](splash::Object& ob) { ob.transform.scale = {scl[0], scl[1], scl[2]}; });
     sectionEnd(top);
 

@@ -50,4 +50,18 @@ float scaleAxis(float start, float factor, bool snap);
 // proportions survive. Clamped per component.
 splash::Vec3 scaleUniform(splash::Vec3 start, float factor, bool snap);
 
+// A plane handle: components `a` and `b` scaled together as scaleUniform
+// scales all three (the factor snapped, each clamped); the third is left
+// as it was.
+splash::Vec3 scalePlane(splash::Vec3 start, int a, int b, float factor, bool snap);
+
+// The inspector's Scale field with its lock on: component `axis` was given
+// `value`, and every component is multiplied by the same factor,
+// value / start[axis], so the proportions of `start` (the scale when the
+// edit began) are kept, sign included. A zero start component has no
+// proportion to keep: when all three are zero they all take `value`,
+// otherwise that component alone changes. Not clamped: the field takes
+// zero and negative scales typed by hand.
+splash::Vec3 lockedScale(splash::Vec3 start, int axis, float value);
+
 }  // namespace editor

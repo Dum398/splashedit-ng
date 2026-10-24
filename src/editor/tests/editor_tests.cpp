@@ -810,6 +810,52 @@ void testScaleClamp() {
     CHECK(nearV(u, {1.1f, 2.2f, 0.55f}));
 }
 
+// A plane handle scales its two axes as the centre handle scales all three
+// and leaves the third exactly alone (#264).
+void testScalePlane() {
+    using editor::kMinScale;
+    splash::Vec3 p = editor::scalePlane({1, 2, 3}, 0, 1, 1.5f, false);
+    CHECK(nearV(p, {1.5f, 3, 3}) && p.z == 3);
+    p = editor::scalePlane({1, 2, 3}, 1, 2, 2, false);
+    CHECK(p.x == 1 && nearV(p, {1, 4, 6}));
+    p = editor::scalePlane({1, 2, 3}, 0, 2, 0.5f, false);
+    CHECK(p.y == 2 && nearV(p, {0.5f, 2, 1.5f}));
+    // Snapping rounds the factor, so the plane's proportions survive.
+    p = editor::scalePlane({1, 2, 0.5f}, 0, 1, 1.13f, true);
+    CHECK(nearV(p, {1.1f, 2.2f, 0.5f}));
+    // Clamped per component like the other handles; mirrored stays mirrored.
+    p = editor::scalePlane({-1, 2, 5}, 0, 1, -1, false);
+    CHECK(p.x == -kMinScale && p.y == kMinScale && p.z == 5);
+}
+
+// The inspector's locked Scale field: one axis edited, all three times the
+// same factor, from the scale the edit began with (#264).
+void testLockedScale() {
+    CHECK(editor::lockedScale({1, 1, 1}, 0, 2) == (splash::Vec3{2, 2, 2}));
+    CHECK(editor::lockedScale({1, 2, 1}, 0, 2) == (splash::Vec3{2, 4, 2}));
+    CHECK(editor::lockedScale({1, 2, 1}, 1, 1) == (splash::Vec3{0.5f, 1, 0.5f}));
+    CHECK(nearV(editor::lockedScale({1, 2, 4}, 2, 1), {0.25f, 0.5f, 1}));
+    // The edited axis takes the value exactly, even where value / start rounds.
+    CHECK(editor::lockedScale({3, 7, 11}, 0, 1).x == 1);
+    CHECK(editor::lockedScale({0.3f, 0.7f, 1.1f}, 1, 0.9f).y == 0.9f);
+    // Negative: the factor keeps its sign, so the proportions (and the
+    // mirroring) of the start are kept: -1 to 2 is a factor of -2.
+    CHECK(editor::lockedScale({-1, 2, 1}, 0, 2) == (splash::Vec3{2, -4, -2}));
+    CHECK(editor::lockedScale({-1, 2, 1}, 0, -3) == (splash::Vec3{-3, 6, 3}));
+    // Zero typed: every axis to zero (not clamped; the field allows it).
+    CHECK(editor::lockedScale({1, 2, 1}, 0, 0) == (splash::Vec3{0, 0, 0}));
+    // A zero start axis has no ratio: that axis alone, unless all are zero.
+    CHECK(editor::lockedScale({0, 2, 1}, 0, 3) == (splash::Vec3{3, 2, 1}));
+    CHECK(editor::lockedScale({0, 0, 0}, 1, 2) == (splash::Vec3{2, 2, 2}));
+    // A scrub: each frame from the same start, so passing through zero
+    // and back keeps the proportions.
+    const splash::Vec3 start{1, 2, 3};
+    splash::Vec3 s = editor::lockedScale(start, 0, 0);
+    s = editor::lockedScale(start, 0, -0.5f);
+    s = editor::lockedScale(start, 0, 2);
+    CHECK(s == (splash::Vec3{2, 4, 6}));
+}
+
 // One gizmo drag (many merged edits) undoes to the exact transform before it
 // and redoes to the exact transform after it, for rotate and for scale.
 void testGizmoUndo() {
@@ -15807,12 +15853,12 @@ static void testTvPreview() {
     {
         const fs::path cfg = g_outDir / "tv" / "play.cfg";
         editor::PlayTools t;
-        CHECK(!t.safeArea && t.tvAspect && t.look == 0 && !t.uiSafeArea);
-        t.safeArea = true, t.tvAspect = false, t.look = int(tv::Look::Composite), t.uiSafeArea = true;
+        CHECK(!t.safeArea && t.tvAspect && t.look == 0 && !t.uiSafeArea && !t.scaleLock);
+        t.safeArea = true, t.tvAspect = false, t.look = int(tv::Look::Composite), t.uiSafeArea = true, t.scaleLock = true;
         const editor::PlayTools back = editor::savePlayTools(cfg, t) ? editor::loadPlayTools(cfg) : editor::PlayTools{};
-        CHECK(back.safeArea && !back.tvAspect && back.look == int(tv::Look::Composite) && back.uiSafeArea);
+        CHECK(back.safeArea && !back.tvAspect && back.look == int(tv::Look::Composite) && back.uiSafeArea && back.scaleLock);
         const editor::PlayTools none = editor::loadPlayTools(g_outDir / "tv" / "absent.cfg");
-        CHECK(!none.safeArea && none.tvAspect && none.look == 0 && !none.uiSafeArea);
+        CHECK(!none.safeArea && none.tvAspect && none.look == 0 && !none.uiSafeArea && !none.scaleLock);
     }
 
     // Pure grey keeps its luma under every look; with scanlines a 240-line
@@ -15899,6 +15945,8 @@ int main(int argc, char** argv) {
     testTriggerWorldBox();
     testGizmoMath();
     testScaleClamp();
+    testScalePlane();
+    testLockedScale();
     testGizmoUndo();
     testCatalog();
     testExportStats();

@@ -54,6 +54,7 @@ PlayTools loadPlayTools(const fs::path& file) {
         else if (key == "game_aspect") t.tvAspect = value != "square";
         else if (key == "game_look") t.look = int(tv::lookFromName(value.c_str()));
         else if (key == "ui_safe_area") t.uiSafeArea = value == "1";
+        else if (key == "scale_lock") t.scaleLock = value == "1";
     }
     return t;
 }
@@ -75,7 +76,8 @@ bool savePlayTools(const fs::path& file, const PlayTools& t) {
         << "game_safe_area=" << (t.safeArea ? 1 : 0) << "\n"
         << "game_aspect=" << (t.tvAspect ? "4:3" : "square") << "\n"
         << "game_look=" << tv::lookName(tv::Look(std::clamp(t.look, 0, 2))) << "\n"
-        << "ui_safe_area=" << (t.uiSafeArea ? 1 : 0) << "\n";
+        << "ui_safe_area=" << (t.uiSafeArea ? 1 : 0) << "\n"
+        << "scale_lock=" << (t.scaleLock ? 1 : 0) << "\n";
     return bool(out);
 }
 

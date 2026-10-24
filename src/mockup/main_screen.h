@@ -92,6 +92,12 @@ struct State {
     // Gizmo snapping: move to 0.25 m, rotate to 15 degrees, scale to 0.1.
     // Ctrl snaps while it is off.
     bool snap = true;
+    // The inspector's Scale lock (#264; on or off in play.tools.scaleLock):
+    // scaleLockFrom is the scale an edit under the lock began from,
+    // scaleLockWrote what it last wrote: a scale that no longer matches it
+    // starts a new edit.
+    std::optional<splash::Vec3> scaleLockFrom;
+    splash::Vec3 scaleLockWrote;
     bool gizmos = true;  // viewport draws trigger boxes, interaction radii and nav regions
     // The viewport draws the exported BVH's boxes down to bvhDepth (-1: every
     // level). Its own toggle, independent of gizmos.

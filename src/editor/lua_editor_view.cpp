@@ -952,6 +952,7 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
     ImGui::SetNextItemAllowOverlap();
     ImGui::InvisibleButton("##code", ImMax(ImVec2(area.GetWidth() - barW, area.GetHeight()), ImVec2(1, 1)));
     const bool hovered = ImGui::IsItemHovered(), held = ImGui::IsItemActive();
+    const ImGuiID codeId = ImGui::GetItemID();
     const ImVec2 mouse = io.MousePos;
     const bool overPopup = (t.compOpen && t.compRect.Contains(mouse)) || (t.findOpen && t.findRect.Contains(mouse));
     if (hovered && !overPopup && mouse.x >= body.Min.x)
@@ -995,6 +996,11 @@ void ScriptTabs::draw(ImDrawList* dl, ImRect r) {
         g.PlatformImeData.InputLineHeight = lineH;
         g.PlatformImeData.ViewportId = ImGui::GetWindowViewport()->ID;
 
+        // Tab and Shift+Tab are the code's (indent, outdent, take a completion).
+        // ImGui cycles keyboard focus on Tab even with keyboard navigation off,
+        // to the first field in the window (the Scene filter, #262), unless
+        // the key has an owner; owning it here keeps it for next frame's check.
+        ImGui::SetKeyOwner(ImGuiKey_Tab, codeId);
         auto key = [](ImGuiKey k) { return ImGui::IsKeyPressed(k, true); };
         const bool ctrl = io.KeyCtrl, shift = io.KeyShift, alt = io.KeyAlt;
         const int page = std::max(1, (int)(body.GetHeight() / lineH) - 1);

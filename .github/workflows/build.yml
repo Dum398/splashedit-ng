@@ -168,6 +168,9 @@ jobs:
       - name: Script editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/scripteditorcheck.py build/splashedit
+      - name: Tab in the script editor
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/luatabcheck.py build/splashedit
       - name: External editor setup (lua-language-server)
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/luadefsguicheck.py build/splashedit

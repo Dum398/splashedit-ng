@@ -363,6 +363,9 @@ jobs:
       - name: Status bar triangle meter and last good export
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/statusbudgetcheck.py build/splashedit
+      - name: Budget meters suggest fixes, Apply and undo
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/meterfixcheck.py build/splashedit
       - name: Scene network id field and exported hash
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/netidcheck.py build/splashedit build/cli/splashpack-cli

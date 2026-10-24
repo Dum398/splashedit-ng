@@ -1038,7 +1038,8 @@ float problemCard(const char* id, ImVec2 pos, float width, const char* title, co
     return h;
 }
 
-float meter(const char* id, ImVec2 pos, const char* ic, const char* label, float fraction, const char* value, const char* tip) {
+float meter(const char* id, ImVec2 pos, const char* ic, const char* label, float fraction, const char* value, const char* tip,
+            bool* clicked) {
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     // A negative fraction is a plain readout: no bar.
@@ -1053,6 +1054,8 @@ float meter(const char* id, ImVec2 pos, const char* ic, const char* label, float
     float w = 18 + labelW + space::sm + barW + space::sm + valueW;
     ImRect r(pos, pos + ImVec2(w, size::statusBar));
     Hit h = interact(id, r);
+    nameRect(id, r);  // --click @m_vram
+    if (clicked) *clicked = h.clicked;
     tooltip(tip);
     if (h.hover > 0)
         dl->AddRectFilled(r.Min + ImVec2(-6, 4), r.Max + ImVec2(6, -4), rgb(0x2a2f39, (int)(255 * h.hover)), radius::field);

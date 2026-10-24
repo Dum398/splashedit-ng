@@ -20,6 +20,7 @@
 #include "editor/asset_browser_view.hh"
 #include "editor/hardware.hh"
 #include "editor/live_export.hh"
+#include "editor/meter_fixes.hh"
 #include "editor/log_view.hh"
 #include "editor/model_import.hh"
 #include "editor/texture_preview_view.hh"
@@ -413,6 +414,19 @@ struct State {
 
     // Inspector texture preview: Source vs PS1, converted off the UI thread.
     ui::TexturePreviewView texPreview;
+
+    // Fixes under a budget meter that went amber or red (VRAM, RAM,
+    // Triangles): clicking it opens them. Measured off the UI thread.
+    struct MeterFixes {
+        editor::MeterFixFinder finder;
+        int open = -1;        // FixMeter whose list shows, -1 none
+        bool openNow = false; // open the popup this frame
+        int selected = 0;     // row whose before/after shows
+        std::array<ImRect, editor::kFixMeters> meters{};  // status bar rects
+        // Before/after thumbnails of the selected texture fix.
+        editor::TexturePreviewer before, after;
+        unsigned beforeTex = 0, afterTex = 0, beforeGen = 0, afterGen = 0;
+    } meterFixes;
 
     // The bottom dock under the middle panel holds the Project panel and,
     // while they are open, the Timeline and the Frame debugger as tabs; one

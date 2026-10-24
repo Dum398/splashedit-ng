@@ -830,7 +830,17 @@ int main(int argc, char** argv) {
     bool scrollDone = false;
     // The live export is running, or its last result is for an older revision of the scene.
     const auto playBuilding = [&] { return state.play.build.valid() || state.play.hwBuild.valid() || state.play.disc.valid(); };
-    const auto exportBehind = [&] { return state.live.busy() || state.live.resultRevision() != doc.revision() || !state.live.result(); };
+    // An open meter fixes list (#194) also holds it until its fixes are
+    // measured for this revision and the before/after thumbnails converted.
+    const auto fixesBehind = [&] {
+        const mockup::State::MeterFixes& mf = state.meterFixes;
+        if (mf.open < 0) return false;
+        const editor::MeterFixFinder::State fs = mf.finder.state();
+        return !fs.done || fs.revision != doc.revision() || mf.before.busy() || mf.after.busy();
+    };
+    const auto exportBehind = [&] {
+        return state.live.busy() || state.live.resultRevision() != doc.revision() || !state.live.result() || fixesBehind();
+    };
     std::string shotDue;
     // The end screenshot waits (up to 90 s, since when) for a model import still
     // running, so a --drop has landed in it; --shot-at keeps its exact frame.

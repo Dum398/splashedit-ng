@@ -11606,6 +11606,192 @@ static float importStatus(ImDrawList* dl, ImRect bar, float x, State& st) {
     return r.Max.x + space::xl;
 }
 
+// Uploads an RGBA8 top-down image into `tex` (made on first use), nearest
+// filtered so a PS1 texel stays a hard square when magnified.
+static void uploadNearest(unsigned& tex, int w, int h, const std::vector<uint8_t>& rgba) {
+    if (!tex) glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+// What a fix saves on meter `m`, as the list shows it.
+static std::string fixSaving(editor::FixMeter m, long long bytes) {
+    char b[48];
+    if (m == editor::FixMeter::Tris)
+        std::snprintf(b, sizeof b, "\xe2\x88\x92%lld tris", bytes);
+    else
+        std::snprintf(b, sizeof b, "\xe2\x88\x92%.1f KB", double(bytes) / 1024.0);
+    return b;
+}
+
+// The fixes under an amber or red meter (statusBar opens it): each with what
+// it saves, measured by exporting the scene with it (editor/meter_fixes.hh).
+// Apply makes the edit as one undo step; the selected texture fix shows the
+// texture as the console draws it now and after. The Triangles list has no
+// one-click fix (simplifying rewrites the model's files, outside undo):
+// Select picks the mesh so its import settings' Triangles can be set.
+// Scripted runs print `meterfix: <meter> measuring`, then `meterfix: <meter>
+// <i> <title> saves <n> [apply|select]` per row and `meterfix: <meter> N fixes`;
+// an Apply prints `meterfix: applied <meter> <i> saves <n>`.
+static void meterFixPanel(State& st, editor::Document& doc) {
+    State::MeterFixes& mf = st.meterFixes;
+    if (mf.open < 0) return;
+    const editor::FixMeter meter = editor::FixMeter(mf.open);
+    const char* mname = editor::meterName(meter);
+    const char* popupId = "##meterfixes";
+    if (mf.openNow) {
+        ImGui::OpenPopup(popupId);
+        mf.openNow = false;
+    }
+    const ImRect anchor = mf.meters[size_t(mf.open)];
+    const float w = 520;
+    ImGui::SetNextWindowPos(ImVec2(anchor.Min.x - space::sm, anchor.Min.y - space::xs), ImGuiCond_Always, ImVec2(0, 1));
+    ImGui::SetNextWindowSize(ImVec2(w, 0));
+    pushPopupStyle();
+    const bool open = ImGui::BeginPopup(popupId, ImGuiWindowFlags_NoSavedSettings);
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    if (!open) {
+        mf.open = -1;
+        return;
+    }
+    mf.finder.request(doc);
+    const editor::MeterFixFinder::State fs = mf.finder.state();
+    Fonts& f = fonts();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 top = ImGui::GetCursorScreenPos();
+    const float x0 = top.x, x1 = top.x + w - 2 * space::lg;
+    float y = top.y;
+    static const char* titles[] = {"VRAM fixes", "RAM fixes", "Triangles"};
+    text(dl, ImVec2(x0, y), f.medium, type::title, color::text, titles[mf.open]);
+    y += measure(f.medium, type::title, "Ag").y + space::xs;
+    auto caption = [&](const std::string& s, ImU32 col) {
+        text(dl, ImVec2(x0, y), f.regular, type::caption, col, s.c_str());
+        y += measure(f.regular, type::caption, "Ag").y + space::xs;
+    };
+    const bool current = fs.done && fs.revision == doc.revision();
+    if (!current) {
+        caption(fs.total > 0 ? "Measuring each fix by exporting the scene with it: " + std::to_string(fs.measured) + " of " +
+                                   std::to_string(fs.total) + "..."
+                             : std::string("Measuring each fix by exporting the scene with it..."),
+                color::textDim);
+        scriptLine("meterfix.state", std::string("meterfix: ") + mname + " measuring");
+    } else if (!fs.result.ok) {
+        caption("The scene does not export: see problems.", color::bad);
+        scriptLine("meterfix.state", std::string("meterfix: ") + mname + " export failed");
+    } else {
+        const std::vector<const editor::MeterFix*> fixes = editor::fixesFor(fs.result, meter);
+        caption(meter == editor::FixMeter::Tris
+                    ? "Meshes putting the most triangles in view, and what simplifying each to half would save."
+                    : "Each saving was measured by exporting the scene with the fix. Ctrl+Z undoes an Apply.",
+                color::textDim);
+        if (fixes.empty())
+            caption(meter == editor::FixMeter::Ram ? "No texture or render buffer change lowers RAM in this scene."
+                                                   : "No texture can drop to a lower bit depth and save VRAM.",
+                    color::textFaint);
+        mf.selected = std::clamp(mf.selected, 0, std::max(0, int(fixes.size()) - 1));
+        const size_t shown = std::min<size_t>(fixes.size(), 6);
+        for (size_t i = 0; i < shown; i++) {
+            const editor::MeterFix& fx = *fixes[i];
+            const long long save = fx.saving(meter);
+            const std::string id = "meterfix." + std::string(mname) + "." + std::to_string(i);
+            const bool sel = int(i) == mf.selected;
+            const float rowH = 44;
+            const ImRect row(ImVec2(x0 - space::sm, y), ImVec2(x1 + space::sm, y + rowH));
+            const std::string action = fx.oneClick() ? "Apply" : "Select";
+            const float bw = buttonWidth(nullptr, action.c_str());
+            const ImRect hitR(row.Min, ImVec2(row.Max.x - bw - space::md, row.Max.y));
+            const Hit h = interact((id + ".row").c_str(), hitR);
+            nameRect(id + ".row", hitR);
+            if (h.clicked) mf.selected = int(i);
+            dl->AddRectFilled(row.Min, row.Max, sel ? color::active : lerpColor(color::raised, color::hover, h.hover), radius::field);
+            text(dl, ImVec2(x0, y + 5), f.medium, type::body, color::text, fx.title.c_str());
+            text(dl, ImVec2(x0, y + 25), f.regular, type::caption, color::textDim, fx.detail.c_str());
+            const std::string sv = fixSaving(meter, save);
+            const ImVec2 ss = measure(f.medium, type::body, sv.c_str());
+            const float bx = x1 - bw;
+            text(dl, ImVec2(bx - space::md - ss.x, y + (rowH - ss.y) * 0.5f), f.medium, type::body, color::good, sv.c_str());
+            const bool hit = button((id + ".apply").c_str(), ImVec2(bx, y + (rowH - size::field - 6) * 0.5f), nullptr,
+                                    action.c_str(), fx.oneClick() ? ButtonKind::Primary : ButtonKind::Secondary);
+            scriptLine(("meterfix." + id).c_str(), "meterfix: " + std::string(mname) + " " + std::to_string(i) + " " + fx.title +
+                                                       " saves " + std::to_string(save) + " " + (fx.oneClick() ? "apply" : "select"));
+            if (hit && fx.oneClick()) {
+                const editor::MeterFix copy = fx;  // the list is rebuilt from the next revision
+                if (editor::applyFix(doc, copy)) {
+                    scriptLine(nullptr, "meterfix: applied " + std::string(mname) + " " + std::to_string(i) + " saves " +
+                                            std::to_string(save));
+                    notify(st, "Applied " + copy.title + ": Ctrl+Z undoes it", false);
+                }
+            } else if (hit && !fx.objects.empty()) {
+                doc.select(fx.objects[0]);
+                scriptLine(nullptr, "meterfix: selected " + fx.mesh);
+            }
+            y = row.Max.y + space::xs;
+        }
+        if (fixes.size() > shown) caption(std::to_string(fixes.size() - shown) + " more with smaller savings.", color::textFaint);
+        scriptLine("meterfix.state", std::string("meterfix: ") + mname + " " + std::to_string(fixes.size()) + " fixes");
+        // Before and after for the selected texture fix: the largest of its
+        // textures as the console draws it at each depth.
+        if (!fixes.empty() && fixes[size_t(mf.selected)]->kind == editor::MeterFix::Kind::TextureDepth) {
+            const editor::MeterFix& fx = *fixes[size_t(mf.selected)];
+            const editor::TextureInfo* ti = doc.texture(fx.textures[0]);
+            const bool holes = ti && ti->holes;
+            const editor::TexturePreviewKey kb{doc.resolve(fx.textures[0]), fx.from, holes}, ka{doc.resolve(fx.textures[0]), fx.to, holes};
+            mf.before.request(kb);
+            mf.after.request(ka);
+            std::shared_ptr<const editor::TexturePreview> pb = mf.before.latest(), pa = mf.after.latest();
+            if (pb && pb->error.empty() && mf.before.generation() != mf.beforeGen) {
+                uploadNearest(mf.beforeTex, pb->width, pb->height, pb->ps1);
+                mf.beforeGen = mf.before.generation();
+            }
+            if (pa && pa->error.empty() && mf.after.generation() != mf.afterGen) {
+                uploadNearest(mf.afterTex, pa->width, pa->height, pa->ps1);
+                mf.afterGen = mf.after.generation();
+            }
+            y += space::xs;
+            const float paneW = (x1 - x0 - space::md) / 2, paneH = 128;
+            for (int k = 0; k < 2; k++) {
+                const auto& p = k == 0 ? pb : pa;
+                const editor::TexturePreviewKey& key = k == 0 ? kb : ka;
+                const float px = x0 + k * (paneW + space::md);
+                const std::string label = std::to_string(int(key.depth)) + " bpp" + (k == 0 ? " now" : " after") +
+                                          (p && p->key == key && p->error.empty() ? ", " + std::to_string(p->ps1Colors) + " colours" : "");
+                text(dl, ImVec2(px, y), f.medium, type::caption, color::textDim, label.c_str());
+                const ImRect pane(ImVec2(px, y + 18), ImVec2(px + paneW, y + 18 + paneH));
+                dl->AddRectFilled(pane.Min, pane.Max, color::chrome, radius::field);
+                const unsigned tex = k == 0 ? mf.beforeTex : mf.afterTex;
+                if (p && p->key == key && p->error.empty() && tex) {
+                    // Fits the pane, centred, at a whole-pixel zoom when it is magnified.
+                    float z = std::min(paneW / p->width, paneH / p->height);
+                    if (z >= 1) z = std::floor(z);
+                    const float iw = p->width * z, ih = p->height * z;
+                    const ImVec2 o(pane.Min.x + (paneW - iw) * 0.5f, pane.Min.y + (paneH - ih) * 0.5f);
+                    ui::addTextureImage(dl, ImTextureID(intptr_t(tex)), o, o + ImVec2(iw, ih));
+                    nameRect(std::string("meterfix.preview.") + (k == 0 ? "before" : "after"), ImRect(o, o + ImVec2(iw, ih)));
+                } else {
+                    textCentered(dl, pane, f.regular, type::caption, color::textFaint, "Converting...");
+                }
+            }
+            const bool ready = pb && pa && pb->key == kb && pa->key == ka && pb->error.empty() && pa->error.empty();
+            if (ready)
+                scriptLine("meterfix.preview", "meterfix: preview " + fx.textures[0] + " " + std::to_string(int(fx.from)) + " bpp " +
+                                                   std::to_string(pb->ps1Colors) + " colours -> " + std::to_string(int(fx.to)) +
+                                                   " bpp " + std::to_string(pa->ps1Colors) + " colours");
+            y += 18 + paneH + space::xs;
+        }
+    }
+    // interact() moved the cursor down to each row: size the popup from the top.
+    ImGui::SetCursorScreenPos(top);
+    ImGui::Dummy(ImVec2(w - 2 * space::lg, y - top.y));
+    ImGui::EndPopup();
+}
+
 static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, State& st) {
     Fonts& f = fonts();
     ImRect bar(ImVec2(0, size.y - size::statusBar), size);
@@ -11623,19 +11809,36 @@ static void statusBar(ImDrawList* dl, ImVec2 size, const editor::Document& doc, 
         std::string rs = mb(r.used) + " / " + mb(r.capacity) + " MB";
         std::string ts = std::to_string(s.triangles);
         if (s.trianglesInView != uint64_t(s.triangles)) ts += ", up to " + std::to_string(s.trianglesInView) + " in view";
-        x += meter("m_vram", ImVec2(x, bar.Min.y), icon::grid, "VRAM", v.fraction(), vs.c_str(),
-                   "Framebuffers, texture atlases, palettes and fonts, as the export packs them.") +
+        // Amber or red: a click lists fixes found in the scene (meterFixPanel).
+        auto fixable = [&](editor::FixMeter m, float fr, std::string tip, const char* id, const char* ic, const char* label,
+                           const std::string& value) {
+            const bool over = splash::budgetBandOf(fr) != splash::BudgetBand::Good;
+            if (over) tip += " Click for fixes found in this scene.";
+            bool clicked = false;
+            const float w = meter(id, ImVec2(x, bar.Min.y), ic, label, fr, value.c_str(), tip.c_str(), &clicked);
+            st.meterFixes.meters[size_t(m)] = ImRect(ImVec2(x, bar.Min.y), ImVec2(x + w, bar.Max.y));
+            if (clicked && over) {
+                st.meterFixes.open = int(m);
+                st.meterFixes.openNow = true;
+                st.meterFixes.selected = 0;
+            }
+            return w;
+        };
+        x += fixable(editor::FixMeter::Vram, v.fraction(), "Framebuffers, texture atlases, palettes and fonts, as the export packs them.",
+                     "m_vram", icon::grid, "VRAM", vs) +
              space::xl;
         x += meter("m_spu", ImVec2(x, bar.Min.y), icon::music, "SPU RAM", a.fraction(), as.c_str(),
                    "Sound samples, placed the way psxsplash uploads them.") +
              space::xl;
-        x += meter("m_ram", ImVec2(x, bar.Min.y), icon::hardDrive, "RAM", r.fraction(), rs.c_str(),
-                   "Scene data, the renderer's buffers, its visible-triangle list, the world streaming slots and what "
-                   "psxsplash and Lua allocate for each object, in psxsplash's heap at the peak of loading.") +
+        x += fixable(editor::FixMeter::Ram, r.fraction(),
+                     "Scene data, the renderer's buffers, its visible-triangle list, the world streaming slots and what "
+                     "psxsplash and Lua allocate for each object, in psxsplash's heap at the peak of loading.",
+                     "m_ram", icon::hardDrive, "RAM", rs) +
              space::xl;
-        x += meter("m_tris", ImVec2(x, bar.Min.y), icon::box, "Triangles", t.fraction(), ts.c_str(),
-                   "Triangles in the exported meshes, and the most that can be in view at once (what the meter "
-                   "measures). The psxsplash docs suggest 1000 to 2000 visible triangles per frame at 30 fps.") +
+        x += fixable(editor::FixMeter::Tris, t.fraction(),
+                     "Triangles in the exported meshes, and the most that can be in view at once (what the meter "
+                     "measures). The psxsplash docs suggest 1000 to 2000 visible triangles per frame at 30 fps.",
+                     "m_tris", icon::box, "Triangles", ts) +
              space::xl;
         auto meterLine = [](const char* name, const splash::Budget& m) {
             scriptLine((std::string("statusbar.") + name).c_str(),
@@ -12408,6 +12611,7 @@ ImRect drawMainScreen(State& st, editor::Document& doc, viewport::Ps1View& view,
     updateImports(st, doc, view);
     assetRequests(st, doc, view);
     statusBar(dl, size, doc, st);
+    meterFixPanel(st, doc);
     playSetup(st, doc, size);
     refreshLuaDefinitions(doc);
     menus(st, doc, view);

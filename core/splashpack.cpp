@@ -296,11 +296,22 @@ std::vector<Color> meshColors(const FlatObject& fo, const MeshComponent& mc, con
                               const std::vector<SceneLight>& lights) {
     std::vector<Color> out(m.positions.size());
     bool hasColors = mc.vertexColors == VertexColorMode::Mesh && m.colors.size() == m.positions.size();
+    // A painted layer that does not fit the mesh (the model was reimported
+    // with other vertices) is not used: the mesh exports baked lighting and
+    // the editor warns. A byte is taken as the middle of its step, (byte +
+    // 0.5) / 255, which colorToPsx truncates back to the byte: a layer taken
+    // from another mode's export gives every vertex the bytes that mode did.
+    // Corners made where a face is cut at a texture repeat interpolate the
+    // colour, and there the 8-bit layer can land one step off the float one.
+    VertexColorMode mode = mc.vertexColors;
+    if (mode == VertexColorMode::Painted && mc.paint.size() != m.positions.size()) mode = VertexColorMode::Baked;
     std::vector<Vec3> lightNormals;
-    if (mc.vertexColors != VertexColorMode::Flat && mc.vertexColors != VertexColorMode::Mesh)
-        lightNormals = mc.smoothNormals ? smoothNormals(m) : m.normals;
+    if (mode == VertexColorMode::Baked) lightNormals = mc.smoothNormals ? smoothNormals(m) : m.normals;
     for (size_t i = 0; i < m.positions.size(); i++) {
-        switch (mc.vertexColors) {
+        switch (mode) {
+            case VertexColorMode::Painted:
+                out[i] = {(mc.paint[i][0] + 0.5f) / 255.f, (mc.paint[i][1] + 0.5f) / 255.f, (mc.paint[i][2] + 0.5f) / 255.f};
+                break;
             case VertexColorMode::Flat:
                 out[i] = {mc.flatColor[0] / 255.f, mc.flatColor[1] / 255.f, mc.flatColor[2] / 255.f};
                 break;

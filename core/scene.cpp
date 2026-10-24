@@ -55,7 +55,10 @@ const char* enumTo(E v, std::initializer_list<std::pair<const char*, E>> table) 
 }
 
 const std::initializer_list<std::pair<const char*, VertexColorMode>> kColorModes = {
-    {"baked", VertexColorMode::Baked}, {"flat", VertexColorMode::Flat}, {"mesh", VertexColorMode::Mesh}};
+    {"baked", VertexColorMode::Baked},
+    {"flat", VertexColorMode::Flat},
+    {"mesh", VertexColorMode::Mesh},
+    {"painted", VertexColorMode::Painted}};
 const std::initializer_list<std::pair<const char*, ColliderKind>> kColliderKinds = {
     {"none", ColliderKind::None}, {"static", ColliderKind::Static}, {"dynamic", ColliderKind::Dynamic}};
 const std::initializer_list<std::pair<const char*, LightKind>> kLightKinds = {
@@ -142,6 +145,8 @@ json writeMesh(const MeshComponent& m) {
     if (m.shadow != def.shadow) j["shadow"] = enumTo(m.shadow, kShadowModes);
     if (m.shadowSize != def.shadowSize) j["shadowSize"] = m.shadowSize;
     if (m.shadowDarkness != def.shadowDarkness) j["shadowDarkness"] = m.shadowDarkness;
+    // The painted layer, rrggbb hex per vertex (encodeVertexPaint); only once painted.
+    if (!m.paint.empty()) j["paintColors"] = encodeVertexPaint(m.paint);
     putExtras(j, m.extra);
     return j;
 }
@@ -330,6 +335,11 @@ Object readObject(const json& j) {
             if (c.contains("shadow")) m.shadow = enumFrom(c["shadow"], kShadowModes);
             m.shadowSize = c.value("shadowSize", m.shadowSize);
             m.shadowDarkness = c.value("shadowDarkness", m.shadowDarkness);
+            if (c.contains("paintColors")) {
+                std::optional<std::vector<std::array<uint8_t, 3>>> p = decodeVertexPaint(c["paintColors"].get<std::string>());
+                if (!p) fail("paintColors must be rrggbb hex digits per vertex");
+                m.paint = std::move(*p);
+            }
             {
                 // The shadow keys are the mesh's own even when they hold the default.
                 json written = writeMesh(m);
@@ -1114,6 +1124,32 @@ void Tilemap::resize(int w, int h) {
     cells = std::move(next);
     width = w;
     height = h;
+}
+
+std::string encodeVertexPaint(const std::vector<std::array<uint8_t, 3>>& paint) {
+    static const char kHex[] = "0123456789abcdef";
+    std::string s;
+    s.reserve(paint.size() * 6);
+    for (const std::array<uint8_t, 3>& c : paint)
+        for (uint8_t v : c) s += kHex[v >> 4], s += kHex[v & 15];
+    return s;
+}
+
+std::optional<std::vector<std::array<uint8_t, 3>>> decodeVertexPaint(const std::string& text) {
+    if (text.size() % 6) return std::nullopt;
+    auto nibble = [](char ch) {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    };
+    std::vector<std::array<uint8_t, 3>> out(text.size() / 6);
+    for (size_t i = 0; i < text.size(); i += 2) {
+        const int hi = nibble(text[i]), lo = nibble(text[i + 1]);
+        if (hi < 0 || lo < 0) return std::nullopt;
+        out[i / 6][(i / 2) % 3] = uint8_t(hi * 16 + lo);
+    }
+    return out;
 }
 
 int uvTextureSlot(const MeshComponent& mc, size_t mat) {

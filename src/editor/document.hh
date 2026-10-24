@@ -30,6 +30,7 @@ struct MeshInfo {
     int triangles = 0;  // sum of submesh index counts / 3, valid when Ok
     int submeshes = 0;  // submesh count (one material each), valid when Ok
     bool hasColors = false;  // vertex colours cover every vertex, as the exporter requires
+    int vertices = 0;        // vertex count, valid when Ok
     std::string error;
 };
 
@@ -340,7 +341,8 @@ public:
 
     // Something about this object needs attention: a missing or unreadable
     // mesh, texture or script, a texture that would lose nothing at 4 bpp,
-    // or Mesh colours on a mesh without vertex colours.
+    // Mesh colours on a mesh without vertex colours, or Painted with a
+    // painted layer that does not fit the mesh.
     bool hasWarning(const splash::Object& o) const;
     // The textures are stored deeper than their colours need: the mesh is set
     // to 8 or 16 bpp, every textured material's texture reads and has at most
@@ -348,6 +350,9 @@ public:
     bool couldBe4bpp(const splash::MeshComponent& m) const;
     // Set to Mesh colours, but the mesh has none, so it exports flat grey.
     bool missingMeshColors(const splash::MeshComponent& m) const;
+    // Set to Painted, but the painted layer has not one colour per vertex of
+    // the mesh (none, or the model changed since), so it exports baked lighting.
+    bool paintMismatch(const splash::MeshComponent& m) const;
 
     std::filesystem::path resolve(const std::string& projectPath) const { return m_project / projectPath; }
 

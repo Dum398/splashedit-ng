@@ -12804,12 +12804,14 @@ static std::string fixSaving(editor::FixMeter m, long long bytes) {
 // The fixes under an amber or red meter (statusBar opens it): each with what
 // it saves, measured by exporting the scene with it (editor/meter_fixes.hh).
 // Apply makes the edit as one undo step; the selected texture fix shows the
-// texture as the console draws it now and after. The Triangles list has no
-// one-click fix (simplifying rewrites the model's files, outside undo):
-// Select picks the mesh so its import settings' Triangles can be set.
+// texture as the console draws it now and after. A Triangles fix sets the
+// model's import settings' Triangles to what halves the mesh and imports it
+// again, the files it rewrites in the same undo step; one that cannot (not
+// from an imported model, skinned) only has Select, which picks the mesh.
 // Scripted runs print `meterfix: <meter> measuring`, then `meterfix: <meter>
-// <i> <title> saves <n> [apply|select]` per row and `meterfix: <meter> N fixes`;
-// an Apply prints `meterfix: applied <meter> <i> saves <n>`.
+// <i> <title> saves <n> [apply|select][ about]` per row and `meterfix: <meter>
+// N fixes`; an Apply prints `meterfix: applied <meter> <i> saves <n>` (or
+// `meterfix: failed <meter> <i> <why>`).
 static void meterFixPanel(State& st, editor::Document& doc) {
     State::MeterFixes& mf = st.meterFixes;
     if (mf.open < 0) return;
@@ -12859,7 +12861,7 @@ static void meterFixPanel(State& st, editor::Document& doc) {
     } else {
         const std::vector<const editor::MeterFix*> fixes = editor::fixesFor(fs.result, meter);
         caption(meter == editor::FixMeter::Tris
-                    ? "Meshes putting the most triangles in view, and what simplifying each to half would save."
+                    ? "Meshes putting the most triangles in view, simplified to half. Ctrl+Z undoes an Apply."
                     : "Each saving was measured by exporting the scene with the fix. Ctrl+Z undoes an Apply.",
                 color::textDim);
         if (fixes.empty())
@@ -12877,29 +12879,40 @@ static void meterFixPanel(State& st, editor::Document& doc) {
             const ImRect row(ImVec2(x0 - space::sm, y), ImVec2(x1 + space::sm, y + rowH));
             const std::string action = fx.oneClick() ? "Apply" : "Select";
             const float bw = buttonWidth(nullptr, action.c_str());
-            const ImRect hitR(row.Min, ImVec2(row.Max.x - bw - space::md, row.Max.y));
+            // A simplify fix that applies keeps Select beside it, to find the mesh first.
+            const bool alsoSelect = fx.kind == editor::MeterFix::Kind::SimplifyMesh && fx.oneClick() && !fx.objects.empty();
+            const float sw = alsoSelect ? buttonWidth(nullptr, "Select") + space::xs : 0;
+            const ImRect hitR(row.Min, ImVec2(row.Max.x - bw - sw - space::md, row.Max.y));
             const Hit h = interact((id + ".row").c_str(), hitR);
             nameRect(id + ".row", hitR);
             if (h.clicked) mf.selected = int(i);
             dl->AddRectFilled(row.Min, row.Max, sel ? color::active : lerpColor(color::raised, color::hover, h.hover), radius::field);
             text(dl, ImVec2(x0, y + 5), f.medium, type::body, color::text, fx.title.c_str());
             text(dl, ImVec2(x0, y + 25), f.regular, type::caption, color::textDim, fx.detail.c_str());
-            const std::string sv = fixSaving(meter, save);
+            const std::string sv = (fx.approximate ? "about " : "") + fixSaving(meter, save);
             const ImVec2 ss = measure(f.medium, type::body, sv.c_str());
             const float bx = x1 - bw;
-            text(dl, ImVec2(bx - space::md - ss.x, y + (rowH - ss.y) * 0.5f), f.medium, type::body, color::good, sv.c_str());
-            const bool hit = button((id + ".apply").c_str(), ImVec2(bx, y + (rowH - size::field - 6) * 0.5f), nullptr,
-                                    action.c_str(), fx.oneClick() ? ButtonKind::Primary : ButtonKind::Secondary);
+            text(dl, ImVec2(bx - sw - space::md - ss.x, y + (rowH - ss.y) * 0.5f), f.medium, type::body, color::good, sv.c_str());
+            const float by = y + (rowH - size::field - 6) * 0.5f;
+            const bool selectHit =
+                alsoSelect && button((id + ".select").c_str(), ImVec2(bx - sw, by), nullptr, "Select", ButtonKind::Secondary);
+            const bool hit = button((id + ".apply").c_str(), ImVec2(bx, by), nullptr, action.c_str(),
+                                    fx.oneClick() ? ButtonKind::Primary : ButtonKind::Secondary);
             scriptLine(("meterfix." + id).c_str(), "meterfix: " + std::string(mname) + " " + std::to_string(i) + " " + fx.title +
-                                                       " saves " + std::to_string(save) + " " + (fx.oneClick() ? "apply" : "select"));
+                                                       " saves " + std::to_string(save) + " " + (fx.oneClick() ? "apply" : "select") +
+                                                       (fx.approximate ? " about" : ""));
             if (hit && fx.oneClick()) {
                 const editor::MeterFix copy = fx;  // the list is rebuilt from the next revision
-                if (editor::applyFix(doc, copy)) {
+                std::string error;
+                if (editor::applyFix(doc, copy, &error)) {
                     scriptLine(nullptr, "meterfix: applied " + std::string(mname) + " " + std::to_string(i) + " saves " +
                                             std::to_string(save));
                     notify(st, "Applied " + copy.title + ": Ctrl+Z undoes it", false);
+                } else if (!error.empty()) {
+                    scriptLine(nullptr, "meterfix: failed " + std::string(mname) + " " + std::to_string(i) + " " + error);
+                    notify(st, copy.title + ": " + error, true);
                 }
-            } else if (hit && !fx.objects.empty()) {
+            } else if ((hit || selectHit) && !fx.objects.empty()) {
                 doc.select(fx.objects[0]);
                 scriptLine(nullptr, "meterfix: selected " + fx.mesh);
             }

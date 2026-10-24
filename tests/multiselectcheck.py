@@ -9,7 +9,9 @@
 # Scene view: the move gizmo sits at the centre of the selection
 # (vp.selcentre) and dragging its Y arrow moves all of them by the same
 # delta, one undo step. Scale lock with two selected: each object keeps its
-# own proportions, typed and through the gizmo's centre handle.
+# own proportions, typed and through the gizmo's centre handle. Delete,
+# Ctrl+D and Ctrl+C/Ctrl+V act on the whole selection, each one undo step:
+# the copies become the selection, and undoing a delete restores it.
 # usage: python3 multiselectcheck.py <splashedit> [keep-dir]   (needs a display: xvfb-run -a)
 # keep-dir, when given, receives inspector-mixed.png and gizmo-centre.png.
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
@@ -82,6 +84,8 @@ def project_copy():
 W = lambda n: ['--wait', str(n)]
 mid = None  # with SAVE_MID in the script: the lamps as saved at that point
 mid_rot = None  # and their rotations
+mid_names = None  # and the top-level object names
+saved_names = None  # the top-level object names as saved at the end
 
 
 def lamps(s):
@@ -100,7 +104,7 @@ def run(name, args, save=True, select='LampA'):
     """A fresh copy with `select` selected, then `args` (and Ctrl+S); returns
     the saved lamps, the output lines, the named controls' rects and the
     screenshot."""
-    global mid, mid_rot
+    global mid, mid_rot, mid_names, saved_names
     project = project_copy()
     scene = os.path.join(project, 'courtyard.scene')
     snap = os.path.join(os.path.dirname(project), 'mid.scene')
@@ -110,6 +114,8 @@ def run(name, args, save=True, select='LampA'):
         (['--key', 'ctrl+s'] + W(10) if save else []) + ['--screenshot', shot]
     r = subprocess.run(cmd, capture_output=True, text=True, env=ENV, timeout=240)
     mid = lamps(json.load(open(snap, encoding='utf-8'))) if os.path.exists(snap) else None
+    mid_names = [o['name'] for o in json.load(open(snap, encoding='utf-8'))['objects']] if os.path.exists(snap) else None
+    saved_names = [o['name'] for o in json.load(open(scene, encoding='utf-8'))['objects']]
     mid_rot = {o['name']: [float(v) for v in o['transform']['rotation']] for o in json.load(open(snap, encoding='utf-8'))['objects']
                if o['name'] in LAMPS} if os.path.exists(snap) else None
     lines = (r.stdout + r.stderr).strip().splitlines()
@@ -319,6 +325,31 @@ if mid:
 else:
     check('the scale drag was saved', False, mid)
 check('one Ctrl+Z undoes the scale drag for both', s == ORIG, s)
+
+# Delete, Duplicate and Copy/Paste act on the whole selection, each one undo step.
+LAMP_ROWS = ['LampA', 'LampB', 'LampC']
+lamp_rows = lambda names: [n for n in (names or []) if n.startswith('Lamp')]
+s, lines, _, _ = run('delete', ALL3 + ['--key', 'delete'] + W(5) + SAVE_MID + UNDO)
+print('after delete:', lamp_rows(mid_names), 'after undo:', lamp_rows(saved_names))
+check('Delete with three selected removes all three', mid_names is not None and lamp_rows(mid_names) == [], mid_names)
+check('Delete leaves the other objects', mid_names is not None and 'Torch Light' in mid_names and 'Game Logic' in mid_names, mid_names)
+check('one Ctrl+Z brings all three back', s == ORIG and lamp_rows(saved_names) == LAMP_ROWS, (s, saved_names))
+check('the undo restores the three-object selection', selections(lines)[-1:] == [(3, 'LampC', LAMP_ROWS)], selections(lines)[-3:])
+
+s, lines, _, _ = run('duplicate', TWO + ['--key', 'ctrl+d'] + W(5) + SAVE_MID + UNDO)
+print('after Ctrl+D:', lamp_rows(mid_names), 'selections:', selections(lines)[-3:])
+check('Ctrl+D with two selected makes two copies, each after its original',
+      lamp_rows(mid_names) == ['LampA', 'LampA (2)', 'LampB', 'LampB (2)', 'LampC'], mid_names)
+check('the copies are the selection, the primary\'s copy primary',
+      (2, 'LampB (2)', ['LampA (2)', 'LampB (2)']) in selections(lines), selections(lines)[-3:])
+check('one Ctrl+Z removes both copies', s == ORIG and lamp_rows(saved_names) == LAMP_ROWS, saved_names)
+
+s, lines, _, _ = run('copypaste', TWO + ['--key', 'ctrl+c'] + W(3) + ['--key', 'ctrl+v'] + W(5) + SAVE_MID + UNDO)
+print('after copy+paste:', lamp_rows(mid_names), 'selections:', selections(lines)[-3:])
+check('Copy + Paste with two selected pastes both after the primary',
+      lamp_rows(mid_names) == ['LampA', 'LampB', 'LampA (2)', 'LampB (2)', 'LampC'], mid_names)
+check('the pasted pair is the selection', (2, 'LampB (2)', ['LampA (2)', 'LampB (2)']) in selections(lines), selections(lines)[-3:])
+check('one Ctrl+Z removes both pasted', s == ORIG and lamp_rows(saved_names) == LAMP_ROWS, saved_names)
 
 print('FAILS=%d' % fails)
 sys.exit(1 if fails else 0)

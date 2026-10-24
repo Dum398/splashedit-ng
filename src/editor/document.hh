@@ -199,11 +199,26 @@ public:
     // copyObject, then removes the object as one undo step. Empty, with no
     // change, when there is no such object.
     std::string cutObject(const ObjectPath& path);
+    // The same over several objects (a multi-selection, #263), each as one
+    // undo step. An object inside another of `paths` goes with it and is
+    // left out itself; objects the single-object command refuses are
+    // skipped. Removing restores the selection on undo; duplicating selects
+    // the copies (the primary's copy primary). copyObjects writes them in
+    // tree order; cutObjects copies the ones it can remove, then removes them.
+    // Each returns what removeObject etc. return for the whole set: how many
+    // were removed, the copies' paths, the text.
+    // topLevel(): `paths` without the ones inside another, in tree order.
+    std::vector<ObjectPath> topLevel(const std::vector<ObjectPath>& paths) const;
+    int removeObjects(const std::vector<ObjectPath>& paths);
+    std::vector<ObjectPath> duplicateObjects(const std::vector<ObjectPath>& paths);
+    std::string copyObjects(const std::vector<ObjectPath>& paths) const;
+    std::string cutObjects(const std::vector<ObjectPath>& paths);
     // Inserts the objects in clipboard `text` right after `after` as its
     // siblings, or at the end of the top level when `after` is unset or gone,
     // as one undo step. A name already taken among the new siblings is
     // numbered the way duplicateObject numbers it. Selects the last pasted
-    // object and returns its path; nullopt, with no change, for text that is
+    // object (with several pasted, all of them, the last primary, and undo
+    // restores the selection before) and returns its path; nullopt, with no change, for text that is
     // not ours. So a copy does not land on top of what it was copied from,
     // the pasted objects move together along X by `step`, as many steps as
     // it takes for none of them to sit where a new sibling copied from the
@@ -275,6 +290,10 @@ public:
     // Applies `cmd` and pushes it, dropping anything that could be redone.
     // With `mergeable`, it may fold into the previous command (see Command::merge).
     void execute(std::unique_ptr<Command> cmd, bool mergeable = false);
+    // Every command executed between beginBatch() and endBatch() is applied
+    // as it comes and undoes as one step (none when nothing ran). Not nested.
+    void beginBatch();
+    void endBatch();
 
     bool canUndo() const { return m_cursor > 0; }
     bool canRedo() const { return m_cursor < m_history.size(); }
@@ -378,6 +397,13 @@ private:
     size_t m_cursor = 0;       // commands [0, m_cursor) are applied
     size_t m_savedCursor = 0;  // m_cursor at the last load or save; kNever once unreachable
     bool m_mergeOpen = false;
+    std::optional<std::vector<std::unique_ptr<Command>>> m_batch;  // open batch (beginBatch)
+    // Pushes `cmd`, already applied, onto the history.
+    void record(std::unique_ptr<Command> cmd, bool mergeable);
+    // At the front of a batch: undo puts the current selection back; at its
+    // end: do and redo select `primary` and `more`.
+    void batchRestoreSelection();
+    void batchSetSelection(std::optional<ObjectPath> primary, std::vector<ObjectPath> more);
     static constexpr size_t kNever = static_cast<size_t>(-1);
 
     std::vector<std::string> m_prefabErrors;

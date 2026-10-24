@@ -1368,20 +1368,46 @@ static void refreshLuaDefinitions(const editor::Document& doc) {
 
 // Copy, Cut and Paste of objects through the system clipboard, as the text
 // Document::copyObject writes. Menu, row menu and shortcuts share these.
+// A command on `path` acts on the whole selection when `path` is one of
+// several selected objects (#263), else on `path` alone.
+static std::vector<editor::ObjectPath> commandTargets(const editor::Document& doc, const editor::ObjectPath& path) {
+    if (doc.selectionCount() > 1 && doc.isSelected(path)) return doc.selectedPaths();
+    return {path};
+}
+
+static void deleteObjects(editor::Document& doc, const editor::ObjectPath& path) {
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    if (t.size() > 1) doc.removeObjects(t);
+    else doc.removeObject(path);
+}
+
+static void duplicateObjects(editor::Document& doc, const editor::ObjectPath& path) {
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    if (t.size() > 1) doc.duplicateObjects(t);
+    else doc.duplicateObject(path);
+}
+
 static void copySelection(State& st, editor::Document& doc, const editor::ObjectPath& path) {
-    const std::string text = doc.copyObject(path);
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    const std::string text = t.size() > 1 ? doc.copyObjects(t) : doc.copyObject(path);
     if (!text.empty() && !SDL_SetClipboardText(text.c_str())) notify(st, std::string("Cannot copy: ") + SDL_GetError(), true);
 }
 
 static void cutSelection(State& st, editor::Document& doc, const editor::ObjectPath& path) {
-    const std::string text = doc.copyObject(path);
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    // Several: the ones that can be removed (prefab content cannot).
+    std::vector<editor::ObjectPath> go;
+    for (const editor::ObjectPath& p : t)
+        if (!doc.inInstance(p)) go.push_back(p);
+    const std::string text = t.size() > 1 ? doc.copyObjects(go) : doc.copyObject(path);
     if (text.empty()) return;
     // Only removed once the clipboard holds it, so a failed copy loses nothing.
     if (!SDL_SetClipboardText(text.c_str())) {
         notify(st, std::string("Cannot cut: ") + SDL_GetError(), true);
         return;
     }
-    doc.cutObject(path);
+    if (t.size() > 1) doc.cutObjects(go);
+    else doc.cutObject(path);
 }
 
 // Pastes right after `after`, or at the end of the top level when unset.
@@ -2792,11 +2818,11 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc] { st.canvasView.paste(doc, false); }));
                 m.push_back(item("Delete", "Del", hasEl, [&st, &doc] { st.canvasView.remove(doc); }));
             } else {
-                m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
+                m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { duplicateObjects(doc, *sel); }));
                 m.push_back(item("Cut", "Ctrl+X", hasSel, [&st, &doc, sel] { cutSelection(st, doc, *sel); }));
                 m.push_back(item("Copy", "Ctrl+C", hasSel, [&st, &doc, sel] { copySelection(st, doc, *sel); }));
                 m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, sel] { pasteClipboard(st, doc, sel); }));
-                m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
+                m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { deleteObjects(doc, *sel); }));
             }
             m.push_back(separator());
             m.push_back(item("Select None", "", hasSel, [&] { doc.select(std::nullopt); }));
@@ -3405,11 +3431,11 @@ static std::vector<MenuEntry> treeMenuEntries(int kind, State& st, editor::Docum
             st.renameStart = true;
             st.renamePath = p;
         }));
-        m.push_back(item("Duplicate", "Ctrl+D", !part && !root, [&doc, p] { doc.duplicateObject(p); }));
+        m.push_back(item("Duplicate", "Ctrl+D", !part && !root, [&doc, p] { duplicateObjects(doc, p); }));
         m.push_back(item("Cut", "Ctrl+X", !part && !root, [&st, &doc, p] { cutSelection(st, doc, p); }));
         m.push_back(item("Copy", "Ctrl+C", true, [&st, &doc, p] { copySelection(st, doc, p); }));
         m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, p] { pasteClipboard(st, doc, p); }));
-        m.push_back(item("Delete", "Del", !part && !root, [&doc, p] { doc.removeObject(p); }));
+        m.push_back(item("Delete", "Del", !part && !root, [&doc, p] { deleteObjects(doc, p); }));
         m.push_back(separator());
         // A prefab: a file in prefabs/ that holds the object and its children, placed again from the Project panel.
         if (instance && !part) {
@@ -13230,8 +13256,8 @@ static void shortcuts(State& st, editor::Document& doc) {
     const bool assetKeys = st.assets.focused() && projectInFront(st);
     if (uiTab && !assetKeys && !ctrl && pressed(ImGuiKey_F2)) st.canvasView.rename(doc);
     if (const std::optional<editor::ObjectPath> sel = (uiTab || assetKeys) ? std::nullopt : doc.selection()) {
-        if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
-        if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
+        if (!ctrl && pressed(ImGuiKey_Delete)) deleteObjects(doc, *sel);
+        if (ctrl && !shift && pressed(ImGuiKey_D)) duplicateObjects(doc, *sel);
         if (ctrl && !shift && pressed(ImGuiKey_C)) copySelection(st, doc, *sel);
         if (ctrl && !shift && pressed(ImGuiKey_X)) cutSelection(st, doc, *sel);
         if (!ctrl && pressed(ImGuiKey_F2)) {

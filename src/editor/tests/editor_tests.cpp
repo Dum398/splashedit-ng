@@ -7765,6 +7765,54 @@ void testMultiSelection() {
     CHECK(d.selectionCount() == 0);
 }
 
+// Delete, duplicate, copy, cut and paste over a multi-selection (#263): one undo step each.
+void testMultiObjectCommands() {
+    editor::Document d;
+    d.reset(sample());  // A, B (B1), C
+    const size_t hist = d.historySize();
+    // B1 is inside B: it goes with B and is not counted on its own.
+    CHECK(d.topLevel({{2}, {1, 0}, {0}, {1}, {9}}) == std::vector<editor::ObjectPath>({{0}, {1}, {2}}));
+    d.selectMany(editor::ObjectPath{2}, {{0}, {1, 0}});
+    CHECK(d.removeObjects(d.selectedPaths()) == 3);
+    CHECK(d.scene().objects.size() == 1 && d.object({0})->name == "B" && d.object({0})->children.empty());
+    CHECK(d.selectionCount() == 0 && d.historySize() == hist + 1);
+    CHECK(d.undo());  // one step: all back, with the selection
+    CHECK(d.scene().objects.size() == 3 && d.object({1, 0}) && d.object({1, 0})->name == "B1");
+    CHECK(d.selection() == editor::ObjectPath({2}) && d.moreSelected() == std::vector<editor::ObjectPath>({{0}, {1, 0}}));
+    CHECK(d.redo() && d.scene().objects.size() == 1 && d.selectionCount() == 0);
+    CHECK(d.undo());
+
+    // Duplicate A and C: copies right after each, selected, C's copy primary.
+    d.selectMany(editor::ObjectPath{2}, {{0}});
+    const size_t h2 = d.historySize();
+    std::vector<editor::ObjectPath> copies = d.duplicateObjects(d.selectedPaths());
+    CHECK(d.historySize() == h2);  // one step, in place of the undone one
+    CHECK(copies == std::vector<editor::ObjectPath>({{1}, {4}}));
+    CHECK(d.scene().objects.size() == 5 && d.object({1})->name == "A (2)" && d.object({4})->name == "C (2)");
+    CHECK(d.selection() == editor::ObjectPath({4}) && d.moreSelected() == std::vector<editor::ObjectPath>({{1}}));
+    CHECK(d.undo() && d.scene().objects.size() == 3);
+    CHECK(d.selection() == editor::ObjectPath({2}) && d.moreSelected() == std::vector<editor::ObjectPath>({{0}}));
+    CHECK(d.redo() && d.selection() == editor::ObjectPath({4}) && d.selectionCount() == 2);
+    CHECK(d.undo());
+
+    // Copy two, paste after C: both pasted, both selected, one step.
+    const std::string text = d.copyObjects({{2}, {0}});
+    CHECK(!text.empty());
+    d.select(editor::ObjectPath{2});
+    const size_t h3 = d.historySize();
+    std::optional<editor::ObjectPath> last = d.pasteObjects(text, editor::ObjectPath{2});
+    CHECK(last == editor::ObjectPath({4}) && d.historySize() == h3);
+    CHECK(d.object({3})->name == "A (2)" && d.object({4})->name == "C (2)");
+    CHECK(d.selection() == editor::ObjectPath({4}) && d.moreSelected() == std::vector<editor::ObjectPath>({{3}}));
+    CHECK(d.undo() && d.scene().objects.size() == 3 && d.selection() == editor::ObjectPath({2}) && d.selectionCount() == 1);
+
+    // Cut two: gone in one step, the text pastes them back.
+    const size_t h4 = d.historySize();
+    const std::string cut = d.cutObjects({{0}, {2}});
+    CHECK(!cut.empty() && d.scene().objects.size() == 1 && d.historySize() == h4);
+    CHECK(d.pasteObjects(cut, editor::ObjectPath{0}) && d.scene().objects.size() == 3 && d.selectionCount() == 2);
+}
+
 // Copy, cut and paste of objects as clipboard text.
 void testClipboard() {
     editor::Document d;
@@ -16037,6 +16085,7 @@ int main(int argc, char** argv) {
     testRoomRename();
     testEditMany();
     testMultiSelection();
+    testMultiObjectCommands();
     testTimelineSample();
     testTimelineEdit();
     testTimelinePreview();

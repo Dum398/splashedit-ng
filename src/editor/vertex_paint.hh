@@ -21,7 +21,7 @@ inline constexpr const char* kPaintStrokeKey = "paint.stroke";
 
 struct PaintBrush {
     Rgb color{255, 255, 255};
-    float radius = 0.5f;    // metres, world space
+    float radius = 1.0f;    // metres, world space
     float strength = 1.0f;  // 0..1: how far a stroke takes a vertex at the centre towards the colour
     float falloff = 0.5f;   // 0: hard edge; 1: fades smoothly from the centre to the rim
 };
@@ -49,7 +49,8 @@ std::vector<Rgb> currentPaint(const Document& doc, const ObjectPath& path);
 struct PaintHit {
     ObjectPath path;
     splash::Vec3 world;
-    Rgb color;  // the current colours interpolated across the triangle hit
+    splash::Vec3 normal;  // of the triangle hit, unit length, world space (for the brush circle)
+    Rgb color;            // the current colours interpolated across the triangle hit
 };
 std::optional<PaintHit> paintHit(const Document& doc, const std::vector<ObjectPath>& paths, splash::Vec3 origin, splash::Vec3 dir);
 

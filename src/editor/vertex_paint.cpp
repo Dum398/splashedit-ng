@@ -136,7 +136,7 @@ std::optional<PaintHit> paintHit(const Document& doc, const std::vector<ObjectPa
                     std::lround(wa * cols[size_t(hitTri[0])][size_t(ch)] + wb * cols[size_t(hitTri[1])][size_t(ch)] +
                                 wc * cols[size_t(hitTri[2])][size_t(ch)]),
                     0l, 255l));
-        best = PaintHit{path, p, col};
+        best = PaintHit{path, p, splash::normalized(splash::cross(v0, v1)), col};
         bestT = hitT;
     }
     return best;

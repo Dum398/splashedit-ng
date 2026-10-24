@@ -8991,10 +8991,14 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         const ImRect lr(ImVec2(lx - 22, ly - 11), ImVec2(lx, ly + 11));
         nameRect("obj.scllock", lr);
         // Saved with Play's tools, like the Game view's toggles.
+        // Tab goes from Rotation Z straight to Scale X past it (#158).
         bool& on = st.play.tools.scaleLock;
-        if (iconButton("scllock", lr, on ? icon::lock : icon::link, on,
-                       on ? "Scale locked: editing one axis scales all three by the same factor"
-                          : "Lock the scale's proportions: editing one axis scales all three by the same factor")) {
+        ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
+        const bool flip = iconButton("scllock", lr, on ? icon::lock : icon::link, on,
+                                     on ? "Scale locked: editing one axis scales all three by the same factor"
+                                        : "Lock the scale's proportions: editing one axis scales all three by the same factor");
+        ImGui::PopItemFlag();
+        if (flip) {
             on = !on;
             st.scaleLockFrom.reset();
             if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);

@@ -94,7 +94,10 @@ def run(name, args, save=True):
     for l in lines:
         m = re.match(r'control (\S+) at (-?\d+),(-?\d+) (-?\d+),(-?\d+)$', l)
         if m: rects[m.group(1)] = tuple(int(v) for v in m.groups()[1:])
-    return box_scale(json.load(open(scene, encoding='utf-8'))), rects, shot
+    saved = json.load(open(scene, encoding='utf-8'))
+    global last_rotation
+    last_rotation = next((o['transform']['rotation'] for o in saved['objects'] if o['name'] == 'Box'), None)
+    return box_scale(saved), rects, shot
 
 
 def box_scale(s):
@@ -102,6 +105,9 @@ def box_scale(s):
         if o['name'] == 'Box':
             return [round(float(v), 4) for v in o['transform']['scale']]
     return None
+
+
+last_rotation = None  # Box's saved rotation from the last run
 
 
 def near(a, b, eps=1e-3):
@@ -143,6 +149,11 @@ check('lock on: one Ctrl+Z undoes the whole scrub', near(s, START), s)
 # The lock off again: back to one axis.
 s, _, _ = run('relocked', LOCK + LOCK + typed('obj.scl.x', '2'))
 check('lock clicked twice: off again, X alone', near(s, [2, 2, 1]), s)
+# The lock is no Tab stop: Shift+Tab from Scale X types into Rotation Z (#158).
+s, _, _ = run('tab', LOCK + ['--dblclick', '@obj.scl.x'] + W(3) + ['--key', 'ctrl+a', '--text', '1', '--key', 'shift+tab'] + W(3) +
+          ['--key', 'ctrl+a', '--text', '30', '--key', 'enter'] + W(3))
+check('Shift+Tab from Scale X goes past the lock to Rotation Z',
+      near(s, START) and last_rotation is not None and abs(float(last_rotation[2])) > 0.2, (s, last_rotation))
 # The lock is saved with Play's tools (play.cfg) and read back next time.
 cfg = os.path.join(tempfile.mkdtemp(), 'play.cfg')
 run('lockpersist', ['--play-settings', cfg] + LOCK, save=False)

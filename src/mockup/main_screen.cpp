@@ -1072,6 +1072,11 @@ struct TreeCtx {
     int dropIndex = 0;
     bool dropInto = false;
     ImRect dropMark{};
+    // Every object row in the order drawn (collapsed and filtered rows left
+    // out): what a Shift+click selects a range of (#263).
+    std::vector<editor::ObjectPath> order{};
+    // A Shift+click this frame, resolved once every row is in `order`.
+    std::optional<editor::ObjectPath> rangeTo{};
 };
 
 static std::string lower(std::string s) {
@@ -1160,7 +1165,8 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         row.meta = meta.empty() ? nullptr : meta.c_str();
         row.hasChildren = !o.children.empty();
         row.expanded = open;
-        row.selected = c.doc.selection() && *c.doc.selection() == path;
+        row.selected = c.doc.isSelected(path);
+        c.order.push_back(path);
         row.warning = c.doc.hasWarning(o);
         row.hidden = !o.active;
         row.inheritedOff = ancestorOff;
@@ -1174,7 +1180,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
                                ". Open the prefab to change it (Inspector > Prefab > Open).").c_str());
         nameRect("tree." + o.name, rr);
         ++c.shown;
-        if (row.selected) c.selTop = rr.Min.y - c.contentTop;
+        if (c.doc.selection() && *c.doc.selection() == path) c.selTop = rr.Min.y - c.contentTop;
         if (rr.Overlaps(c.list)) {
             // Only its visible part takes a dropped file.
             ImRect shown = rr;
@@ -1189,18 +1195,38 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             if (row.hasChildren && chevronClicked(rr, row.depth)) {
                 if (c.filter.empty()) c.doc.toggleExpanded(path);
             } else {
-                c.doc.select(path);
+                // Ctrl+click adds or takes away one row, Shift+click selects
+                // the rows from the anchor (the last plain or Ctrl click) to
+                // this one; a plain click selects this one alone (#263).
+                const ImGuiIO& io = ImGui::GetIO();
+                if (io.KeyShift && !io.KeyCtrl) {
+                    c.rangeTo = path;
+                } else if (io.KeyCtrl) {
+                    c.doc.toggleSelected(path);
+                    c.st.treeAnchor = path;
+                } else {
+                    c.doc.select(path);
+                    c.st.treeAnchor = path;
+                }
                 c.selectedHere = true;
             }
         }
-        if (!c.st.treeDragging && h.hovered && ImGui::IsMouseDoubleClicked(0) && !(row.hasChildren && chevronClicked(rr, row.depth))) {
+        const bool modifiers = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift;
+        if (!c.st.treeDragging && !modifiers && h.hovered && ImGui::IsMouseDoubleClicked(0) &&
+            !(row.hasChildren && chevronClicked(rr, row.depth))) {
             c.doc.select(path);
             c.selectedHere = true;
             c.st.frameRequest = true;
         }
-        // Right-click: select it and open its menu.
+        // Right-click: select it and open its menu. A right-click on a row of
+        // a multi-selection keeps the selection and makes that row primary.
         if (!c.st.treeDragging && h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-            c.doc.select(path);
+            if (c.doc.selectionCount() > 1 && c.doc.isSelected(path)) {
+                std::vector<editor::ObjectPath> rest = c.doc.selectedPaths();
+                c.doc.selectMany(path, rest);
+            } else {
+                c.doc.select(path);
+            }
             c.selectedHere = true;
             c.st.treeMenu = 1;
             c.st.treeMenuPath = path;
@@ -3538,6 +3564,24 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
     editor::ObjectPath path;
     if (rootOpen) treeObjects(ctx, doc.scene().objects, path);
+    if (ctx.rangeTo) {
+        // Shift+click: the rows between the anchor and the clicked one, both
+        // in, the clicked one primary. Without an anchor in view, the primary
+        // anchors it; with neither, it selects the one row.
+        const auto in = [&](const std::optional<editor::ObjectPath>& p) {
+            return p ? std::find(ctx.order.begin(), ctx.order.end(), *p) : ctx.order.end();
+        };
+        auto to = in(ctx.rangeTo), from = in(st.treeAnchor);
+        if (from == ctx.order.end()) from = in(doc.selection());
+        if (from == ctx.order.end()) {
+            doc.select(*ctx.rangeTo);
+            st.treeAnchor = ctx.rangeTo;
+        } else {
+            std::vector<editor::ObjectPath> range(std::min(from, to), std::max(from, to) + 1);
+            if (!st.treeAnchor || in(st.treeAnchor) == ctx.order.end()) st.treeAnchor = *from;
+            doc.selectMany(*ctx.rangeTo, range);
+        }
+    }
     if (st.renaming && !ctx.renameShown) st.renaming = false;  // the row is collapsed away or gone
     if (!ctx.filter.empty() && ctx.shown == 0) {
         const char* none = "No objects match";
@@ -3866,12 +3910,51 @@ static void gizmoLabel(ImDrawList* dl, ImRect r, ImVec2 c, ImVec2 at, const char
     text(dl, ImVec2(b.Min.x + padX + ts.x + gap, b.Min.y + (h - vs.y) * 0.5f), f.medium, type::label, color::text, value);
 }
 
+// Several objects under one gizmo (#263): the items the drag started from,
+// by path, and a parent-space delta for each.
+using GizmoItems = std::vector<State::GizmoDrag::Item>;
+static const State::GizmoDrag::Item* gizmoItem(const GizmoItems& items, const editor::ObjectPath& p) {
+    for (const State::GizmoDrag::Item& it : items)
+        if (it.path == p) return &it;
+    return nullptr;
+}
+static splash::Vec3 itemDelta(const State::GizmoDrag::Item& it, splash::Vec3 worldDelta) {
+    return worldToParentDelta(it.parentToWorld ? &*it.parentToWorld : nullptr, worldDelta);
+}
+static std::vector<editor::ObjectPath> itemPaths(const GizmoItems& items) {
+    std::vector<editor::ObjectPath> v;
+    for (const State::GizmoDrag::Item& it : items) v.push_back(it.path);
+    return v;
+}
+// Writes each item's new transform from `fn` (given the item and the
+// object's transform to set) as one merging edit `key`, when any changed.
+static void editItems(editor::Document& doc, const GizmoItems& items, const std::string& key,
+                      const std::function<void(const State::GizmoDrag::Item&, splash::Transform&)>& fn) {
+    bool changed = false;
+    for (const State::GizmoDrag::Item& it : items) {
+        const splash::Object* o = doc.object(it.path);
+        if (!o) continue;
+        splash::Transform t = o->transform;
+        fn(it, t);
+        const splash::Transform& c = o->transform;
+        if (!(t.position == c.position) || !(t.scale == c.scale) || t.rotation.x != c.rotation.x || t.rotation.y != c.rotation.y ||
+            t.rotation.z != c.rotation.z || t.rotation.w != c.rotation.w)
+            changed = true;
+    }
+    if (!changed) return;
+    doc.editEach(itemPaths(items), [&](const editor::ObjectPath& p, splash::Object& ob) {
+        if (const State::GizmoDrag::Item* it = gizmoItem(items, p)) fn(*it, ob.transform);
+    }, key);
+}
+
 // The move gizmo: three world-axis arrows and an XZ plane handle, a fixed
 // size on screen. Dragging an arrow moves along it by the mouse motion
 // projected onto the arrow; dragging the plane follows the mouse across the
 // horizontal plane through the object. One drag is one undo step.
+// With `group` (several objects selected), `fo` sits at their centre and
+// every item moves by the same world delta.
 static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
-                      const splash::Mat34* parentToWorld) {
+                      const splash::Mat34* parentToWorld, const GizmoItems* group = nullptr) {
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = ImGui::GetIO();
     const ImGuiID gid = ImGui::GetID("##gizmo");
@@ -3930,6 +4013,7 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
             drag.startMouse = io.MousePos;
             drag.startWorld = wpos;
             drag.startLocal = fo.object->transform.position;
+            drag.group = group ? *group : GizmoItems();
             bool ok = true;
             if (hover < 3) {
                 ImVec2 d = tips[hover] - c;
@@ -3968,9 +4052,16 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
                 for (int i = 0; i < 3; ++i)
                     if (drag.handle == i || (drag.handle == 3 && i != 1)) component(nw, i) = std::round(component(nw, i) / step) * step;
             }
-            splash::Vec3 local = drag.startLocal + worldToParentDelta(parentToWorld, nw - drag.startWorld);
-            if (moved && doc.selection() && !(local == fo.object->transform.position))
-                doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.position = local; }, "gizmo.move");
+            if (!drag.group.empty()) {
+                const splash::Vec3 d = nw - drag.startWorld;
+                if (moved)
+                    editItems(doc, drag.group, "gizmo.move",
+                              [&](const State::GizmoDrag::Item& it, splash::Transform& t) { t.position = it.local.position + itemDelta(it, d); });
+            } else {
+                splash::Vec3 local = drag.startLocal + worldToParentDelta(parentToWorld, nw - drag.startWorld);
+                if (moved && doc.selection() && !(local == fo.object->transform.position))
+                    doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.position = local; }, "gizmo.move");
+            }
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
         } else {
             doc.endMerge();
@@ -4020,8 +4111,10 @@ static splash::Vec3 eyeUnity(const viewport::Ps1View& view) {
 // gizmo's screen size. Dragging a ring turns the object about that axis by
 // the mouse's angle around the gizmo's centre on screen; snapping rounds the
 // turn to 15 degrees. One drag is one undo step.
+// With `group`, every item turns about the world axis through the centre
+// `fo` sits at: its rotation turns and its origin swings round the centre.
 static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
-                        const splash::Mat34* parentToWorld) {
+                        const splash::Mat34* parentToWorld, const GizmoItems* group = nullptr) {
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = ImGui::GetIO();
     const ImGuiID gid = ImGui::GetID("##gizmo");
@@ -4072,6 +4165,12 @@ static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRe
             // A world axis seen from the parent's space, so the turn is about the world axis.
             splash::Vec3 pa = worldToParentDelta(parentToWorld, kAxis[hover]);
             drag.parentAxis = splash::sqrMagnitude(pa) > 1e-12f ? splash::normalized(pa) : kAxis[hover];
+            drag.startWorld = gf.wpos;
+            drag.group = group ? *group : GizmoItems();
+            for (State::GizmoDrag::Item& it : drag.group) {
+                splash::Vec3 ia = itemDelta(it, kAxis[hover]);
+                it.parentAxis = splash::sqrMagnitude(ia) > 1e-12f ? splash::normalized(ia) : kAxis[hover];
+            }
             float a = 2 * editor::kPi * (hoverSeg + 0.5f) / kSeg;
             drag.ringStart = kRingU[hover] * std::cos(a) + kRingV[hover] * std::sin(a);
             drag.lastAngle = editor::screenAngle(gf.c.x, gf.c.y, io.MousePos.x, io.MousePos.y);
@@ -4104,12 +4203,24 @@ static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRe
             }
             float deg = editor::rotateDragDegrees(drag.accum * drag.sign, st.snap || io.KeyCtrl);
             drag.shown = deg;
+            if (!drag.group.empty()) {
+                const float rad = deg * (editor::kPi / 180.0f);
+                const splash::Quat turn = editor::quatAxisAngle(kAxis[drag.handle], rad);
+                editItems(doc, drag.group, "gizmo.rotate", [&](const State::GizmoDrag::Item& it, splash::Transform& t) {
+                    t.rotation = it.local.rotation;
+                    t.position = it.local.position;
+                    if (deg == 0) return;
+                    t.rotation = editor::quatNormalize(editor::quatMul(editor::quatAxisAngle(it.parentAxis, rad), it.local.rotation));
+                    const splash::Vec3 w = drag.startWorld + splash::rotate(turn, it.world - drag.startWorld);
+                    t.position = it.local.position + itemDelta(it, w - it.world);
+                });
+            }
             splash::Quat q = drag.startRot;
             if (deg != 0)
                 q = editor::quatNormalize(editor::quatMul(editor::quatAxisAngle(drag.parentAxis, deg * (editor::kPi / 180.0f)), drag.startRot));
             const splash::Quat& cur = fo.object->transform.rotation;
             bool same = q.x == cur.x && q.y == cur.y && q.z == cur.z && q.w == cur.w;
-            if (doc.selection() && !same)
+            if (drag.group.empty() && doc.selection() && !same)
                 doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.rotation = q; }, "gizmo.rotate");
         } else {
             doc.endMerge();
@@ -4228,7 +4339,13 @@ static void gizmoCube(ImDrawList* dl, const viewport::Ps1View& view, ImRect r, s
 // handle by its own screen length doubles that axis; the centre scales by
 // the drag up and to the right, a square by the drag out through it. Snapping rounds to 0.1, and no component
 // ever reaches zero or changes sign. One drag is one undo step.
-static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo) {
+// With `group`, the handles lie along the primary object's axes at the
+// centre `fo` sits at. Each item's own scale changes as the primary's would
+// from its own start (so each keeps its own proportions under the plane and
+// centre handles), and its origin moves away from or toward the centre
+// along the handle's axes by the primary's factor.
+static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
+                       const GizmoItems* group = nullptr) {
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = ImGui::GetIO();
     const ImGuiID gid = ImGui::GetID("##gizmo");
@@ -4341,6 +4458,8 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
             drag.tool = 3;
             drag.startMouse = io.MousePos;
             drag.startScale = cur;
+            drag.startWorld = gf.wpos;
+            drag.group = group ? *group : GizmoItems();
             drag.axisDir = hover < 3 ? dirS[hover] : ImVec2(0.70710678f, -0.70710678f);
             drag.handlePx = hover < 3 ? tipPx[hover] : 76.0f;
             if (hover >= 4) {
@@ -4382,8 +4501,32 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
                         break;
                     }
             }
-            if (doc.selection() && !(ns == cur))
+            if (!drag.group.empty()) {
+                // The primary's factor per gizmo axis, for the origins.
+                float pf[3];
+                for (int i = 0; i < 3; ++i) pf[i] = std::fabs(drag.startScale[i]) > 1e-6f ? ns[i] / drag.startScale[i] : 1.0f;
+                const int h = drag.handle;
+                editItems(doc, drag.group, "gizmo.scale", [&](const State::GizmoDrag::Item& it, splash::Transform& t) {
+                    const splash::Vec3 s0 = it.local.scale;
+                    if (h < 3) {
+                        t.scale = s0;
+                        component(t.scale, h) = editor::scaleAxis(s0[h], factor, snap);
+                    } else if (h >= 4) {
+                        t.scale = editor::scalePlane(s0, (h - 4 + 1) % 3, (h - 4 + 2) % 3, factor, snap);
+                    } else {
+                        t.scale = editor::scaleUniform(s0, factor, snap);
+                    }
+                    const splash::Vec3 off = it.world - drag.startWorld;
+                    splash::Vec3 w = drag.startWorld + off;
+                    for (int i = 0; i < 3; ++i) {
+                        const bool on = h == 3 || h == i || (h >= 4 && i != h - 4);
+                        if (on) w = w + dirs[i] * ((pf[i] - 1) * splash::dot(off, dirs[i]));
+                    }
+                    t.position = it.local.position + itemDelta(it, w - it.world);
+                });
+            } else if (doc.selection() && !(ns == cur)) {
                 doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.scale = ns; }, "gizmo.scale");
+            }
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
         } else {
             doc.endMerge();
@@ -4489,6 +4632,24 @@ static void selectedBoxGl(const editor::Document& doc, const splash::FlatObject&
 // GL-space bounds of the selection, or of the whole scene with nothing selected.
 static bool frameBounds(const editor::Document& doc, const viewport::Ps1View& view, const std::vector<splash::FlatObject>& flats,
                         viewport::Vec3* lo, viewport::Vec3* hi) {
+    // Several selected: the box around all of them (#263).
+    if (doc.selectionCount() > 1) {
+        bool any = false;
+        for (const editor::ObjectPath& p : doc.selectedPaths()) {
+            const splash::Object* ob = doc.object(p);
+            for (const splash::FlatObject& fo : flats)
+                if (ob && fo.object == ob) {
+                    viewport::Vec3 a, b;
+                    selectedBoxGl(doc, fo, &a, &b);
+                    if (!any) *lo = a, *hi = b;
+                    *lo = {std::min(lo->x, a.x), std::min(lo->y, a.y), std::min(lo->z, a.z)};
+                    *hi = {std::max(hi->x, b.x), std::max(hi->y, b.y), std::max(hi->z, b.z)};
+                    any = true;
+                    break;
+                }
+        }
+        if (any) return true;
+    }
     if (const splash::Object* sel = doc.selected())
         for (const splash::FlatObject& fo : flats)
             if (fo.object == sel) {
@@ -4644,8 +4805,16 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
             if (mode == Select && !st.vpDragged && r.Contains(io.MousePos)) {
                 std::optional<int> hit = view.pick(io.MousePos, r.Min, r.GetSize());
                 std::vector<editor::ObjectPath> paths = doc.flatPaths();
-                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) doc.select(pickTarget(doc, paths[(size_t)*hit]));
-                else doc.select(std::nullopt);
+                // Ctrl or Shift+click adds the object to the selection or takes
+                // it away, and leaves the selection alone on empty space (#263).
+                const bool add = io.KeyCtrl || io.KeyShift;
+                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) {
+                    const editor::ObjectPath p = pickTarget(doc, paths[(size_t)*hit]);
+                    if (add) doc.toggleSelected(p);
+                    else doc.select(p);
+                } else if (!add) {
+                    doc.select(std::nullopt);
+                }
             }
             ImGui::ClearActiveID();
             st.vpButton = -1;
@@ -5786,6 +5955,22 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     }
 
     // Selection outline and the tool's gizmo follow the selected object.
+    // The rest of a multi-selection is outlined too, a little fainter (#263).
+    const std::vector<editor::ObjectPath> selPaths = doc.selectedPaths();
+    const bool multi = selPaths.size() > 1;
+    if (multi) {
+        dl->ChannelsSetCurrent(kScene);
+        for (const editor::ObjectPath& p : doc.moreSelected()) {
+            const splash::Object* ob = doc.object(p);
+            for (size_t si = 0; ob && si < flats.size(); ++si)
+                if (flats[si].object == ob) {
+                    viewport::Vec3 lo, hi;
+                    selectedBoxGl(doc, si < shown.size() ? shown[si] : flats[si], &lo, &hi);
+                    selectionOutline(dl, view, mn, sz, lo, hi, rgb(0xb3a8ff, 170), 1.2f);
+                    break;
+                }
+        }
+    }
     if (sel) {
         for (size_t si = 0; si < flats.size(); ++si)
             if (const splash::FlatObject& fo = flats[si]; fo.object == sel) {
@@ -5814,7 +5999,58 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 }
                 // Content of a prefab instance does not move here: no handles.
                 const bool sculpting = fo.object->terrain && st.terrainTool >= 0;
-                if (!posed && !sculpting && st.tool >= 1 && st.tool <= 3 && !doc.inInstance(*doc.selection())) {
+                if (multi) {
+                    // Several objects (#263): one gizmo at the centre of their
+                    // origins moves them all. An object under another selected
+                    // one moves with it, and prefab content does not move; an
+                    // object the preview poses takes the gizmo away.
+                    GizmoItems items;
+                    bool anyPosed = posed;
+                    splash::Vec3 centre{};
+                    for (const editor::ObjectPath& p : selPaths) {
+                        bool under = false;
+                        for (const editor::ObjectPath& q : selPaths)
+                            if (q.size() < p.size() && std::equal(q.begin(), q.end(), p.begin())) under = true;
+                        if (under || doc.inInstance(p)) continue;
+                        const splash::Object* ob = doc.object(p);
+                        const splash::Object* par = doc.parent(p);
+                        State::GizmoDrag::Item it;
+                        it.path = p;
+                        bool found = false;
+                        for (size_t k = 0; k < flats.size(); ++k) {
+                            if (flats[k].object == ob) {
+                                it.world = flats[k].localToWorld.position();
+                                found = true;
+                                if (previewing && k < shown.size() && !samePose(flats[k], shown[k], doc.scene().settings.gteScaling))
+                                    anyPosed = true;
+                            }
+                            if (par && flats[k].object == par) it.parentToWorld = flats[k].localToWorld;
+                        }
+                        if (!found) continue;
+                        it.local = ob->transform;
+                        centre = centre + it.world;
+                        items.push_back(std::move(it));
+                    }
+                    if (anyPosed && st.gizmo.handle >= 0) {
+                        doc.endMerge();
+                        if (GImGui->ActiveId == ImGui::GetID("##gizmo")) ImGui::ClearActiveID();
+                        st.gizmo.handle = -1;
+                    }
+                    if (!items.empty() && !anyPosed && st.tool >= 1 && st.tool <= 3) {
+                        centre = centre * (1.0f / static_cast<float>(items.size()));
+                        // The primary's frame (its axes for the scale handles), moved to the centre.
+                        splash::FlatObject at = fo;
+                        at.worldPosition = centre;
+                        at.localToWorld.m[0][3] = centre.x, at.localToWorld.m[1][3] = centre.y, at.localToWorld.m[2][3] = centre.z;
+                        if (namedRectsOn()) {
+                            ImVec2 cp;
+                            if (view.project(toGl(centre), mn, sz, &cp)) nameRect("vp.selcentre", ImRect(cp - ImVec2(3, 3), cp + ImVec2(3, 3)));
+                        }
+                        if (st.tool == 1) moveGizmo(st, dl, view, r, doc, at, nullptr, &items);
+                        if (st.tool == 2) rotateGizmo(st, dl, view, r, doc, at, nullptr, &items);
+                        if (st.tool == 3) scaleGizmo(st, dl, view, r, doc, at, &items);
+                    }
+                } else if (!posed && !sculpting && st.tool >= 1 && st.tool <= 3 && !doc.inInstance(*doc.selection())) {
                     const splash::Object* par = doc.parent(*doc.selection());
                     const splash::Mat34* parentToWorld = nullptr;
                     for (const splash::FlatObject& pf : flats)
@@ -5927,7 +6163,11 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
         if (!ic) continue;
         ImGui::PushID((int)i);
-        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name) && i < paths.size()) doc.select(pickTarget(doc, paths[i]));
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name) && i < paths.size()) {
+            const ImGuiIO& io = ImGui::GetIO();
+            if (io.KeyCtrl || io.KeyShift) doc.toggleSelected(pickTarget(doc, paths[i]));
+            else doc.select(pickTarget(doc, paths[i]));
+        }
         ImGui::PopID();
     }
     if (previewing) previewCamera(dl, view, mn, sz, view.preview());

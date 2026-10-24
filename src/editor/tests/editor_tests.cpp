@@ -58,6 +58,7 @@
 #include "editor/texture_preview.hh"
 #include "editor/strings_edit.hh"
 #include "editor/timeline.hh"
+#include "editor/tv_preview.hh"
 #include "editor/unirom.hh"
 #include "audio.hh"
 #include "blend.hh"
@@ -15782,6 +15783,102 @@ void testMeterFixes() {
     fs::remove_all(dir, ec);
 }
 
+// The Game view's TV preview (editor/tv_preview.hh): safe areas on whole
+// pixels, the frame 4:3 or square, and the S-video and composite looks.
+static void testTvPreview() {
+    namespace tv = editor::tv;
+    auto eq = [](tv::Rect r, float x0, float y0, float x1, float y1) { return r.x0 == x0 && r.y0 == y0 && r.x1 == x1 && r.y1 == y1; };
+    // Action safe 90%, title safe 80%, at a frame's own pixels.
+    CHECK(eq(tv::safeRect({0, 0, 320, 240}, tv::kActionSafe), 16, 12, 304, 228));
+    CHECK(eq(tv::safeRect({0, 0, 320, 240}, tv::kTitleSafe), 32, 24, 288, 216));
+    CHECK(eq(tv::safeRect({0, 0, 640, 480}, tv::kActionSafe), 32, 24, 608, 456));
+    CHECK(eq(tv::safeRect({0, 0, 640, 480}, tv::kTitleSafe), 64, 48, 576, 432));
+    CHECK(eq(tv::safeRect({100, 50, 420, 290}, tv::kActionSafe), 116, 62, 404, 278));
+    // In an 800x600 panel: 4:3 fills it whatever the width, square pixels keep the frame's shape.
+    const tv::Rect panel{0, 0, 800, 600};
+    CHECK(eq(tv::displayRect(panel, 256, 240, true), 0, 0, 800, 600));
+    CHECK(eq(tv::displayRect(panel, 512, 240, true), 0, 0, 800, 600));
+    CHECK(eq(tv::displayRect(panel, 256, 240, false), 80, 0, 720, 600));
+    CHECK(eq(tv::displayRect(panel, 512, 240, false), 0, 112, 800, 487));
+    CHECK(eq(tv::displayRect({10, 20, 1010, 620}, 512, 240, true), 110, 20, 910, 620));
+    CHECK(eq(tv::safeRect(tv::displayRect(panel, 512, 240, true), tv::kActionSafe), 40, 30, 760, 570));
+    CHECK(eq(tv::safeRect(tv::displayRect(panel, 512, 240, false), tv::kActionSafe), 40, 131, 760, 468));
+    // The Game view's and UI tab's toggles, saved with Play's tools.
+    {
+        const fs::path cfg = g_outDir / "tv" / "play.cfg";
+        editor::PlayTools t;
+        CHECK(!t.safeArea && t.tvAspect && t.look == 0 && !t.uiSafeArea);
+        t.safeArea = true, t.tvAspect = false, t.look = int(tv::Look::Composite), t.uiSafeArea = true;
+        const editor::PlayTools back = editor::savePlayTools(cfg, t) ? editor::loadPlayTools(cfg) : editor::PlayTools{};
+        CHECK(back.safeArea && !back.tvAspect && back.look == int(tv::Look::Composite) && back.uiSafeArea);
+        const editor::PlayTools none = editor::loadPlayTools(g_outDir / "tv" / "absent.cfg");
+        CHECK(!none.safeArea && none.tvAspect && none.look == 0 && !none.uiSafeArea);
+    }
+
+    // Pure grey keeps its luma under every look; with scanlines a 240-line
+    // frame gets a darker line under each of its lines, a 480-line one none.
+    auto image = [](int w, int h, std::array<uint8_t, 3> c) {
+        std::vector<uint8_t> v(size_t(w) * size_t(h) * 4);
+        for (size_t i = 0; i < v.size(); i += 4) v[i] = c[0], v[i + 1] = c[1], v[i + 2] = c[2], v[i + 3] = 200;
+        return v;
+    };
+    const std::vector<uint8_t> grey = image(320, 240, {128, 128, 128});
+    for (tv::Look look : {tv::Look::RGB, tv::Look::SVideo, tv::Look::Composite}) {
+        int oh = 0;
+        const std::vector<uint8_t> out = tv::applyLook(grey.data(), 320, 240, look, true, &oh);
+        const bool scan = look != tv::Look::RGB;
+        CHECK(oh == (scan ? 480 : 240) && out.size() == size_t(320) * size_t(oh) * 4);
+        bool lines = true, gaps = true;
+        for (int y = 0; y < oh; ++y)
+            for (int x = 0; x < 320; ++x) {
+                const uint8_t* p = out.data() + (size_t(y) * 320 + size_t(x)) * 4;
+                const int want = scan && (y & 1) ? 96 : 128;
+                const bool ok = p[0] == want && p[1] == want && p[2] == want && p[3] == 200;
+                (scan && (y & 1) ? gaps : lines) = (scan && (y & 1) ? gaps : lines) && ok;
+            }
+        CHECK(lines && gaps);
+    }
+    {
+        const std::vector<uint8_t> hi = image(640, 480, {90, 90, 90});
+        int oh = 0;
+        const std::vector<uint8_t> out = tv::applyLook(hi.data(), 640, 480, tv::Look::Composite, true, &oh);
+        CHECK(oh == 480 && out == hi);
+        // Without room for scanlines a 240-line frame keeps its lines, grey unchanged.
+        const std::vector<uint8_t> flat = tv::applyLook(grey.data(), 320, 240, tv::Look::Composite, false, &oh);
+        CHECK(oh == 240 && flat == grey);
+    }
+
+    // A 1-pixel chroma stripe (luma as the grey around it) spreads across:
+    // under composite wider than under S-video, under RGB not at all; S-video
+    // leaves luma where it was.
+    auto spread = [&](tv::Look look, bool* lumaKept) {
+        std::vector<uint8_t> v = image(320, 2, {128, 128, 128});
+        for (int y = 0; y < 2; ++y) {
+            uint8_t* p = v.data() + (size_t(y) * 320 + 160) * 4;
+            p[0] = 166, p[1] = 117, p[2] = 84;  // Y 128, I +40, Q 0
+        }
+        int oh = 0;
+        const std::vector<uint8_t> out = tv::applyLook(v.data(), 320, 2, look, false, &oh);
+        int n = 0;
+        *lumaKept = true;
+        for (int x = 0; x < 320; ++x) {
+            const uint8_t* p = out.data() + size_t(x) * 4;
+            n += std::abs(p[0] - 128) + std::abs(p[1] - 128) + std::abs(p[2] - 128) > 3;
+            const double luma = 0.299 * p[0] + 0.587 * p[1] + 0.114 * p[2];
+            *lumaKept = *lumaKept && std::abs(luma - 128) < 1.5;
+        }
+        return n;
+    };
+    bool rgbLuma = false, svLuma = false, cvLuma = false;
+    const int rgb = spread(tv::Look::RGB, &rgbLuma), sv = spread(tv::Look::SVideo, &svLuma), cv = spread(tv::Look::Composite, &cvLuma);
+    CHECK(rgb == 1 && rgbLuma);
+    CHECK(sv > rgb && svLuma);
+    CHECK(cv > sv);
+    // Names in play.cfg.
+    for (tv::Look look : {tv::Look::RGB, tv::Look::SVideo, tv::Look::Composite}) CHECK(tv::lookFromName(tv::lookName(look)) == look);
+    CHECK(tv::lookFromName("bogus") == tv::Look::RGB);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -15996,6 +16093,7 @@ int main(int argc, char** argv) {
     testStringsBlocks();
     testStringsDoc();
     testMeterFixes();
+    testTvPreview();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

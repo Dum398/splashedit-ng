@@ -605,6 +605,17 @@ display (CI runs it under `xvfb-run`).
 
     python3 renderlostcheck.py <splashedit> [screenshot prefix]
 
+`safeareacheck.py` starts Play against a stand-in pcsx-redux (`emulator_tests` with
+`SPLASHEDIT_FAKE_REDUX=<w>x<h>` publishes one frame of colour bars that size) and clicks the Game
+view's display bar. With the guides on, every edge of the action-safe (central 90%) and title-safe
+(80%) rectangles must be on the screenshot in its colour at the pixels `game.frame` gives, and with
+them off none; 4:3 must show a 512x240 frame 4:3 and 1:1 at 512:240, the guides following it;
+S-video must blur a colour bar edge, Composite wider, RGB not at all, and both add scanlines to a
+240-line frame. The UI tab's header toggle must draw the same guides over the screen, and every
+toggle must be saved in the play settings. Needs a display (CI runs it under `xvfb-run`).
+
+    python3 safeareacheck.py <splashedit> [screenshot prefix]
+
 `linkplaycheck.py` plays a copy of the courtyard whose scripts call `Net.Connect()` and
 `Net.Send()` with 2 linked consoles, on a real pcsx-redux: both views must show frames, their
 status lines must reach Linked with exactly one host, slots 0 and 1 and the no-Network-id hint;

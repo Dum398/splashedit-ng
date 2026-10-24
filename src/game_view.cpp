@@ -130,11 +130,45 @@ void GameView::update() {
         std::atomic_thread_fence(std::memory_order_acquire);
         got = load(hd->sequence, std::memory_order_relaxed) == s1;
     }
-    if (!got || h.frame == m_lastFrame) return;
-    m_lastFrame = h.frame;
+    const bool fresh = got && h.frame != m_lastFrame;
+    // A new look redraws the last frame, as a paused game sends no new one.
+    if (!fresh && !(m_relook && m_frames && m_fw > 0)) return;
+    if (fresh && !buildFrame(&h)) return;
+    m_relook = false;
 
+    // m_rgba stays the frame as redux shows it; the look goes on a copy.
+    int th = m_fh;
+    std::vector<uint8_t> looked;
+    if (m_look != editor::tv::Look::RGB) looked = editor::tv::applyLook(m_rgba.data(), m_fw, m_fh, m_look, m_scanlines, &th);
+    const uint8_t* pixels = looked.empty() ? m_rgba.data() : looked.data();
+    const int w = m_fw;
+    if (!m_tex) glGenTextures(1, &m_tex);
+    glBindTexture(GL_TEXTURE_2D, m_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    if (w != m_w || th != m_h) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+        m_w = w;
+        m_h = th;
+    } else {
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, th, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+    if (fresh) ++m_frames;
+}
+
+// The display area of the copied VRAM into m_rgba. False for a size redux
+// would not show.
+bool GameView::buildFrame(const void* header) {
+    const Header& h = *(const Header*)header;
+    m_lastFrame = h.frame;
     int w = h.displayWidth, ht = h.displayHeight;
-    if (w <= 0 || ht <= 0 || w > 1024 || ht > 512) return;
+    if (w <= 0 || ht <= 0 || w > 1024 || ht > 512) return false;
+    m_fw = w;
+    m_fh = ht;
     m_rgba.assign((size_t)w * ht * 4, 0);
     if (h.displayEnabled) {
         for (int y = 0; y < ht; ++y) {
@@ -154,22 +188,7 @@ void GameView::update() {
             }
         }
     }
-    if (!m_tex) glGenTextures(1, &m_tex);
-    glBindTexture(GL_TEXTURE_2D, m_tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    if (w != m_w || ht != m_h) {
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, ht, 0, GL_RGBA, GL_UNSIGNED_BYTE, m_rgba.data());
-        m_w = w;
-        m_h = ht;
-    } else {
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, ht, GL_RGBA, GL_UNSIGNED_BYTE, m_rgba.data());
-    }
-    glBindTexture(GL_TEXTURE_2D, 0);
-    ++m_frames;
+    return true;
 }
 
 void GameView::setPads(uint16_t pad0, uint16_t pad1) {

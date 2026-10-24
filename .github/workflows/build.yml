@@ -342,6 +342,9 @@ jobs:
       - name: Triangles the engine lost, in the Game view and Render buffers
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/renderlostcheck.py build/splashedit
+      - name: Safe area guides, 4:3 and composite look in the Game view and UI tab
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/safeareacheck.py build/splashedit
       - name: Play with 4 consoles through the relay, grid and Network view
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/relayviewcheck.py build/splashedit

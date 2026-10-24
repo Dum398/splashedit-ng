@@ -13,6 +13,7 @@
 #include <SDL3/SDL_stdinc.h>
 
 #include "budget.hh"
+#include "editor/tv_preview.hh"
 #include "ui/colour_hex.hh"
 #include "ui/icons.h"
 #include "ui/scrub.hh"
@@ -1129,6 +1130,17 @@ void menuSize(const std::vector<MenuItem>& items, float* w, float* h) {
         *h += size::field + 4;
         *w = std::max(*w, space::md + measure(f.regular, type::body, e.label.c_str()).x + space::xl +
                               measure(f.regular, type::label, e.shortcut.c_str()).x + space::md);
+    }
+}
+
+void safeAreaGuides(ImDrawList* dl, ImRect frame) {
+    const editor::tv::Rect f{std::round(frame.Min.x), std::round(frame.Min.y), std::round(frame.Max.x), std::round(frame.Max.y)};
+    for (const auto& [fraction, col] : {std::pair{editor::tv::kActionSafe, kActionSafeColour}, std::pair{editor::tv::kTitleSafe, kTitleSafeColour}}) {
+        const editor::tv::Rect s = editor::tv::safeRect(f, fraction);
+        dl->AddRectFilled(ImVec2(s.x0, s.y0), ImVec2(s.x1, s.y0 + 1), col);
+        dl->AddRectFilled(ImVec2(s.x0, s.y1 - 1), ImVec2(s.x1, s.y1), col);
+        dl->AddRectFilled(ImVec2(s.x0, s.y0 + 1), ImVec2(s.x0 + 1, s.y1 - 1), col);
+        dl->AddRectFilled(ImVec2(s.x1 - 1, s.y0 + 1), ImVec2(s.x1, s.y1 - 1), col);
     }
 }
 

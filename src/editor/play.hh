@@ -31,6 +31,12 @@ struct PlayTools {
     // 3 or more always go through the editor's relay (editor/relay.hh).
     int players = 1;
     bool relay = false;
+    // How the Game view shows the frame (editor/tv_preview.hh): the safe-area
+    // guides, 4:3 like a TV or square pixels, and the RGB, S-video or
+    // composite look (a tv::Look). uiSafeArea: the guides on the UI canvas.
+    bool safeArea = false, tvAspect = true;
+    int look = 0;
+    bool uiSafeArea = false;
 };
 inline constexpr int kMaxPlayers = 10;
 // Whether a Play with these tools runs its consoles through the relay.
@@ -38,8 +44,10 @@ inline bool usesRelay(const PlayTools& t) { return t.players >= 3 || (t.players 
 
 // key=value lines: redux=, psxsplash=, bios=, disc=, port=, overlay_perf=,
 // overlay_rooms=, boot_logo= (1 or 0), players= (1 to kMaxPlayers, clamped),
-// relay= (1 or 0). A missing file or key reads as empty or off, but boot_logo
-// as on and players as 1 (also for a value that is not a number).
+// relay= (1 or 0), game_safe_area= (1 or 0), game_aspect= (4:3 or square),
+// game_look= (rgb, svideo or composite), ui_safe_area= (1 or 0). A missing
+// file or key reads as empty or off, but boot_logo as on, players as 1 (also
+// for a value that is not a number) and game_aspect as 4:3.
 PlayTools loadPlayTools(const std::filesystem::path& file);
 bool savePlayTools(const std::filesystem::path& file, const PlayTools& tools);
 

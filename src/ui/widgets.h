@@ -200,6 +200,12 @@ struct MenuItem {
 // With a `name`, scripted checks find each row as <name>/<label>. Returns
 // the clicked row's run.
 std::function<void()> menuRows(const std::vector<MenuItem>& items, float w, float h, const char* name = nullptr);
+
+// The broadcast safe areas over a picture shown in `frame` (editor/tv_preview.hh):
+// action-safe (the central 90%) and title-safe (80%), 1-pixel lines on whole
+// pixels, each line on the innermost pixels of its rectangle.
+inline constexpr ImU32 kActionSafeColour = IM_COL32(255, 170, 0, 255), kTitleSafeColour = IM_COL32(80, 220, 255, 255);
+void safeAreaGuides(ImDrawList* dl, ImRect frame);
 // The size menuRows wants for `items`.
 void menuSize(const std::vector<MenuItem>& items, float* w, float* h);
 

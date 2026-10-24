@@ -77,6 +77,20 @@ static int fakeRedux() {
     if (!mem) return 1;
     mem[2] = 64;          // headerSize
     mem[3] = vramOffset;  // vramOffset
+    // SPLASHEDIT_FAKE_REDUX=<w>x<h> (tests/safeareacheck.py): one frame of
+    // that size, 75% colour bars over the top two thirds, black below with a
+    // white line every 32 pixels. Any other value: no frame.
+    int fw = 0, fh = 0;
+    if (std::sscanf(std::getenv("SPLASHEDIT_FAKE_REDUX"), "%dx%d", &fw, &fh) == 2 && fw > 0 && fh > 0 && fw <= 1024 && fh <= 512) {
+        uint16_t* vram = (uint16_t*)((uint8_t*)mem + vramOffset);
+        static const uint16_t bars[8] = {0x5ef7, 0x02f7, 0x5ee0, 0x02e0, 0x5c17, 0x0017, 0x5c00, 0x0000};
+        for (int y = 0; y < fh; ++y)
+            for (int x = 0; x < fw; ++x)
+                vram[y * 1024 + x] = y < fh * 2 / 3 ? bars[x * 8 / fw] : x % 32 == 16 ? 0x7fff : 0;
+        mem[5] = 1;  // frame
+        mem[8] = uint32_t(fw), mem[9] = uint32_t(fh);
+        mem[11] = 1;  // displayEnabled
+    }
     mem[0] = 0x44535850;  // magic "PXSD", last so a reader never sees a half header
     std::printf("fake redux up\n");
     std::fflush(stdout);

@@ -65,4 +65,5 @@ inline constexpr const char* pencil = "\xee\x87\xb9";          // e1f9
 inline constexpr const char* squareDashed = "\xee\x87\x8b";    // e1cb
 inline constexpr const char* paintBucket = "\xee\x8b\xa6";     // e2e6
 inline constexpr const char* pipette = "\xee\x84\xbb";         // e13b
+inline constexpr const char* brush = "\xee\x8b\xa7";           // e2e7 paintbrush
 }  // namespace icon

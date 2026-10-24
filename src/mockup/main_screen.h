@@ -27,6 +27,7 @@
 #include "editor/lua_editor_view.hh"
 #include "editor/terrain_edit.hh"
 #include "editor/tilemap_view.hh"
+#include "editor/vertex_paint.hh"
 #include "editor/ui_canvas_view.hh"
 #include "editor/linkplay.hh"
 #include "editor/play.hh"
@@ -51,7 +52,7 @@ namespace mockup {
 using ModelTarget = editor::ModelTarget;
 
 struct State {
-    int tool = 1;        // 0 hand, 1 move, 2 rotate, 3 scale
+    int tool = 1;        // 0 hand, 1 move, 2 rotate, 3 scale, 4 paint (vertex colours)
     int viewMode = 0;    // 0 PS1, 1 clean
     // Prefab mode, one entry a level deep: the camera and look to put back on leaving it.
     struct PrefabView {
@@ -410,6 +411,9 @@ struct State {
     splash::TerrainBrush terrainBrush;
     bool terrainRadiusSet = false;  // the radius was typed or dragged; until then it follows the terrain's size
     editor::TerrainStroke terrainStroke;
+    // The Paint tool (tool 4, #199): brush settings (not saved) and the stroke in progress.
+    editor::PaintBrush paintBrush;
+    editor::PaintStroke paintStroke;
 
     // Lua files open in the script editor, as tabs beside the Scene and UI.
     ui::ScriptTabs scripts;

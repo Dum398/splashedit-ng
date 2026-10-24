@@ -2871,6 +2871,7 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
             m.push_back(choice("Move", "W", [&] { st.tool = 1; }, st.tool == 1));
             m.push_back(choice("Rotate", "E", [&] { st.tool = 2; }, st.tool == 2));
             m.push_back(choice("Scale", "R", [&] { st.tool = 3; }, st.tool == 3));
+            m.push_back(choice("Paint", "B", [&] { st.tool = 4; }, st.tool == 4));
             m.push_back(separator());
             m.push_back(choice("PS1 Look", "", [&] { st.viewMode = 0; }, st.viewMode == 0));
             m.push_back(choice("Clean Look", "", [&] { st.viewMode = 1; }, st.viewMode == 1));
@@ -5681,6 +5682,208 @@ static void sceneOverlays(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, Im
     }
 }
 
+static std::string fmtShort(float v, int decimals);
+
+// The Paint tool in the Scene view (#199): its settings bar at `at` (colour,
+// radius, strength, falloff, Fill; named paint.*), the brush circle on the
+// selected mesh under the cursor, strokes and Ctrl+click sampling. Scripted
+// checks read "vpaint:" lines: the brush when it changes, each stroke, fill
+// and sample.
+static void paintTool(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, ImVec2 at, editor::Document& doc, int chrome,
+                      int scene) {
+    Fonts& f = fonts();
+    ImGuiContext& g = *GImGui;
+    ImGuiIO& io = ImGui::GetIO();
+    editor::PaintBrush& brush = st.paintBrush;
+    auto hex = [](editor::Rgb c) { return ui::colourHex({c[0] / 255.f, c[1] / 255.f, c[2] / 255.f}); };
+    const std::vector<editor::ObjectPath> targets = editor::paintTargets(doc);
+
+    // The settings bar.
+    dl->ChannelsSetCurrent(chrome);
+    const float h = 36, fw = 58, pad = 6;
+    const char* labels[3] = {"Radius", "Strength", "Falloff"};
+    float lw[3];
+    for (int i = 0; i < 3; ++i) lw[i] = measure(f.medium, type::caption, labels[i]).x;
+    const float colW = 92, fillW = buttonWidth(icon::paintBucket, "Fill");
+    // colour, then a label and field each, then Fill.
+    const float barW = pad + colW + pad + (pad * 2 + fw) * 3 + lw[0] + lw[1] + lw[2] + pad * 2 + fillW + pad;
+    const ImRect bar(at, at + ImVec2(barW, h));
+    dl->AddRectFilled(bar.Min, bar.Max, rgb(0x0e1014, 210), radius::button + 2);
+    dl->AddRect(bar.Min, bar.Max, rgb(0xffffff, 14), radius::button + 2);
+    nameRect("paint.bar", bar);
+    float x = bar.Min.x + pad;
+    const float fy = bar.Min.y + (h - size::field) / 2;
+    const std::array<float, 3> cf{brush.color[0] / 255.f, brush.color[1] / 255.f, brush.color[2] / 255.f};
+    const ImRect colRow(ImVec2(x, fy), ImVec2(x + colW, fy + size::field));
+    const ColorFieldHit colHit = colorField("paintcol", colRow, cf, "paint.color");
+    nameRect("paint.color", colRow);
+    auto toBytes = [](const std::array<float, 3>& c) {
+        editor::Rgb b;
+        for (int k = 0; k < 3; k++) b[size_t(k)] = uint8_t(std::lround(std::clamp(c[size_t(k)], 0.f, 1.f) * 255));
+        return b;
+    };
+    if (colHit.pasted) brush.color = toBytes(*colHit.pasted);
+    if (colHit.clicked) ImGui::OpenPopup("##paintcolpick");
+    ImGui::SetNextWindowPos(ImVec2(colRow.Min.x, colRow.Max.y + space::xs), ImGuiCond_Always);
+    pushPopupStyle();
+    if (ImGui::BeginPopup("##paintcolpick")) {
+        float c[3] = {cf[0], cf[1], cf[2]};
+        ImGui::SetNextItemWidth(220);
+        if (ImGui::ColorPicker3("##paintcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                          ImGuiColorEditFlags_NoAlpha))
+            brush.color = toBytes({c[0], c[1], c[2]});
+        nameRect("paint.colorpick", ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+        ImGui::EndPopup();
+    }
+    ImGui::PopStyleVar(4);
+    ImGui::PopStyleColor(2);
+    x += colW + pad;
+    float* values[3] = {&brush.radius, &brush.strength, &brush.falloff};
+    const char* ids[3] = {"paintradius", "paintstrength", "paintfalloff"};
+    const char* names[3] = {"paint.radius", "paint.strength", "paint.falloff"};
+    for (int i = 0; i < 3; ++i) {
+        x += pad;
+        text(dl, ImVec2(x, bar.Min.y + (h - type::caption) / 2 - 1), f.medium, type::caption, color::textDim, labels[i]);
+        x += lw[i] + pad;
+        const ImRect fr(ImVec2(x, fy), ImVec2(x + fw, fy + size::field));
+        nameRect(names[i], fr);
+        float nv = *values[i];
+        if (numberField(ids[i], fr, fmtShort(nv, 2).c_str(), i == 0 ? "m" : nullptr, 0, nullptr, &nv).changed)
+            *values[i] = i == 0 ? std::clamp(nv, 0.01f, 100.f) : std::clamp(nv, 0.f, 1.f);
+        x += fw;
+    }
+    x += pad * 2;
+    {
+        // button() names its rect by its id: paint.fill.
+        const ImVec2 bp(x, bar.Min.y + (h - size::field - 6) / 2);
+        if (button("paint.fill", bp, icon::paintBucket, "Fill", ButtonKind::Secondary, nullptr,
+                   "Sets every vertex of the selected meshes to the brush colour, one undo step")) {
+            const int n = editor::fillPaint(doc, targets, brush.color);
+            if (namedRectsOn()) std::printf("vpaint: fill %d %s\n", n, hex(brush.color).c_str()), std::fflush(stdout);
+        }
+    }
+    if (namedRectsOn()) {
+        static std::string last;
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "vpaint: brush %s radius %.3f strength %.3f falloff %.3f", hex(brush.color).c_str(),
+                      double(brush.radius), double(brush.strength), double(brush.falloff));
+        if (last != buf) last = buf, std::printf("%s\n", buf), std::fflush(stdout);
+    }
+
+    // Why nothing is painted, when nothing selected can be.
+    if (targets.empty()) {
+        std::string note = "Paint: select a mesh to paint its vertex colours";
+        if (doc.selection())
+            if (const std::string why = editor::paintRefusal(doc, *doc.selection()); !why.empty())
+                note = "Paint: not this object, " + why;
+        const ImVec2 ns = measure(f.regular, type::caption, note.c_str());
+        const ImRect nc(ImVec2(r.Min.x + space::md, r.Max.y - space::md - 24 - space::sm - 24),
+                        ImVec2(r.Min.x + space::md + ns.x + 20, r.Max.y - space::md - 24 - space::sm));
+        dl->AddRectFilled(nc.Min, nc.Max, rgb(0x0e1014, 190), radius::pill);
+        textCentered(dl, nc, f.regular, type::caption, color::textDim, note.c_str());
+        nameRect("vp.painthint", nc);
+        if (st.paintStroke.active) editor::endPaintStroke(st.paintStroke, doc);
+        return;
+    }
+
+    // The brush under the cursor, the stroke and Ctrl+click.
+    const ImGuiID wid = ImGui::GetID("##vertexpaint");
+    editor::PaintStroke& ps = st.paintStroke;
+    static bool sampling = false;  // a Ctrl+click holds the mouse until release
+    static std::optional<splash::Vec3> lastHit;
+    static splash::Vec3 firstHit;
+    const bool active = g.ActiveId == wid;
+    if (active) ImGui::KeepAliveID(wid);
+    std::optional<editor::PaintHit> hit;
+    if (r.Contains(io.MousePos) && !bar.Contains(io.MousePos)) {
+        viewport::Vec3 ro, rd;
+        view.ray(io.MousePos, r.Min, r.GetSize(), &ro, &rd);
+        hit = editor::paintHit(doc, targets, {ro.x, ro.y, -ro.z}, {rd.x, rd.y, -rd.z});
+    }
+    auto print = [](const std::string& s) {
+        if (!namedRectsOn()) return;
+        std::printf("vpaint: %s\n", s.c_str());
+        std::fflush(stdout);
+    };
+    auto v3 = [](splash::Vec3 v) {
+        char buf[96];
+        std::snprintf(buf, sizeof buf, "%.3f,%.3f,%.3f", double(v.x), double(v.y), double(v.z));
+        return std::string(buf);
+    };
+    // One application per stretch of a brush quarter, so a fast drag leaves no gaps.
+    auto paintTo = [&](splash::Vec3 to) {
+        if (lastHit) {
+            const splash::Vec3 d = to - *lastHit;
+            const int n = std::clamp(int(splash::magnitude(d) / std::max(brush.radius * 0.25f, 0.01f)), 1, 256);
+            for (int i = 1; i <= n; ++i) editor::stepPaintStroke(ps, doc, *lastHit + d * (float(i) / float(n)));
+        } else {
+            editor::stepPaintStroke(ps, doc, to);
+        }
+        lastHit = to;
+    };
+    if (hit && !active && gizmoMayHover(false, r)) {
+        ImGui::SetHoveredID(wid);
+        if (ImGui::IsMouseClicked(0)) {
+            ImGui::SetActiveID(wid, g.CurrentWindow);
+            ImGui::FocusWindow(g.CurrentWindow);
+            if (io.KeyCtrl) {
+                sampling = true;
+                brush.color = hit->color;
+                print("sampled " + hex(hit->color) + " on " + doc.object(hit->path)->name + " at " + v3(hit->world));
+            } else {
+                sampling = false;
+                editor::beginPaintStroke(ps, doc, targets, brush);
+                lastHit.reset();
+                firstHit = hit->world;
+                paintTo(hit->world);
+            }
+        }
+    } else if (active) {
+        if (ImGui::IsMouseDown(0)) {
+            if (!sampling && ps.active && hit) paintTo(hit->world);
+        } else {
+            if (!sampling && ps.active) {
+                print("stroke steps " + std::to_string(ps.steps) + " objects " + std::to_string(ps.paths.size()) + " from " +
+                      v3(firstHit) + " to " + v3(lastHit ? *lastHit : firstHit) + " radius " + fmtShort(brush.radius, 3));
+                editor::endPaintStroke(ps, doc);
+            }
+            sampling = false;
+            ImGui::ClearActiveID();
+        }
+    } else if (ps.active) {
+        editor::endPaintStroke(ps, doc);
+    }
+
+    // The brush circle in the plane of the face under the cursor, lifted a
+    // little towards it, and its full strength ring dimmer.
+    if (hit) {
+        dl->ChannelsSetCurrent(scene);
+        const splash::Vec3 n = hit->normal;
+        const splash::Vec3 u = splash::normalized(std::fabs(n.y) < 0.9f ? splash::cross(n, {0, 1, 0}) : splash::cross(n, {1, 0, 0}));
+        const splash::Vec3 v = splash::cross(n, u);
+        const splash::Vec3 c = hit->world + n * 0.02f;
+        const ImU32 col = rgb(brush.color[0] << 16 | brush.color[1] << 8 | brush.color[2]);
+        auto ring = [&](float rad, ImU32 rc, float thick) {
+            if (rad <= 0) return;
+            ImVec2 pts[64];
+            for (int k = 0; k < 64; k++) {
+                const float a = float(k) / 64.f * 6.2831853f;
+                if (!view.project(toGl(c + u * (std::cos(a) * rad) + v * (std::sin(a) * rad)), r.Min, r.GetSize(), &pts[k])) return;
+            }
+            dl->AddPolyline(pts, 64, rc, ImDrawFlags_Closed, thick);
+        };
+        ring(brush.radius, rgb(0x000000, 150), 4.f);
+        ring(brush.radius, rgb(0xffffff, 230), 2.f);
+        ring(brush.radius * (1 - std::clamp(brush.falloff, 0.f, 1.f)), rgb(0xffffff, 110), 1.2f);
+        ImVec2 cp;
+        if (view.project(toGl(hit->world), r.Min, r.GetSize(), &cp)) {
+            dl->AddCircleFilled(cp, 5.f, col);
+            dl->AddCircle(cp, 5.f, rgb(0xffffff, 230), 0, 1.5f);
+            nameRect("vp.brush", ImRect(cp - ImVec2(5, 5), cp + ImVec2(5, 5)));
+        }
+    }
+}
+
 static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, viewport::Ps1View& view) {
     // Into prefab mode: the scene's camera kept and the prefab framed; back
     // out, the camera put back where it was.
@@ -5723,16 +5926,18 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     dl->ChannelsSetCurrent(kChrome);
     ImVec2 p = r.Min + ImVec2(space::md, space::md);
     float w = 0;
-    ImRect tools(p, p + ImVec2(4 * 30 + 4, 32));
+    ImRect tools(p, p + ImVec2(5 * 30 + 4, 32));
     dl->AddRectFilled(tools.Min, tools.Max, rgb(0x0e1014, 210), radius::button + 2);
     dl->AddRect(tools.Min, tools.Max, rgb(0xffffff, 14), radius::button + 2);
-    const char* tIcons[4] = {icon::hand, icon::move, icon::rotate, icon::scale};
-    const char* tTips[4] = {"Hand (Q)", "Move (W)", "Rotate (E)", "Scale (R)"};
-    for (int i = 0; i < 4; ++i) {
+    const char* tIcons[5] = {icon::hand, icon::move, icon::rotate, icon::scale, icon::brush};
+    const char* tTips[5] = {"Hand (Q)", "Move (W)", "Rotate (E)", "Scale (R)",
+                            "Paint vertex colours on the selected meshes (B). Ctrl+click picks the colour under the cursor."};
+    static const char* const kToolRects[5] = {"tool.hand", "tool.move", "tool.rotate", "tool.scale", "tool.paint"};
+    for (int i = 0; i < 5; ++i) {
         ImGui::PushID(i);
-        if (iconButton("tool", ImRect(ImVec2(p.x + 2 + i * 30, p.y + 2), ImVec2(p.x + 2 + i * 30 + 30, p.y + 30)), tIcons[i],
-                       st.tool == i, tTips[i]))
-            st.tool = i;
+        const ImRect tr(ImVec2(p.x + 2 + i * 30, p.y + 2), ImVec2(p.x + 2 + i * 30 + 30, p.y + 30));
+        nameRect(kToolRects[i], tr);
+        if (iconButton("tool", tr, tIcons[i], st.tool == i, tTips[i])) st.tool = i;
         ImGui::PopID();
     }
     ImRect snap(ImVec2(tools.Max.x + space::sm, p.y), ImVec2(tools.Max.x + space::sm + 34, p.y + 32));
@@ -6003,6 +6208,16 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         }
     } else if (st.terrainStroke.active) {
         editor::endTerrainStroke(st.terrainStroke, doc);
+    }
+
+    // Vertex paint (#199): with the Paint tool on, a settings bar under the
+    // tools; the brush circle follows the mouse over the selected meshes, a
+    // held left button paints every selected mesh it reaches (one undo step
+    // per stroke) and Ctrl+click takes the colour under the cursor.
+    if (st.tool == 4 && !previewing) {
+        paintTool(st, dl, view, r, p + ImVec2(0, sel && sel->terrain ? 80 : 40), doc, kChrome, kScene);
+    } else if (st.paintStroke.active) {
+        editor::endPaintStroke(st.paintStroke, doc);
     }
 
     // Blob shadows on the floor, under the selection outline and the gizmo.
@@ -6305,6 +6520,7 @@ static const char* lightingLabel(splash::VertexColorMode m) {
         case splash::VertexColorMode::Baked: return "Baked vertex";
         case splash::VertexColorMode::Flat: return "Flat";
         case splash::VertexColorMode::Mesh: return "Mesh colours";
+        case splash::VertexColorMode::Painted: return "Painted";
     }
     return "";
 }
@@ -10056,7 +10272,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     };
     report("offvia", offVia.empty() ? std::string() : "object: " + o->name + " off via " + offVia);
     // This object's mesh colour, audio and skin lines; cleared when it has none.
-    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine, flatColLine;
+    std::string meshColLine, materialLines, uvOffLine, audioLine, skinLine, interactLine, texHolesLine, flatColLine, paintLine;
 
     // Mesh.
     // A labelled on/off switch; a click flips it through `flip` (one undo step).
@@ -10305,16 +10521,22 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 uvOffLine = "uvoffset: " + std::to_string(cur) + " materials " + (ml.empty() ? std::string("none") : ml);
             }
         }
-        // Menu order follows the labels' enum: Baked vertex, Flat, Mesh colours.
-        const splash::VertexColorMode modes[3] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
-                                                  splash::VertexColorMode::Mesh};
+        // Menu order follows the labels' enum: Baked vertex, Flat, Mesh colours, Painted.
+        const splash::VertexColorMode modes[4] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
+                                                  splash::VertexColorMode::Mesh, splash::VertexColorMode::Painted};
         int curMode = (int)(std::find(std::begin(modes), std::end(modes), m.vertexColors) - std::begin(modes));
-        const ImRect lightRow = row("llight", "Lighting", "How light reaches this mesh. Baked vertex lighting costs nothing at runtime.");
+        const ImRect lightRow =
+            row("llight", "Lighting",
+                "How light reaches this mesh. Baked vertex lighting costs nothing at runtime. Painted uses the colours painted with "
+                "the Scene view's Paint tool (B).");
         nameRect("obj.lighting", lightRow);  // its items are lighting/<label>
-        int pickMode = dropdownMenu("lighting", lightRow,
-                                    icon::sun, lightingLabel(m.vertexColors), {"Baked vertex", "Flat", "Mesh colours"}, curMode);
-        if (pickMode >= 0 && modes[pickMode] != m.vertexColors)
-            doc.edit(path, [&](splash::Object& ob) { ob.mesh->vertexColors = modes[pickMode]; });
+        int pickMode = dropdownMenu("lighting", lightRow, icon::sun, lightingLabel(m.vertexColors),
+                                    {"Baked vertex", "Flat", "Mesh colours", "Painted"}, curMode);
+        if (pickMode >= 0 && modes[pickMode] != m.vertexColors) {
+            // Painted starts from what the mesh shows now when it has no layer that fits.
+            if (modes[pickMode] == splash::VertexColorMode::Painted) editor::setPaintedMode(doc, path);
+            else doc.edit(path, [&](splash::Object& ob) { ob.mesh->vertexColors = modes[pickMode]; });
+        }
         // Flat lighting's one colour, from a colour well and its picker (named
         // obj.flatcolor and obj.flatcolorpick, as the material Colour row); a drag is one undo step.
         if (m.vertexColors == splash::VertexColorMode::Flat) {
@@ -10353,6 +10575,29 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             if (card("fixmeshcol", "No mesh colours", body, "Use baked lighting"))
                 doc.edit(path, [](splash::Object& ob) { ob.mesh->vertexColors = splash::VertexColorMode::Baked; });
         }
+        // The painted layer (#199): a warning when it does not fit the mesh,
+        // and while there is one, a row to drop it. Only drawn for a painted
+        // mesh, so the rows below stay where they were on any other.
+        if (doc.paintMismatch(m)) {
+            const std::string body = m.paint.empty() ? "Nothing is painted on this mesh yet, so it exports baked lighting."
+                                                     : modelName + " has a different number of vertices than were painted (" +
+                                                           std::to_string(m.paint.size()) + "), so it exports baked lighting.";
+            if (card("fixpaint", "Painted colours do not fit", body, "Use baked lighting")) editor::clearPaint(doc, path);
+        }
+        if (!m.paint.empty()) {
+            const ImRect pr = row("lpaint", "Painted colours",
+                                  "Vertex colours painted with the Scene view's Paint tool (B). Painted lighting exports them. "
+                                  "Clear paint removes them; a Painted mesh goes back to Baked vertex lighting.");
+            const std::string n = std::to_string(m.paint.size()) + " vertices";
+            text(dl, ImVec2(pr.Min.x, pr.Min.y + (pr.GetHeight() - type::caption) / 2 - 1), f.regular, type::caption, color::textDim,
+                 n.c_str());
+            const float bw = buttonWidth(icon::trash, "Clear paint");
+            if (button("obj.clearpaint", ImVec2(pr.Max.x - bw, pr.Min.y + (pr.GetHeight() - size::field - 6) / 2), icon::trash,
+                       "Clear paint", ButtonKind::Secondary))
+                editor::clearPaint(doc, path);
+        }
+        paintLine = "paint: " + o->name + " " + lightingLabel(m.vertexColors) + " layer " + std::to_string(m.paint.size()) +
+                    (doc.paintMismatch(m) ? " mismatch" : "");
         // Smoothed normals only feed baked vertex lighting.
         const bool baked = m.vertexColors == splash::VertexColorMode::Baked;
         const float smoothTop = y;
@@ -11897,6 +12142,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
 
     report("meshcol", meshColLine);
     report("flatcolor", flatColLine);
+    report("paint", paintLine);
     report("materials", materialLines);
     report("uvoffset", uvOffLine);
     report("texholes", texHolesLine);
@@ -13249,6 +13495,7 @@ static void shortcuts(State& st, editor::Document& doc) {
         if (pressed(ImGuiKey_W)) st.tool = 1;
         if (pressed(ImGuiKey_E)) st.tool = 2;
         if (pressed(ImGuiKey_R)) st.tool = 3;
+        if (pressed(ImGuiKey_B)) st.tool = 4;
     }
     // Object commands on the selection; the UI tab takes these keys for its
     // elements, and while the Project panel has the keyboard, Delete and F2 are its own.

@@ -83,6 +83,7 @@ MeshInfo analyseMesh(const fs::path& file) {
         info.triangles = static_cast<int>(indices / 3);
         info.submeshes = static_cast<int>(m.submeshes.size());
         info.hasColors = !m.positions.empty() && m.colors.size() == m.positions.size();
+        info.vertices = static_cast<int>(m.positions.size());
         info.status = AssetStatus::Ok;
     } catch (const std::exception& e) {
         info.status = AssetStatus::Unreadable;
@@ -1266,6 +1267,12 @@ bool Document::missingMeshColors(const splash::MeshComponent& m) const {
     return mi && mi->status == AssetStatus::Ok && !mi->hasColors;
 }
 
+bool Document::paintMismatch(const splash::MeshComponent& m) const {
+    if (m.vertexColors != splash::VertexColorMode::Painted) return false;
+    const MeshInfo* mi = mesh(m.mesh);
+    return mi && mi->status == AssetStatus::Ok && size_t(mi->vertices) != m.paint.size();
+}
+
 bool Document::hasWarning(const splash::Object& o) const {
     if (!o.prefab.empty() && !o.prefabResolved) return true;
     if (o.mesh) {
@@ -1279,6 +1286,7 @@ bool Document::hasWarning(const splash::Object& o) const {
             if (const TextureInfo* t = texture(mat.texture); t && t->status != AssetStatus::Ok) return true;
         if (couldBe4bpp(*o.mesh)) return true;
         if (missingMeshColors(*o.mesh)) return true;
+        if (paintMismatch(*o.mesh)) return true;
     }
     if (o.script && !o.script->lua.empty() && !fileExists(o.script->lua)) return true;
     return false;

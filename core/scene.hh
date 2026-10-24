@@ -16,7 +16,8 @@
 namespace splash {
 
 enum class BitDepth : uint8_t { Bpp4 = 4, Bpp8 = 8, Bpp16 = 16 };
-enum class VertexColorMode : uint8_t { Baked, Flat, Mesh };
+// Painted: the mesh component's own painted layer (MeshComponent::paint).
+enum class VertexColorMode : uint8_t { Baked, Flat, Mesh, Painted };
 enum class ColliderKind : uint8_t { None, Static, Dynamic };
 enum class LightKind : uint8_t { Directional, Point, Spot };
 enum class DynamicLighting : uint8_t { Auto, On, Off, Smooth };
@@ -59,6 +60,13 @@ struct MeshComponent {
     BitDepth bitDepth = BitDepth::Bpp8;
     VertexColorMode vertexColors = VertexColorMode::Baked;
     std::array<uint8_t, 3> flatColor{128, 128, 128};
+    // Vertex colours painted in the Scene view: one RGB per vertex of the
+    // .mesh, in its vertex order, exported as is in Painted mode when its
+    // size matches the mesh (Baked lighting otherwise). Kept when the mode
+    // changes, so going back to Painted shows it again; empty when never
+    // painted. The scene file holds it as "paintColors" (encodeVertexPaint),
+    // only when not empty.
+    std::vector<std::array<uint8_t, 3>> paint;
     bool smoothNormals = true;
     int uvOffsetMaterial = 0;
     // Auto: lit by runtime lights whose range reaches the mesh bounds.
@@ -687,6 +695,13 @@ int uvTextureSlot(const MeshComponent& mc, size_t mat);
 // The materials whose triangles a UV offset track scrolls: the exporter flags a
 // triangle when its texture index equals uvOffsetMaterial.
 std::vector<size_t> uvOffsetMaterials(const MeshComponent& mc, int index);
+
+// MeshComponent::paint as the scene file holds it: six lowercase hex digits
+// (rrggbb) per vertex, no separators, so a painted mesh is one string next
+// to its other keys. decodeVertexPaint reads either case and returns nullopt
+// for text that is not whole rrggbb groups.
+std::string encodeVertexPaint(const std::vector<std::array<uint8_t, 3>>& paint);
+std::optional<std::vector<std::array<uint8_t, 3>>> decodeVertexPaint(const std::string& text);
 
 std::vector<FlatObject> flatten(const Scene& scene);
 

@@ -396,6 +396,9 @@ jobs:
       - name: Multi-object selection, mixed inspector fields and group gizmo
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/multiselectcheck.py build/splashedit
+      - name: Vertex colour painting in the Scene view
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/vertexpaintcheck.py build/splashedit
       - name: UI canvas editor
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/uicanvascheck.py build/splashedit

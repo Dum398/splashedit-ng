@@ -103,6 +103,7 @@ add_library(splasheditdoc STATIC
     src/editor/relay.cpp
     src/editor/model_import.cpp
     src/editor/project.cpp
+    src/editor/file_swaps.cpp
     src/editor/skin_clips.cpp
     src/editor/serial.cpp
     src/editor/sprites.cpp

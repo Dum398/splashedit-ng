@@ -123,6 +123,7 @@ std::optional<std::string> Document::load(const fs::path& project, const fs::pat
     clearHistory();
     ++m_loadId;
     m_selection.reset();
+    m_more.clear();
     m_uiSelection = {};
     m_pinned.reset();
     m_collapsed.clear();
@@ -165,6 +166,7 @@ void Document::reset(splash::Scene scene, const fs::path& project, const std::st
     ++m_loadId;
     ++m_revision;
     m_selection.reset();
+    m_more.clear();
     m_uiSelection = {};
     m_pinned.reset();
     m_collapsed.clear();
@@ -309,15 +311,29 @@ private:
 class GroupCommand : public Command {
 public:
     explicit GroupCommand(std::vector<std::unique_ptr<Command>> parts) : m_parts(std::move(parts)) {}
+    // A keyed group of edits (editMany with a merge key) on `paths`: a later
+    // one with the same key on the same paths folds into it, part by part.
+    GroupCommand(std::vector<std::unique_ptr<Command>> parts, std::string key, std::vector<ObjectPath> paths)
+        : m_parts(std::move(parts)), m_key(std::move(key)), m_paths(std::move(paths)) {}
     void apply(Document& doc) override {
         for (auto& c : m_parts) c->apply(doc);
     }
     void revert(Document& doc) override {
         for (auto it = m_parts.rbegin(); it != m_parts.rend(); ++it) (*it)->revert(doc);
     }
+    bool merge(const Command& next) override {
+        auto* n = dynamic_cast<const GroupCommand*>(&next);
+        if (!n || m_key.empty() || n->m_key != m_key || n->m_paths != m_paths || n->m_parts.size() != m_parts.size()) return false;
+        // Every part is an EditCommand with this key on the same path, so each merges.
+        for (size_t i = 0; i < m_parts.size(); ++i)
+            if (!m_parts[i]->merge(*n->m_parts[i])) return false;
+        return true;
+    }
 
 private:
     std::vector<std::unique_ptr<Command>> m_parts;
+    std::string m_key;
+    std::vector<ObjectPath> m_paths;
 };
 
 class SettingsCommand : public Command {
@@ -445,7 +461,7 @@ private:
         *o = v;
         for (std::optional<ObjectPath> p : {doc.selection(), doc.pinned()}) {
             if (!p || p->size() <= m_path.size() || !std::equal(m_path.begin(), m_path.end(), p->begin()) || doc.object(*p)) continue;
-            if (p == doc.selection()) doc.select(m_path);
+            if (p == doc.selection()) doc.selectMany(m_path, doc.moreSelected());
             if (p == doc.pinned()) doc.pin(m_path);
         }
         doc.recount();
@@ -542,6 +558,15 @@ void Document::shiftPaths(const ObjectPath& at, int delta) {
     if (at.empty()) return;
     if (m_selection) m_selection = shifted(*m_selection, at, delta);
     if (m_pinned) m_pinned = shifted(*m_pinned, at, delta);
+    std::vector<ObjectPath> more;
+    for (const ObjectPath& p : m_more)
+        if (auto q = shifted(p, at, delta)) more.push_back(*q);
+    m_more = std::move(more);
+    // The primary went: the one selected before it takes over.
+    if (!m_selection && !m_more.empty()) {
+        m_selection = m_more.back();
+        m_more.pop_back();
+    }
     std::set<ObjectPath> collapsed;
     for (const ObjectPath& p : m_collapsed)
         if (p.empty()) collapsed.insert(p);
@@ -601,21 +626,30 @@ bool Document::edit(const ObjectPath& path, const std::function<void(splash::Obj
     return true;
 }
 
-int Document::editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn) {
+int Document::editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn,
+                       const std::string& mergeKey) {
+    return editEach(paths, [&](const ObjectPath&, splash::Object& o) { fn(o); }, mergeKey);
+}
+
+int Document::editEach(const std::vector<ObjectPath>& paths, const std::function<void(const ObjectPath&, splash::Object&)>& fn,
+                       const std::string& mergeKey) {
     std::vector<std::unique_ptr<Command>> parts;
+    std::vector<ObjectPath> edited;
     for (const ObjectPath& path : paths) {
         splash::Object* o = objectMut(path);
         if (!o || inInstance(path)) continue;
         splash::Object before = shallowCopy(*o);
         splash::Object after = before;
-        fn(after);
+        fn(path, after);
         after.children.clear();
         if (!before.prefab.empty() && touchesContent(before, after)) continue;
-        parts.push_back(std::make_unique<EditCommand>(path, std::move(before), std::move(after), std::string()));
+        parts.push_back(std::make_unique<EditCommand>(path, std::move(before), std::move(after), mergeKey));
+        edited.push_back(path);
     }
     if (parts.empty()) return 0;
     const int n = int(parts.size());
-    execute(std::make_unique<GroupCommand>(std::move(parts)));
+    if (mergeKey.empty()) execute(std::make_unique<GroupCommand>(std::move(parts)));
+    else execute(std::make_unique<GroupCommand>(std::move(parts), mergeKey, std::move(edited)), true);
     return n;
 }
 
@@ -1005,8 +1039,47 @@ std::optional<std::string> Document::saveAs(const fs::path& scene) {
 bool Document::selectByName(const std::string& name) {
     ObjectPath p;
     if (!findByName(m_scene.objects, name, p)) return false;
-    m_selection = p;
+    select(p);
     return true;
+}
+
+std::vector<ObjectPath> Document::selectedPaths() const {
+    std::vector<ObjectPath> v;
+    if (!m_selection) return v;
+    v = m_more;
+    v.push_back(*m_selection);
+    return v;
+}
+
+bool Document::isSelected(const ObjectPath& path) const {
+    return (m_selection && *m_selection == path) || std::find(m_more.begin(), m_more.end(), path) != m_more.end();
+}
+
+void Document::selectMany(std::optional<ObjectPath> primary, const std::vector<ObjectPath>& more) {
+    std::vector<ObjectPath> kept;
+    if (primary && object(*primary))
+        for (const ObjectPath& p : more)
+            if (p != *primary && object(p) && std::find(kept.begin(), kept.end(), p) == kept.end()) kept.push_back(p);
+    m_selection = std::move(primary);
+    m_more = std::move(kept);
+}
+
+void Document::toggleSelected(const ObjectPath& path) {
+    if (!object(path)) return;
+    if (m_selection && *m_selection == path) {
+        m_selection.reset();
+        if (!m_more.empty()) {
+            m_selection = m_more.back();
+            m_more.pop_back();
+        }
+        return;
+    }
+    if (auto it = std::find(m_more.begin(), m_more.end(), path); it != m_more.end()) {
+        m_more.erase(it);
+        return;
+    }
+    if (m_selection) m_more.push_back(*m_selection);
+    m_selection = path;
 }
 
 void Document::toggleExpanded(const ObjectPath& path) {
@@ -1169,6 +1242,8 @@ std::vector<std::string> Document::resolvePrefabs() {
         if (p == m_selection) m_selection = up;
         if (p == m_pinned) m_pinned = up;
     }
+    // The rest of the selection: what no longer resolves leaves it.
+    if (!m_more.empty()) selectMany(m_selection, m_more);
     recount();
     for (const splash::Object& o : m_scene.objects) cacheAssets(o);
     ++m_revision;

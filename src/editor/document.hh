@@ -93,9 +93,29 @@ public:
     // Parent of the object at `path`, or nullptr for a top-level object.
     const splash::Object* parent(const ObjectPath& path) const;
 
+    // The selection: selection() is the primary object (the last clicked:
+    // the inspector's, the one most commands act on); moreSelected() holds
+    // the other selected objects, in the order they were added (#263).
+    // select() selects one object (or none) and drops the rest.
     const std::optional<ObjectPath>& selection() const { return m_selection; }
     const splash::Object* selected() const { return m_selection ? object(*m_selection) : nullptr; }
-    void select(std::optional<ObjectPath> path) { m_selection = std::move(path); }
+    void select(std::optional<ObjectPath> path) {
+        m_selection = std::move(path);
+        m_more.clear();
+    }
+    const std::vector<ObjectPath>& moreSelected() const { return m_more; }
+    // Every selected object, the primary last; empty with nothing selected.
+    std::vector<ObjectPath> selectedPaths() const;
+    // How many objects are selected.
+    size_t selectionCount() const { return m_selection ? 1 + m_more.size() : 0; }
+    bool isSelected(const ObjectPath& path) const;
+    // Selects `primary` and `more` (duplicates, the primary and paths that
+    // do not resolve left out). Without a primary, nothing is selected.
+    void selectMany(std::optional<ObjectPath> primary, const std::vector<ObjectPath>& more);
+    // Ctrl+click: a selected object leaves the selection (when it was the
+    // primary, the one selected before it takes over); any other joins it
+    // as the new primary.
+    void toggleSelected(const ObjectPath& path);
     // Selects the first object (depth-first) with this name. Returns false if none.
     bool selectByName(const std::string& name);
     // Path of every object in splash::flatten order (depth-first pre-order),
@@ -135,7 +155,14 @@ public:
     // endMerge() is called; a drag passes a key and calls endMerge() on release.
     bool edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey = {});
     // Runs `fn` on each object in `paths` as one undo step. Returns how many it changed.
-    int editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn);
+    // With a `mergeKey`, consecutive calls on the same paths with the same key
+    // merge into one step until endMerge(), as edit() does.
+    int editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn,
+                 const std::string& mergeKey = {});
+    // The same, with `fn` told which object it is editing (a multi-object
+    // gizmo drag gives each its own position).
+    int editEach(const std::vector<ObjectPath>& paths, const std::function<void(const ObjectPath&, splash::Object&)>& fn,
+                 const std::string& mergeKey = {});
     // Renames the object at `path` as one undo step. Portals name their rooms
     // by object name, so when the object is a Room and no other Room still
     // carries the old name, every Portal's roomA/roomB that held the old name
@@ -337,6 +364,7 @@ private:
     unsigned m_loadId = 0;
     unsigned m_assetsId = 0;
     std::optional<ObjectPath> m_selection;
+    std::vector<ObjectPath> m_more;  // the rest of the selection (#263)
     std::set<ObjectPath> m_collapsed;
     std::optional<ObjectPath> m_pinned;
     UiSelection m_uiSelection;

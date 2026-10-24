@@ -7704,6 +7704,65 @@ void testEditMany() {
     CHECK(!d.undo());
     CHECK(d.redo() && d.object({1, 0})->transform.position.y == 5);
     CHECK(d.editMany({}, [](splash::Object&) {}) == 0);
+    // A keyed editMany (an inspector scrub over several objects) merges into one step.
+    const size_t hist = d.historySize();
+    for (float y : {1.f, 2.f, 3.f}) d.editMany({{0}, {2}}, [y](splash::Object& o) { o.transform.position.y = y; }, "scrub");
+    d.endMerge();
+    CHECK(d.historySize() == hist + 1);
+    CHECK(d.object({0})->transform.position.y == 3 && d.object({2})->transform.position.y == 3);
+    CHECK(d.undo() && d.object({0})->transform.position.y == 5 && d.object({2})->transform.position.y == 0);
+    CHECK(d.redo());
+    // Other paths under the same key start a new step.
+    d.editMany({{0}, {2}}, [](splash::Object& o) { o.transform.position.y = 7; }, "scrub");
+    d.editMany({{0}}, [](splash::Object& o) { o.transform.position.y = 8; }, "scrub");
+    d.endMerge();
+    CHECK(d.undo() && d.object({0})->transform.position.y == 7);
+    // editEach: each object told which it is.
+    CHECK(d.editEach({{0}, {2}}, [](const editor::ObjectPath& p, splash::Object& o) { o.transform.position.z = float(p[0]); }) == 2);
+    CHECK(d.object({0})->transform.position.z == 0 && d.object({2})->transform.position.z == 2);
+}
+
+// The multi-object selection (#263): a primary plus the rest.
+void testMultiSelection() {
+    editor::Document d;
+    d.reset(sample());
+    d.select(editor::ObjectPath{0});
+    CHECK(d.selectionCount() == 1 && d.moreSelected().empty());
+    d.toggleSelected({2});  // Ctrl+click C: C primary, A kept
+    CHECK(d.selection() == editor::ObjectPath({2}) && d.selectionCount() == 2 && d.isSelected({0}) && d.isSelected({2}));
+    CHECK(!d.isSelected({1}));
+    CHECK(d.selectedPaths() == std::vector<editor::ObjectPath>({{0}, {2}}));
+    d.toggleSelected({1, 0});
+    CHECK(d.selection() == editor::ObjectPath({1, 0}) && d.selectionCount() == 3);
+    d.toggleSelected({1, 0});  // the primary leaves: the one before takes over
+    CHECK(d.selection() == editor::ObjectPath({2}) && d.selectionCount() == 2);
+    d.toggleSelected({0});  // one of the rest leaves
+    CHECK(d.selection() == editor::ObjectPath({2}) && d.selectionCount() == 1);
+    d.toggleSelected({2});
+    CHECK(!d.selection() && d.selectionCount() == 0);
+    d.toggleSelected({9});  // no such object
+    CHECK(!d.selection());
+    // A plain select drops the rest.
+    d.selectMany(editor::ObjectPath{2}, {{0}, {0}, {2}, {7}, {1, 0}});
+    CHECK(d.selectionCount() == 3 && d.moreSelected() == std::vector<editor::ObjectPath>({{0}, {1, 0}}));
+    d.select(editor::ObjectPath{1});
+    CHECK(d.selectionCount() == 1);
+    // Inserts and removes keep every selected path on its object.
+    d.selectMany(editor::ObjectPath{2}, {{0}, {1, 0}});
+    CHECK(d.insertObject({0}, named("New", 9)));  // selects the new object alone, as before
+    CHECK(d.selectionCount() == 1 && d.selection() == editor::ObjectPath({0}));
+    d.selectMany(editor::ObjectPath{3}, {{1}, {2, 0}});  // C, A, B1
+    CHECK(d.removeObject({0}));
+    CHECK(d.selection() == editor::ObjectPath({2}) && d.moreSelected() == std::vector<editor::ObjectPath>({{0}, {1, 0}}));
+    CHECK(d.object(*d.selection())->name == "C");
+    // The primary removed: the one selected before it takes over.
+    CHECK(d.removeObject({2}));
+    CHECK(d.selection() == editor::ObjectPath({1, 0}) && d.selectionCount() == 2);
+    // A parent removed takes its selected child with it.
+    CHECK(d.removeObject({1}));
+    CHECK(d.selection() == editor::ObjectPath({0}) && d.selectionCount() == 1);
+    d.reset(sample());
+    CHECK(d.selectionCount() == 0);
 }
 
 // Copy, cut and paste of objects as clipboard text.
@@ -15977,6 +16036,7 @@ int main(int argc, char** argv) {
     testRoomsEditor();
     testRoomRename();
     testEditMany();
+    testMultiSelection();
     testTimelineSample();
     testTimelineEdit();
     testTimelinePreview();

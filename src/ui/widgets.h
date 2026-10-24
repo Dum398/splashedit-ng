@@ -184,7 +184,10 @@ float problemCard(const char* id, ImVec2 pos, float width, const char* title, co
 
 // Budget meter for the status bar. Returns its width.
 // fraction < 0 draws no bar (a plain count).
-float meter(const char* id, ImVec2 pos, const char* icon, const char* label, float fraction, const char* value, const char* tip);
+// A status bar budget meter. Its rect is named `id` for scripted clicks;
+// `clicked` (when given) says whether it was clicked this frame.
+float meter(const char* id, ImVec2 pos, const char* icon, const char* label, float fraction, const char* value, const char* tip,
+            bool* clicked = nullptr);
 
 // A row of a popup menu (menuRows).
 struct MenuItem {

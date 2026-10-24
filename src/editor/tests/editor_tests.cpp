@@ -39,6 +39,7 @@
 #include "editor/hardware.hh"
 #include "editor/gizmo.hh"
 #include "editor/live_export.hh"
+#include "editor/meter_fixes.hh"
 #include "editor/log_view.hh"
 #include "editor/lua_editor.hh"
 #include "editor/memcard.hh"
@@ -15631,6 +15632,156 @@ static void testStringsDoc() {
     CHECK(editor::filterStrings(t, "SAL") == std::vector<int>{0} && editor::filterStrings(t, "zz").empty());
 }
 
+// Meter fixes (#194): every one-click fix's saving is the meters' change once
+// it is applied to the document, measured by exporting the edited scene; undo
+// puts the scene and the meters back. A texture shared by two meshes drops for
+// both; render buffer overrides above the scene's need reset to Auto with
+// what rendererBytes says they cost; the triangle list ranks meshes and its
+// estimate is the simplifier's count.
+void testMeterFixes() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "meter_fixes";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "textures", ec);
+    fs::create_directories(dir / "meshes", ec);
+    auto image = [](int w, int h, auto px) {
+        splash::Image img;
+        img.width = w, img.height = h;
+        img.pixels.resize(size_t(w) * h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) img.pixels[size_t(y) * w + x] = px(x, y);
+        return img;
+    };
+    // a: a 128x128 gradient (many colours), b: 64x64 in 10 colours.
+    splash::savePng(image(128, 128, [](int x, int y) { return splash::Image::Px{x / 127.f, y / 127.f, 0.4f, 1}; }),
+                    dir / "textures/a.png");
+    splash::savePng(image(64, 64, [](int x, int) { return splash::Image::Px{float(x / 7) / 9.f, 0.2f, 0.7f, 1}; }),
+                    dir / "textures/b.png");
+    // A 16 x 16 quad grid (512 triangles) with UVs.
+    splash::Mesh grid;
+    const int n = 16;
+    for (int z = 0; z <= n; z++)
+        for (int x = 0; x <= n; x++) {
+            grid.positions.push_back({x * 0.1f, 0, z * 0.1f});
+            grid.normals.push_back({0, 1, 0});
+            grid.uv.push_back({float(x) / n, float(z) / n});
+        }
+    grid.submeshes.emplace_back();
+    for (int z = 0; z < n; z++)
+        for (int x = 0; x < n; x++) {
+            const int a = z * (n + 1) + x, b = a + 1, c = a + n + 2, d = a + n + 1;
+            for (int i : {a, d, c, a, c, b}) grid.submeshes[0].push_back(i);
+        }
+    splash::saveMesh(grid, dir / "meshes/grid.mesh");
+    auto meshObj = [](const char* name, const char* tex, splash::BitDepth depth) {
+        splash::Object o;
+        o.name = name;
+        splash::MeshComponent mc;
+        mc.mesh = "meshes/grid.mesh";
+        mc.materials = {splash::Material{tex, {1, 1, 1, 1}, {}}};
+        mc.bitDepth = depth;
+        o.mesh = mc;
+        return o;
+    };
+    splash::Scene sc;
+    sc.objects = {meshObj("A1", "textures/a.png", splash::BitDepth::Bpp16), meshObj("B", "textures/b.png", splash::BitDepth::Bpp8)};
+    splash::Object group;
+    group.name = "Group";
+    group.children = {meshObj("A2", "textures/a.png", splash::BitDepth::Bpp16)};
+    sc.objects.push_back(group);
+    splash::Object off = meshObj("Off", "textures/b.png", splash::BitDepth::Bpp16);
+    off.active = false;  // not exported: never a candidate
+    sc.objects.push_back(off);
+    sc.settings.orderingTableSize = 4000;
+    sc.settings.bumpAllocatorSize = 400000;
+
+    const splash::VramSettings vram = editor::loadVramSettings(dir);
+    auto exportStats = [&](const splash::Scene& s) {
+        splash::Scene c = s;
+        splash::ExportOptions opt;
+        opt.dryRun = true;
+        opt.vram = vram;
+        splash::ExportResult r = splash::exportSplashpack(c, dir, dir / "scene.splashpack", opt);
+        CHECK(r.ok());
+        return r.stats;
+    };
+    const splash::ExportStats base = exportStats(sc);
+    int progressCalls = 0;
+    const editor::MeterFixResult res = editor::findMeterFixes(sc, dir, vram, {}, [&](int, int) { progressCalls++; });
+    CHECK(res.ok && progressCalls > 0);
+    for (int m = 0; m < editor::kFixMeters; m++)
+        CHECK(editor::meterUsed(editor::FixMeter(m), res.base) == editor::meterUsed(editor::FixMeter(m), base));
+
+    int depthFixes = 0, resets = 0;
+    for (const editor::MeterFix& f : res.fixes) {
+        if (!f.oneClick()) continue;
+        editor::Document d;
+        d.reset(sc, dir, "s");
+        CHECK(editor::applyFix(d, f));
+        const splash::ExportStats after = exportStats(d.scene());
+        for (int m = 0; m < editor::kFixMeters; m++) {
+            const editor::FixMeter fm = editor::FixMeter(m);
+            // The saving shown is the meter's change.
+            CHECK(f.before[size_t(m)] == editor::meterUsed(fm, base));
+            CHECK(f.after[size_t(m)] == editor::meterUsed(fm, after));
+            CHECK(f.saving(fm) == (long long)editor::meterUsed(fm, base) - (long long)editor::meterUsed(fm, after));
+        }
+        CHECK(d.undo());
+        const splash::ExportStats undone = exportStats(d.scene());
+        for (int m = 0; m < editor::kFixMeters; m++)
+            CHECK(editor::meterUsed(editor::FixMeter(m), undone) == editor::meterUsed(editor::FixMeter(m), base));
+        CHECK(d.scene().objects[0].mesh->bitDepth == splash::BitDepth::Bpp16 &&
+              d.scene().objects[2].children[0].mesh->bitDepth == splash::BitDepth::Bpp16 &&
+              d.scene().objects[1].mesh->bitDepth == splash::BitDepth::Bpp8 && d.scene().settings.orderingTableSize == 4000 &&
+              d.scene().settings.bumpAllocatorSize == 400000);
+        if (f.kind == editor::MeterFix::Kind::TextureDepth) {
+            depthFixes++;
+            if (f.textures == std::vector<std::string>{"textures/a.png"})
+                CHECK(f.objects == (std::vector<editor::ObjectPath>{{0}, {2, 0}}));  // both meshes on a.png
+            if (f.textures == std::vector<std::string>{"textures/b.png"}) CHECK(f.objects == std::vector<editor::ObjectPath>{{1}});
+            CHECK(f.saving(editor::FixMeter::Vram) > 0);
+        } else {
+            resets++;
+            CHECK(f.saving(editor::FixMeter::Vram) == 0);
+            // Two tables of (size + 1) words, two bump allocators.
+            if (f.kind == editor::MeterFix::Kind::ResetOrderingTable)
+                CHECK(f.saving(editor::FixMeter::Ram) == 2LL * (4000 - (long long)base.orderingTableNeed) * 4);
+            else
+                CHECK(f.saving(editor::FixMeter::Ram) == 2LL * (400000 - (long long)base.bumpAllocatorNeed));
+        }
+    }
+    // a.png 16 -> 8 and 16 -> 4, b.png 8 -> 4; both overrides.
+    CHECK(depthFixes == 3);
+    CHECK(resets == 2);
+    const std::vector<const editor::MeterFix*> v = editor::fixesFor(res, editor::FixMeter::Vram);
+    CHECK(v.size() == 3);
+    for (size_t i = 1; i < v.size(); i++) CHECK(v[i - 1]->saving(editor::FixMeter::Vram) >= v[i]->saving(editor::FixMeter::Vram));
+    // Measured, not guessed: a.png at 8 bpp joins b.png's 8 bpp atlas, while at
+    // 4 bpp it opens a 4 bpp atlas of its own, so 16 -> 8 saves more here.
+    CHECK(v.size() == 3 && v[0]->title == "a.png: 16 \xe2\x86\x92 8 bpp" && v[1]->title == "a.png: 16 \xe2\x86\x92 4 bpp" &&
+          v[0]->saving(editor::FixMeter::Vram) > v[1]->saving(editor::FixMeter::Vram));
+    CHECK(editor::fixesFor(res, editor::FixMeter::Ram).size() >= 2);
+    // Triangles: one mesh, three instances (the inactive one left out), simplified to half.
+    const std::vector<const editor::MeterFix*> t = editor::fixesFor(res, editor::FixMeter::Tris);
+    CHECK(t.size() == 1);
+    if (t.size() == 1) {
+        CHECK(t[0]->triangles == 512 && t[0]->objects.size() == 3 && !t[0]->oneClick());
+        CHECK(t[0]->simplified > 0 && t[0]->simplified <= 256);
+        splash::Mesh m = grid;
+        CHECK(t[0]->simplified == splash::simplifyToTriangles(m, 256).after);
+        CHECK(t[0]->saving(editor::FixMeter::Tris) == 3LL * (512 - t[0]->simplified));
+        CHECK(base.trianglesInView == 3 * 512);
+        editor::Document d;
+        d.reset(sc, dir, "s");
+        CHECK(!editor::applyFix(d, *t[0]));  // no one-click: it rewrites the model's files
+    }
+    // A stop request ends the search before any candidate is measured.
+    const editor::MeterFixResult stopped = editor::findMeterFixes(sc, dir, vram, [] { return true; });
+    CHECK(stopped.ok && stopped.fixes.empty());
+    fs::remove_all(dir, ec);
+}
+
 int main(int argc, char** argv) {
     std::error_code ec;
     std::filesystem::path exe = argc > 0 ? std::filesystem::absolute(argv[0], ec) : std::filesystem::path();
@@ -15844,6 +15995,7 @@ int main(int argc, char** argv) {
     testStringsExport();
     testStringsBlocks();
     testStringsDoc();
+    testMeterFixes();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);
         return 1;

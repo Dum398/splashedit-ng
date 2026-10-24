@@ -93,9 +93,29 @@ public:
     // Parent of the object at `path`, or nullptr for a top-level object.
     const splash::Object* parent(const ObjectPath& path) const;
 
+    // The selection: selection() is the primary object (the last clicked:
+    // the inspector's, the one most commands act on); moreSelected() holds
+    // the other selected objects, in the order they were added (#263).
+    // select() selects one object (or none) and drops the rest.
     const std::optional<ObjectPath>& selection() const { return m_selection; }
     const splash::Object* selected() const { return m_selection ? object(*m_selection) : nullptr; }
-    void select(std::optional<ObjectPath> path) { m_selection = std::move(path); }
+    void select(std::optional<ObjectPath> path) {
+        m_selection = std::move(path);
+        m_more.clear();
+    }
+    const std::vector<ObjectPath>& moreSelected() const { return m_more; }
+    // Every selected object, the primary last; empty with nothing selected.
+    std::vector<ObjectPath> selectedPaths() const;
+    // How many objects are selected.
+    size_t selectionCount() const { return m_selection ? 1 + m_more.size() : 0; }
+    bool isSelected(const ObjectPath& path) const;
+    // Selects `primary` and `more` (duplicates, the primary and paths that
+    // do not resolve left out). Without a primary, nothing is selected.
+    void selectMany(std::optional<ObjectPath> primary, const std::vector<ObjectPath>& more);
+    // Ctrl+click: a selected object leaves the selection (when it was the
+    // primary, the one selected before it takes over); any other joins it
+    // as the new primary.
+    void toggleSelected(const ObjectPath& path);
     // Selects the first object (depth-first) with this name. Returns false if none.
     bool selectByName(const std::string& name);
     // Path of every object in splash::flatten order (depth-first pre-order),
@@ -135,7 +155,14 @@ public:
     // endMerge() is called; a drag passes a key and calls endMerge() on release.
     bool edit(const ObjectPath& path, const std::function<void(splash::Object&)>& fn, const std::string& mergeKey = {});
     // Runs `fn` on each object in `paths` as one undo step. Returns how many it changed.
-    int editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn);
+    // With a `mergeKey`, consecutive calls on the same paths with the same key
+    // merge into one step until endMerge(), as edit() does.
+    int editMany(const std::vector<ObjectPath>& paths, const std::function<void(splash::Object&)>& fn,
+                 const std::string& mergeKey = {});
+    // The same, with `fn` told which object it is editing (a multi-object
+    // gizmo drag gives each its own position).
+    int editEach(const std::vector<ObjectPath>& paths, const std::function<void(const ObjectPath&, splash::Object&)>& fn,
+                 const std::string& mergeKey = {});
     // Renames the object at `path` as one undo step. Portals name their rooms
     // by object name, so when the object is a Room and no other Room still
     // carries the old name, every Portal's roomA/roomB that held the old name
@@ -172,11 +199,26 @@ public:
     // copyObject, then removes the object as one undo step. Empty, with no
     // change, when there is no such object.
     std::string cutObject(const ObjectPath& path);
+    // The same over several objects (a multi-selection, #263), each as one
+    // undo step. An object inside another of `paths` goes with it and is
+    // left out itself; objects the single-object command refuses are
+    // skipped. Removing restores the selection on undo; duplicating selects
+    // the copies (the primary's copy primary). copyObjects writes them in
+    // tree order; cutObjects copies the ones it can remove, then removes them.
+    // Each returns what removeObject etc. return for the whole set: how many
+    // were removed, the copies' paths, the text.
+    // topLevel(): `paths` without the ones inside another, in tree order.
+    std::vector<ObjectPath> topLevel(const std::vector<ObjectPath>& paths) const;
+    int removeObjects(const std::vector<ObjectPath>& paths);
+    std::vector<ObjectPath> duplicateObjects(const std::vector<ObjectPath>& paths);
+    std::string copyObjects(const std::vector<ObjectPath>& paths) const;
+    std::string cutObjects(const std::vector<ObjectPath>& paths);
     // Inserts the objects in clipboard `text` right after `after` as its
     // siblings, or at the end of the top level when `after` is unset or gone,
     // as one undo step. A name already taken among the new siblings is
     // numbered the way duplicateObject numbers it. Selects the last pasted
-    // object and returns its path; nullopt, with no change, for text that is
+    // object (with several pasted, all of them, the last primary, and undo
+    // restores the selection before) and returns its path; nullopt, with no change, for text that is
     // not ours. So a copy does not land on top of what it was copied from,
     // the pasted objects move together along X by `step`, as many steps as
     // it takes for none of them to sit where a new sibling copied from the
@@ -248,6 +290,10 @@ public:
     // Applies `cmd` and pushes it, dropping anything that could be redone.
     // With `mergeable`, it may fold into the previous command (see Command::merge).
     void execute(std::unique_ptr<Command> cmd, bool mergeable = false);
+    // Every command executed between beginBatch() and endBatch() is applied
+    // as it comes and undoes as one step (none when nothing ran). Not nested.
+    void beginBatch();
+    void endBatch();
 
     bool canUndo() const { return m_cursor > 0; }
     bool canRedo() const { return m_cursor < m_history.size(); }
@@ -337,6 +383,7 @@ private:
     unsigned m_loadId = 0;
     unsigned m_assetsId = 0;
     std::optional<ObjectPath> m_selection;
+    std::vector<ObjectPath> m_more;  // the rest of the selection (#263)
     std::set<ObjectPath> m_collapsed;
     std::optional<ObjectPath> m_pinned;
     UiSelection m_uiSelection;
@@ -350,6 +397,13 @@ private:
     size_t m_cursor = 0;       // commands [0, m_cursor) are applied
     size_t m_savedCursor = 0;  // m_cursor at the last load or save; kNever once unreachable
     bool m_mergeOpen = false;
+    std::optional<std::vector<std::unique_ptr<Command>>> m_batch;  // open batch (beginBatch)
+    // Pushes `cmd`, already applied, onto the history.
+    void record(std::unique_ptr<Command> cmd, bool mergeable);
+    // At the front of a batch: undo puts the current selection back; at its
+    // end: do and redo select `primary` and `more`.
+    void batchRestoreSelection();
+    void batchSetSelection(std::optional<ObjectPath> primary, std::vector<ObjectPath> more);
     static constexpr size_t kNever = static_cast<size_t>(-1);
 
     std::vector<std::string> m_prefabErrors;

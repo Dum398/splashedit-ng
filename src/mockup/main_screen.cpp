@@ -1072,6 +1072,11 @@ struct TreeCtx {
     int dropIndex = 0;
     bool dropInto = false;
     ImRect dropMark{};
+    // Every object row in the order drawn (collapsed and filtered rows left
+    // out): what a Shift+click selects a range of (#263).
+    std::vector<editor::ObjectPath> order{};
+    // A Shift+click this frame, resolved once every row is in `order`.
+    std::optional<editor::ObjectPath> rangeTo{};
 };
 
 static std::string lower(std::string s) {
@@ -1160,7 +1165,8 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         row.meta = meta.empty() ? nullptr : meta.c_str();
         row.hasChildren = !o.children.empty();
         row.expanded = open;
-        row.selected = c.doc.selection() && *c.doc.selection() == path;
+        row.selected = c.doc.isSelected(path);
+        c.order.push_back(path);
         row.warning = c.doc.hasWarning(o);
         row.hidden = !o.active;
         row.inheritedOff = ancestorOff;
@@ -1174,7 +1180,7 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
                                ". Open the prefab to change it (Inspector > Prefab > Open).").c_str());
         nameRect("tree." + o.name, rr);
         ++c.shown;
-        if (row.selected) c.selTop = rr.Min.y - c.contentTop;
+        if (c.doc.selection() && *c.doc.selection() == path) c.selTop = rr.Min.y - c.contentTop;
         if (rr.Overlaps(c.list)) {
             // Only its visible part takes a dropped file.
             ImRect shown = rr;
@@ -1189,18 +1195,38 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
             if (row.hasChildren && chevronClicked(rr, row.depth)) {
                 if (c.filter.empty()) c.doc.toggleExpanded(path);
             } else {
-                c.doc.select(path);
+                // Ctrl+click adds or takes away one row, Shift+click selects
+                // the rows from the anchor (the last plain or Ctrl click) to
+                // this one; a plain click selects this one alone (#263).
+                const ImGuiIO& io = ImGui::GetIO();
+                if (io.KeyShift && !io.KeyCtrl) {
+                    c.rangeTo = path;
+                } else if (io.KeyCtrl) {
+                    c.doc.toggleSelected(path);
+                    c.st.treeAnchor = path;
+                } else {
+                    c.doc.select(path);
+                    c.st.treeAnchor = path;
+                }
                 c.selectedHere = true;
             }
         }
-        if (!c.st.treeDragging && h.hovered && ImGui::IsMouseDoubleClicked(0) && !(row.hasChildren && chevronClicked(rr, row.depth))) {
+        const bool modifiers = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift;
+        if (!c.st.treeDragging && !modifiers && h.hovered && ImGui::IsMouseDoubleClicked(0) &&
+            !(row.hasChildren && chevronClicked(rr, row.depth))) {
             c.doc.select(path);
             c.selectedHere = true;
             c.st.frameRequest = true;
         }
-        // Right-click: select it and open its menu.
+        // Right-click: select it and open its menu. A right-click on a row of
+        // a multi-selection keeps the selection and makes that row primary.
         if (!c.st.treeDragging && h.hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
-            c.doc.select(path);
+            if (c.doc.selectionCount() > 1 && c.doc.isSelected(path)) {
+                std::vector<editor::ObjectPath> rest = c.doc.selectedPaths();
+                c.doc.selectMany(path, rest);
+            } else {
+                c.doc.select(path);
+            }
             c.selectedHere = true;
             c.st.treeMenu = 1;
             c.st.treeMenuPath = path;
@@ -1342,20 +1368,46 @@ static void refreshLuaDefinitions(const editor::Document& doc) {
 
 // Copy, Cut and Paste of objects through the system clipboard, as the text
 // Document::copyObject writes. Menu, row menu and shortcuts share these.
+// A command on `path` acts on the whole selection when `path` is one of
+// several selected objects (#263), else on `path` alone.
+static std::vector<editor::ObjectPath> commandTargets(const editor::Document& doc, const editor::ObjectPath& path) {
+    if (doc.selectionCount() > 1 && doc.isSelected(path)) return doc.selectedPaths();
+    return {path};
+}
+
+static void deleteObjects(editor::Document& doc, const editor::ObjectPath& path) {
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    if (t.size() > 1) doc.removeObjects(t);
+    else doc.removeObject(path);
+}
+
+static void duplicateObjects(editor::Document& doc, const editor::ObjectPath& path) {
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    if (t.size() > 1) doc.duplicateObjects(t);
+    else doc.duplicateObject(path);
+}
+
 static void copySelection(State& st, editor::Document& doc, const editor::ObjectPath& path) {
-    const std::string text = doc.copyObject(path);
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    const std::string text = t.size() > 1 ? doc.copyObjects(t) : doc.copyObject(path);
     if (!text.empty() && !SDL_SetClipboardText(text.c_str())) notify(st, std::string("Cannot copy: ") + SDL_GetError(), true);
 }
 
 static void cutSelection(State& st, editor::Document& doc, const editor::ObjectPath& path) {
-    const std::string text = doc.copyObject(path);
+    const std::vector<editor::ObjectPath> t = commandTargets(doc, path);
+    // Several: the ones that can be removed (prefab content cannot).
+    std::vector<editor::ObjectPath> go;
+    for (const editor::ObjectPath& p : t)
+        if (!doc.inInstance(p)) go.push_back(p);
+    const std::string text = t.size() > 1 ? doc.copyObjects(go) : doc.copyObject(path);
     if (text.empty()) return;
     // Only removed once the clipboard holds it, so a failed copy loses nothing.
     if (!SDL_SetClipboardText(text.c_str())) {
         notify(st, std::string("Cannot cut: ") + SDL_GetError(), true);
         return;
     }
-    doc.cutObject(path);
+    if (t.size() > 1) doc.cutObjects(go);
+    else doc.cutObject(path);
 }
 
 // Pastes right after `after`, or at the end of the top level when unset.
@@ -2766,11 +2818,11 @@ static std::vector<MenuEntry> menuEntries(int which, State& st, editor::Document
                 m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc] { st.canvasView.paste(doc, false); }));
                 m.push_back(item("Delete", "Del", hasEl, [&st, &doc] { st.canvasView.remove(doc); }));
             } else {
-                m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { doc.duplicateObject(*sel); }));
+                m.push_back(item("Duplicate", "Ctrl+D", hasSel, [&doc, sel] { duplicateObjects(doc, *sel); }));
                 m.push_back(item("Cut", "Ctrl+X", hasSel, [&st, &doc, sel] { cutSelection(st, doc, *sel); }));
                 m.push_back(item("Copy", "Ctrl+C", hasSel, [&st, &doc, sel] { copySelection(st, doc, *sel); }));
                 m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, sel] { pasteClipboard(st, doc, sel); }));
-                m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { doc.removeObject(*sel); }));
+                m.push_back(item("Delete", "Del", hasSel, [&doc, sel] { deleteObjects(doc, *sel); }));
             }
             m.push_back(separator());
             m.push_back(item("Select None", "", hasSel, [&] { doc.select(std::nullopt); }));
@@ -3379,11 +3431,11 @@ static std::vector<MenuEntry> treeMenuEntries(int kind, State& st, editor::Docum
             st.renameStart = true;
             st.renamePath = p;
         }));
-        m.push_back(item("Duplicate", "Ctrl+D", !part && !root, [&doc, p] { doc.duplicateObject(p); }));
+        m.push_back(item("Duplicate", "Ctrl+D", !part && !root, [&doc, p] { duplicateObjects(doc, p); }));
         m.push_back(item("Cut", "Ctrl+X", !part && !root, [&st, &doc, p] { cutSelection(st, doc, p); }));
         m.push_back(item("Copy", "Ctrl+C", true, [&st, &doc, p] { copySelection(st, doc, p); }));
         m.push_back(item("Paste", "Ctrl+V", true, [&st, &doc, p] { pasteClipboard(st, doc, p); }));
-        m.push_back(item("Delete", "Del", !part && !root, [&doc, p] { doc.removeObject(p); }));
+        m.push_back(item("Delete", "Del", !part && !root, [&doc, p] { deleteObjects(doc, p); }));
         m.push_back(separator());
         // A prefab: a file in prefabs/ that holds the object and its children, placed again from the Project panel.
         if (instance && !part) {
@@ -3538,6 +3590,24 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
     }
     editor::ObjectPath path;
     if (rootOpen) treeObjects(ctx, doc.scene().objects, path);
+    if (ctx.rangeTo) {
+        // Shift+click: the rows between the anchor and the clicked one, both
+        // in, the clicked one primary. Without an anchor in view, the primary
+        // anchors it; with neither, it selects the one row.
+        const auto in = [&](const std::optional<editor::ObjectPath>& p) {
+            return p ? std::find(ctx.order.begin(), ctx.order.end(), *p) : ctx.order.end();
+        };
+        auto to = in(ctx.rangeTo), from = in(st.treeAnchor);
+        if (from == ctx.order.end()) from = in(doc.selection());
+        if (from == ctx.order.end()) {
+            doc.select(*ctx.rangeTo);
+            st.treeAnchor = ctx.rangeTo;
+        } else {
+            std::vector<editor::ObjectPath> range(std::min(from, to), std::max(from, to) + 1);
+            if (!st.treeAnchor || in(st.treeAnchor) == ctx.order.end()) st.treeAnchor = *from;
+            doc.selectMany(*ctx.rangeTo, range);
+        }
+    }
     if (st.renaming && !ctx.renameShown) st.renaming = false;  // the row is collapsed away or gone
     if (!ctx.filter.empty() && ctx.shown == 0) {
         const char* none = "No objects match";
@@ -3648,8 +3718,9 @@ static void selectionOutline(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn,
 }
 
 // A clickable marker for an object without geometry. Returns true when clicked.
+// `picked`: one of several selected objects (#263), ringed in the selection colour.
 static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2 sz, viewport::Vec3 p, const char* ic, ImU32 col,
-                      const std::string& name = {}) {
+                      const std::string& name = {}, bool picked = false) {
     ImVec2 c;
     if (!view.project(p, mn, sz, &c)) return false;
     if (!ImRect(mn, mn + sz).Contains(c)) return false;
@@ -3660,6 +3731,7 @@ static bool sceneIcon(ImDrawList* dl, viewport::Ps1View& view, ImVec2 mn, ImVec2
     ImU32 ringA = (ImU32)(0x90 + (0xff - 0x90) * h.hover);
     dl->AddCircle(c, 13, (col & 0x00ffffffu) | (ringA << IM_COL32_A_SHIFT), 24, 1.2f + 0.6f * h.hover);
     textCentered(dl, ImRect(c - ImVec2(13, 13), c + ImVec2(13, 13)), fonts().medium, type::icon - 1, col, ic);
+    if (picked) dl->AddCircle(c, 16, rgb(0xb3a8ff, 230), 28, 2.0f);
     return h.clicked;
 }
 
@@ -3866,12 +3938,51 @@ static void gizmoLabel(ImDrawList* dl, ImRect r, ImVec2 c, ImVec2 at, const char
     text(dl, ImVec2(b.Min.x + padX + ts.x + gap, b.Min.y + (h - vs.y) * 0.5f), f.medium, type::label, color::text, value);
 }
 
+// Several objects under one gizmo (#263): the items the drag started from,
+// by path, and a parent-space delta for each.
+using GizmoItems = std::vector<State::GizmoDrag::Item>;
+static const State::GizmoDrag::Item* gizmoItem(const GizmoItems& items, const editor::ObjectPath& p) {
+    for (const State::GizmoDrag::Item& it : items)
+        if (it.path == p) return &it;
+    return nullptr;
+}
+static splash::Vec3 itemDelta(const State::GizmoDrag::Item& it, splash::Vec3 worldDelta) {
+    return worldToParentDelta(it.parentToWorld ? &*it.parentToWorld : nullptr, worldDelta);
+}
+static std::vector<editor::ObjectPath> itemPaths(const GizmoItems& items) {
+    std::vector<editor::ObjectPath> v;
+    for (const State::GizmoDrag::Item& it : items) v.push_back(it.path);
+    return v;
+}
+// Writes each item's new transform from `fn` (given the item and the
+// object's transform to set) as one merging edit `key`, when any changed.
+static void editItems(editor::Document& doc, const GizmoItems& items, const std::string& key,
+                      const std::function<void(const State::GizmoDrag::Item&, splash::Transform&)>& fn) {
+    bool changed = false;
+    for (const State::GizmoDrag::Item& it : items) {
+        const splash::Object* o = doc.object(it.path);
+        if (!o) continue;
+        splash::Transform t = o->transform;
+        fn(it, t);
+        const splash::Transform& c = o->transform;
+        if (!(t.position == c.position) || !(t.scale == c.scale) || t.rotation.x != c.rotation.x || t.rotation.y != c.rotation.y ||
+            t.rotation.z != c.rotation.z || t.rotation.w != c.rotation.w)
+            changed = true;
+    }
+    if (!changed) return;
+    doc.editEach(itemPaths(items), [&](const editor::ObjectPath& p, splash::Object& ob) {
+        if (const State::GizmoDrag::Item* it = gizmoItem(items, p)) fn(*it, ob.transform);
+    }, key);
+}
+
 // The move gizmo: three world-axis arrows and an XZ plane handle, a fixed
 // size on screen. Dragging an arrow moves along it by the mouse motion
 // projected onto the arrow; dragging the plane follows the mouse across the
 // horizontal plane through the object. One drag is one undo step.
+// With `group` (several objects selected), `fo` sits at their centre and
+// every item moves by the same world delta.
 static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
-                      const splash::Mat34* parentToWorld) {
+                      const splash::Mat34* parentToWorld, const GizmoItems* group = nullptr) {
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = ImGui::GetIO();
     const ImGuiID gid = ImGui::GetID("##gizmo");
@@ -3907,6 +4018,12 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
                  view.project(toGl(wpos + splash::Vec3{0, 0, pl}), mn, sz, &quad[3]);
         quad[0] = c;
     }
+    if (visible && namedRectsOn()) {
+        static const char* names[3] = {"vp.move.x", "vp.move.y", "vp.move.z"};
+        nameRect("vp.move.c", ImRect(c - ImVec2(4, 4), c + ImVec2(4, 4)));
+        for (int i = 0; i < 3; ++i)
+            if (tipOk[i]) nameRect(names[i], ImRect(tips[i] - ImVec2(4, 4), tips[i] + ImVec2(4, 4)));
+    }
 
     // Hover: arrows over the plane, nearest arrow wins.
     int hover = -1;
@@ -3930,6 +4047,7 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
             drag.startMouse = io.MousePos;
             drag.startWorld = wpos;
             drag.startLocal = fo.object->transform.position;
+            drag.group = group ? *group : GizmoItems();
             bool ok = true;
             if (hover < 3) {
                 ImVec2 d = tips[hover] - c;
@@ -3968,9 +4086,16 @@ static void moveGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect
                 for (int i = 0; i < 3; ++i)
                     if (drag.handle == i || (drag.handle == 3 && i != 1)) component(nw, i) = std::round(component(nw, i) / step) * step;
             }
-            splash::Vec3 local = drag.startLocal + worldToParentDelta(parentToWorld, nw - drag.startWorld);
-            if (moved && doc.selection() && !(local == fo.object->transform.position))
-                doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.position = local; }, "gizmo.move");
+            if (!drag.group.empty()) {
+                const splash::Vec3 d = nw - drag.startWorld;
+                if (moved)
+                    editItems(doc, drag.group, "gizmo.move",
+                              [&](const State::GizmoDrag::Item& it, splash::Transform& t) { t.position = it.local.position + itemDelta(it, d); });
+            } else {
+                splash::Vec3 local = drag.startLocal + worldToParentDelta(parentToWorld, nw - drag.startWorld);
+                if (moved && doc.selection() && !(local == fo.object->transform.position))
+                    doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.position = local; }, "gizmo.move");
+            }
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
         } else {
             doc.endMerge();
@@ -4020,8 +4145,10 @@ static splash::Vec3 eyeUnity(const viewport::Ps1View& view) {
 // gizmo's screen size. Dragging a ring turns the object about that axis by
 // the mouse's angle around the gizmo's centre on screen; snapping rounds the
 // turn to 15 degrees. One drag is one undo step.
+// With `group`, every item turns about the world axis through the centre
+// `fo` sits at: its rotation turns and its origin swings round the centre.
 static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
-                        const splash::Mat34* parentToWorld) {
+                        const splash::Mat34* parentToWorld, const GizmoItems* group = nullptr) {
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = ImGui::GetIO();
     const ImGuiID gid = ImGui::GetID("##gizmo");
@@ -4050,6 +4177,29 @@ static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRe
         }
     }
 
+    // Scripted tests: a grab point on each ring, the middle of the segment
+    // facing the camera that lies farthest from the other rings on screen.
+    if (gf.visible && namedRectsOn()) {
+        static const char* names[3] = {"vp.rotate.x", "vp.rotate.y", "vp.rotate.z"};
+        for (int i = 0; i < 3; ++i) {
+            if (!ringOk[i]) continue;
+            int best = -1;
+            float bestD = -1;
+            for (int k = 0; k < kSeg; ++k) {
+                if (!facing[i][k]) continue;
+                const ImVec2 m = (ring[i][k] + ring[i][(k + 1) % kSeg]) * 0.5f;
+                float d = 1e9f;
+                for (int j = 0; j < 3; ++j)
+                    if (j != i && ringOk[j])
+                        for (int q = 0; q < kSeg; ++q) d = std::min(d, length(ring[j][q] - m));
+                if (d > bestD) bestD = d, best = k;
+            }
+            if (best < 0) continue;
+            const ImVec2 m = (ring[i][best] + ring[i][(best + 1) % kSeg]) * 0.5f;
+            nameRect(names[i], ImRect(m - ImVec2(2, 2), m + ImVec2(2, 2)));
+        }
+    }
+
     // Hover: the nearest ring, front halves preferred where rings cross.
     int hover = -1, hoverSeg = 0;
     if (gf.visible && gizmoMayHover(active, r)) {
@@ -4072,6 +4222,12 @@ static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRe
             // A world axis seen from the parent's space, so the turn is about the world axis.
             splash::Vec3 pa = worldToParentDelta(parentToWorld, kAxis[hover]);
             drag.parentAxis = splash::sqrMagnitude(pa) > 1e-12f ? splash::normalized(pa) : kAxis[hover];
+            drag.startWorld = gf.wpos;
+            drag.group = group ? *group : GizmoItems();
+            for (State::GizmoDrag::Item& it : drag.group) {
+                splash::Vec3 ia = itemDelta(it, kAxis[hover]);
+                it.parentAxis = splash::sqrMagnitude(ia) > 1e-12f ? splash::normalized(ia) : kAxis[hover];
+            }
             float a = 2 * editor::kPi * (hoverSeg + 0.5f) / kSeg;
             drag.ringStart = kRingU[hover] * std::cos(a) + kRingV[hover] * std::sin(a);
             drag.lastAngle = editor::screenAngle(gf.c.x, gf.c.y, io.MousePos.x, io.MousePos.y);
@@ -4104,12 +4260,24 @@ static void rotateGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRe
             }
             float deg = editor::rotateDragDegrees(drag.accum * drag.sign, st.snap || io.KeyCtrl);
             drag.shown = deg;
+            if (!drag.group.empty()) {
+                const float rad = deg * (editor::kPi / 180.0f);
+                const splash::Quat turn = editor::quatAxisAngle(kAxis[drag.handle], rad);
+                editItems(doc, drag.group, "gizmo.rotate", [&](const State::GizmoDrag::Item& it, splash::Transform& t) {
+                    t.rotation = it.local.rotation;
+                    t.position = it.local.position;
+                    if (deg == 0) return;
+                    t.rotation = editor::quatNormalize(editor::quatMul(editor::quatAxisAngle(it.parentAxis, rad), it.local.rotation));
+                    const splash::Vec3 w = drag.startWorld + splash::rotate(turn, it.world - drag.startWorld);
+                    t.position = it.local.position + itemDelta(it, w - it.world);
+                });
+            }
             splash::Quat q = drag.startRot;
             if (deg != 0)
                 q = editor::quatNormalize(editor::quatMul(editor::quatAxisAngle(drag.parentAxis, deg * (editor::kPi / 180.0f)), drag.startRot));
             const splash::Quat& cur = fo.object->transform.rotation;
             bool same = q.x == cur.x && q.y == cur.y && q.z == cur.z && q.w == cur.w;
-            if (doc.selection() && !same)
+            if (drag.group.empty() && doc.selection() && !same)
                 doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.rotation = q; }, "gizmo.rotate");
         } else {
             doc.endMerge();
@@ -4228,7 +4396,13 @@ static void gizmoCube(ImDrawList* dl, const viewport::Ps1View& view, ImRect r, s
 // handle by its own screen length doubles that axis; the centre scales by
 // the drag up and to the right, a square by the drag out through it. Snapping rounds to 0.1, and no component
 // ever reaches zero or changes sign. One drag is one undo step.
-static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo) {
+// With `group`, the handles lie along the primary object's axes at the
+// centre `fo` sits at. Each item's own scale changes as the primary's would
+// from its own start (so each keeps its own proportions under the plane and
+// centre handles), and its origin moves away from or toward the centre
+// along the handle's axes by the primary's factor.
+static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRect r, editor::Document& doc, const splash::FlatObject& fo,
+                       const GizmoItems* group = nullptr) {
     ImGuiContext& g = *GImGui;
     ImGuiIO& io = ImGui::GetIO();
     const ImGuiID gid = ImGui::GetID("##gizmo");
@@ -4341,6 +4515,8 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
             drag.tool = 3;
             drag.startMouse = io.MousePos;
             drag.startScale = cur;
+            drag.startWorld = gf.wpos;
+            drag.group = group ? *group : GizmoItems();
             drag.axisDir = hover < 3 ? dirS[hover] : ImVec2(0.70710678f, -0.70710678f);
             drag.handlePx = hover < 3 ? tipPx[hover] : 76.0f;
             if (hover >= 4) {
@@ -4382,8 +4558,32 @@ static void scaleGizmo(State& st, ImDrawList* dl, viewport::Ps1View& view, ImRec
                         break;
                     }
             }
-            if (doc.selection() && !(ns == cur))
+            if (!drag.group.empty()) {
+                // The primary's factor per gizmo axis, for the origins.
+                float pf[3];
+                for (int i = 0; i < 3; ++i) pf[i] = std::fabs(drag.startScale[i]) > 1e-6f ? ns[i] / drag.startScale[i] : 1.0f;
+                const int h = drag.handle;
+                editItems(doc, drag.group, "gizmo.scale", [&](const State::GizmoDrag::Item& it, splash::Transform& t) {
+                    const splash::Vec3 s0 = it.local.scale;
+                    if (h < 3) {
+                        t.scale = s0;
+                        component(t.scale, h) = editor::scaleAxis(s0[h], factor, snap);
+                    } else if (h >= 4) {
+                        t.scale = editor::scalePlane(s0, (h - 4 + 1) % 3, (h - 4 + 2) % 3, factor, snap);
+                    } else {
+                        t.scale = editor::scaleUniform(s0, factor, snap);
+                    }
+                    const splash::Vec3 off = it.world - drag.startWorld;
+                    splash::Vec3 w = drag.startWorld + off;
+                    for (int i = 0; i < 3; ++i) {
+                        const bool on = h == 3 || h == i || (h >= 4 && i != h - 4);
+                        if (on) w = w + dirs[i] * ((pf[i] - 1) * splash::dot(off, dirs[i]));
+                    }
+                    t.position = it.local.position + itemDelta(it, w - it.world);
+                });
+            } else if (doc.selection() && !(ns == cur)) {
                 doc.edit(*doc.selection(), [&](splash::Object& ob) { ob.transform.scale = ns; }, "gizmo.scale");
+            }
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
         } else {
             doc.endMerge();
@@ -4489,6 +4689,24 @@ static void selectedBoxGl(const editor::Document& doc, const splash::FlatObject&
 // GL-space bounds of the selection, or of the whole scene with nothing selected.
 static bool frameBounds(const editor::Document& doc, const viewport::Ps1View& view, const std::vector<splash::FlatObject>& flats,
                         viewport::Vec3* lo, viewport::Vec3* hi) {
+    // Several selected: the box around all of them (#263).
+    if (doc.selectionCount() > 1) {
+        bool any = false;
+        for (const editor::ObjectPath& p : doc.selectedPaths()) {
+            const splash::Object* ob = doc.object(p);
+            for (const splash::FlatObject& fo : flats)
+                if (ob && fo.object == ob) {
+                    viewport::Vec3 a, b;
+                    selectedBoxGl(doc, fo, &a, &b);
+                    if (!any) *lo = a, *hi = b;
+                    *lo = {std::min(lo->x, a.x), std::min(lo->y, a.y), std::min(lo->z, a.z)};
+                    *hi = {std::max(hi->x, b.x), std::max(hi->y, b.y), std::max(hi->z, b.z)};
+                    any = true;
+                    break;
+                }
+        }
+        if (any) return true;
+    }
     if (const splash::Object* sel = doc.selected())
         for (const splash::FlatObject& fo : flats)
             if (fo.object == sel) {
@@ -4644,8 +4862,16 @@ static void viewportInput(State& st, ImRect r, editor::Document& doc, viewport::
             if (mode == Select && !st.vpDragged && r.Contains(io.MousePos)) {
                 std::optional<int> hit = view.pick(io.MousePos, r.Min, r.GetSize());
                 std::vector<editor::ObjectPath> paths = doc.flatPaths();
-                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) doc.select(pickTarget(doc, paths[(size_t)*hit]));
-                else doc.select(std::nullopt);
+                // Ctrl or Shift+click adds the object to the selection or takes
+                // it away, and leaves the selection alone on empty space (#263).
+                const bool add = io.KeyCtrl || io.KeyShift;
+                if (hit && *hit >= 0 && (size_t)*hit < paths.size()) {
+                    const editor::ObjectPath p = pickTarget(doc, paths[(size_t)*hit]);
+                    if (add) doc.toggleSelected(p);
+                    else doc.select(p);
+                } else if (!add) {
+                    doc.select(std::nullopt);
+                }
             }
             ImGui::ClearActiveID();
             st.vpButton = -1;
@@ -5786,6 +6012,22 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
     }
 
     // Selection outline and the tool's gizmo follow the selected object.
+    // The rest of a multi-selection is outlined too, a little fainter (#263).
+    const std::vector<editor::ObjectPath> selPaths = doc.selectedPaths();
+    const bool multi = selPaths.size() > 1;
+    if (multi) {
+        dl->ChannelsSetCurrent(kScene);
+        for (const editor::ObjectPath& p : doc.moreSelected()) {
+            const splash::Object* ob = doc.object(p);
+            for (size_t si = 0; ob && si < flats.size(); ++si)
+                if (flats[si].object == ob) {
+                    viewport::Vec3 lo, hi;
+                    selectedBoxGl(doc, si < shown.size() ? shown[si] : flats[si], &lo, &hi);
+                    selectionOutline(dl, view, mn, sz, lo, hi, rgb(0xb3a8ff, 170), 1.2f);
+                    break;
+                }
+        }
+    }
     if (sel) {
         for (size_t si = 0; si < flats.size(); ++si)
             if (const splash::FlatObject& fo = flats[si]; fo.object == sel) {
@@ -5814,7 +6056,58 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
                 }
                 // Content of a prefab instance does not move here: no handles.
                 const bool sculpting = fo.object->terrain && st.terrainTool >= 0;
-                if (!posed && !sculpting && st.tool >= 1 && st.tool <= 3 && !doc.inInstance(*doc.selection())) {
+                if (multi) {
+                    // Several objects (#263): one gizmo at the centre of their
+                    // origins moves them all. An object under another selected
+                    // one moves with it, and prefab content does not move; an
+                    // object the preview poses takes the gizmo away.
+                    GizmoItems items;
+                    bool anyPosed = posed;
+                    splash::Vec3 centre{};
+                    for (const editor::ObjectPath& p : selPaths) {
+                        bool under = false;
+                        for (const editor::ObjectPath& q : selPaths)
+                            if (q.size() < p.size() && std::equal(q.begin(), q.end(), p.begin())) under = true;
+                        if (under || doc.inInstance(p)) continue;
+                        const splash::Object* ob = doc.object(p);
+                        const splash::Object* par = doc.parent(p);
+                        State::GizmoDrag::Item it;
+                        it.path = p;
+                        bool found = false;
+                        for (size_t k = 0; k < flats.size(); ++k) {
+                            if (flats[k].object == ob) {
+                                it.world = flats[k].localToWorld.position();
+                                found = true;
+                                if (previewing && k < shown.size() && !samePose(flats[k], shown[k], doc.scene().settings.gteScaling))
+                                    anyPosed = true;
+                            }
+                            if (par && flats[k].object == par) it.parentToWorld = flats[k].localToWorld;
+                        }
+                        if (!found) continue;
+                        it.local = ob->transform;
+                        centre = centre + it.world;
+                        items.push_back(std::move(it));
+                    }
+                    if (anyPosed && st.gizmo.handle >= 0) {
+                        doc.endMerge();
+                        if (GImGui->ActiveId == ImGui::GetID("##gizmo")) ImGui::ClearActiveID();
+                        st.gizmo.handle = -1;
+                    }
+                    if (!items.empty() && !anyPosed && st.tool >= 1 && st.tool <= 3) {
+                        centre = centre * (1.0f / static_cast<float>(items.size()));
+                        // The primary's frame (its axes for the scale handles), moved to the centre.
+                        splash::FlatObject at = fo;
+                        at.worldPosition = centre;
+                        at.localToWorld.m[0][3] = centre.x, at.localToWorld.m[1][3] = centre.y, at.localToWorld.m[2][3] = centre.z;
+                        if (namedRectsOn()) {
+                            ImVec2 cp;
+                            if (view.project(toGl(centre), mn, sz, &cp)) nameRect("vp.selcentre", ImRect(cp - ImVec2(3, 3), cp + ImVec2(3, 3)));
+                        }
+                        if (st.tool == 1) moveGizmo(st, dl, view, r, doc, at, nullptr, &items);
+                        if (st.tool == 2) rotateGizmo(st, dl, view, r, doc, at, nullptr, &items);
+                        if (st.tool == 3) scaleGizmo(st, dl, view, r, doc, at, &items);
+                    }
+                } else if (!posed && !sculpting && st.tool >= 1 && st.tool <= 3 && !doc.inInstance(*doc.selection())) {
                     const splash::Object* par = doc.parent(*doc.selection());
                     const splash::Mat34* parentToWorld = nullptr;
                     for (const splash::FlatObject& pf : flats)
@@ -5927,7 +6220,12 @@ static void viewportPanel(State& st, ImDrawList* dl, ImRect r, editor::Document&
         else if (!fo.object->mesh && fo.object->children.empty() && !fo.object->script) ic = icon::square, col = kind::folder;
         if (!ic) continue;
         ImGui::PushID((int)i);
-        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name) && i < paths.size()) doc.select(pickTarget(doc, paths[i]));
+        const bool picked = multi && i < paths.size() && doc.isSelected(paths[i]);
+        if (sceneIcon(dl, view, mn, sz, pos, ic, col, fo.object->name, picked) && i < paths.size()) {
+            const ImGuiIO& io = ImGui::GetIO();
+            if (io.KeyCtrl || io.KeyShift) doc.toggleSelected(pickTarget(doc, paths[i]));
+            else doc.select(pickTarget(doc, paths[i]));
+        }
         ImGui::PopID();
     }
     if (previewing) previewCamera(dl, view, mn, sz, view.preview());
@@ -8777,6 +9075,420 @@ static std::string fitWidth(const std::string& t, float w) {
     return s + "...";
 }
 
+// Several objects selected (#263): the inspector shows what they all have.
+// A field whose values differ reads "mixed"; an edit sets the value on every
+// one of them as one undo step (a scrub merges into one until released).
+// Typed transform values set that one axis on all (all on the same Y). The
+// components whose inspectors are files, lists or painting are edited one
+// object at a time: they are named in a card at the end.
+static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
+    Fonts& f = fonts();
+    std::vector<editor::ObjectPath> paths;
+    std::vector<const splash::Object*> objs;
+    for (const editor::ObjectPath& p : doc.selectedPaths())
+        if (const splash::Object* o = doc.object(p)) paths.push_back(p), objs.push_back(o);
+    if (objs.empty()) return;
+    const splash::Object& prim = *objs.back();  // the primary is last
+    auto all = [&](const std::function<bool(const splash::Object&)>& pred) {
+        for (const splash::Object* o : objs)
+            if (!pred(*o)) return false;
+        return true;
+    };
+    // Scripted tests: what each field shows, once per change.
+    auto reportField = [&](const std::string& id, const std::string& shown) {
+        if (!namedRectsOn()) return;
+        static std::map<std::string, std::string> last;
+        std::string& l = last[id];
+        if (l == shown) return;
+        l = shown;
+        std::printf("inspector: %s %s\n", id.c_str(), shown.c_str());
+        std::fflush(stdout);
+    };
+    auto editAll = [&](const std::function<void(splash::Object&)>& fn, const std::string& key = {}) { doc.editMany(paths, fn, key); };
+
+    ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
+    nameRect("obj.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
+    static float scroll = 0;
+    static std::vector<editor::ObjectPath> scrolled;
+    if (scrolled != paths) {
+        scrolled = paths;
+        scroll = 0;
+    }
+    const float top0 = y;
+    y -= scroll;
+    float x0 = r.Min.x + space::md, x1 = r.Max.x - space::md;
+
+    // Header: how many, which one is primary, and their on/off switch.
+    {
+        ImRect ic(ImVec2(x0, y), ImVec2(x0 + 40, y + 40));
+        dl->AddRectFilled(ic.Min, ic.Max, (color::accentHover & 0x00ffffffu) | (34u << IM_COL32_A_SHIFT), radius::card);
+        textCentered(dl, ic, f.medium, type::icon + 3, color::accentHover, icon::layers);
+        const std::string title = std::to_string(objs.size()) + " objects";
+        const ImVec2 np(ic.Max.x + space::md, y + 2);
+        text(dl, np, f.semibold, type::title, color::text, title.c_str());
+        nameRect("obj.multi", ImRect(np, np + measure(f.semibold, type::title, title.c_str())));
+        const std::string sub = "Last picked: " + prim.name;
+        text(dl, ImVec2(ic.Max.x + space::md, y + 22), f.regular, type::caption, color::textFaint, sub.c_str());
+        const bool allOn = all([](const splash::Object& o) { return o.active; });
+        const ImRect tr(ImVec2(x1 - 30, y + 12), ImVec2(x1, y + 28));
+        nameRect("obj.active", tr);
+        if (toggle("objactive", tr, allOn)) editAll([allOn](splash::Object& ob) { ob.active = !allOn; });
+        tooltip("Off leaves these objects out of the game entirely. When some are off, a click turns them all on.");
+        y += 40 + space::lg;
+    }
+    if (std::any_of(paths.begin(), paths.end(), [&](const editor::ObjectPath& p) { return doc.inInstance(p); })) {
+        const char* note = "Some of these are part of a prefab: edits here leave them as they are.";
+        text(dl, ImVec2(x0, y), f.regular, type::caption, color::warn, note);
+        y += 16 + space::md;
+    }
+
+    const float lw = 96, rowH = 32;
+    auto row = [&](const char* id, const char* label, const char* tip) {
+        ImRect rr(ImVec2(x0 + space::sm, y), ImVec2(x1 - space::sm, y + rowH));
+        y += rowH;
+        return property(id, rr, lw, label, tip);
+    };
+    bool folded = false;
+    auto fold = [&](bool open) {
+        folded = !open;
+        if (folded) ImGui::PushClipRect(ImVec2(0, 0), ImVec2(0, 0), false);
+    };
+    auto sectionEnd = [&](float top) {
+        if (folded) {
+            ImGui::PopClipRect();
+            folded = false;
+            y = top + 34 + space::md;
+            return;
+        }
+        dl->AddRect(ImVec2(x0, top), ImVec2(x1, y + space::sm), rgb(0xffffff, 10), radius::card);
+        y += space::sm + space::md;
+    };
+    // The three fields of a Vec3 row, named obj.<id>.x/y/z.
+    auto nameVec3 = [&](const char* id, ImRect rr) {
+        const float w = (rr.GetWidth() - space::xs * 2) / 3;
+        for (int i = 0; i < 3; ++i)
+            nameRect(std::string("obj.") + id + "." + "xyz"[i],
+                     ImRect(ImVec2(rr.Min.x + i * (w + space::xs), rr.Min.y), ImVec2(rr.Min.x + i * (w + space::xs) + w, rr.Max.y)));
+    };
+    // A Vec3 row: each axis shows the primary's value or "mixed"; an edit sets
+    // that axis alone on every object (`set` gets the axis and the value).
+    auto vec3Row = [&](const char* id, const char* lid, const char* label, const char* tip,
+                       const std::function<splash::Vec3(const splash::Object&)>& get, std::string (*fmt)(float),
+                       const std::function<void(splash::Object&, int, float)>& set, ImRect* rowOut = nullptr) {
+        const splash::Vec3 pv = get(prim);
+        std::string shown[3];
+        bool mixed[3] = {};
+        float ed[3] = {pv.x, pv.y, pv.z};
+        for (int i = 0; i < 3; ++i) {
+            shown[i] = fmt(ed[i]);
+            for (const splash::Object* o : objs)
+                if (fmt(get(*o)[i]) != shown[i]) mixed[i] = true;
+            reportField(std::string(id) + "." + "xyz"[i], mixed[i] ? "mixed" : shown[i]);
+        }
+        const ImRect rr = row(lid, label, tip);
+        nameVec3(id, rr);
+        if (rowOut) *rowOut = rr;
+        FieldEdit fe = vec3Field(id, rr, mixed[0] ? "mixed" : shown[0].c_str(), mixed[1] ? "mixed" : shown[1].c_str(),
+                                 mixed[2] ? "mixed" : shown[2].c_str(), nullptr, ed, mixed);
+        return std::make_pair(fe, std::array<float, 3>{ed[0], ed[1], ed[2]});
+    };
+    auto fmtF = [](float v) { return fmtFixed(v); };
+    auto fmtS = [](float v) { return fmtShort(v); };
+
+    // Transform.
+    float top = y;
+    fold(section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false));
+    y += 34 + space::xs;
+    {
+        auto [fe, v] = vec3Row("pos", "lpos", "Position", "Where each object sits, in metres, relative to its parent.",
+                               [](const splash::Object& o) { return o.transform.position; }, fmtF, nullptr);
+        if (fe.changed) {
+            const int i = fe.index;
+            const float nv = v[i];
+            editAll([i, nv](splash::Object& ob) { component(ob.transform.position, i) = nv; }, "mpos." + std::to_string(i));
+        }
+        if (fe.done) doc.endMerge();
+    }
+    {
+        auto [fe, v] = vec3Row("rot", "lrot", "Rotation", "Rotation around each axis, in degrees.",
+                               [](const splash::Object& o) { return eulerDegrees(o.transform.rotation); }, fmtS, nullptr);
+        if (fe.changed) {
+            const int i = fe.index;
+            const float nv = v[i];
+            editAll([i, nv](splash::Object& ob) {
+                splash::Vec3 e = eulerDegrees(ob.transform.rotation);
+                component(e, i) = nv;
+                ob.transform.rotation = quatFromEuler(e);
+            }, "mrot." + std::to_string(i));
+        }
+        if (fe.done) doc.endMerge();
+    }
+    {
+        // The Scale lock, as with one object: each object keeps its own proportions.
+        const float lx = x0 + space::sm + lw - 4, ly = y + rowH * 0.5f;
+        const ImRect lr(ImVec2(lx - 22, ly - 11), ImVec2(lx, ly + 11));
+        nameRect("obj.scllock", lr);
+        bool& on = st.play.tools.scaleLock;
+        ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
+        const bool flip = iconButton("scllock", lr, on ? icon::lock : icon::link, on,
+                                     on ? "Scale locked: editing one axis scales all three by the same factor, each object from its own scale"
+                                        : "Lock the scale's proportions: editing one axis scales all three by the same factor");
+        ImGui::PopItemFlag();
+        if (flip) {
+            on = !on;
+            st.scaleLockFromMany.clear();
+            if (!st.play.settingsFile.empty()) editor::savePlayTools(st.play.settingsFile, st.play.tools);
+        }
+    }
+    {
+        auto [fe, v] = vec3Row("scl", "lscl", "Scale", "Size multiplier on each axis.", [](const splash::Object& o) { return o.transform.scale; },
+                               fmtF, nullptr);
+        if (fe.changed) {
+            const int i = fe.index;
+            const float nv = v[i];
+            if (st.play.tools.scaleLock) {
+                // Every frame of a scrub scales each object from where the edit began.
+                bool same = st.scaleLockFromMany.size() == paths.size();
+                for (size_t k = 0; same && k < paths.size(); ++k) same = st.scaleLockFromMany[k].first == paths[k];
+                if (!same) {
+                    st.scaleLockFromMany.clear();
+                    for (size_t k = 0; k < paths.size(); ++k) st.scaleLockFromMany.push_back({paths[k], objs[k]->transform.scale});
+                }
+                doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
+                    splash::Vec3 from = ob.transform.scale;
+                    for (const auto& [lp, s] : st.scaleLockFromMany)
+                        if (lp == p) from = s;
+                    ob.transform.scale = editor::lockedScale(from, i, nv);
+                }, "mscl." + std::to_string(i));
+            } else {
+                editAll([i, nv](splash::Object& ob) { component(ob.transform.scale, i) = nv; }, "mscl." + std::to_string(i));
+            }
+        }
+        if (fe.done) {
+            st.scaleLockFromMany.clear();
+            doc.endMerge();
+        }
+    }
+    sectionEnd(top);
+
+    // A dropdown over every object: "mixed" while they differ.
+    auto pickRow = [&](const char* id, const char* lid, const char* label, const char* tip, int cur, bool mixed,
+                       const char* curLabel, std::initializer_list<const char*> items) {
+        const ImRect rr = row(lid, label, tip);
+        nameRect(std::string("obj.") + id, rr);
+        reportField(id, mixed ? "mixed" : curLabel);
+        return dropdownMenu(id, rr, nullptr, mixed ? "mixed" : curLabel, items, mixed ? -1 : cur);
+    };
+    // A number over every object.
+    auto num = [&](const char* id, const char* label, const char* tip, const std::function<float(const splash::Object&)>& get,
+                   const char* unit, float lo, float hi, const std::function<void(splash::Object&, float)>& set, int decimals = 2) {
+        const float pv = get(prim);
+        const std::string shown = fmtShort(pv, decimals);
+        bool mixed = false;
+        for (const splash::Object* o : objs)
+            if (fmtShort(get(*o), decimals) != shown) mixed = true;
+        reportField(id, mixed ? "mixed" : shown);
+        float nv = pv;
+        const std::string lid = std::string("l") + id;
+        const ImRect fr = row(lid.c_str(), label, tip);
+        nameRect(std::string("obj.") + id, fr);
+        FieldEdit fe = numberField(id, fr, mixed ? "mixed" : shown.c_str(), unit, 0, nullptr, &nv, false, mixed);
+        if (fe.changed) {
+            const float v = splash::clampv(nv, lo, hi);
+            editAll([&](splash::Object& ob) { set(ob, v); }, std::string("m.") + id);
+        }
+        if (fe.done) doc.endMerge();
+    };
+    // A switch over every object: on when all are on; a click sets all to the other.
+    auto toggleAll = [&](const char* id, const char* label, const char* tip, const std::function<bool(const splash::Object&)>& get,
+                         const std::function<void(splash::Object&, bool)>& set) {
+        const bool allOn = all(get);
+        const bool mixed = !allOn && !all([&](const splash::Object& o) { return !get(o); });
+        reportField(id, mixed ? "mixed" : allOn ? "on" : "off");
+        const std::string lid = std::string("l") + id;
+        ImRect fr = row(lid.c_str(), label, tip);
+        ImRect sw(ImVec2(fr.Min.x, fr.GetCenter().y - 8), ImVec2(fr.Min.x + 30, fr.GetCenter().y + 8));
+        nameRect(std::string("obj.") + id, sw);
+        if (toggle(id, sw, allOn)) editAll([&](splash::Object& ob) { set(ob, !allOn); });
+        if (mixed) text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, fr.Min.y, fr.Max.y)), f.regular, type::caption,
+                        color::textFaint, "mixed");
+    };
+    auto compSection = [&](const char* id, editor::ComponentKind k) {
+        ObjectLook lk = lookOf(k);
+        fold(section(id, ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), lk.icon, lk.color, editor::info(k).label, true, true, false));
+        y += 34 + space::xs;
+    };
+    auto has = [&](editor::ComponentKind k) { return all([k](const splash::Object& o) { return editor::hasComponent(o, k); }); };
+
+    // Collider.
+    if (has(editor::ComponentKind::Collider)) {
+        top = y;
+        compSection("s_col", editor::ComponentKind::Collider);
+        const splash::ColliderKind kinds[3] = {splash::ColliderKind::Static, splash::ColliderKind::Dynamic, splash::ColliderKind::None};
+        const splash::ColliderKind pk = prim.collider->kind;
+        const bool mixed = !all([pk](const splash::Object& o) { return o.collider->kind == pk; });
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), pk) - std::begin(kinds));
+        int pick = pickRow("shape", "lshape", "Shape", "Static never moves. Dynamic can be moved by scripts. None turns collision off.", cur,
+                           mixed, colliderLabel(pk), {"Static", "Dynamic", "None"});
+        if (pick >= 0) editAll([&](splash::Object& ob) { ob.collider->kind = kinds[pick]; });
+        sectionEnd(top);
+    }
+
+    // Light.
+    if (has(editor::ComponentKind::Light)) {
+        const splash::LightComponent& l = *prim.light;
+        top = y;
+        const bool allOn = all([](const splash::Object& o) { return o.light->enabled; });
+        bool flipLight = false;
+        fold(section("s_light", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::lightbulb, kind::light, "Light", true, allOn, false, nullptr,
+                     &flipLight));
+        if (flipLight) editAll([allOn](splash::Object& ob) { ob.light->enabled = !allOn; });
+        y += 34 + space::xs;
+        const splash::LightKind kinds[3] = {splash::LightKind::Point, splash::LightKind::Spot, splash::LightKind::Directional};
+        const bool kindMixed = !all([&](const splash::Object& o) { return o.light->kind == l.kind; });
+        int cur = (int)(std::find(std::begin(kinds), std::end(kinds), l.kind) - std::begin(kinds));
+        int pick = pickRow("lkind", "llkind", "Type", "Point shines in every direction, spot in a cone, directional from far away.", cur,
+                           kindMixed, lightKindLabel(l.kind), {"Point", "Spot", "Directional"});
+        if (pick >= 0) editAll([&](splash::Object& ob) {
+            ob.light->kind = kinds[pick];
+            if (ob.light->kind != splash::LightKind::Point) ob.light->runtime = false;
+        });
+        if (all([](const splash::Object& o) { return o.light->kind == splash::LightKind::Point; }))
+            toggleAll("lruntime", "Runtime",
+                      "Lit on the console instead of baked into vertex colours, so scripts and timelines can find these lights by name. At most 16 per scene.",
+                      [](const splash::Object& o) { return o.light->runtime; }, [](splash::Object& ob, bool v) { ob.light->runtime = v; });
+        const bool colMixed = !all([&](const splash::Object& o) { return o.light->color == l.color; });
+        reportField("lcol", colMixed ? "mixed" : colourHex(l.color));
+        const ImRect colRow = row("llcol", "Colour", "The colour of the lights. Click to pick one for all of them.");
+        nameRect("obj.lcol", colRow);
+        const ColorFieldHit lHit = colorField("lcol", colRow, l.color, "obj.lcol", colMixed);
+        if (lHit.clicked) ImGui::OpenPopup("##lcolpick");
+        if (lHit.pasted) editAll([&](splash::Object& ob) { ob.light->color = *lHit.pasted; });
+        ImGui::SetNextWindowPos(ImVec2(colRow.Max.x, colRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+        pushPopupStyle();
+        if (ImGui::BeginPopup("##lcolpick")) {
+            float c[3] = {l.color[0], l.color[1], l.color[2]};
+            ImGui::SetNextItemWidth(220);
+            if (ImGui::ColorPicker3("##lcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                          ImGuiColorEditFlags_NoAlpha))
+                editAll([&](splash::Object& ob) { ob.light->color = {c[0], c[1], c[2]}; }, "mlcol");
+            if (ImGui::IsItemDeactivated()) doc.endMerge();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar(4);
+        ImGui::PopStyleColor(2);
+        num("lint", "Intensity", "How bright the lights are. 1 is normal.", [](const splash::Object& o) { return o.light->intensity; }, nullptr, 0,
+            1e9f, [](splash::Object& ob, float v) { ob.light->intensity = v; });
+        if (all([](const splash::Object& o) { return o.light->kind != splash::LightKind::Directional; }))
+            num("lrange", "Range", "How far the lights reach before they fade out.", [](const splash::Object& o) { return o.light->range; }, "m", 0,
+                1e9f, [](splash::Object& ob, float v) { ob.light->range = v; });
+        if (all([](const splash::Object& o) { return o.light->kind == splash::LightKind::Spot; })) {
+            num("lspot", "Spot angle", "Width of the cone of light.", [](const splash::Object& o) { return o.light->spotAngle; }, "\xc2\xb0", 1,
+                179, [](splash::Object& ob, float v) { ob.light->spotAngle = v; });
+            num("linner", "Inner angle", "Inside this cone the light is at full strength. 0 fades from 80% of the spot angle.",
+                [](const splash::Object& o) { return o.light->innerSpotAngle; }, "\xc2\xb0", 0, 179,
+                [](splash::Object& ob, float v) { ob.light->innerSpotAngle = std::min(v, ob.light->spotAngle); });
+        }
+        sectionEnd(top);
+    }
+
+    // Components with a few plain numbers and switches.
+    if (has(editor::ComponentKind::Interactable)) {
+        top = y;
+        compSection("s_interact", editor::ComponentKind::Interactable);
+        num("iradius", "Radius", "How close the player has to be.", [](const splash::Object& o) { return o.interactable->radius; }, "m", 0, 1000,
+            [](splash::Object& ob, float v) { ob.interactable->radius = v; });
+        toggleAll("irepeat", "Repeatable", "Can be used more than once.", [](const splash::Object& o) { return o.interactable->repeatable; },
+                  [](splash::Object& ob, bool v) { ob.interactable->repeatable = v; });
+        num("icooldown", "Cooldown", "Wait before it can be used again, in frames (60 a second; 50 on PAL).",
+            [](const splash::Object& o) { return float(o.interactable->cooldownFrames); }, "frames", 0, 65535,
+            [](splash::Object& ob, float v) { ob.interactable->cooldownFrames = static_cast<decltype(ob.interactable->cooldownFrames)>(std::lround(v)); }, 0);
+        num("iangle", "Facing angle", "How far to either side of straight ahead the object can be and still count as faced.",
+            [](const splash::Object& o) { return o.interactable->facingAngle; }, "deg", 0, 180,
+            [](splash::Object& ob, float v) { ob.interactable->facingAngle = v; });
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::Portal)) {
+        top = y;
+        compSection("s_portal", editor::ComponentKind::Portal);
+        num("pw", "Width", "The opening's width along each object's X axis, before scale.", [](const splash::Object& o) { return o.portal->width; },
+            "m", 0.01f, 1000, [](splash::Object& ob, float v) { ob.portal->width = v; });
+        num("ph", "Height", "The opening's height along each object's Y axis, before scale.",
+            [](const splash::Object& o) { return o.portal->height; }, "m", 0.01f, 1000, [](splash::Object& ob, float v) { ob.portal->height = v; });
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::Agent)) {
+        top = y;
+        compSection("s_agent", editor::ComponentKind::Agent);
+        num("agspeed", "Move speed", "How fast they walk, in metres per second.", [](const splash::Object& o) { return o.agent->moveSpeed; }, "m/s",
+            0, 100, [](splash::Object& ob, float v) { ob.agent->moveSpeed = v; });
+        num("agstop", "Stop distance", "How close to a waypoint or target counts as arrived.",
+            [](const splash::Object& o) { return o.agent->stopDistance; }, "m", 0, 100, [](splash::Object& ob, float v) { ob.agent->stopDistance = v; });
+        toggleAll("agvision", "Vision", "Sees the player (or its target) inside its cone.", [](const splash::Object& o) { return o.agent->vision; },
+                  [](splash::Object& ob, bool v) { ob.agent->vision = v; });
+        num("agrange", "Vision range", "How far they see (a square around each agent). 0 sees nothing.",
+            [](const splash::Object& o) { return o.agent->visionRange; }, "m", 0, 1000, [](splash::Object& ob, float v) { ob.agent->visionRange = v; });
+        num("agfov", "Field of view", "The whole cone, in degrees. 360 sees all around.", [](const splash::Object& o) { return o.agent->fov; },
+            "deg", 1, 360, [](splash::Object& ob, float v) { ob.agent->fov = v; });
+        num("aghear", "Hearing range", "How far they hear. 0 hears nothing.", [](const splash::Object& o) { return o.agent->hearingRange; }, "m",
+            0, 1000, [](splash::Object& ob, float v) { ob.agent->hearingRange = v; });
+        num("agalert", "Alert timeout", "Frames after it last sensed the target before onTargetLost runs.",
+            [](const splash::Object& o) { return float(o.agent->alertTimeout); }, "frames", 0, 65535,
+            [](splash::Object& ob, float v) { ob.agent->alertTimeout = int(std::lround(v)); }, 0);
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::Path)) {
+        top = y;
+        compSection("s_path", editor::ComponentKind::Path);
+        num("pathspeed", "Speed", "How fast followers ride them, in metres per second.", [](const splash::Object& o) { return o.path->speed; },
+            "m/s", 0, 100, [](splash::Object& ob, float v) { ob.path->speed = v; });
+        sectionEnd(top);
+    }
+    if (has(editor::ComponentKind::FollowPath)) {
+        top = y;
+        compSection("s_followpath", editor::ComponentKind::FollowPath);
+        num("followspeed", "Speed", "Metres per second; 0 rides at the path's own speed.", [](const splash::Object& o) { return o.followPath->speed; },
+            "m/s", 0, 100, [](splash::Object& ob, float v) { ob.followPath->speed = v; });
+        num("followoffset", "Start offset", "Where on the path each starts, 0 to 1.", [](const splash::Object& o) { return o.followPath->startOffset; },
+            "", 0, 1, [](splash::Object& ob, float v) { ob.followPath->startOffset = v; });
+        toggleAll("followface", "Face along", "Turns each object to face the way it rides (about Y only).",
+                  [](const splash::Object& o) { return o.followPath->faceAlong; }, [](splash::Object& ob, bool v) { ob.followPath->faceAlong = v; });
+        sectionEnd(top);
+    }
+
+    // Shared components edited one object at a time.
+    {
+        using K = editor::ComponentKind;
+        const K handled[] = {K::Collider, K::Light, K::Interactable, K::Portal, K::Agent, K::Path, K::FollowPath};
+        std::string names;
+        for (const editor::ComponentInfo& c : editor::components()) {
+            if (std::find(std::begin(handled), std::end(handled), c.kind) != std::end(handled) || !has(c.kind)) continue;
+            names += (names.empty() ? "" : ", ") + std::string(c.label);
+        }
+        reportField("singleonly", names.empty() ? "-" : names);
+        if (!names.empty()) {
+            const std::string body = "They all have " + names + ". Select one object to edit " + (names.find(',') == std::string::npos ? "it." : "those.");
+            const float tx = x0 + space::sm, w = x1 - space::sm - tx;
+            const float h = f.regular->CalcTextSizeA(type::caption, FLT_MAX, w, body.c_str()).y;
+            dl->AddText(f.regular, type::caption, ImVec2(tx, y), color::textDim, body.c_str(), nullptr, w);
+            nameRect("obj.multisingle", ImRect(ImVec2(tx, y), ImVec2(tx + w, y + h)));
+            y += h + space::md;
+        }
+    }
+    ImGui::PopClipRect();
+    {
+        const float content = y + space::xl - (top0 - scroll), view = r.Max.y - top0;
+        const float maxScroll = std::max(0.0f, content - view);
+        if (maxScroll > 0 && ImGui::IsMouseHoveringRect(r.Min, r.Max) && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId))
+            scroll -= ImGui::GetIO().MouseWheel * 48.0f;
+        scroll = std::clamp(scroll, 0.0f, maxScroll);
+        if (maxScroll > 0) {
+            const float bh = view * view / content, t = top0 + (view - bh) * (scroll / maxScroll);
+            dl->AddRectFilled(ImVec2(r.Max.x - 5, t + 2), ImVec2(r.Max.x - 2, t + bh - 2), rgb(0xffffff, 40), 2);
+        }
+    }
+}
+
 static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc, const viewport::Ps1View& view) {
     Fonts& f = fonts();
     panel(dl, r);
@@ -8798,6 +9510,27 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                    pinned || doc.selection()))
         doc.pin(pinned ? std::nullopt : doc.selection());
 
+    // Scripted tests: the selection, once per change (#263): how many, the
+    // primary, and every selected object in the Scene panel's order.
+    if (namedRectsOn()) {
+        static std::string last;
+        std::string line = "selection: " + std::to_string(doc.selectionCount());
+        if (const splash::Object* p = doc.selected()) line += " primary=" + p->name;
+        std::string names;
+        for (const editor::ObjectPath& p : doc.flatPaths())
+            if (doc.isSelected(p)) names += (names.empty() ? "" : ";") + doc.object(p)->name;
+        line += " all=" + names;
+        if (line != last) {
+            last = line;
+            std::printf("%s\n", line.c_str());
+            std::fflush(stdout);
+        }
+    }
+    // Several selected (and the inspector not pinned): what they share.
+    if (!doc.pinned() && doc.selectionCount() > 1) {
+        multiInspector(st, dl, r, y, doc);
+        return;
+    }
     const std::optional<editor::ObjectPath> target = doc.pinned() ? doc.pinned() : doc.selection();
     const splash::Object* o = target ? doc.object(*target) : nullptr;
     if (!o) {
@@ -12523,8 +13256,8 @@ static void shortcuts(State& st, editor::Document& doc) {
     const bool assetKeys = st.assets.focused() && projectInFront(st);
     if (uiTab && !assetKeys && !ctrl && pressed(ImGuiKey_F2)) st.canvasView.rename(doc);
     if (const std::optional<editor::ObjectPath> sel = (uiTab || assetKeys) ? std::nullopt : doc.selection()) {
-        if (!ctrl && pressed(ImGuiKey_Delete)) doc.removeObject(*sel);
-        if (ctrl && !shift && pressed(ImGuiKey_D)) doc.duplicateObject(*sel);
+        if (!ctrl && pressed(ImGuiKey_Delete)) deleteObjects(doc, *sel);
+        if (ctrl && !shift && pressed(ImGuiKey_D)) duplicateObjects(doc, *sel);
         if (ctrl && !shift && pressed(ImGuiKey_C)) copySelection(st, doc, *sel);
         if (ctrl && !shift && pressed(ImGuiKey_X)) cutSelection(st, doc, *sel);
         if (!ctrl && pressed(ImGuiKey_F2)) {

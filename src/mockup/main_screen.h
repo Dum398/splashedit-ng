@@ -98,6 +98,9 @@ struct State {
     // starts a new edit.
     std::optional<splash::Vec3> scaleLockFrom;
     splash::Vec3 scaleLockWrote;
+    // The same with several objects selected (#263): each object's scale
+    // when the edit began, so each keeps its own proportions.
+    std::vector<std::pair<std::vector<int>, splash::Vec3>> scaleLockFromMany;
     bool gizmos = true;  // viewport draws trigger boxes, interaction radii and nav regions
     // The viewport draws the exported BVH's boxes down to bvhDepth (-1: every
     // level). Its own toggle, independent of gizmos.
@@ -258,6 +261,9 @@ struct State {
     bool treeThumbHeld = false;
     bool treeRevealPending = false;  // the selection's groups were opened; scroll to its row next frame
     std::optional<std::vector<int>> treeSeenSelection;
+    // Where a Shift+click range in the Scene panel starts: the row last
+    // clicked plainly or with Ctrl (#263).
+    std::optional<std::vector<int>> treeAnchor;
     std::string treeSeenFilter;
 
     // The title-bar menu that is open (index into File..Help), or -1.
@@ -378,6 +384,16 @@ struct State {
         splash::Vec3 startScale;
         float handlePx = 1;
         float shown = 0;  // the value the drag label shows (degrees or factor)
+        // Several objects selected (#263): the gizmo sits at their centre
+        // (startWorld) and each object moves from where it was.
+        struct Item {
+            std::vector<int> path;
+            splash::Vec3 world;     // its origin, world space
+            splash::Transform local;  // its transform
+            std::optional<splash::Mat34> parentToWorld;
+            splash::Vec3 parentAxis;  // rotate: the turn axis in its parent's space
+        };
+        std::vector<Item> group;
     } gizmo;
     // A waypoint of the selected agent being dragged in the viewport (-1 = none).
     struct AgentWpDrag {

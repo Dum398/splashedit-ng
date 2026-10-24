@@ -573,7 +573,7 @@ static ScrubState& scrubState() {
 }
 
 FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit, ImU32 axis, const char* axisLabel, float* edit,
-                      bool integer) {
+                      bool integer, bool mixed) {
     FieldEdit out;
     Fonts& f = fonts();
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -602,7 +602,7 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
             char* end = nullptr;
             float v = std::strtof(typed.c_str(), &end);
             while (end && *end == ' ') ++end;
-            if (end && end != typed.c_str() && *end == 0 && std::isfinite(v) && v != *edit) {
+            if (end && end != typed.c_str() && *end == 0 && std::isfinite(v) && (v != *edit || mixed)) {
                 *edit = v;
                 out.changed = true;
             }
@@ -636,18 +636,20 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
         if ((h.hovered && ImGui::IsMouseDoubleClicked(0)) || keyboardActivated(gid)) {
             char b[32];
             std::snprintf(b, sizeof b, "%.6g", static_cast<double>(*edit));
-            beginTextEdit(id, b);
+            beginTextEdit(id, mixed ? "" : b);
         }
     }
     bool scrubbing = edit && scrubState().id == gid && scrubState().dragging;
     well(dl, r, scrubbing ? 1.0f : h.hover);
     if (scrubbing) dl->AddRect(r.Min, r.Max, rgb(0x8b7bff, 150), radius::field);
     decorations();
-    text(dl, ImVec2(x, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text, value);
+    text(dl, ImVec2(x, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, mixed ? color::textFaint : color::text,
+         value);
     return out;
 }
 
-FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit, float* edit) {
+FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, const char* z, const char* unit, float* edit,
+                    const bool* mixed) {
     FieldEdit out;
     float gap = space::xs;
     float w = (r.GetWidth() - gap * 2) / 3;
@@ -657,7 +659,7 @@ FieldEdit vec3Field(const char* id, ImRect r, const char* x, const char* y, cons
     for (int i = 0; i < 3; ++i) {
         ImRect c(ImVec2(r.Min.x + i * (w + gap), r.Min.y), ImVec2(r.Min.x + i * (w + gap) + w, r.Max.y));
         ImGui::PushID(i);
-        FieldEdit e = numberField(id, c, vals[i], unit, cols[i], labels[i], edit ? edit + i : nullptr);
+        FieldEdit e = numberField(id, c, vals[i], unit, cols[i], labels[i], edit ? edit + i : nullptr, false, mixed && mixed[i]);
         ImGui::PopID();
         if (e.changed || e.done) {
             out = e;
@@ -928,7 +930,7 @@ bool toggle(const char* id, ImRect r, bool on) {
     return h.clicked;
 }
 
-ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name) {
+ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& value, const char* name, bool mixed) {
     Fonts& f = fonts();
     const std::string hex = colourHex(value);
     auto u8 = [](float v) { return static_cast<int>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
@@ -936,9 +938,10 @@ ColorFieldHit colorField(const char* id, ImRect r, const std::array<float, 3>& v
     ImDrawList* dl = ImGui::GetWindowDrawList();
     well(dl, r, h.hover);
     ImRect sw(r.Min + ImVec2(3, 3), ImVec2(r.Min.x + 34, r.Max.y - 3));
-    dl->AddRectFilled(sw.Min, sw.Max, IM_COL32(u8(value[0]), u8(value[1]), u8(value[2]), 255), radius::field - 1);
-    text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body, color::text,
-         hex.c_str());
+    dl->AddRectFilled(sw.Min, sw.Max, mixed ? IM_COL32(110, 112, 118, 255) : IM_COL32(u8(value[0]), u8(value[1]), u8(value[2]), 255),
+                      radius::field - 1);
+    text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::body, r.Min.y, r.Max.y)), f.regular, type::body,
+         mixed ? color::textFaint : color::text, mixed ? "mixed" : hex.c_str());
     ColorFieldHit out;
     out.clicked = h.clicked;
 

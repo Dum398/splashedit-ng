@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Checks src/editor/psxsplash.d.lua against src/editor/lua_api.inc, both
-written by tools/gen_lua_api.py from the same rows.
+written by tools/gen_lua_api.py from the same rows, plus the hand-kept
+path_api.inc and strings_api.inc that it adds to the definitions only.
 
 Every psxsplash table is a ---@class with its global; every constant a
 ---@field of its table's class; every function a function stub with a
@@ -8,7 +9,7 @@ Every psxsplash table is a ---@class with its global; every constant a
 are not re-declared (lua-language-server has its own), and nothing in the
 file is a function the table does not have. The file is ASCII.
 
-    python3 tests/luadefscheck.py [lua_api.inc psxsplash.d.lua]
+    python3 tests/luadefscheck.py [lua_api.inc psxsplash.d.lua [hand-kept.inc ...]]
 """
 
 import os
@@ -18,6 +19,7 @@ import sys
 here = os.path.dirname(os.path.abspath(__file__))
 inc = sys.argv[1] if len(sys.argv) > 2 else os.path.join(here, '..', 'src', 'editor', 'lua_api.inc')
 defs = sys.argv[2] if len(sys.argv) > 2 else os.path.join(here, '..', 'src', 'editor', 'psxsplash.d.lua')
+hand = sys.argv[3:] if len(sys.argv) > 2 else [os.path.join(here, '..', 'src', 'editor', f) for f in ('path_api.inc', 'strings_api.inc')]
 STDLIB_TABLES = {'string', 'table', 'coroutine', 'bit32', 'debug'}
 fails = 0
 
@@ -28,16 +30,24 @@ def check(name, ok, detail=''):
     fails += not ok
 
 
-rows = []
-for line in open(inc, encoding='utf-8'):
-    m = re.match(r'\{"((?:[^"\\]|\\.)*)", "((?:[^"\\]|\\.)*)", ApiKind::(\w+),', line)
-    if m:
-        rows.append((m.group(1), m.group(2), m.group(3)))
+def inc_rows(path):
+    out = []
+    for line in open(path, encoding='utf-8'):
+        m = re.match(r'\{"((?:[^"\\]|\\.)*)", "((?:[^"\\]|\\.)*)", ApiKind::(\w+),', line)
+        if m:
+            out.append((m.group(1), m.group(2), m.group(3)))
+    return out
+
+
+rows = inc_rows(inc)
+check('lua_api.inc has rows', len(rows) > 300, len(rows))
+hand_rows = [r for h in hand for r in inc_rows(h)]
+check('the hand-kept tables have rows', all(inc_rows(h) for h in hand), hand)
+rows += hand_rows
 raw = open(defs, 'rb').read()
 text = raw.decode('ascii', errors='replace')
 lines = text.splitlines()
 
-check('lua_api.inc has rows', len(rows) > 300, len(rows))
 check('psxsplash.d.lua is ASCII', all(b < 128 for b in raw), [i for i, b in enumerate(raw) if b >= 128][:5])
 check('psxsplash.d.lua is a lua-ls meta file', lines[:1] == ['---@meta psxsplash'], lines[:1])
 
@@ -89,7 +99,7 @@ check('no stdlib table is declared', not (STDLIB_TABLES & set(fields)), sorted(S
 
 known = {(t + '.' + n if t else n) for t, n, k in psx if k in ('Function', 'Callback')}
 extra = sorted(set(stubs) - known)
-check('every function in psxsplash.d.lua is a row of lua_api.inc', not extra, extra[:10])
+check('every function in psxsplash.d.lua is a row of lua_api.inc or a hand-kept table', not extra, extra[:10])
 
 print('%d failure%s' % (fails, '' if fails == 1 else 's'))
 sys.exit(1 if fails else 0)

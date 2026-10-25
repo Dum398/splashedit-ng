@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Start menu tile of splashedit.exe: Windows reads it from beside the exe,
+     under the exe's name. The logos are drawn by tools/make_icons.py. -->
+<Application xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <VisualElements
+        BackgroundColor="#ffd23f"
+        ShowNameOnSquare150x150Logo="on"
+        ForegroundText="dark"
+        Square150x150Logo="assets\brand\tile-150.png"
+        Square70x70Logo="assets\brand\tile-70.png"/>
+</Application>

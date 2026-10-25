@@ -464,6 +464,8 @@ jobs:
             Windows)
               (cd pkg/redux && cmake -E tar xf ../../redux-download)
               cp build/Release/splashedit.exe pkg/
+              # The Start menu tile: Windows reads it from beside the exe, under the exe's name.
+              cp packaging/windows/splashedit.VisualElementsManifest.xml pkg/
               # The editor and redux both import the MSVC runtime, which a
               # clean Windows does not have: ship it app-local beside each.
               for d in msvcp140 msvcp140_atomic_wait vcruntime140 vcruntime140_1; do
@@ -487,7 +489,7 @@ jobs:
               mkdir -p pkg/share/applications
               cp packaging/linux/splashedit.desktop pkg/share/applications/
               cp packaging/linux/install-desktop-entry.sh pkg/
-              for n in 16 32 64 128 256 512; do
+              for n in 16 24 32 48 64 128 256 512; do
                 mkdir -p pkg/share/icons/hicolor/${n}x${n}/apps
                 cp assets/brand/icon-$n.png pkg/share/icons/hicolor/${n}x${n}/apps/splashedit.png
               done ;;

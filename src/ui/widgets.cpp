@@ -626,6 +626,8 @@ FieldEdit numberField(const char* id, ImRect r, const char* value, const char* u
                 if (shown != *edit) {
                     *edit = shown;
                     out.changed = true;
+                    out.scrubbed = true;
+                    out.scrubFrom = sc.start;
                 }
             }
         } else if (sc.id == gid) {

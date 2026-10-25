@@ -29,4 +29,13 @@ inline float scrubTo(float& acc, float dx, bool integer, bool fine) {
     return std::round(acc / r.step) * r.step;
 }
 
+// A drag on a field that stands for several differing values (#263) moves
+// each by what the drag has moved the shown one, from `from` to `to`: `own`
+// is that object's value when the drag began. Clamped to [lo, hi] for each
+// on its own; a whole-number field rounds it.
+inline float scrubOffset(float own, float from, float to, float lo, float hi, bool integer) {
+    const float v = std::clamp(own + (to - from), lo, hi);
+    return integer ? std::round(v) : v;
+}
+
 }  // namespace ui

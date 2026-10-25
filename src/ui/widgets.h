@@ -106,6 +106,8 @@ struct FieldEdit {
     bool changed = false;  // the value was written this frame
     bool done = false;     // the interaction ended (drag released, text committed or cancelled): close the undo step
     int index = 0;         // component that changed, for vec3Field
+    bool scrubbed = false; // the change came from a drag, not typing
+    float scrubFrom = 0;   // with `scrubbed`: the value when the drag began (the drag has moved it by *edit - scrubFrom)
 };
 
 // A number in a well. With `edit`, it is editable: drag horizontally to
@@ -114,7 +116,8 @@ struct FieldEdit {
 // An `integer` field (pixels, frames) scrubs one per pixel (ui/scrub.hh).
 // A `mixed` field stands for several objects whose values differ (#263):
 // `value` is drawn faint, typing starts empty, and any typed number counts
-// as a change even when it equals *edit.
+// as a change even when it equals *edit. A scrub's change says so
+// (FieldEdit::scrubbed), so a mixed field can move each value by the drag.
 FieldEdit numberField(const char* id, ImRect r, const char* value, const char* unit = nullptr, ImU32 axis = 0,
                       const char* axisLabel = nullptr, float* edit = nullptr, bool integer = false, bool mixed = false);
 // Three numberFields; `edit` points at three floats, `mixed` (when given) at three flags.

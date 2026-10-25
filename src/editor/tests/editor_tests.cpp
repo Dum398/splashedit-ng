@@ -13757,6 +13757,21 @@ void testNumberScrub() {
     CHECK(std::fabs(drag(2.0f, {1}, false, false) - 2.02f) < 1e-4f);
 }
 
+// A scrub on a "mixed" multi-object field (#263) moves each value by the
+// drag's change, so each keeps its offset; a clamp stops only the one it
+// reaches; a whole-number field rounds each result.
+void testMixedScrub() {
+    CHECK(ui::scrubOffset(1, 1, 1.5f, -1e9f, 1e9f, false) == 1.5f);  // the shown one
+    CHECK(ui::scrubOffset(4, 1, 1.5f, -1e9f, 1e9f, false) == 4.5f);  // another keeps its 3 ahead
+    CHECK(ui::scrubOffset(-2, 1, 0.25f, -1e9f, 1e9f, false) == -2.75f);
+    CHECK(ui::scrubOffset(95, 50, 60, 0, 100, false) == 100);  // clamped on its own
+    CHECK(ui::scrubOffset(20, 50, 60, 0, 100, false) == 30);   // while another moves the whole delta
+    CHECK(ui::scrubOffset(5, 1, 0, 1, 360, false) == 4);
+    CHECK(ui::scrubOffset(1, 1, 0, 1, 360, false) == 1);
+    CHECK(ui::scrubOffset(10, 3, 5.4f, 0, 65535, true) == 12);  // whole numbers: rounded
+    CHECK(ui::scrubOffset(10, 3, 5.6f, 0, 65535, true) == 13);
+}
+
 // A colour field's Copy / Paste text (#176): Copy writes what the field
 // shows, Paste reads that back and the usual hand-typed forms, nothing else.
 void testColourHex() {
@@ -17067,6 +17082,7 @@ int main(int argc, char** argv) {
     testSpriteDirectionSets();
     testUiSprite();
     testNumberScrub();
+    testMixedScrub();
     testDialogGate();
     testColourHex();
     testWindowChrome();

@@ -3475,7 +3475,21 @@ static std::vector<MenuEntry> treeMenuEntries(int kind, State& st, editor::Docum
         }
         m.push_back(separator());
         // Out of its group, to the top level right after the group it was in.
-        m.push_back(item("Move to Top Level", "", p.size() > 1 && !part && !doc.inPrefabMode(), [&doc, p] { doc.moveObject(p, {}, p.front() + 1); }));
+        // A row of several selected (#263): every one of them not inside another,
+        // side by side in tree order, after the last group any of them was in.
+        const std::vector<editor::ObjectPath> tops = doc.topLevel(commandTargets(doc, p));
+        if (tops.size() > 1) {
+            const bool nested = std::any_of(tops.begin(), tops.end(), [](const editor::ObjectPath& t) { return t.size() > 1; });
+            const bool parts = std::any_of(tops.begin(), tops.end(), [&doc](const editor::ObjectPath& t) { return doc.inInstance(t); });
+            int after = 0;
+            for (const editor::ObjectPath& t : tops)
+                if (t.size() > 1) after = std::max(after, t.front() + 1);
+            m.push_back(item("Move to Top Level", "", nested && !parts && !doc.inPrefabMode(),
+                             [&doc, tops, after] { doc.moveObjects(tops, {}, after); }));
+        } else {
+            m.push_back(item("Move to Top Level", "", p.size() > 1 && !part && !doc.inPrefabMode(),
+                             [&doc, p] { doc.moveObject(p, {}, p.front() + 1); }));
+        }
         m.push_back(item("Frame in View", "F", true, [&st] { st.frameRequest = true; }));
         const bool pinned = doc.pinned() && *doc.pinned() == p;
         m.push_back(item("Pin in Inspector", "", true, [&doc, p, pinned] { doc.pin(pinned ? std::nullopt : std::optional(p)); }, pinned));

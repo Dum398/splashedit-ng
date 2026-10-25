@@ -12639,6 +12639,101 @@ void testMeshAlpha() {
     }
 }
 
+// Per-material bit depth (#229): a material's own depth round-trips through
+// the scene file (a material without one writes no key), an object drawing
+// one image at two depths exports two textures with each material's
+// triangles on its own, and a depth that is not 4, 8 or 16 fails to load.
+void testMaterialDepth() {
+    using namespace roomtest;
+    const fs::path dir = g_outDir / "matdepth";
+    fs::remove_all(dir);
+    fs::create_directories(dir / "out");
+    splash::Image img;
+    img.width = img.height = 16;
+    for (int i = 0; i < 16 * 16; i++) img.pixels.push_back({float(i % 16) / 15.f, float(i / 16) / 15.f, 0.5f, 1});
+    splash::savePng(img, dir / "img.png");
+    // Two one-triangle parts: part 0 at y 0, part 1 at y 0.5.
+    splash::Mesh two;
+    two.positions = {{0, 0, 0}, {1, 0, 0}, {0, 0, 1}, {0, 0.5f, 0}, {1, 0.5f, 0}, {0, 0.5f, 1}};
+    two.normals.assign(6, {0, 1, 0});
+    two.uv = {{0, 0}, {1, 0}, {0, 1}, {0, 0}, {1, 0}, {0, 1}};
+    two.submeshes = {{0, 1, 2}, {3, 4, 5}};
+    splash::saveMesh(two, dir / "two.mesh");
+
+    splash::Scene s;
+    splash::Object o = named("Two");
+    splash::MeshComponent m;
+    m.mesh = "two.mesh";
+    m.bitDepth = splash::BitDepth::Bpp4;
+    m.materials = {{"img.png", {1, 1, 1, 1}, {}}, {"img.png", {1, 1, 1, 1}, {}}};
+    m.materials[0].bitDepth = splash::BitDepth::Bpp16;
+    o.mesh = m;
+    s.objects.push_back(o);
+    CHECK(splash::materialDepth(m, m.materials[0]) == splash::BitDepth::Bpp16);
+    CHECK(splash::materialDepth(m, m.materials[1]) == splash::BitDepth::Bpp4);
+
+    // (i) Round trip: the key on the overriding material only, not in extra.
+    splash::saveScene(s, dir / "a.scene");
+    const std::string a = readAll(dir / "a.scene");
+    size_t keys = 0;
+    for (size_t at = a.find("\"bitDepth\""); at != std::string::npos; at = a.find("\"bitDepth\"", at + 1)) keys++;
+    CHECK(keys == 2);  // the component's and material 0's
+    const splash::Scene l = splash::loadScene(dir / "a.scene");
+    CHECK(l.objects.size() == 1 && l.objects[0].mesh && l.objects[0].mesh->materials.size() == 2);
+    if (l.objects.size() == 1 && l.objects[0].mesh && l.objects[0].mesh->materials.size() == 2) {
+        const splash::MeshComponent& lm = *l.objects[0].mesh;
+        CHECK(lm.bitDepth == splash::BitDepth::Bpp4);
+        CHECK(lm.materials[0].bitDepth == splash::BitDepth::Bpp16 && lm.materials[0].extra.empty());
+        CHECK(!lm.materials[1].bitDepth && lm.materials[1].extra.empty());
+        splash::saveScene(l, dir / "b.scene");
+        CHECK(readAll(dir / "b.scene") == a);
+    }
+    splash::Scene plain = s;
+    plain.objects[0].mesh->materials[0].bitDepth.reset();
+    splash::saveScene(plain, dir / "plain.scene");
+    const std::string p = readAll(dir / "plain.scene");
+    CHECK(p.find("\"bitDepth\"") != std::string::npos && p.find("\"bitDepth\"", p.find("\"bitDepth\"") + 1) == std::string::npos);
+
+    // (ii) Export: two copies of img.png, 16 and 4 bpp, each part on its own.
+    splash::ExportResult r = splash::exportSplashpack(s, dir, dir / "out" / "scene.splashpack");
+    CHECK(r.ok());
+    CHECK(r.stats.textures.size() == 2);
+    std::multiset<int> depths;
+    for (const auto& t : r.stats.textures) depths.insert(t.bitDepth);
+    CHECK((depths == std::multiset<int>{4, 16}));
+    if (r.ok()) {
+        const std::string b = readAll(dir / "out" / "scene.splashpack");
+        const size_t obj = 156 + 8 * size_t(rd16(b, 4));
+        const size_t tris = size_t(rd32(b, obj));
+        CHECK(rd16(b, 6) == 1 && rd16(b, obj + 52) == 2);
+        int seen = 0;
+        for (size_t i = 0; i < 2 && tris + 52 * (i + 1) <= b.size(); i++) {
+            const size_t t = tris + 52 * i;
+            const int mode = (rd16(b, t + 44) >> 7) & 3;  // 0 = 4 bpp, 2 = 16 bpp
+            const bool part0 = rdi16(b, t + 2) == 0;     // vertex 0's y
+            CHECK(mode == (part0 ? 2 : 0));
+            seen |= part0 ? 1 : 2;
+        }
+        CHECK(seen == 3);
+    }
+
+    // (iii) A depth that is not 4, 8 or 16.
+    std::string bad = a;
+    const size_t at16 = bad.find("\"bitDepth\": 16");
+    CHECK(at16 != std::string::npos);
+    if (at16 != std::string::npos) {
+        bad.replace(at16, 14, "\"bitDepth\": 7");
+        std::ofstream(dir / "bad.scene", std::ios::binary) << bad;
+        std::string err;
+        try {
+            splash::loadScene(dir / "bad.scene");
+        } catch (const std::exception& e) {
+            err = e.what();
+        }
+        CHECK(err.find("bitDepth must be 4, 8 or 16") != std::string::npos);
+    }
+}
+
 // Sprite sheets: the scene JSON round trip, the exact sprite table of the
 // tests/sprite fixture (2 sheets, 3 animations), each error export refuses
 // with, and the inspector's edits as undo steps.
@@ -17037,6 +17132,7 @@ int main(int argc, char** argv) {
     testQuantizer();
     testTexturePreview();
     testMeshAlpha();
+    testMaterialDepth();
     testAssetBrowser();
     testBlocksConvert();
     testUiLayout();

@@ -10599,7 +10599,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         editor::AssetStatus texSt = ti ? ti->status : editor::AssetStatus::Ok;
         bool to4 = doc.couldBe4bpp(m);
         std::string texName = texPath.empty() ? std::string("None") : fileName(texPath);
-        std::string texMeta = bppLabel(m.bitDepth);
+        std::string texMeta = bppLabel(m.materials.empty() ? m.bitDepth : splash::materialDepth(m, m.materials[0]));
         if (ti && ti->status == editor::AssetStatus::Ok)
             texMeta = std::to_string(ti->width) + " x " + std::to_string(ti->height) + "  \xc2\xb7  " + texMeta;
 
@@ -10720,6 +10720,24 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                     fileCard(("fixtex." + is).c_str(), mSt, tp, mt ? mt->error : std::string()))
                     pickAsset(AssetSlot::Texture, path, int(i));
                 if (tp.empty()) matColour(i);
+                else {
+                    // The depth this material's texture exports at: the object's unless set here.
+                    const std::optional<splash::BitDepth> own = m.materials[i].bitDepth;
+                    const std::string objLabel = std::string("Object (") + bppLabel(m.bitDepth) + ")";
+                    const splash::BitDepth depths[3] = {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8, splash::BitDepth::Bpp16};
+                    const int dCur = own ? 1 + int(std::find(std::begin(depths), std::end(depths), *own) - std::begin(depths)) : 0;
+                    const ImRect dRow = row(("lmatdepth." + is).c_str(), "Depth",
+                                            "Bit depth of this material's texture. Object uses the object's; one image at two depths "
+                                            "takes VRAM twice.");
+                    nameRect("obj.matdepth." + is, dRow);
+                    const int dPick = dropdownMenu(("obj.matdepth." + is).c_str(), dRow, nullptr, own ? bppLabel(*own) : objLabel.c_str(),
+                                                   {objLabel.c_str(), "4 bpp", "8 bpp", "16 bpp"}, dCur);
+                    if (dPick >= 0)
+                        doc.edit(path, [&](splash::Object& ob) {
+                            if (!ob.mesh || i >= ob.mesh->materials.size()) return;
+                            ob.mesh->materials[i].bitDepth = dPick == 0 ? std::nullopt : std::optional<splash::BitDepth>(depths[dPick - 1]);
+                        });
+                }
             }
         }
         if (to4) {
@@ -10731,7 +10749,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 if (!t) continue;
                 n++;
                 one = fileName(mat.texture);
-                cur += m.bitDepth == splash::BitDepth::Bpp8 ? t->vramBytes8 : t->vramBytes16;
+                cur += t->vramBytesAt(splash::materialDepth(m, mat));
                 at4 += t->vramBytes4;
                 most = std::max(most, t->colors15);
             }
@@ -10741,13 +10759,17 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                                             (most == 1 ? " colour" : " colours") + " each and take " + fmtKB(cur) +
                                             " of VRAM together. At 4 bpp they keep every colour and take " + fmtKB(at4) + ".";
             if (card("fix4bpp", n == 1 ? "Texture could be 4 bpp" : "Textures could be 4 bpp", body, "Convert to 4 bpp"))
-                doc.edit(path, [](splash::Object& ob) { ob.mesh->bitDepth = splash::BitDepth::Bpp4; });
+                doc.edit(path, [](splash::Object& ob) {
+                    ob.mesh->bitDepth = splash::BitDepth::Bpp4;
+                    for (splash::Material& mat : ob.mesh->materials) mat.bitDepth.reset();
+                });
         }
         // What the console will show, next to the source. A mesh texture is
         // cutout when it has texels under half alpha (splash::hasCutoutTexels).
         if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty()) {
             const bool holes = ti && ti->holes;
-            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, m.bitDepth, holes) + space::sm;
+            const splash::BitDepth depth0 = splash::materialDepth(m, m.materials[0]);
+            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, depth0, holes) + space::sm;
             if (holes) {
                 // Word-wrapped to the inspector's width.
                 const char* const msg = "Texels under half alpha are see-through on the console. At 4 and 8 bpp this costs one palette colour.";

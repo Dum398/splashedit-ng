@@ -167,8 +167,9 @@ int picker(const char* id, ImVec2 pos, float width, const char* placeholder, std
 
 // Returns true when clicked.
 bool assetField(const char* id, ImRect r, const char* icon, ImU32 iconColor, const char* name, const char* meta);
-// Returns true on the frame the switch is clicked.
-bool toggle(const char* id, ImRect r, bool on);
+// Returns true on the frame the switch is clicked. `mixed` draws the third
+// look (knob in the middle, a dash on it) for values that differ.
+bool toggle(const char* id, ImRect r, bool on, bool mixed = false);
 // What a colour field did this frame.
 struct ColorFieldHit {
     bool clicked = false;                         // left click: the caller opens its picker

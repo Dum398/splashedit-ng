@@ -345,7 +345,7 @@ Hit treeRow(const char* id, ImRect r, const TreeRow& row, bool* visibilityClicke
     return h;
 }
 
-static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float hover);
+static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float hover, bool mixed = false);
 
 bool section(const char* id, ImRect r, const char* ic, ImU32 iconColor, const char* title, bool open, bool enabled,
              bool removable, bool* removed, bool* toggled) {
@@ -915,20 +915,27 @@ bool assetField(const char* id, ImRect r, const char* ic, ImU32 iconColor, const
     return h.clicked;
 }
 
-static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float hover) {
+// `mixed` (several objects that differ): the knob sits in the middle of a
+// half-lit track with a dash on it, neither on nor off.
+static void drawToggle(ImDrawList* dl, const char* id, ImRect r, bool on, float hover, bool mixed) {
     float t = anim(ImGui::GetID((std::string(id) + "#k").c_str()), on, 18.0f);
-    ImU32 track = lerpColor(color::active, color::accent, t);
+    if (mixed) t = 0.5f;
+    ImU32 track = lerpColor(color::active, color::accent, mixed ? 0.35f : t);
     if (hover > 0 && !on) track = lerpColor(track, color::borderStrong, hover);
     float rad = r.GetHeight() * 0.5f;
     dl->AddRectFilled(r.Min, r.Max, track, rad);
     float cx = r.Min.x + rad + (r.GetWidth() - rad * 2) * t;
     dl->AddCircleFilled(ImVec2(cx, r.Min.y + rad + 0.5f), rad - 2.5f, rgb(0x000000, 50), 20);
     dl->AddCircleFilled(ImVec2(cx, r.Min.y + rad), rad - 2.5f, rgb(0xf4f5f8), 20);
+    if (mixed) {
+        const float d = (rad - 2.5f) * 0.5f;
+        dl->AddLine(ImVec2(cx - d, r.Min.y + rad), ImVec2(cx + d, r.Min.y + rad), color::textFaint, 2.0f);
+    }
 }
 
-bool toggle(const char* id, ImRect r, bool on) {
+bool toggle(const char* id, ImRect r, bool on, bool mixed) {
     Hit h = interact(id, r);
-    drawToggle(ImGui::GetWindowDrawList(), id, r, on, h.hover);
+    drawToggle(ImGui::GetWindowDrawList(), id, r, on, h.hover, mixed);
     return h.clicked;
 }
 

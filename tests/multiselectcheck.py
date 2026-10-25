@@ -12,6 +12,8 @@
 # own proportions, typed and through the gizmo's centre handle. Delete,
 # Ctrl+D and Ctrl+C/Ctrl+V act on the whole selection, each one undo step:
 # the copies become the selection, and undoing a delete restores it.
+# A switch whose values differ (Runtime) draws its knob in the middle, and
+# a click turns it on for all of them.
 # usage: python3 multiselectcheck.py <splashedit> [keep-dir]   (needs a display: xvfb-run -a)
 # keep-dir, when given, receives inspector-mixed.png and gizmo-centre.png.
 import json, os, re, shutil, struct, subprocess, sys, tempfile, zlib
@@ -24,7 +26,7 @@ fails = 0
 ENV = dict(os.environ, SPLASHEDIT_REDUX='/nonexistent/pcsx-redux', SPLASHEDIT_PSXSPLASH='/nonexistent/psxsplash.ps-exe')
 LAMPS = {
     'LampA': {'pos': [0.0, 1.0, 2.0], 'scale': [1.0, 2.0, 1.0], 'intensity': 1.0, 'range': 5.0},
-    'LampB': {'pos': [2.0, 3.0, 2.0], 'scale': [2.0, 1.0, 3.0], 'intensity': 2.0, 'range': 5.0},
+    'LampB': {'pos': [2.0, 3.0, 2.0], 'scale': [2.0, 1.0, 3.0], 'intensity': 2.0, 'range': 5.0, 'runtime': True},
     'LampC': {'pos': [-2.0, 0.5, 3.0], 'scale': [1.0, 1.0, 1.0], 'intensity': 1.0, 'range': 6.0},
 }
 
@@ -75,7 +77,8 @@ def project_copy():
         s['objects'].append({'name': name, 'active': True,
                              'transform': {'position': l['pos'], 'rotation': [0, 0, 0, 1], 'scale': l['scale']},
                              'components': [{'type': 'light', 'kind': 'point', 'color': [1.0, 1.0, 1.0], 'intensity': l['intensity'],
-                                             'range': l['range'], 'spotAngle': 30.0, 'innerSpotAngle': 0.0, 'enabled': True}],
+                                             'range': l['range'], 'spotAngle': 30.0, 'innerSpotAngle': 0.0, 'enabled': True,
+                                             'runtime': l.get('runtime', False)}],
                              'children': []})
     json.dump(s, open(scene, 'w', encoding='utf-8'), indent=2)
     return project
@@ -216,6 +219,14 @@ check('the move gizmo sits at the selection centre', centre('vp.move.c') is not 
 # Every selected lamp's marker is ringed in the selection colour (radius 16).
 w, h, px = png_rgb(shot)
 
+# A switch whose values differ (Runtime: only LampB on) reads "mixed" and
+# draws its knob in the middle of the track, neither on nor off; a click
+# sets it on for all three.
+check('differing Runtime switches show "mixed"', shown(lines, 'lruntime') == 'mixed', shown(lines, 'lruntime'))
+k = centre('obj.lruntime')
+knob = k and px[int(k[1]) + 3][3 * int(k[0]):3 * int(k[0]) + 3]
+check('the mixed switch draws its knob in the middle', knob is not None and min(knob) > 215, (k, knob))
+
 
 def ringed(n):
     c = centre('vp.marker.' + n)
@@ -301,6 +312,9 @@ if mid and mid_rot:
 else:
     check('the rotate drag was saved', False, mid)
 check('one Ctrl+Z undoes the turn for both', s == ORIG, s)
+
+_, lines, _, _ = run('mixedswitch', ALL3 + ['--click', '@obj.lruntime'] + W(5), save=False)
+check('a click on a mixed switch turns it on for all', shown(lines, 'lruntime') == 'on', shown(lines, 'lruntime'))
 
 # Scale lock with two selected: LampA 1/2/1 and LampB 2/1/3 each keep their proportions.
 TWO = ctrl('LampB')

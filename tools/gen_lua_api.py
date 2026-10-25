@@ -8,9 +8,11 @@ engine really registers). Signatures and docs come from the comments above
 each function in src/luaapi.hh and from psxsplash-docs' lua/api-reference.md
 and lua/events.md when those are found. FixedPoint's members come from
 psyqo-lua's src/lua.cpp (the nugget submodule of psxsplash by default).
+The hand-kept tables (path_api.inc, strings_api.inc: the exporter's, not
+psxsplash's) are read back and go into psxsplash.d.lua only, after the rest.
 
     python3 tools/gen_lua_api.py --psxsplash ../psxsplash [--docs ../psxsplash-docs]
-        [--psyqo-lua DIR] [-o lua_api.inc] [--defs-out psxsplash.d.lua]
+        [--psyqo-lua DIR] [-o lua_api.inc] [--defs-out psxsplash.d.lua] [--hand-kept INC ...]
 """
 
 import argparse
@@ -355,8 +357,9 @@ def function_stub(qualified, sig, doc, callback=False):
 
 
 def write_defs(path, rows, rev):
-    """psxsplash.d.lua: the psxsplash rows of lua_api.inc as lua-language-server
-    annotations. The Lua standard library is left to lua-ls's own copy.
+    """psxsplash.d.lua: the psxsplash rows of lua_api.inc, then the hand-kept
+    rows, as lua-language-server annotations. The Lua standard library is left
+    to lua-ls's own copy.
     Callbacks are plain function stubs: measured with lua-ls 3.19, a script's
     own function onCreate(self) then gives no redefinition diagnostic."""
     order, tables = [], {}
@@ -441,6 +444,20 @@ def fixedpoint_entries(cpp):
     return out
 
 
+INC_STR = r'"((?:[^"\\]|\\.)*)"'
+INC_ROW = re.compile(r'^\{%s, %s, ApiKind::(\w+), %s, %s\},$' % (INC_STR, INC_STR, INC_STR, INC_STR), re.M)
+
+
+def inc_rows(path):
+    """The {table, name, kind, signature, doc} rows of a hand-kept .inc, in order."""
+    text = read(path)
+    rows = INC_ROW.findall(text)
+    if len(rows) != sum(l.startswith("{") for l in text.splitlines()):
+        sys.exit("gen_lua_api: %s has a row this script cannot read" % path)
+    unescape = lambda s: re.sub(r"\\(.)", r"\1", s)
+    return [(unescape(t), unescape(n), k, unescape(sig), unescape(doc)) for t, n, k, sig, doc in rows]
+
+
 def c_str(s):
     s = s.replace("\\", "\\\\").replace('"', '\\"')
     return '"%s"' % s
@@ -456,6 +473,9 @@ def main():
     ap.add_argument("-o", "--out", default=os.path.join(here, "..", "src", "editor", "lua_api.inc"))
     ap.add_argument("--defs-out", default=os.path.join(here, "..", "src", "editor", "psxsplash.d.lua"),
                     help="lua-language-server definitions written from the same rows")
+    ap.add_argument("--hand-kept", nargs="*",
+                    default=[os.path.join(here, "..", "src", "editor", f) for f in ("path_api.inc", "strings_api.inc")],
+                    help="hand-kept .inc tables added to the definitions only")
     a = ap.parse_args()
 
     cpp = read(os.path.join(a.psxsplash, "src", "luaapi.cpp"))
@@ -533,7 +553,8 @@ def main():
         f.write("// {table, name, kind, signature, doc}; name is empty for the table itself.\n")
         for table, name, kind, sig, doc in rows:
             f.write("{%s, %s, ApiKind::%s, %s, %s},\n" % (c_str(table), c_str(name), kind, c_str(sig), c_str(doc)))
-    write_defs(a.defs_out, rows, rev)
+    hand = [row for inc in a.hand_kept for row in inc_rows(inc)]
+    write_defs(a.defs_out, rows + hand, rev)
     print("gen_lua_api: %d symbols -> %s, %s" % (len(rows), os.path.relpath(a.out), os.path.relpath(a.defs_out)))
 
 

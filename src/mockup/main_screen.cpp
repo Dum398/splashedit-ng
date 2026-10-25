@@ -9671,7 +9671,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         ImRect fr = row(lid.c_str(), label, tip);
         ImRect sw(ImVec2(fr.Min.x, fr.GetCenter().y - 8), ImVec2(fr.Min.x + 30, fr.GetCenter().y + 8));
         nameRect(std::string("obj.") + id, sw);
-        if (toggle(id, sw, allOn)) editAll([&](splash::Object& ob) { set(ob, !allOn); });
+        if (toggle(id, sw, allOn, mixed)) editAll([&](splash::Object& ob) { set(ob, !allOn); });
         if (mixed) text(dl, ImVec2(sw.Max.x + space::sm, centerY(f.regular, type::caption, fr.Min.y, fr.Max.y)), f.regular, type::caption,
                         color::textFaint, "mixed");
     };

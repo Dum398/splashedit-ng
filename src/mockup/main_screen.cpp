@@ -10842,6 +10842,16 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 uvOffLine = "uvoffset: " + std::to_string(cur) + " materials " + (ml.empty() ? std::string("none") : ml);
             }
         }
+        // The object's texture depth; a material's own Depth row overrides it.
+        {
+            const splash::BitDepth depths[3] = {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8, splash::BitDepth::Bpp16};
+            const int dCur = (int)(std::find(std::begin(depths), std::end(depths), m.bitDepth) - std::begin(depths));
+            const ImRect bppRow = row("lbpp", "Bit depth", "Colours the textures keep in VRAM. 4 bpp costs a quarter of 16 bpp.");
+            nameRect("obj.bpp", bppRow);  // its items are obj.bpp/<label>
+            const int dPick = dropdownMenu("obj.bpp", bppRow, nullptr, bppLabel(m.bitDepth), {"4 bpp", "8 bpp", "16 bpp"}, dCur);
+            if (dPick >= 0 && depths[dPick] != m.bitDepth)
+                doc.edit(path, [d = depths[dPick]](splash::Object& ob) { ob.mesh->bitDepth = d; });
+        }
         // Menu order follows the labels' enum: Baked vertex, Flat, Mesh colours, Painted.
         const splash::VertexColorMode modes[4] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
                                                   splash::VertexColorMode::Mesh, splash::VertexColorMode::Painted};

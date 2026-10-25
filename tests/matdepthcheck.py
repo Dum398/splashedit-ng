@@ -101,5 +101,10 @@ mesh, out = run(['--click', '@obj.matdepth.1', '--wait', '5', '--click', '@obj.m
                 lambda d: three(d, 16))
 check('Object (8 bpp) clears the override', depths(mesh) == [None, None, None] and mesh['bitDepth'] == 8, mesh)
 
+# --- The object's Bit depth row moves the object and keeps an override ---
+mesh, out = run(['--click', '@obj.bpp', '--wait', '5', '--click', '@obj.bpp/4 bpp', '--wait', '5'], lambda d: three(d, 16))
+check('a Bit depth row for the object, inside the inspector', inside('obj.bpp'), rects.get('obj.bpp'))
+check('Bit depth 4 bpp moves the object, Material 2 stays at 16', depths(mesh) == [None, 16, None] and mesh['bitDepth'] == 4, mesh)
+
 print('matdepthcheck: %s' % ('all passed' if not fails else '%d failed' % fails))
 sys.exit(1 if fails else 0)

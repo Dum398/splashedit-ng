@@ -54,8 +54,23 @@ splash::Object* objectAt(splash::Scene& scene, const ObjectPath& path) {
 }
 
 // The one edit each kind makes, shared by the dry runs and the document.
+// Materials at the fix's depth move to the new one, the others keep theirs;
+// a material's override is cleared when it then matches the object's depth.
 void fixObject(splash::Object& o, const MeterFix& fix) {
-    if (fix.kind == MeterFix::Kind::TextureDepth && o.mesh) o.mesh->bitDepth = fix.to;
+    if (fix.kind != MeterFix::Kind::TextureDepth || !o.mesh) return;
+    splash::MeshComponent& m = *o.mesh;
+    std::vector<splash::BitDepth> to;
+    for (const splash::Material& mat : m.materials)
+        to.push_back(splash::materialDepth(m, mat) == fix.from ? fix.to : splash::materialDepth(m, mat));
+    if (m.bitDepth == fix.from) m.bitDepth = fix.to;
+    for (size_t i = 0; i < to.size(); i++)
+        m.materials[i].bitDepth = to[i] == m.bitDepth ? std::nullopt : std::optional<splash::BitDepth>(to[i]);
+}
+bool fixChanges(const splash::MeshComponent& m, const MeterFix& fix) {
+    if (m.bitDepth == fix.from) return true;
+    for (const splash::Material& mat : m.materials)
+        if (splash::materialDepth(m, mat) == fix.from) return true;
+    return false;
 }
 // A plain image only: a sheet-backed one draws at its sheet's depth.
 void fixImage(splash::UIElement& e, const MeterFix& fix) {
@@ -406,7 +421,7 @@ bool applyFix(Document& doc, const MeterFix& fix, std::string* error) {
             for (const auto& [c, e] : fix.uiImages) byCanvas[c].push_back(e);
             std::vector<ObjectPath> objects;  // editMany makes a step for each it is given, changed or not
             for (const ObjectPath& p : fix.objects)
-                if (const splash::Object* o = doc.object(p); o && o->mesh && o->mesh->bitDepth != fix.to) objects.push_back(p);
+                if (const splash::Object* o = doc.object(p); o && o->mesh && fixChanges(*o->mesh, fix)) objects.push_back(p);
             bool changed = false;
             doc.beginBatch();
             if (!objects.empty()) changed |= doc.editMany(objects, [&](splash::Object& o) { fixObject(o, fix); }) > 0;
@@ -496,10 +511,14 @@ MeterFixResult findMeterFixes(const splash::Scene& scene, const std::filesystem:
     for (size_t i = 0; i < objs.size(); i++) {
         const splash::Object& o = *objs[i].object;
         if (!o.mesh) continue;
-        Group one{o.mesh->bitDepth, {i}, {}, {}, {}};
+        // One group per depth the object's textures export at.
+        std::map<splash::BitDepth, Group> byDepth;
         for (const splash::Material& m : o.mesh->materials)
-            if (!m.texture.empty()) one.textures.insert(m.texture);
-        join(std::move(one));
+            if (!m.texture.empty()) {
+                const splash::BitDepth d = splash::materialDepth(*o.mesh, m);
+                byDepth.try_emplace(d, Group{d, {i}, {}, {}, {}}).first->second.textures.insert(m.texture);
+            }
+        for (auto& [d, one] : byDepth) join(std::move(one));
     }
     // Every canvas the export writes, hidden ones too, but the loading
     // screen's (the first of that name), which goes in the loader pack.

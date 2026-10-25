@@ -247,6 +247,9 @@ struct State {
     bool focusTreeFilter = false;
     bool treeDragging = false;
     std::vector<int> treeDragPath;
+    // Every object the drag carries: the pressed row's alone, or, when it is
+    // part of a multi-selection, the selection's top-level objects (#263).
+    std::vector<std::vector<int>> treeDragPaths;
     int treeMenu = 0;
     int treeMenuShown = 0;
     std::vector<int> treeMenuPath;

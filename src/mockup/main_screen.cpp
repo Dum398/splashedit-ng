@@ -46,6 +46,7 @@
 #include "ui/file_dialog.h"
 #include "ui/icons.h"
 #include "ui/list_scroll.hh"
+#include "ui/scrub.hh"
 #include "ui/texture_image.h"
 #include "ui/widgets.h"
 #include "viewport/ps1view.h"
@@ -9328,7 +9329,9 @@ static std::string fitWidth(const std::string& t, float w) {
 // Several objects selected (#263): the inspector shows what they all have.
 // A field whose values differ reads "mixed"; an edit sets the value on every
 // one of them as one undo step (a scrub merges into one until released).
-// Typed transform values set that one axis on all (all on the same Y). The
+// Typed transform values set that one axis on all (all on the same Y). A
+// scrub on a mixed field moves each by the drag instead, so each keeps its
+// offset, each clamped on its own. The
 // components whose inspectors are files, lists or painting are edited one
 // object at a time: they are named in a card at the end.
 // The blob shadow size `o` gets when switched to Blob: its own once set,
@@ -9377,6 +9380,30 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         std::fflush(stdout);
     };
     auto editAll = [&](const std::function<void(splash::Object&)>& fn, const std::string& key = {}) { doc.editMany(paths, fn, key); };
+    // A scrub on a mixed field moves each object by the drag from its own
+    // value when the drag began (ui::scrubOffset), kept here until release.
+    // Once begun it goes on so until release, even when the values meet.
+    struct MixedScrub {
+        std::string key;
+        std::vector<editor::ObjectPath> paths;
+        std::vector<splash::Vec3> from;  // per object, as `paths`; a number field uses x
+    };
+    static MixedScrub mixedScrub;
+    auto scrubbingMixed = [&](const std::string& key) { return mixedScrub.key == key && mixedScrub.paths == paths; };
+    // Each object's value when the scrub on `key` began, read with `get` on its first frame.
+    auto scrubStart = [&](const std::string& key, const std::function<splash::Vec3(const splash::Object&)>& get) {
+        if (!scrubbingMixed(key)) {
+            mixedScrub = {key, paths, {}};
+            for (const splash::Object* o : objs) mixedScrub.from.push_back(get(*o));
+        }
+        return [](const editor::ObjectPath& p) {
+            for (size_t k = 0; k < mixedScrub.paths.size(); ++k)
+                if (mixedScrub.paths[k] == p) return mixedScrub.from[k];
+            return splash::Vec3{};
+        };
+    };
+    auto scrubEnd = [&] { mixedScrub = {}; };
+    constexpr float kNoLimit = std::numeric_limits<float>::infinity();
 
     ImGui::PushClipRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1), true);
     nameRect("obj.panel", ImRect(ImVec2(r.Min.x, y), ImVec2(r.Max.x, r.Max.y - 1)));
@@ -9444,6 +9471,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     };
     // A Vec3 row: each axis shows the primary's value or "mixed"; an edit sets
     // that axis alone on every object (`set` gets the axis and the value).
+    // Also returns which axes are mixed.
     auto vec3Row = [&](const char* id, const char* lid, const char* label, const char* tip,
                        const std::function<splash::Vec3(const splash::Object&)>& get, std::string (*fmt)(float),
                        const std::function<void(splash::Object&, int, float)>& set, ImRect* rowOut = nullptr) {
@@ -9462,7 +9490,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         if (rowOut) *rowOut = rr;
         FieldEdit fe = vec3Field(id, rr, mixed[0] ? "mixed" : shown[0].c_str(), mixed[1] ? "mixed" : shown[1].c_str(),
                                  mixed[2] ? "mixed" : shown[2].c_str(), nullptr, ed, mixed);
-        return std::make_pair(fe, std::array<float, 3>{ed[0], ed[1], ed[2]});
+        return std::make_tuple(fe, std::array<float, 3>{ed[0], ed[1], ed[2]}, std::array<bool, 3>{mixed[0], mixed[1], mixed[2]});
     };
     auto fmtF = [](float v) { return fmtFixed(v); };
     auto fmtS = [](float v) { return fmtShort(v); };
@@ -9472,28 +9500,54 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     fold(section("s_transform", ImRect(ImVec2(x0, y), ImVec2(x1, y + 34)), icon::move, color::textDim, "Transform", true, true, false));
     y += 34 + space::xs;
     {
-        auto [fe, v] = vec3Row("pos", "lpos", "Position", "Where each object sits, in metres, relative to its parent.",
-                               [](const splash::Object& o) { return o.transform.position; }, fmtF, nullptr);
+        auto posOf = [](const splash::Object& o) { return o.transform.position; };
+        auto [fe, v, mx] = vec3Row("pos", "lpos", "Position", "Where each object sits, in metres, relative to its parent.", posOf, fmtF,
+                                   nullptr);
         if (fe.changed) {
             const int i = fe.index;
             const float nv = v[i];
-            editAll([i, nv](splash::Object& ob) { component(ob.transform.position, i) = nv; }, "mpos." + std::to_string(i));
+            const std::string key = "mpos." + std::to_string(i);
+            if (fe.scrubbed && (mx[i] || scrubbingMixed(key))) {
+                auto from = scrubStart(key, posOf);
+                doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
+                    component(ob.transform.position, i) = ui::scrubOffset(from(p)[i], fe.scrubFrom, nv, -kNoLimit, kNoLimit, false);
+                }, key);
+            } else {
+                editAll([i, nv](splash::Object& ob) { component(ob.transform.position, i) = nv; }, key);
+            }
         }
-        if (fe.done) doc.endMerge();
+        if (fe.done) {
+            scrubEnd();
+            doc.endMerge();
+        }
     }
     {
-        auto [fe, v] = vec3Row("rot", "lrot", "Rotation", "Rotation around each axis, in degrees.",
-                               [](const splash::Object& o) { return eulerDegrees(o.transform.rotation); }, fmtS, nullptr);
+        auto rotOf = [](const splash::Object& o) { return eulerDegrees(o.transform.rotation); };
+        auto [fe, v, mx] = vec3Row("rot", "lrot", "Rotation", "Rotation around each axis, in degrees.", rotOf, fmtS, nullptr);
         if (fe.changed) {
             const int i = fe.index;
             const float nv = v[i];
-            editAll([i, nv](splash::Object& ob) {
-                splash::Vec3 e = eulerDegrees(ob.transform.rotation);
-                component(e, i) = nv;
-                ob.transform.rotation = quatFromEuler(e);
-            }, "mrot." + std::to_string(i));
+            const std::string key = "mrot." + std::to_string(i);
+            if (fe.scrubbed && (mx[i] || scrubbingMixed(key))) {
+                // Each from its own angles at the start, so the other two axes do not drift.
+                auto from = scrubStart(key, rotOf);
+                doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
+                    splash::Vec3 e = from(p);
+                    component(e, i) = ui::scrubOffset(e[i], fe.scrubFrom, nv, -kNoLimit, kNoLimit, false);
+                    ob.transform.rotation = quatFromEuler(e);
+                }, key);
+            } else {
+                editAll([i, nv](splash::Object& ob) {
+                    splash::Vec3 e = eulerDegrees(ob.transform.rotation);
+                    component(e, i) = nv;
+                    ob.transform.rotation = quatFromEuler(e);
+                }, key);
+            }
         }
-        if (fe.done) doc.endMerge();
+        if (fe.done) {
+            scrubEnd();
+            doc.endMerge();
+        }
     }
     {
         // The Scale lock, as with one object: each object keeps its own proportions.
@@ -9513,12 +9567,23 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
     }
     {
-        auto [fe, v] = vec3Row("scl", "lscl", "Scale", "Size multiplier on each axis.", [](const splash::Object& o) { return o.transform.scale; },
-                               fmtF, nullptr);
+        auto sclOf = [](const splash::Object& o) { return o.transform.scale; };
+        auto [fe, v, mx] = vec3Row("scl", "lscl", "Scale", "Size multiplier on each axis.", sclOf, fmtF, nullptr);
         if (fe.changed) {
             const int i = fe.index;
             const float nv = v[i];
-            if (st.play.tools.scaleLock) {
+            const std::string key = "mscl." + std::to_string(i);
+            if (fe.scrubbed && (mx[i] || scrubbingMixed(key))) {
+                // Each axis from its own start by the drag; locked, the other two follow in proportion.
+                auto from = scrubStart(key, sclOf);
+                const bool lock = st.play.tools.scaleLock;
+                doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
+                    const splash::Vec3 f0 = from(p);
+                    const float to = ui::scrubOffset(f0[i], fe.scrubFrom, nv, -kNoLimit, kNoLimit, false);
+                    if (lock) ob.transform.scale = editor::lockedScale(f0, i, to);
+                    else component(ob.transform.scale, i) = to;
+                }, key);
+            } else if (st.play.tools.scaleLock) {
                 // Every frame of a scrub scales each object from where the edit began.
                 bool same = st.scaleLockFromMany.size() == paths.size();
                 for (size_t k = 0; same && k < paths.size(); ++k) same = st.scaleLockFromMany[k].first == paths[k];
@@ -9538,6 +9603,7 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         }
         if (fe.done) {
             st.scaleLockFromMany.clear();
+            scrubEnd();
             doc.endMerge();
         }
     }
@@ -9565,11 +9631,21 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         const ImRect fr = row(lid.c_str(), label, tip);
         nameRect(std::string("obj.") + id, fr);
         FieldEdit fe = numberField(id, fr, mixed ? "mixed" : shown.c_str(), unit, 0, nullptr, &nv, false, mixed);
-        if (fe.changed) {
+        const std::string key = std::string("m.") + id;
+        if (fe.changed && fe.scrubbed && (mixed || scrubbingMixed(key))) {
+            // Each from its own start by the drag, clamped on its own.
+            auto from = scrubStart(key, [&](const splash::Object& o) { return splash::Vec3{get(o), 0, 0}; });
+            doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
+                set(ob, ui::scrubOffset(from(p).x, fe.scrubFrom, nv, lo, hi, decimals == 0));
+            }, key);
+        } else if (fe.changed) {
             const float v = splash::clampv(nv, lo, hi);
-            editAll([&](splash::Object& ob) { set(ob, v); }, std::string("m.") + id);
+            editAll([&](splash::Object& ob) { set(ob, v); }, key);
         }
-        if (fe.done) doc.endMerge();
+        if (fe.done) {
+            scrubEnd();
+            doc.endMerge();
+        }
     };
     // A switch over every object: on when all are on; a click sets all to the other.
     auto toggleAll = [&](const char* id, const char* label, const char* tip, const std::function<bool(const splash::Object&)>& get,

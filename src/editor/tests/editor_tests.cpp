@@ -16287,6 +16287,185 @@ void testMeterFixes() {
     fs::remove_all(dir, ec);
 }
 
+// Texture depth fixes (#194) for the other carriers of a bit depth: plain UI
+// images and sprite sheets. packVram keeps one copy per file and depth (and
+// cutout) across meshes, UI images and sheets, so every carrier sharing a copy
+// is in the one fix: a mesh and a UI image on one texture, a sheet and a
+// hidden canvas's image on another. A sheet-backed image follows its sheet,
+// the loading canvas goes in the loader pack and a 4 bpp sheet has nowhere to
+// drop: none of them is a target. Each saving is the meters' change once the
+// fix is applied through the document, and one Ctrl+Z puts every carrier back.
+void testMeterFixCarriers() {
+    namespace fs = std::filesystem;
+    const fs::path dir = g_outDir / "meter_fix_carriers";
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "textures", ec);
+    fs::create_directories(dir / "meshes", ec);
+    auto image = [](int w, int h, auto px) {
+        splash::Image img;
+        img.width = w, img.height = h;
+        img.pixels.resize(size_t(w) * h);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++) img.pixels[size_t(y) * w + x] = px(x, y);
+        return img;
+    };
+    // 256x256 each: one atlas of its own at any depth, so every drop frees one.
+    splash::savePng(image(256, 256, [](int x, int y) { return splash::Image::Px{x / 255.f, y / 255.f, 0.3f, 1}; }), dir / "textures/u.png");
+    splash::savePng(image(256, 256, [](int x, int y) { return splash::Image::Px{0.5f, x / 255.f, y / 255.f, 1}; }), dir / "textures/s.png");
+    splash::savePng(image(256, 256, [](int x, int) { return splash::Image::Px{float(x / 32) / 7.f, 0.4f, 0.6f, 1}; }),
+                    dir / "textures/m.png");
+    splash::savePng(image(64, 64, [](int x, int) { return splash::Image::Px{float(x / 16) / 3.f, 0.1f, 0.9f, 1}; }), dir / "textures/t.png");
+    splash::Mesh quad;
+    quad.positions = {{0, 0, 0}, {1, 0, 0}, {1, 0, 1}, {0, 0, 1}};
+    quad.normals = {{0, 1, 0}, {0, 1, 0}, {0, 1, 0}, {0, 1, 0}};
+    quad.uv = {{0, 0}, {1, 0}, {1, 1}, {0, 1}};
+    quad.submeshes = {{0, 2, 1, 0, 3, 2}};
+    splash::saveMesh(quad, dir / "meshes/quad.mesh");
+
+    splash::Scene sc;
+    splash::Object o;
+    o.name = "M";
+    splash::MeshComponent mc;
+    mc.mesh = "meshes/quad.mesh";
+    mc.materials = {splash::Material{"textures/m.png", {1, 1, 1, 1}, {}}};
+    mc.bitDepth = splash::BitDepth::Bpp8;
+    o.mesh = mc;
+    sc.objects = {o};
+    splash::SpriteSheet s;
+    s.name = "S";
+    s.texture = "textures/s.png";
+    s.bitDepth = splash::BitDepth::Bpp16;
+    s.cellW = s.cellH = 32;
+    splash::SpriteSheet t;
+    t.name = "T";
+    t.texture = "textures/t.png";  // at the default 4 bpp: no lower depth
+    sc.spriteSheets = {s, t};
+    auto img = [](const char* name, const char* tex, splash::BitDepth d, bool cutout) {
+        splash::UIElement e;
+        e.type = splash::UIElementType::Image;
+        e.name = name;
+        e.texture = tex;
+        e.bitDepth = d;
+        e.cutout = cutout;
+        return e;
+    };
+    splash::UICanvas hud;
+    hud.name = "HUD";
+    splash::UIElement box;
+    box.name = "Box";
+    splash::UIElement cell = img("Cell", "", splash::BitDepth::Bpp8, true);
+    cell.sheet = "S";  // shows the sheet's texture at the sheet's depth
+    // m.png without cutout, as the mesh's opaque texture converts: one copy for both.
+    hud.elements = {img("U", "textures/u.png", splash::BitDepth::Bpp16, true), box, cell,
+                    img("Shared", "textures/m.png", splash::BitDepth::Bpp8, false)};
+    splash::UICanvas loading;
+    loading.name = "Loading";
+    loading.elements = {img("L", "textures/u.png", splash::BitDepth::Bpp16, true)};
+    splash::UICanvas hidden;
+    hidden.name = "Hidden";
+    hidden.visible = false;  // exported all the same
+    hidden.elements = {img("H", "textures/s.png", splash::BitDepth::Bpp16, true)};
+    sc.canvases = {hud, loading, hidden};
+    sc.settings.loadingCanvas = "Loading";
+
+    const splash::VramSettings vram = editor::loadVramSettings(dir);
+    auto exportStats = [&](const splash::Scene& sIn) {
+        splash::Scene c = sIn;
+        splash::ExportOptions opt;
+        opt.dryRun = true;
+        opt.vram = vram;
+        splash::ExportResult r = splash::exportSplashpack(c, dir, dir / "scene.splashpack", opt);
+        CHECK(r.ok());
+        for (const std::string& e : r.errors) std::printf("  export: %s\n", e.c_str());
+        return r.stats;
+    };
+    auto depths = [](const splash::Scene& x) {
+        return std::vector<splash::BitDepth>{x.objects[0].mesh->bitDepth,         x.canvases[0].elements[0].bitDepth,
+                                             x.canvases[0].elements[2].bitDepth,  x.canvases[0].elements[3].bitDepth,
+                                             x.canvases[1].elements[0].bitDepth,  x.canvases[2].elements[0].bitDepth,
+                                             x.spriteSheets[0].bitDepth,          x.spriteSheets[1].bitDepth};
+    };
+    const std::vector<splash::BitDepth> was = depths(sc);
+    const splash::ExportStats base = exportStats(sc);
+    const editor::MeterFixResult res = editor::findMeterFixes(sc, dir, vram);
+    CHECK(res.ok);
+    using Images = std::vector<std::pair<int, int>>;
+    const std::string dot = " \xc2\xb7 ";
+    int u = 0, sheet = 0, shared = 0;
+    for (const editor::MeterFix& f : res.fixes) {
+        if (f.kind != editor::MeterFix::Kind::TextureDepth) continue;  // the quad's simplify fix
+        CHECK(f.saving(editor::FixMeter::Vram) > 0);
+        CHECK(f.textures.size() == 1);
+        const std::string tex = f.textures.empty() ? "" : f.textures[0];
+        if (tex == "textures/u.png") {
+            u++;  // the HUD's image; the loading canvas's on the same file is not in this pack
+            CHECK(f.objects.empty() && f.uiImages == (Images{{0, 0}}) && f.sheets.empty() && f.from == splash::BitDepth::Bpp16);
+            CHECK(f.detail.rfind("1 UI image" + dot, 0) == 0);
+        } else if (tex == "textures/s.png") {
+            sheet++;  // the sheet and the hidden canvas's image on its file; not the sheet-backed image
+            CHECK(f.objects.empty() && f.uiImages == (Images{{2, 0}}) && f.sheets == std::vector<int>{0} &&
+                  f.from == splash::BitDepth::Bpp16);
+            CHECK(f.detail.rfind("1 UI image" + dot + "1 sprite sheet" + dot, 0) == 0);
+        } else if (tex == "textures/m.png") {
+            shared++;  // the mesh and the UI image share one copy: one fix for both
+            CHECK(f.objects == std::vector<editor::ObjectPath>{{0}} && f.uiImages == (Images{{0, 3}}) && f.sheets.empty() &&
+                  f.from == splash::BitDepth::Bpp8 && f.to == splash::BitDepth::Bpp4);
+            CHECK(f.detail.rfind("1 object" + dot + "1 UI image" + dot, 0) == 0 && f.title == "m.png: 8 \xe2\x86\x92 4 bpp");
+            // Dropping the mesh alone keeps the 8 bpp copy for the image and adds a 4 bpp one: no saving.
+            editor::MeterFix meshOnly = f;
+            meshOnly.uiImages.clear();
+            splash::Scene alone = sc;
+            editor::applyFix(alone, meshOnly);
+            CHECK(editor::meterUsed(editor::FixMeter::Vram, exportStats(alone)) >= editor::meterUsed(editor::FixMeter::Vram, base));
+        } else {
+            CHECK(false);  // t.png's sheet is at 4 bpp already
+        }
+        std::printf("  %s: %s saves %lld vram bytes\n", f.title.c_str(), f.detail.c_str(), f.saving(editor::FixMeter::Vram));
+
+        // The saving shown is the meters' change, through the document and through a scene copy alike.
+        editor::Document d;
+        d.reset(sc, dir, "s");
+        CHECK(editor::applyFix(d, f));
+        CHECK(d.historySize() == 1);  // one undo step for every carrier
+        const splash::ExportStats after = exportStats(d.scene());
+        splash::Scene copy = sc;
+        editor::applyFix(copy, f);
+        CHECK(depths(copy) == depths(d.scene()));
+        for (int m = 0; m < editor::kFixMeters; m++) {
+            const editor::FixMeter fm = editor::FixMeter(m);
+            CHECK(f.before[size_t(m)] == editor::meterUsed(fm, base));
+            CHECK(f.after[size_t(m)] == editor::meterUsed(fm, after));
+            CHECK(f.saving(fm) == (long long)editor::meterUsed(fm, base) - (long long)editor::meterUsed(fm, after));
+        }
+        for (const editor::ObjectPath& p : f.objects) CHECK(d.scene().objects[size_t(p[0])].mesh->bitDepth == f.to);
+        for (const auto& [c, e] : f.uiImages) CHECK(d.scene().canvases[size_t(c)].elements[size_t(e)].bitDepth == f.to);
+        for (int i : f.sheets) CHECK(d.scene().spriteSheets[size_t(i)].bitDepth == f.to);
+        // Untouched: the sheet-backed image, the loading canvas and the 4 bpp sheet.
+        CHECK(depths(d.scene())[2] == was[2] && depths(d.scene())[4] == was[4] && depths(d.scene())[7] == was[7]);
+        CHECK(!editor::applyFix(d, f));  // done already: no step
+        CHECK(d.historySize() == 1);
+        CHECK(d.undo() && !d.canUndo());
+        CHECK(depths(d.scene()) == was);
+        CHECK(d.scene().canvases[0].elements[0].bitDepth == splash::BitDepth::Bpp16 &&
+              d.scene().canvases[0].elements[3].bitDepth == splash::BitDepth::Bpp8 &&
+              d.scene().canvases[2].elements[0].bitDepth == splash::BitDepth::Bpp16 &&
+              d.scene().spriteSheets[0].bitDepth == splash::BitDepth::Bpp16 &&
+              d.scene().objects[0].mesh->bitDepth == splash::BitDepth::Bpp8);
+        const splash::ExportStats undone = exportStats(d.scene());
+        for (int m = 0; m < editor::kFixMeters; m++)
+            CHECK(editor::meterUsed(editor::FixMeter(m), undone) == editor::meterUsed(editor::FixMeter(m), base));
+        CHECK(d.redo() && depths(d.scene()) == depths(copy));
+    }
+    // u.png and s.png 16 -> 8 and 16 -> 4, m.png 8 -> 4.
+    CHECK(u == 2 && sheet == 2 && shared == 1);
+    // The cap counts these carriers' candidates too.
+    const editor::MeterFixResult capped = editor::findMeterFixes(sc, dir, vram, {}, {}, 2);
+    CHECK(std::count_if(capped.fixes.begin(), capped.fixes.end(),
+                        [](const editor::MeterFix& f) { return f.kind == editor::MeterFix::Kind::TextureDepth; }) == 2);
+    fs::remove_all(dir, ec);
+}
+
 // The Triangles meter's simplify fix (#194): one click sets the model's
 // import settings' Triangles to what halves the mesh and imports it again;
 // undo puts every file the import wrote back byte for byte (the sidecar too)
@@ -16796,6 +16975,7 @@ int main(int argc, char** argv) {
     testStringsBlocks();
     testStringsDoc();
     testMeterFixes();
+    testMeterFixCarriers();
     testMeterFixSimplify();
     testTvPreview();
     if (g_failures) {

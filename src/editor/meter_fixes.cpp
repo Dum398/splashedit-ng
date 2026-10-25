@@ -11,6 +11,7 @@
 #include "budget.hh"
 #include "editor/file_swaps.hh"
 #include "editor/project.hh"
+#include "editor/ui_canvas.hh"
 #include "import.hh"
 #include "simplify.hh"
 #include "texture.hh"
@@ -55,6 +56,15 @@ splash::Object* objectAt(splash::Scene& scene, const ObjectPath& path) {
 // The one edit each kind makes, shared by the dry runs and the document.
 void fixObject(splash::Object& o, const MeterFix& fix) {
     if (fix.kind == MeterFix::Kind::TextureDepth && o.mesh) o.mesh->bitDepth = fix.to;
+}
+// A plain image only: a sheet-backed one draws at its sheet's depth.
+void fixImage(splash::UIElement& e, const MeterFix& fix) {
+    if (fix.kind == MeterFix::Kind::TextureDepth && e.type == splash::UIElementType::Image && e.sheet.empty()) e.bitDepth = fix.to;
+}
+void fixSheets(std::vector<splash::SpriteSheet>& sheets, const MeterFix& fix) {
+    if (fix.kind != MeterFix::Kind::TextureDepth) return;
+    for (int i : fix.sheets)
+        if (i >= 0 && size_t(i) < sheets.size()) sheets[size_t(i)].bitDepth = fix.to;
 }
 void fixSettings(splash::SceneSettings& s, const MeterFix& fix) {
     if (fix.kind == MeterFix::Kind::ResetOrderingTable) s.orderingTableSize = 0;
@@ -381,12 +391,31 @@ void applyFix(splash::Scene& scene, const MeterFix& fix) {
     if (fix.kind != MeterFix::Kind::TextureDepth) return;
     for (const ObjectPath& p : fix.objects)
         if (splash::Object* o = objectAt(scene, p)) fixObject(*o, fix);
+    for (const auto& [c, e] : fix.uiImages)
+        if (c >= 0 && size_t(c) < scene.canvases.size() && e >= 0 && size_t(e) < scene.canvases[size_t(c)].elements.size())
+            fixImage(scene.canvases[size_t(c)].elements[size_t(e)], fix);
+    fixSheets(scene.spriteSheets, fix);
 }
 
 bool applyFix(Document& doc, const MeterFix& fix, std::string* error) {
     switch (fix.kind) {
-        case MeterFix::Kind::TextureDepth:
-            return doc.editMany(fix.objects, [&](splash::Object& o) { fixObject(o, fix); }) > 0;
+        case MeterFix::Kind::TextureDepth: {
+            // Objects, UI images and sheets through their own edits, undone
+            // as one step: one carrier left behind would keep the old copy.
+            std::map<int, std::vector<int>> byCanvas;
+            for (const auto& [c, e] : fix.uiImages) byCanvas[c].push_back(e);
+            std::vector<ObjectPath> objects;  // editMany makes a step for each it is given, changed or not
+            for (const ObjectPath& p : fix.objects)
+                if (const splash::Object* o = doc.object(p); o && o->mesh && o->mesh->bitDepth != fix.to) objects.push_back(p);
+            bool changed = false;
+            doc.beginBatch();
+            if (!objects.empty()) changed |= doc.editMany(objects, [&](splash::Object& o) { fixObject(o, fix); }) > 0;
+            for (const auto& [c, idx] : byCanvas)
+                changed |= uic::editElements(doc, c, idx, [&](splash::UIElement& e, size_t) { fixImage(e, fix); });
+            if (!fix.sheets.empty()) changed |= doc.editSpriteSheets([&](std::vector<splash::SpriteSheet>& ss) { fixSheets(ss, fix); });
+            doc.endBatch();
+            return changed;
+        }
         case MeterFix::Kind::ResetOrderingTable:
         case MeterFix::Kind::ResetBumpAllocator: {
             splash::SceneSettings after = doc.scene().settings;
@@ -421,43 +450,75 @@ MeterFixResult findMeterFixes(const splash::Scene& scene, const std::filesystem:
 
     // --- Candidates ---
     std::vector<MeterFix> cands;
-    // Textures: meshes at one depth that share a texture drop together (one
-    // left behind would keep the old copy in VRAM).
+    // Textures: every carrier of a texture at one depth drops together (one
+    // left behind would keep the old copy in VRAM). packVram
+    // (core/vrampacker.cpp) packs the meshes', the plain UI images' and the
+    // sprite sheets' textures as one list and places one copy per source
+    // file, depth and cutout, so carriers of all three kinds share copies. A
+    // group joins every carrier on a file at a depth; cutout is not looked
+    // at, so a group may hold carriers whose copies differ but never leaves
+    // one that shares a copy behind.
     struct Group {
         splash::BitDepth depth;
-        std::vector<size_t> members;  // into objs
+        std::vector<size_t> objects;              // into objs
+        std::vector<std::pair<int, int>> images;  // canvas, element
+        std::vector<int> sheets;
         std::set<std::string> textures;
     };
     std::vector<Group> groups;
-    for (size_t i = 0; i < objs.size(); i++) {
-        const splash::Object& o = *objs[i].object;
-        if (!o.mesh || o.mesh->bitDepth == splash::BitDepth::Bpp4) continue;
-        std::set<std::string> tex;
-        for (const splash::Material& m : o.mesh->materials)
-            if (!m.texture.empty()) tex.insert(m.texture);
-        if (tex.empty()) continue;
+    auto absorb = [](Group& into, const Group& g) {
+        into.objects.insert(into.objects.end(), g.objects.begin(), g.objects.end());
+        into.images.insert(into.images.end(), g.images.begin(), g.images.end());
+        into.sheets.insert(into.sheets.end(), g.sheets.begin(), g.sheets.end());
+        into.textures.insert(g.textures.begin(), g.textures.end());
+    };
+    auto join = [&](Group one) {
+        if (one.depth == splash::BitDepth::Bpp4 || one.textures.empty()) return;
         std::vector<size_t> hit;
         for (size_t g = 0; g < groups.size(); g++) {
-            if (groups[g].depth != o.mesh->bitDepth) continue;
-            for (const std::string& t : tex)
+            if (groups[g].depth != one.depth) continue;
+            for (const std::string& t : one.textures)
                 if (groups[g].textures.count(t)) {
                     hit.push_back(g);
                     break;
                 }
         }
         if (hit.empty()) {
-            groups.push_back({o.mesh->bitDepth, {i}, tex});
-            continue;
+            groups.push_back(std::move(one));
+            return;
         }
-        Group& into = groups[hit[0]];
-        into.members.push_back(i);
-        into.textures.insert(tex.begin(), tex.end());
+        absorb(groups[hit[0]], one);
         for (size_t k = hit.size(); k-- > 1;) {
-            Group& g = groups[hit[k]];
-            into.members.insert(into.members.end(), g.members.begin(), g.members.end());
-            into.textures.insert(g.textures.begin(), g.textures.end());
+            absorb(groups[hit[0]], groups[hit[k]]);
             groups.erase(groups.begin() + long(hit[k]));
         }
+    };
+    for (size_t i = 0; i < objs.size(); i++) {
+        const splash::Object& o = *objs[i].object;
+        if (!o.mesh) continue;
+        Group one{o.mesh->bitDepth, {i}, {}, {}, {}};
+        for (const splash::Material& m : o.mesh->materials)
+            if (!m.texture.empty()) one.textures.insert(m.texture);
+        join(std::move(one));
+    }
+    // Every canvas the export writes, hidden ones too, but the loading
+    // screen's (the first of that name), which goes in the loader pack.
+    // Elements of a type this build does not know are not exported.
+    int loading = -1;
+    if (const std::string& lc = scene.settings.loadingCanvas; !lc.empty())
+        for (size_t c = 0; c < scene.canvases.size() && loading < 0; c++)
+            if (scene.canvases[c].name == lc) loading = int(c);
+    for (size_t c = 0; c < scene.canvases.size(); c++) {
+        if (int(c) == loading) continue;
+        const std::vector<splash::UIElement>& els = scene.canvases[c].elements;
+        for (size_t e = 0; e < els.size(); e++)
+            if (els[e].type == splash::UIElementType::Image && els[e].unknown.empty() && els[e].sheet.empty() &&
+                !els[e].texture.empty())
+                join({els[e].bitDepth, {}, {{int(c), int(e)}}, {}, {els[e].texture}});
+    }
+    for (size_t i = 0; i < scene.spriteSheets.size(); i++) {
+        const splash::SpriteSheet& sh = scene.spriteSheets[i];
+        if (!sh.texture.empty()) join({sh.bitDepth, {}, {}, {int(i)}, {sh.texture}});
     }
     struct TexCand {
         MeterFix fix;
@@ -465,7 +526,9 @@ MeterFixResult findMeterFixes(const splash::Scene& scene, const std::filesystem:
     };
     std::vector<TexCand> texCands;
     for (Group& g : groups) {
-        std::sort(g.members.begin(), g.members.end());
+        std::sort(g.objects.begin(), g.objects.end());
+        std::sort(g.images.begin(), g.images.end());
+        std::sort(g.sheets.begin(), g.sheets.end());
         size_t texels = 0;
         int colors = 0;
         std::vector<std::pair<size_t, std::string>> bySize;
@@ -484,14 +547,22 @@ MeterFixResult findMeterFixes(const splash::Scene& scene, const std::filesystem:
             f.to = to;
             f.colors = colors;
             for (const auto& [n, t] : bySize) f.textures.push_back(t);
-            for (size_t m : g.members) f.objects.push_back(objs[m].path);
+            for (size_t m : g.objects) f.objects.push_back(objs[m].path);
+            f.uiImages = g.images;
+            f.sheets = g.sheets;
             f.title = baseName(f.textures[0]) +
                       (f.textures.size() > 1 ? " and " + std::to_string(f.textures.size() - 1) + " more" : std::string()) + ": " +
                       std::to_string(bits(f.from)) + " \xe2\x86\x92 " + std::to_string(bits(f.to)) + " bpp";
             const int fits = 1 << bits(to);
-            f.detail = std::to_string(f.objects.size()) + (f.objects.size() == 1 ? " object" : " objects") + " \xc2\xb7 " +
-                       (colors > 0 && colors <= fits ? std::to_string(colors) + " colours, fits " + std::to_string(fits) + " exactly"
-                                                     : std::to_string(colors) + " colours reduced to " + std::to_string(fits));
+            std::string who;
+            auto count = [&](size_t n, const char* one, const char* many) {
+                if (n > 0) who += std::to_string(n) + " " + (n == 1 ? one : many) + " \xc2\xb7 ";
+            };
+            count(f.objects.size(), "object", "objects");
+            count(f.uiImages.size(), "UI image", "UI images");
+            count(f.sheets.size(), "sprite sheet", "sprite sheets");
+            f.detail = who + (colors > 0 && colors <= fits ? std::to_string(colors) + " colours, fits " + std::to_string(fits) + " exactly"
+                                                           : std::to_string(colors) + " colours reduced to " + std::to_string(fits));
             texCands.push_back({std::move(f), double(texels) * (bits(g.depth) - bits(to))});
         }
     }

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "editor/document.hh"
@@ -32,14 +33,19 @@ const char* meterName(FixMeter m);  // "vram", "ram", "tris"
 
 struct MeterFix {
     enum class Kind {
-        TextureDepth,        // set the meshes in `objects` to bit depth `to`
+        TextureDepth,        // set the meshes in `objects`, `uiImages` and `sheets` to bit depth `to`
         ResetOrderingTable,  // clear the scene's ordering table override (the export sizes it)
         ResetBumpAllocator,  // clear the scene's bump allocator override
         SimplifyMesh,        // set `model`'s import settings' Triangles to `target` and import it again
     };
     Kind kind = Kind::TextureDepth;
     std::vector<ObjectPath> objects;    // the objects the fix edits (SimplifyMesh: the mesh's instances)
-    std::vector<std::string> textures;  // TextureDepth: the textures those meshes share, first is the largest
+    // TextureDepth: the other carriers of those textures at depth `from`, as
+    // the scene indexes them: plain UI images (canvas, element) and sprite
+    // sheets. A sheet-backed image is not one: it shows its sheet's texture.
+    std::vector<std::pair<int, int>> uiImages;
+    std::vector<int> sheets;
+    std::vector<std::string> textures;  // TextureDepth: the textures they share, first is the largest
     splash::BitDepth from = splash::BitDepth::Bpp8, to = splash::BitDepth::Bpp4;
     int colors = 0;  // TextureDepth: most distinct 15-bit colours in one of `textures`
     std::string mesh;                   // SimplifyMesh: project-relative .mesh
@@ -67,7 +73,8 @@ struct MeterFix {
 // Applies `fix` to a scene (the dry runs do this to a copy; a SimplifyMesh
 // fix changes no scene).
 void applyFix(splash::Scene& scene, const MeterFix& fix);
-// Applies `fix` to the document as one undo step. False when nothing changed,
+// Applies `fix` to the document as one undo step (a texture fix: its
+// objects, UI images and sprite sheets together). False when nothing changed,
 // with `error` set when it failed. A SimplifyMesh fix saves the target into
 // the model's sidecar and imports it again (reimportModel): undo puts every
 // file the import wrote back as it was, the sidecar too, and the scene.

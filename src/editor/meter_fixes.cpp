@@ -4,13 +4,18 @@
 #include <exception>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <set>
 #include <unordered_set>
 
 #include "budget.hh"
+#include "editor/file_swaps.hh"
 #include "editor/project.hh"
+#include "import.hh"
 #include "simplify.hh"
 #include "texture.hh"
+
+namespace fs = std::filesystem;
 
 namespace editor {
 
@@ -117,6 +122,258 @@ std::array<size_t, kFixMeters> readings(const splash::ExportStats& s) {
     return {meterUsed(FixMeter::Vram, s), meterUsed(FixMeter::Ram, s), meterUsed(FixMeter::Tris, s)};
 }
 
+std::string utf8(const fs::path& p) {
+    std::u8string u = p.u8string();
+    return std::string(u.begin(), u.end());
+}
+fs::path fromUtf8(const std::string& s) { return fs::path(std::u8string(s.begin(), s.end())); }
+std::string projectPath(const fs::path& root, const fs::path& file) {
+    std::u8string u = file.lexically_relative(root).generic_u8string();
+    return std::string(u.begin(), u.end());
+}
+
+int triangleCount(const splash::Mesh& m) {
+    int t = 0;
+    for (const auto& sm : m.submeshes) t += int(sm.size() / 3);
+    return t;
+}
+
+// How many times each mesh is drawn by an exported object, prefab
+// instances' content too (resolved as the export resolves it).
+void countDrawn(const std::vector<splash::Object>& level, std::map<std::string, size_t>& out) {
+    for (const splash::Object& o : level) {
+        if (!o.active) continue;
+        if (o.mesh && !o.mesh->mesh.empty()) out[o.mesh->mesh]++;
+        countDrawn(o.children, out);
+    }
+}
+std::map<std::string, size_t> drawnMeshes(splash::Scene scene, const fs::path& root) {
+    std::map<std::string, size_t> out;
+    try {
+        splash::resolvePrefabs(scene, root);
+    } catch (const std::exception&) {
+    }
+    countDrawn(scene.objects, out);
+    return out;
+}
+
+// What the importer gives a node mesh of `own` triangles out of `nodeTotal`
+// for a model target of `target` (core/import.cpp, reduce).
+int nodeShare(int target, int own, long long nodeTotal) {
+    if (nodeTotal <= 0) return own;
+    return std::clamp(int((long long)target * own / nodeTotal), std::min(own, 4), own);
+}
+
+// Fills a SimplifyMesh fix for `mesh` (`tris` triangles, the saving
+// counted over `drawn`): when it came from an imported model, the model and
+// the Triangles target that brings it to half, and what the importer's
+// simplifier then leaves of every mesh of the model in view. Otherwise
+// `model` stays empty and `detail` says why.
+void planSimplify(MeterFix& f, const fs::path& root, const std::map<std::string, size_t>& drawn, bool skinned, bool terrain,
+                  bool streamed) {
+    const std::string& path = f.mesh;
+    const int tris = f.triangles;
+    f.simplified = tris;
+    const size_t cutBase = f.before[int(FixMeter::Tris)];
+    auto halfOfDisk = [&] {
+        try {
+            splash::Mesh mesh = splash::loadMesh(root / fromUtf8(path));
+            f.simplified = splash::simplifyToTriangles(mesh, tris / 2).after;
+        } catch (const std::exception&) {
+        }
+        auto it = drawn.find(path);
+        const size_t cut = size_t(tris - f.simplified) * (it == drawn.end() ? 0 : it->second);
+        if (!streamed) f.after[int(FixMeter::Tris)] = cutBase - std::min(cut, cutBase);
+    };
+    auto refuse = [&](const std::string& why) {
+        halfOfDisk();
+        f.detail = (f.simplified < tris ? "Half keeps " + std::to_string(f.simplified) + " \xc2\xb7 " : std::string()) + why;
+    };
+    if (tris < 8) {
+        f.detail = "Too few to simplify";
+        return;
+    }
+    if (terrain) return refuse("a terrain: lower its resolution instead");
+    const fs::path model = modelOfMesh(root, path);
+    if (model.empty()) return refuse("not from an imported model: simplify it where it was made");
+    if (skinned) return refuse("skinned: set Triangles in its import settings");
+    splash::ImportSettings settings;
+    try {
+        settings = splash::loadImportSettings(model);
+    } catch (const std::exception& e) {
+        return refuse(std::string("its import settings do not read: ") + e.what());
+    }
+    // The model's meshes as its last import wrote them: the baked one and a
+    // node mesh per node with geometry, all in its own folder.
+    const std::string name = splash::importName(model), baked = "models/" + name + ".mesh";
+    struct Part {
+        std::string path;
+        splash::Mesh mesh;
+        int tris = 0;
+    };
+    std::vector<Part> parts;  // baked first
+    try {
+        Part b{baked, splash::loadMesh(root / fromUtf8(baked)), 0};
+        b.tris = triangleCount(b.mesh);
+        parts.push_back(std::move(b));
+        std::vector<fs::path> nodes;
+        std::error_code ec;
+        for (fs::directory_iterator it(root / "models" / fromUtf8(name), ec), end; !ec && it != end; it.increment(ec))
+            if (it->path().extension() == ".mesh") nodes.push_back(it->path());
+        std::sort(nodes.begin(), nodes.end());
+        for (const fs::path& n : nodes) {
+            Part p{projectPath(root, n), splash::loadMesh(n), 0};
+            p.tris = triangleCount(p.mesh);
+            parts.push_back(std::move(p));
+        }
+    } catch (const std::exception& e) {
+        return refuse(std::string("its model's meshes do not read: ") + e.what());
+    }
+    const auto self = std::find_if(parts.begin(), parts.end(), [&](const Part& p) { return p.path == path; });
+    if (self == parts.end()) return refuse("not one of " + utf8(model.filename()) + "'s meshes");
+    long long nodeTotal = 0;
+    for (size_t i = 1; i < parts.size(); i++) nodeTotal += parts[i].tris;
+    const int total = parts[0].tris, half = tris / 2;
+    // The baked mesh is simplified toward the whole target, a node mesh
+    // toward its share of it: the smallest target giving it half.
+    const bool isBaked = self == parts.begin();
+    const int target = isBaked ? half : int((half * nodeTotal + tris - 1) / std::max(1, tris));
+    if (target <= 0 || target >= total || (!isBaked && nodeShare(target, tris, nodeTotal) != half))
+        return refuse("no Triangles target of " + utf8(model.filename()) + " halves it");
+    // Simplified already: the next import starts from the file's triangles,
+    // which the project does not hold, so what it keeps is estimated from
+    // the meshes as they are.
+    f.approximate = settings.targetTriangles > 0 && (settings.sourceTriangles <= 0 || settings.targetTriangles < settings.sourceTriangles);
+    size_t cut = 0;
+    int others = 0;
+    for (Part& p : parts) {
+        auto it = drawn.find(p.path);
+        const bool mine = &p == &*self;
+        if (it == drawn.end() && !mine) continue;
+        const int t = &p == &parts[0] ? target : nodeShare(target, p.tris, nodeTotal);
+        const int left = t < p.tris ? splash::simplifyToTriangles(p.mesh, t).after : p.tris;
+        if (mine) f.simplified = left;
+        else if (left < p.tris) others++;
+        if (it != drawn.end()) cut += size_t(p.tris - left) * it->second;
+    }
+    if (!streamed) f.after[int(FixMeter::Tris)] = cutBase - std::min(cut, cutBase);
+    if (f.simplified >= tris) {
+        f.detail = "Simplifying keeps all " + std::to_string(tris) + ": UV seams, material edges and open borders hold them";
+        return;
+    }
+    f.model = projectPath(root, model);
+    f.target = target;
+    f.detail = (f.approximate ? "Keeps about " : "Keeps ") + std::to_string(f.simplified) + " at Triangles " +
+               std::to_string(target) + " in " + utf8(model.filename()) +
+               (others > 0 ? ", and " + std::to_string(others) + (others == 1 ? " other mesh" : " other meshes") + " in view"
+                           : std::string());
+}
+
+// Every file importing `model` again can write, as the project has them:
+// its sidecar, models/<name>.mesh and its textures (models/<name>[_<n>].png),
+// and everything under models/<name>/ (node meshes and clips). Others
+// named alike come along; they do not change.
+std::map<fs::path, std::optional<std::string>> modelFiles(const fs::path& root, const fs::path& model) {
+    std::map<fs::path, std::optional<std::string>> out;
+    const std::string name = splash::importName(model);
+    out[splash::importSettingsPath(model)];
+    std::error_code ec;
+    for (fs::directory_iterator it(root / "models", ec), end; !ec && it != end; it.increment(ec)) {
+        const std::string f = utf8(it->path().filename()), ext = utf8(it->path().extension());
+        std::error_code sec;
+        if (f.size() > name.size() && f.compare(0, name.size(), name) == 0 && (f[name.size()] == '.' || f[name.size()] == '_') &&
+            (ext == ".mesh" || ext == ".png") && it->is_regular_file(sec))
+            out[it->path()];
+    }
+    ec.clear();
+    for (fs::recursive_directory_iterator it(root / "models" / fromUtf8(name), ec), end; !ec && it != end; it.increment(ec)) {
+        std::error_code sec;
+        if (it->is_regular_file(sec)) out[it->path()];
+    }
+    for (auto& [p, bytes] : out) {
+        std::string b;
+        if (readBytes(p, &b)) bytes = std::move(b);
+    }
+    return out;
+}
+
+// The import warnings of a model, kept with the files the import wrote.
+class ImportWarningsCommand : public Command {
+  public:
+    fs::path model;
+    std::vector<std::string> before, after;
+    void apply(Document& doc) override { doc.setImportWarnings(model, after); }
+    void revert(Document& doc) override { doc.setImportWarnings(model, before); }
+};
+
+bool applySimplify(Document& doc, const MeterFix& fix, std::string* error) {
+    auto fail = [&](const std::string& e) {
+        if (error) *error = e;
+        return false;
+    };
+    if (fix.model.empty() || fix.target <= 0) return fail(fix.detail);
+    const fs::path root = doc.projectRoot(), model = root / fromUtf8(fix.model);
+    splash::ImportSettings settings;
+    try {
+        settings = splash::loadImportSettings(model);
+    } catch (const std::exception& e) {
+        return fail(e.what());
+    }
+    if (settings.targetTriangles == fix.target) return false;
+    const auto before = modelFiles(root, model);
+    // Everything as it was, for an import that did not work out.
+    auto putBack = [&] {
+        std::vector<std::string> recheck;
+        for (auto& [p, bytes] : modelFiles(root, model)) {
+            auto it = before.find(p);
+            std::error_code ec;
+            if (it == before.end() || !it->second) fs::remove(p, ec);
+            recheck.push_back(projectPath(root, p));
+        }
+        for (const auto& [p, bytes] : before)
+            if (bytes) writeBytes(p, *bytes);
+        std::erase_if(recheck, [](const std::string& r) { return !r.ends_with(".mesh") && !r.ends_with(".png") && !r.ends_with(".anim"); });
+        doc.refreshAssets(recheck);
+    };
+    settings.targetTriangles = fix.target;
+    try {
+        splash::saveImportSettings(model, settings);
+    } catch (const std::exception& e) {
+        putBack();
+        return fail(std::string("the import settings were not saved: ") + e.what());
+    }
+    auto warnings = std::make_unique<ImportWarningsCommand>();
+    warnings->model = model;
+    warnings->before = doc.importWarnings(model);
+    // The scene step the import makes (materials and node transforms, when
+    // they changed), the files it wrote and its warnings: one undo step.
+    // Undo goes last to first: warnings, files, then the scene.
+    doc.beginBatch();
+    const Reimported r = reimportModel(doc, model);
+    if (!r.error.empty()) {
+        doc.endBatch();
+        putBack();
+        doc.setImportWarnings(model, warnings->before);
+        return fail(r.error);
+    }
+    auto swaps = std::make_unique<FileSwapsCommand>();
+    auto after = modelFiles(root, model);
+    for (const auto& [p, bytes] : before) after.try_emplace(p);  // removed by the import
+    for (auto& [p, now] : after) {
+        auto it = before.find(p);
+        std::optional<std::string> was = it == before.end() ? std::nullopt : it->second;
+        if (was == now) continue;
+        const std::string rel = projectPath(root, p);
+        if (rel.ends_with(".mesh") || rel.ends_with(".png") || rel.ends_with(".anim")) swaps->recheck.push_back(rel);
+        swaps->files.push_back({p, std::move(was), std::move(now)});
+    }
+    warnings->after = doc.importWarnings(model);
+    doc.execute(std::move(swaps));
+    doc.execute(std::move(warnings));
+    doc.endBatch();
+    return true;
+}
+
 }  // namespace
 
 void applyFix(splash::Scene& scene, const MeterFix& fix) {
@@ -126,7 +383,7 @@ void applyFix(splash::Scene& scene, const MeterFix& fix) {
         if (splash::Object* o = objectAt(scene, p)) fixObject(*o, fix);
 }
 
-bool applyFix(Document& doc, const MeterFix& fix) {
+bool applyFix(Document& doc, const MeterFix& fix, std::string* error) {
     switch (fix.kind) {
         case MeterFix::Kind::TextureDepth:
             return doc.editMany(fix.objects, [&](splash::Object& o) { fixObject(o, fix); }) > 0;
@@ -140,7 +397,7 @@ bool applyFix(Document& doc, const MeterFix& fix) {
             doc.editSettings([&](splash::SceneSettings& s) { fixSettings(s, fix); });
             return true;
         }
-        case MeterFix::Kind::SimplifyMesh: return false;
+        case MeterFix::Kind::SimplifyMesh: return applySimplify(doc, fix, error);
     }
     return false;
 }
@@ -281,26 +538,38 @@ MeterFixResult findMeterFixes(const splash::Scene& scene, const std::filesystem:
 
     // --- Triangles: the meshes that put the most in view, simplified to half ---
     std::map<std::string, std::vector<ObjectPath>> byMesh;
+    std::set<std::string> skinned, terrain;
     for (const Exported& e : objs)
-        if (e.object->mesh && !e.object->mesh->mesh.empty()) byMesh[e.object->mesh->mesh].push_back(e.path);
+        if (e.object->mesh && !e.object->mesh->mesh.empty()) {
+            const std::string& m = e.object->mesh->mesh;
+            byMesh[m].push_back(e.path);
+            if (e.object->skin) skinned.insert(m);
+            if (e.object->terrain) terrain.insert(m);
+        }
+    // A reimport rewrites the files prefab instances draw as well.
+    const std::map<std::string, size_t> drawn = drawnMeshes(scene, root);
+    auto drawnCount = [&](const std::string& m, size_t paths) {
+        auto it = drawn.find(m);
+        return std::max(paths, it == drawn.end() ? size_t(0) : it->second);
+    };
     struct MeshCand {
         std::string mesh;
         std::vector<ObjectPath> paths;
         int tris;
+        size_t drawn;
     };
     std::vector<MeshCand> meshes;
     for (auto& [m, paths] : byMesh) {
         try {
             const splash::Mesh mesh = splash::loadMesh(root / m);
-            int t = 0;
-            for (const auto& sm : mesh.submeshes) t += int(sm.size() / 3);
-            if (t > 0) meshes.push_back({m, paths, t});
+            if (mesh.skin) skinned.insert(m);
+            const int t = triangleCount(mesh);
+            if (t > 0) meshes.push_back({m, paths, t, drawnCount(m, paths.size())});
         } catch (const std::exception&) {
         }
     }
-    std::stable_sort(meshes.begin(), meshes.end(), [](const MeshCand& a, const MeshCand& b) {
-        return size_t(a.tris) * a.paths.size() > size_t(b.tris) * b.paths.size();
-    });
+    std::stable_sort(meshes.begin(), meshes.end(),
+                     [](const MeshCand& a, const MeshCand& b) { return size_t(a.tris) * a.drawn > size_t(b.tris) * b.drawn; });
     if (meshes.size() > 5) meshes.resize(5);
     // A streamed world's view count is not the sum of its meshes.
     const bool streamed = scene.settings.streamWorld;
@@ -311,23 +580,17 @@ MeterFixResult findMeterFixes(const splash::Scene& scene, const std::filesystem:
         f.mesh = mc.mesh;
         f.objects = mc.paths;
         f.triangles = mc.tris;
-        f.simplified = mc.tris;
-        if (mc.tris >= 8) {
-            try {
-                splash::Mesh mesh = splash::loadMesh(root / mc.mesh);
-                f.simplified = splash::simplifyToTriangles(mesh, mc.tris / 2).after;
-            } catch (const std::exception&) {
-            }
-        }
         f.before = before;
         f.after = before;
-        const size_t cut = size_t(mc.tris - f.simplified) * mc.paths.size();
-        if (!streamed) f.after[int(FixMeter::Tris)] = before[int(FixMeter::Tris)] - std::min(cut, before[int(FixMeter::Tris)]);
+        planSimplify(f, root, drawn, skinned.count(mc.mesh) > 0, terrain.count(mc.mesh) > 0, streamed);
+        // Another mesh of a model already listed whose half takes the same
+        // target: the same edit, listed once (its detail counts this one).
+        if (!f.model.empty() && std::any_of(out.fixes.begin(), out.fixes.end(), [&](const MeterFix& g) {
+                return g.kind == MeterFix::Kind::SimplifyMesh && g.model == f.model && g.target == f.target;
+            }))
+            continue;
         f.title = baseName(mc.mesh) + ": " + std::to_string(mc.tris) + " triangles" +
-                  (mc.paths.size() > 1 ? " x " + std::to_string(mc.paths.size()) : std::string());
-        f.detail = f.simplified < mc.tris ? "Simplified to half it keeps " + std::to_string(f.simplified) +
-                                                " (Triangles in its import settings)"
-                                          : std::string("Too few to simplify");
+                  (mc.drawn > 1 ? " x " + std::to_string(mc.drawn) : std::string());
         out.fixes.push_back(std::move(f));
     }
     return out;

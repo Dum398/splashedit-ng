@@ -3,8 +3,9 @@
 // .vram file), render buffers sized above what the scene needs (RAM), and
 // the meshes that put the most triangles in view (Triangles). Every saving
 // shown is measured, not guessed: the scene is exported dry with and without
-// the fix, so it is the meter's change once the fix is applied. The one-click
-// fixes go through the document's undo history. No UI.
+// the fix, so it is the meter's change once the fix is applied (a simplify
+// fix runs the importer's own simplifier on the meshes it will rewrite). The
+// one-click fixes go through the document's undo history. No UI.
 #pragma once
 
 #include <array>
@@ -34,7 +35,7 @@ struct MeterFix {
         TextureDepth,        // set the meshes in `objects` to bit depth `to`
         ResetOrderingTable,  // clear the scene's ordering table override (the export sizes it)
         ResetBumpAllocator,  // clear the scene's bump allocator override
-        SimplifyMesh,        // listed only: simplify `mesh` (its import settings' Triangles)
+        SimplifyMesh,        // set `model`'s import settings' Triangles to `target` and import it again
     };
     Kind kind = Kind::TextureDepth;
     std::vector<ObjectPath> objects;    // the objects the fix edits (SimplifyMesh: the mesh's instances)
@@ -43,21 +44,34 @@ struct MeterFix {
     int colors = 0;  // TextureDepth: most distinct 15-bit colours in one of `textures`
     std::string mesh;                   // SimplifyMesh: project-relative .mesh
     int triangles = 0, simplified = 0;  // SimplifyMesh: per instance, now and simplified to half
+    // SimplifyMesh, when it can be applied: the project-relative model file
+    // that wrote `mesh` and the Triangles target its import settings get.
+    // Empty when it cannot (`detail` says why): Select picks the mesh instead.
+    std::string model;
+    int target = 0;
+    // SimplifyMesh: `after` is an estimate, not the importer's own count
+    // (the model is simplified already, so its import starts again from the
+    // file's triangles, which the project does not hold).
+    bool approximate = false;
     std::string title, detail;
     // Meter readings before and after, indexed by FixMeter. TextureDepth and
     // the resets: from dry-run exports of the scene without and with the fix.
-    // SimplifyMesh: before from the export, after = before minus the
-    // instances' triangles that simplifying to half removes (not exported:
-    // that fix rewrites the model's files, outside the undo history).
+    // SimplifyMesh: before from the export, after = before minus what the
+    // importer's simplifier takes from every mesh of the model in view (the
+    // target brings the model's other meshes down in proportion too).
     std::array<size_t, kFixMeters> before{}, after{};
     long long saving(FixMeter m) const { return (long long)before[int(m)] - (long long)after[int(m)]; }
-    bool oneClick() const { return kind != Kind::SimplifyMesh; }
+    bool oneClick() const { return kind != Kind::SimplifyMesh || !model.empty(); }
 };
 
-// Applies `fix` to a scene (the dry runs do this to a copy).
+// Applies `fix` to a scene (the dry runs do this to a copy; a SimplifyMesh
+// fix changes no scene).
 void applyFix(splash::Scene& scene, const MeterFix& fix);
-// Applies `fix` to the document as one undo step. False when nothing changed.
-bool applyFix(Document& doc, const MeterFix& fix);
+// Applies `fix` to the document as one undo step. False when nothing changed,
+// with `error` set when it failed. A SimplifyMesh fix saves the target into
+// the model's sidecar and imports it again (reimportModel): undo puts every
+// file the import wrote back as it was, the sidecar too, and the scene.
+bool applyFix(Document& doc, const MeterFix& fix, std::string* error = nullptr);
 
 // The fixes for `scene` (as the document holds it, before resolving
 // prefabs), each measured: those that lower no meter are left out. Ordered

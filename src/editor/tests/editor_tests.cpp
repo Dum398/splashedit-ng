@@ -16287,6 +16287,195 @@ void testMeterFixes() {
     fs::remove_all(dir, ec);
 }
 
+// The Triangles meter's simplify fix (#194): one click sets the model's
+// import settings' Triangles to what halves the mesh and imports it again;
+// undo puts every file the import wrote back byte for byte (the sidecar too)
+// and the meter where it was, redo does it again. The saving listed is the
+// meter's change.
+void testMeterFixSimplify() {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = g_outDir / "meter_simplify", proj = dir / "game";
+    fs::remove_all(dir, ec);
+    fs::create_directories(proj / "models", ec);
+    // n x n quads (2 n^2 triangles), one UV island, at `x0` along X.
+    auto grid = [](std::ostream& o, int n, double x0, int base) {
+        for (int y = 0; y <= n; y++)
+            for (int x = 0; x <= n; x++)
+                o << "v " << x0 + x * 0.1 << " " << y * 0.1 << " 0\nvt " << double(x) / n << " " << double(y) / n << "\n";
+        for (int y = 0; y < n; y++)
+            for (int x = 0; x < n; x++) {
+                const int a = base + y * (n + 1) + x + 1, b = a + 1, c = a + n + 2, d = a + n + 1;
+                o << "f " << a << "/" << a << " " << b << "/" << b << " " << c << "/" << c << "\n";
+                o << "f " << a << "/" << a << " " << c << "/" << c << " " << d << "/" << d << "\n";
+            }
+        return (n + 1) * (n + 1);
+    };
+    {
+        std::ofstream o(dir / "sheet.obj");
+        grid(o, 32, 0, 0);  // 2048 triangles
+    }
+    {
+        std::ofstream o(dir / "pair.obj");
+        o << "o Big\n";
+        const int used = grid(o, 30, 0, 0);  // 1800
+        o << "o Small\n";
+        grid(o, 13, 5, used);  // 338
+    }
+    auto tree = [&] {
+        std::map<std::string, std::string> files;
+        for (fs::recursive_directory_iterator it(proj, ec), end; !ec && it != end; it.increment(ec))
+            if (it->is_regular_file()) {
+                std::ifstream in(it->path(), std::ios::binary);
+                files[it->path().lexically_relative(proj).generic_string()].assign(std::istreambuf_iterator<char>(in), {});
+            }
+        return files;
+    };
+    editor::Document doc;
+    doc.reset(splash::Scene{}, proj, "game");
+    CHECK(editor::placeModel(doc, dir / "sheet.obj", std::nullopt, {0}, {0, 0, 0}).error.empty());
+    CHECK(editor::placeModel(doc, dir / "pair.obj", std::nullopt, {1}, {4, 0, 0}).error.empty());
+    // A second sheet: the saving counts every instance.
+    {
+        splash::Scene sc = doc.scene();
+        if (sc.objects.size() == 2) {
+            splash::Object twin = sc.objects[0];
+            twin.name = "Sheet 2";
+            twin.transform.position = {0, 0, 3};
+            sc.objects.push_back(twin);
+        }
+        doc.reset(sc, proj, "game");
+    }
+    const fs::path sheet = proj / "models" / "sheet.obj", pair = proj / "models" / "pair.obj";
+    const splash::VramSettings vram = editor::loadVramSettings(proj);
+    auto tris = [&]() -> long long {
+        splash::Scene c = doc.scene();
+        splash::ExportOptions opt;
+        opt.dryRun = true;
+        opt.vram = vram;
+        splash::ExportResult r;
+        r.errors = splash::resolvePrefabs(c, proj);
+        if (r.ok()) r = splash::exportSplashpack(c, proj, proj / "scene.splashpack", opt);
+        CHECK(r.ok());
+        return (long long)editor::meterUsed(editor::FixMeter::Tris, r.stats);
+    };
+    const long long base = tris();
+    const editor::MeterFixResult res = editor::findMeterFixes(doc.scene(), proj, vram);
+    CHECK(res.ok);
+    const std::vector<const editor::MeterFix*> t = editor::fixesFor(res, editor::FixMeter::Tris);
+    for (const editor::MeterFix* f : t)
+        std::fprintf(stderr, "  simplify fix: %s | %s | model %s target %d saves %lld%s\n", f->title.c_str(), f->detail.c_str(),
+                     f->model.c_str(), f->target, f->saving(editor::FixMeter::Tris), f->approximate ? " (approximate)" : "");
+    auto find = [&](const std::string& mesh) -> const editor::MeterFix* {
+        for (const editor::MeterFix* f : t)
+            if (f->mesh == mesh) return f;
+        return nullptr;
+    };
+    const editor::MeterFix* one = nullptr;
+    for (const editor::MeterFix* f : t)
+        if (f->mesh.rfind("models/sheet", 0) == 0) one = f;
+    CHECK(one != nullptr);
+    if (!one) return;
+    CHECK(one->oneClick() && one->model == "models/sheet.obj" && one->target == 1024 && !one->approximate);
+    CHECK(one->triangles == 2048 && one->simplified > 0 && one->simplified <= 1024 && one->title.find(" x 2") != std::string::npos);
+    CHECK(one->before[int(editor::FixMeter::Tris)] == size_t(base));
+
+    // Apply: the sidecar gets the target, the mesh what was listed, and the
+    // meter moves by the saving shown.
+    const std::map<std::string, std::string> was = tree();
+    const editor::MeterFix fix = *one;
+    std::string error;
+    const size_t steps = doc.historySize();
+    CHECK(editor::applyFix(doc, fix, &error) && error.empty());
+    CHECK(doc.historySize() == steps + 1);
+    CHECK(splash::loadImportSettings(sheet).targetTriangles == 1024 && splash::loadImportSettings(sheet).sourceTriangles == 2048);
+    const long long applied = tris();
+    std::fprintf(stderr, "  sheet: meter %lld -> %lld (moved %lld), listed saving %lld\n", base, applied, base - applied,
+                 fix.saving(editor::FixMeter::Tris));
+    CHECK(base - applied == fix.saving(editor::FixMeter::Tris));
+    {
+        int n = 0;
+        for (const auto& sm : splash::loadMesh(proj / fix.mesh).submeshes) n += int(sm.size() / 3);
+        CHECK(n == fix.simplified);
+    }
+    const std::map<std::string, std::string> now = tree();
+    CHECK(now != was);
+    CHECK(!editor::applyFix(doc, fix));  // the target is there already: nothing to do
+
+    // Undo: every file as it was, byte for byte, and the meter back.
+    CHECK(doc.undo());
+    CHECK(tree() == was);
+    CHECK(splash::loadImportSettings(sheet).targetTriangles == 0);
+    CHECK(tris() == base);
+    // Redo: the simplified files again.
+    CHECK(doc.redo());
+    CHECK(tree() == now);
+    CHECK(tris() == applied);
+    CHECK(doc.undo() && tree() == was && tris() == base);
+
+    // Two meshes in one model: the target that halves one brings the other
+    // down in proportion, and the saving counts both.
+    const editor::MeterFix* big = find("models/pair/Big.mesh");
+    CHECK(big != nullptr);
+    if (big) {
+        CHECK(big->oneClick() && big->model == "models/pair.obj" && big->triangles == 1800);
+        // floor(target x 1800 / 2138) is 900 from target 1069 on.
+        CHECK(big->target == 1069 && big->detail.find("1 other mesh") != std::string::npos);
+        const editor::MeterFix fx = *big;
+        CHECK(editor::applyFix(doc, fx));
+        const long long a = tris();
+        std::fprintf(stderr, "  pair: meter %lld -> %lld (moved %lld), listed saving %lld\n", base, a, base - a,
+                     fx.saving(editor::FixMeter::Tris));
+        CHECK(base - a == fx.saving(editor::FixMeter::Tris));
+        CHECK(doc.undo() && tree() == was && tris() == base && splash::loadImportSettings(pair).targetTriangles == 0);
+    }
+
+    // Simplified already: the next import starts from the file again, so the
+    // count is an estimate, said so.
+    {
+        splash::ImportSettings s = splash::loadImportSettings(sheet);
+        s.targetTriangles = 1500;
+        splash::saveImportSettings(sheet, s);
+        CHECK(editor::reimportModel(doc, sheet).error.empty());
+        const editor::MeterFixResult again = editor::findMeterFixes(doc.scene(), proj, vram);
+        const editor::MeterFix* f = nullptr;
+        for (const editor::MeterFix* x : editor::fixesFor(again, editor::FixMeter::Tris))
+            if (x->mesh == fix.mesh) f = x;
+        CHECK(f && f->oneClick() && f->approximate && f->detail.rfind("Keeps about ", 0) == 0 && f->target == f->triangles / 2);
+        if (f) {
+            const long long b = tris();
+            const editor::MeterFix fx = *f;
+            CHECK(editor::applyFix(doc, fx));
+            std::fprintf(stderr, "  sheet simplified already: meter %lld -> %lld (moved %lld), listed about %lld\n", b, tris(),
+                         b - tris(), fx.saving(editor::FixMeter::Tris));
+            CHECK(doc.undo() && splash::loadImportSettings(sheet).targetTriangles == 1500 && tris() == b);
+        }
+    }
+
+    // Not from a model, or skinned: listed, Select only, the reason given.
+    {
+        splash::Mesh m = splash::loadMesh(proj / fix.mesh);
+        splash::saveMesh(m, proj / "loose.mesh");
+        splash::Scene sc = doc.scene();
+        splash::Object loose;
+        loose.name = "Loose";
+        splash::MeshComponent mc;
+        mc.mesh = "loose.mesh";
+        mc.materials = {splash::Material{}};
+        loose.mesh = mc;
+        for (int k = 0; k < 3; k++) sc.objects.push_back(loose);
+        editor::Document d2;
+        d2.reset(sc, proj, "game");
+        const editor::MeterFixResult r2 = editor::findMeterFixes(d2.scene(), proj, vram);
+        const editor::MeterFix* f = nullptr;
+        for (const editor::MeterFix* x : editor::fixesFor(r2, editor::FixMeter::Tris))
+            if (x->mesh == "loose.mesh") f = x;
+        CHECK(f && !f->oneClick() && f->detail.find("not from an imported model") != std::string::npos);
+        if (f) CHECK(!editor::applyFix(d2, *f, &error) && !error.empty());
+    }
+    fs::remove_all(dir, ec);
+}
+
 // The Game view's TV preview (editor/tv_preview.hh): safe areas on whole
 // pixels, the frame 4:3 or square, and the S-video and composite looks.
 static void testTvPreview() {
@@ -16607,6 +16796,7 @@ int main(int argc, char** argv) {
     testStringsBlocks();
     testStringsDoc();
     testMeterFixes();
+    testMeterFixSimplify();
     testTvPreview();
     if (g_failures) {
         std::fprintf(stderr, "editor_tests: %d of %d checks failed\n", g_failures, g_checks);

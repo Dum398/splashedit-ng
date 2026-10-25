@@ -1,21 +1,34 @@
 #!/usr/bin/env python3
 """Checks the application icons tools/make_icons.py writes into assets/brand.
 
-icon.ico (Windows): the 16, 32, 64, 128 and 256 pixel icons, each a 32-bit RGBA
-PNG whose size matches its directory entry, and each the same picture as the
-brand PNG of that size.
+icon.ico (Windows): the 16, 24, 32, 48, 64, 128 and 256 pixel icons, each a
+32-bit RGBA PNG whose size matches its directory entry, and each the same
+picture as the brand PNG of that size.
+The brand PNGs: 16 to 48 pixels have no plate (clear corners, the S in the
+middle, edges clear), 16 and 24 are what tools/small_icons.py draws; 64 to 256 have the
+Windows 11 corner radius, 3/32 of the size, so the top row is opaque from 12%
+of the way in, where icon.svg's 22% corners are still clear; icon-512.png (for
+macOS) keeps the 22% corners. tile-150.png and tile-70.png, the Start tile
+logos, are the art alone on a clear background.
 icon.icns (macOS): every PNG type at its size, RGBA, and the picture drawn
 inside a clear margin (the edge rows and columns of each image transparent).
 
     python3 tests/iconcheck.py
 """
 
+import math
 import os
 import struct
 import sys
 import zlib
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tools"))
+import small_icons  # noqa: E402
+
 BRAND = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "assets", "brand")
+ICO_SIZES = [16, 24, 32, 48, 64, 128, 256]
+SMALL_SIZES = [16, 24, 32, 48]
+PLATE_SIZES = [64, 128, 256]
 ICNS_SIZES = {"icp4": 16, "icp5": 32, "ic11": 32, "icp6": 64, "ic12": 64, "ic07": 128, "ic08": 256,
               "ic13": 256, "ic09": 512, "ic14": 512}
 failures = []
@@ -91,9 +104,63 @@ def checkIco():
         if image is None:
             continue
         check(image[:2] == (w, h) and bits == 32, f"icon.ico {w}px entry matches its image ({image[0]}x{image[1]})")
-        brand = png(read(f"icon-{w}.png"))
-        check(brand is not None and brand[3] == image[3], f"icon.ico {w}px is icon-{w}.png")
-    check(sorted(sizes) == [16, 32, 64, 128, 256], f"icon.ico holds 16 to 256 pixels ({sorted(sizes)})")
+        drawn = brand(f"icon-{w}.png")
+        check(drawn is not None and drawn[3] == image[3], f"icon.ico {w}px is icon-{w}.png")
+    check(sorted(sizes) == ICO_SIZES, f"icon.ico holds {ICO_SIZES} pixels ({sorted(sizes)})")
+
+
+def brand(name):
+    """The brand PNG's image, or None when it is missing or not a PNG this check reads."""
+    return png(read(name)) if os.path.isfile(os.path.join(BRAND, name)) else None
+
+
+def corners(rows):
+    return [rows[0][0], rows[0][-1], rows[-1][0], rows[-1][-1]]
+
+
+def topRow(rows, x):
+    """Alpha at x pixels in from each end of the top and bottom rows."""
+    return [rows[y][c][3] for y in (0, -1) for c in (x, -1 - x)]
+
+
+def checkBrand():
+    for n in SMALL_SIZES:
+        image = brand(f"icon-{n}.png")
+        if image is None or image[:2] != (n, n):
+            check(False, f"icon-{n}.png is a {n}px PNG this check reads")
+            continue
+        rows = image[3]
+        edge = rows[0] + rows[-1] + [r[0] for r in rows] + [r[-1] for r in rows]
+        check(all(px[3] == 0 for px in corners(rows)) and all(px[3] == 0 for px in edge),
+              f"icon-{n}.png has no plate (clear corners and edges)")
+        middle = [px for row in rows[n // 4:n - n // 4] for px in row[n // 4:n - n // 4]]
+        check(any(px[3] == 255 for px in middle), f"icon-{n}.png is drawn in the middle")
+    for n, grid in ((16, small_icons.ICON_16), (24, small_icons.ICON_24)):
+        image = brand(f"icon-{n}.png")
+        drawn = [[small_icons.PALETTE[c] for c in row] for row in grid]
+        check(image is not None and image[3] == drawn, f"icon-{n}.png is what tools/small_icons.py draws")
+    for n in PLATE_SIZES + [512]:
+        image = brand(f"icon-{n}.png")
+        if image is None or image[:2] != (n, n):
+            check(False, f"icon-{n}.png is a {n}px PNG this check reads")
+            continue
+        rows, x = image[3], math.ceil(n * 0.12)
+        check(all(px[3] == 0 for px in corners(rows)), f"icon-{n}.png has round corners")
+        check(rows[n // 2][n // 2][3] == 255, f"icon-{n}.png is drawn in the middle")
+        if n == 512:
+            check(all(a == 0 for a in topRow(rows, x)), "icon-512.png keeps icon.svg's 22% corners for macOS")
+        else:
+            check(all(a == 255 for a in topRow(rows, x)),
+                  f"icon-{n}.png has the Windows 11 corner radius (opaque {x}px in on the edge rows: {topRow(rows, x)})")
+    for name, n in (("tile-150.png", 150), ("tile-70.png", 70)):
+        image = brand(name)
+        if image is None or image[:3] != (n, n, 6):
+            check(False, f"{name} is a {n}px RGBA PNG")
+            continue
+        rows = image[3]
+        edge = rows[0] + rows[-1] + [r[0] for r in rows] + [r[-1] for r in rows]
+        check(all(px[3] == 0 for px in edge), f"{name} is the art alone, with a clear margin")
+        check(any(px[3] == 255 for row in rows for px in row), f"{name} has the art on it")
 
 
 def checkIcns():
@@ -118,6 +185,7 @@ def checkIcns():
 
 
 checkIco()
+checkBrand()
 checkIcns()
 print(f"{len(failures)} failures")
 sys.exit(1 if failures else 0)

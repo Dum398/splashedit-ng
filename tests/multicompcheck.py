@@ -175,12 +175,12 @@ check('differing scripts show "mixed"', shown(lines, 'lua') == 'mixed', shown(li
 check('differing clips show "mixed"', shown(lines, 'clip') == 'mixed', shown(lines, 'clip'))
 check('differing sample rates show "mixed"', shown(lines, 'arate') == 'mixed', shown(lines, 'arate'))
 check('differing loops show "mixed"', shown(lines, 'aloop') == 'mixed', shown(lines, 'aloop'))
-check('a shared volume shows itself (100)', shown(lines, 'avol') == '100', shown(lines, 'avol'))
 check('with a shadow Off among them, no shadow Size or Darkness', 'obj.shadowsize' not in rects and 'obj.shadowdark' not in rects,
       [k for k in rects if k.startswith('obj.shadow')])
 check('no clip Name field with several selected', 'obj.aname' not in rects, [k for k in rects if k.startswith('obj.a')])
+check('no Volume field (export never reads it)', 'obj.avol' not in rects, [k for k in rects if k.startswith('obj.a')])
 for n in ('obj.bpp', 'obj.lighting', 'obj.flatcolor', 'obj.smooth', 'obj.dynlight', 'obj.shadow', 'obj.lua', 'obj.clip', 'obj.arate',
-          'obj.aloop', 'obj.avol', 'obj.atrim'):
+          'obj.aloop', 'obj.atrim'):
     check(n + ' is drawn', n in rects, sorted(k for k in rects if k.startswith('obj.')))
 if keep:
     shutil.copy(shot, os.path.join(keep, 'inspector.png'))
@@ -191,10 +191,6 @@ print('rate typed:', mid)
 check('typed sample rate 11025 sets all three', same('rate', 11025), mid)
 check('the rate edit leaves everything else', kept_but(mid, 'rate'), mid)
 check('one Ctrl+Z restores every sample rate', s == ORIG, s)
-
-s, _, _, _ = run('volume', ALL3 + typed('obj.avol', '64') + SAVE_MID + UNDO)
-check('typed volume 64 sets all three', same('vol', 64), mid)
-check('one Ctrl+Z restores every volume', s == ORIG, s)
 
 # Switch: Loop is mixed, a click turns it on for all.
 s, _, _, _ = run('loop', ALL3 + click('obj.aloop') + SAVE_MID + UNDO)

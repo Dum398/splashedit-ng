@@ -9874,8 +9874,6 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
             [](splash::Object& ob, float v) { ob.audio->sampleRate = int(std::lround(v)); }, 0);
         toggleAll("aloop", "Loop", "Plays again from the start when it ends, until stopped.", [](const splash::Object& o) { return o.audio->loop; },
                   [](splash::Object& ob, bool v) { ob.audio->loop = v; });
-        num("avol", "Volume", "The clips' default volume, 0 to 128.", [](const splash::Object& o) { return float(o.audio->defaultVolume); },
-            nullptr, 0, 128, [](splash::Object& ob, float v) { ob.audio->defaultVolume = int(std::lround(v)); }, 0);
         toggleAll("atrim", "Trim silence", "Cuts the quiet part at the start of each file, so it plays the moment it is triggered.",
                   [](const splash::Object& o) { return o.audio->trimLeadingSilence; },
                   [](splash::Object& ob, bool v) { ob.audio->trimLeadingSilence = v; });

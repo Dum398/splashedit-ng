@@ -124,6 +124,7 @@ json writeMaterial(const Material& mat) {
     json mj;
     mj["texture"] = mat.texture.empty() ? json(nullptr) : json(mat.texture);
     mj["color"] = json::array({mat.color[0], mat.color[1], mat.color[2], mat.color[3]});
+    if (mat.bitDepth) mj["bitDepth"] = int(*mat.bitDepth);
     putExtras(mj, mat.extra);
     return mj;
 }
@@ -320,6 +321,11 @@ Object readObject(const json& j) {
                 if (mj.contains("texture") && !mj["texture"].is_null()) mat.texture = mj["texture"].get<std::string>();
                 if (mj.contains("color"))
                     for (int i = 0; i < 4; i++) mat.color[i] = f(mj["color"].at(i));
+                if (mj.contains("bitDepth")) {
+                    int mbd = mj["bitDepth"].get<int>();
+                    if (mbd != 4 && mbd != 8 && mbd != 16) fail("material bitDepth must be 4, 8 or 16");
+                    mat.bitDepth = BitDepth(mbd);
+                }
                 mat.extra = extrasOf(mj, writeMaterial(mat));
                 m.materials.push_back(mat);
             }
@@ -1154,11 +1160,13 @@ std::optional<std::vector<std::array<uint8_t, 3>>> decodeVertexPaint(const std::
 
 int uvTextureSlot(const MeshComponent& mc, size_t mat) {
     if (mat >= mc.materials.size() || mc.materials[mat].texture.empty()) return -1;
-    std::vector<const std::string*> seen;
+    std::vector<const Material*> seen;
     for (size_t i = 0; i <= mat; i++) {
-        const std::string& t = mc.materials[i].texture;
-        if (t.empty()) continue;
-        auto it = std::find_if(seen.begin(), seen.end(), [&](const std::string* s) { return *s == t; });
+        const Material& t = mc.materials[i];
+        if (t.texture.empty()) continue;
+        auto it = std::find_if(seen.begin(), seen.end(), [&](const Material* s) {
+            return s->texture == t.texture && materialDepth(mc, *s) == materialDepth(mc, t);
+        });
         if (i == mat) return int(it - seen.begin());
         if (it == seen.end()) seen.push_back(&t);
     }

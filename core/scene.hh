@@ -38,6 +38,9 @@ struct Material {
     std::string texture;  // project-relative path, empty = untextured
     std::array<float, 4> color{1, 1, 1, 1};
     ExtraKeys extra;
+    // Texture bit depth for this material; unset = the mesh component's.
+    // Last and defaulted, so {texture, color, extra} initialisers stay as they are.
+    std::optional<BitDepth> bitDepth = std::nullopt;
 };
 
 // Skinned mesh: a named clip set played by SkinnedAnim.Play. Requires a mesh
@@ -76,6 +79,9 @@ struct MeshComponent {
     float shadowDarkness = 60;   // percent taken off the floor at the centre
     ExtraKeys extra;
 };
+
+// The bit depth a material's texture exports at: its own, else the component's.
+inline BitDepth materialDepth(const MeshComponent& m, const Material& mat) { return mat.bitDepth.value_or(m.bitDepth); }
 
 struct ColliderComponent {
     ColliderKind kind = ColliderKind::None;
@@ -689,8 +695,8 @@ inline PortalFrame portalWorldFrame(const FlatObject& fo) {
 }
 
 // Material mat's texture index as the exporter numbers them: the object's
-// distinct textures in material order, a repeated image keeping its first
-// number. -1 when the material has no texture or does not exist.
+// distinct textures in material order, a repeated image at the same depth
+// keeping its first number. -1 when the material has no texture or does not exist.
 int uvTextureSlot(const MeshComponent& mc, size_t mat);
 // The materials whose triangles a UV offset track scrolls: the exporter flags a
 // triangle when its texture index equals uvOffsetMaterial.

@@ -445,7 +445,7 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
         int texIndex = -1;
         if (!mat.texture.empty())
             for (size_t i = 0; i < e.textures.size(); i++)
-                if (e.textures[i]->source == mat.texture) {
+                if (e.textures[i]->source == mat.texture && e.textures[i]->bitDepth == materialDepth(mc, mat)) {
                     texIndex = int(i);
                     break;
                 }
@@ -2109,11 +2109,14 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
             continue;
         }
         // PSXObjectExporter.CreatePSXTextures2D: one texture per textured
-        // material, reusing the object's own copy for a repeated source.
+        // material, reusing the object's own copy for a repeated source at
+        // the same depth (a material may override the component's depth).
         std::map<std::string, PsxTexture*> cache;
         for (const Material& mat : e.mc->materials) {
             if (mat.texture.empty()) continue;
-            auto it = cache.find(mat.texture);
+            const BitDepth depth = materialDepth(*e.mc, mat);
+            const std::string key = mat.texture + "#" + std::to_string(int(depth));
+            auto it = cache.find(key);
             if (it != cache.end()) {
                 e.textures.push_back(it->second);
                 continue;
@@ -2122,13 +2125,13 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                 // Texels under half alpha become word 0, which the GPU
                 // skips; an image without any converts exactly as before.
                 const Image& img = imageFor(mat.texture);
-                textureStore.push_back(convertTexture(img, e.mc->bitDepth, hasCutoutTexels(img)));
+                textureStore.push_back(convertTexture(img, depth, hasCutoutTexels(img)));
             } catch (const std::exception& ex) {
                 res.errors.push_back(ex.what());
                 continue;
             }
             textureStore.back().source = mat.texture;
-            cache[mat.texture] = &textureStore.back();
+            cache[key] = &textureStore.back();
             e.textures.push_back(&textureStore.back());
         }
         exporters.push_back(std::move(e));

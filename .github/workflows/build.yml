@@ -375,6 +375,9 @@ jobs:
       - name: Triangles meter fix simplifies a model, undo puts its files back
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/meterfixsimplifycheck.py build/splashedit
+      - name: VRAM meter fix drops a UI image and sprite sheet texture, Apply and undo
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/meterfixuicheck.py build/splashedit
       - name: Scene network id field and exported hash
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/netidcheck.py build/splashedit build/cli/splashpack-cli

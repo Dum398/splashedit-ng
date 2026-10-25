@@ -79,6 +79,8 @@ int fillPaint(Document& doc, const std::vector<ObjectPath>& paths, Rgb color);
 // Painted mode for the object, its layer started from what it exports now
 // when it has none that fits (so nothing changes on screen). One undo step.
 bool setPaintedMode(Document& doc, const ObjectPath& path);
+// The same for each of `paths` with a mesh not yet Painted, as one undo step. Returns how many changed.
+int setPaintedModes(Document& doc, const std::vector<ObjectPath>& paths);
 // Drops the painted layer; a Painted mesh goes back to Baked. One undo step.
 bool clearPaint(Document& doc, const ObjectPath& path);
 

@@ -1434,6 +1434,8 @@ static void pasteClipboard(State& st, editor::Document& doc, const std::optional
 enum class AssetSlot { Texture, Lua, TriggerLua, Clip, SkinClips, SceneLua, MemCardIcon, UiTexture, ClipModels };
 static AssetSlot g_assetSlot = AssetSlot::Texture;
 static editor::ObjectPath g_assetTarget;
+// Lua and Clip from the multi-object inspector: every selected object.
+static std::vector<editor::ObjectPath> g_assetTargets;
 static int g_assetIndex = 0;
 static std::vector<std::string> g_assetPicked;
 
@@ -1444,11 +1446,13 @@ static void SDLCALL onAssetPicked(void*, const char* const* files, int) {
     for (const char* const* f = files; *f; ++f) g_assetPicked.emplace_back(*f);
 }
 
-static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int index = 0) {
+static void pickAsset(AssetSlot slot, const editor::ObjectPath& target, int index = 0,
+                      const std::vector<editor::ObjectPath>& many = {}) {
     {
         std::lock_guard<std::mutex> lock(g_pickMutex);
         g_assetSlot = slot;
         g_assetTarget = target;
+        g_assetTargets = many;
         g_assetIndex = index;
     }
     static const SDL_DialogFileFilter images[] = {{"Images", "png;jpg;jpeg;bmp;tga;gif"}};
@@ -1494,8 +1498,11 @@ static void addClipModels(State& st, editor::Document& doc, const editor::Object
 // skin's clips are replaced, or with `append` added to (up to 16). `index` is
 // the memory card icon frame to replace, or -1 to append frames; for a
 // Texture, the material to set (-1 is the first), the list grown to reach it.
+// With `many` (Lua or Clip only), the file goes on every one of those objects
+// as one undo step, and a clip leaves each object's clipName as it is.
 static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, const editor::ObjectPath& target,
-                            const std::vector<std::string>& files, bool append = false, int index = -1) {
+                            const std::vector<std::string>& files, bool append = false, int index = -1,
+                            const std::vector<editor::ObjectPath>& many = {}) {
     const bool sceneWide = slot == AssetSlot::SceneLua || slot == AssetSlot::MemCardIcon || slot == AssetSlot::UiTexture;
     if (files.empty() || (!sceneWide && !doc.object(target))) return;
     if (slot == AssetSlot::ClipModels) {
@@ -1550,6 +1557,15 @@ static void applyAssetFiles(State& st, editor::Document& doc, AssetSlot slot, co
         doc.refreshAssets(paths);
         return;
     }
+    if (!many.empty() && (slot == AssetSlot::Lua || slot == AssetSlot::Clip)) {
+        doc.editMany(many, [&](splash::Object& o) {
+            if (slot == AssetSlot::Lua && o.script) o.script->lua = first;
+            if (slot == AssetSlot::Clip && o.audio) o.audio->clip = first;
+        });
+        doc.endMerge();
+        doc.refreshAssets(paths);
+        return;
+    }
     doc.edit(target, [&](splash::Object& o) {
         switch (slot) {
             case AssetSlot::Texture:
@@ -1593,15 +1609,17 @@ static void applyPickedAssets(State& st, editor::Document& doc) {
     std::vector<std::string> files;
     AssetSlot slot;
     editor::ObjectPath target;
+    std::vector<editor::ObjectPath> many;
     int index;
     {
         std::lock_guard<std::mutex> lock(g_pickMutex);
         files.swap(g_assetPicked);
         slot = g_assetSlot;
         target = g_assetTarget;
+        many = g_assetTargets;
         index = g_assetIndex;
     }
-    applyAssetFiles(st, doc, slot, target, files, false, index);
+    applyAssetFiles(st, doc, slot, target, files, false, index, many);
 }
 
 // Whether the asset field `slot` (an AssetSlot, or -1 for the Model field)
@@ -1626,9 +1644,10 @@ static bool slotTakes(int slot, editor::AssetType t) {
 // An inspector asset field that also takes a file dragged from the Project
 // panel: a drop target where it shows (not in a folded section), outlined
 // while a file it takes is dragged, strongly under the pointer.
-static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRect r, ImRect shown, int index = -1) {
+static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRect r, ImRect shown, int index = -1,
+                       const std::vector<editor::ObjectPath>& many = {}) {
     if (shown.GetWidth() <= 0 || shown.GetHeight() <= 0) return;
-    st.assetSlots.push_back({shown, slot, path, index});
+    st.assetSlots.push_back({shown, slot, path, index, many});
     if (const editor::AssetEntry* e = st.assets.dragging(); e && slotTakes(slot, e->type)) {
         const bool over = shown.Contains(ImGui::GetIO().MousePos);
         ImGui::GetWindowDrawList()->AddRect(r.Min - ImVec2(1, 1), r.Max + ImVec2(1, 1), over ? color::accent : color::accentSoft,
@@ -1637,12 +1656,12 @@ static void slotTarget(State& st, int slot, const editor::ObjectPath& path, ImRe
 }
 
 static bool slotField(State& st, int slot, const editor::ObjectPath& path, const char* id, ImRect r, const char* ic, ImU32 iconColor,
-                      const char* name, const char* meta, int index = -1) {
+                      const char* name, const char* meta, int index = -1, const std::vector<editor::ObjectPath>& many = {}) {
     const bool clicked = assetField(id, r, ic, iconColor, name, meta);
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImRect shown = r;
     shown.ClipWith(ImRect(dl->GetClipRectMin(), dl->GetClipRectMax()));
-    slotTarget(st, slot, path, r, shown, index);
+    slotTarget(st, slot, path, r, shown, index, many);
     return clicked;
 }
 
@@ -3313,7 +3332,8 @@ static void assetRequests(State& st, editor::Document& doc, const viewport::Ps1V
                     if (t.rect.Contains(r.pos)) slot = &t;
                 if (slot && slot->slot >= 0) {
                     if (slotTakes(slot->slot, r.type))
-                        applyAssetFiles(st, doc, static_cast<AssetSlot>(slot->slot), slot->path, {utf8(abs)}, true, slot->index);
+                        applyAssetFiles(st, doc, static_cast<AssetSlot>(slot->slot), slot->path, {utf8(abs)}, true, slot->index,
+                                        slot->many);
                     else {
                         std::string what = editor::assetTypeName(r.type, true);
                         for (char& c : what) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -9311,6 +9331,28 @@ static std::string fitWidth(const std::string& t, float w) {
 // Typed transform values set that one axis on all (all on the same Y). The
 // components whose inspectors are files, lists or painting are edited one
 // object at a time: they are named in a card at the end.
+// The blob shadow size `o` gets when switched to Blob: its own once set,
+// else fitted to the object's footprint (splash::shadow::sizeForFootprint).
+static float blobShadowSize(const editor::Document& doc, const splash::Object& o) {
+    const splash::MeshComponent& m = *o.mesh;
+    float size = m.shadowSize;
+    if (size == splash::MeshComponent{}.shadowSize && !m.mesh.empty())
+        if (const std::optional<splash::Bounds>& lb = localBounds(doc, m.mesh))
+            for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
+                if (fo.object != &o) continue;
+                const splash::Vec3 lo = lb->min(), hi = lb->max();
+                splash::Vec3 wmin, wmax;
+                for (int c = 0; c < 8; ++c) {
+                    const splash::Vec3 w = fo.localToWorld.point({c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y, c & 4 ? hi.z : lo.z});
+                    wmin = c == 0 ? w : splash::vmin(wmin, w);
+                    wmax = c == 0 ? w : splash::vmax(wmax, w);
+                }
+                size = splash::shadow::sizeForFootprint(wmax.x - wmin.x, wmax.z - wmin.z);
+                break;
+            }
+    return size;
+}
+
 static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor::Document& doc) {
     Fonts& f = fonts();
     std::vector<editor::ObjectPath> paths;
@@ -9550,6 +9592,116 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
     };
     auto has = [&](editor::ComponentKind k) { return all([k](const splash::Object& o) { return editor::hasComponent(o, k); }); };
 
+    // Mesh: the settings that are not tied to each object's model (the model,
+    // its materials, paint and UV offset part stay one object at a time).
+    if (has(editor::ComponentKind::Mesh)) {
+        const splash::MeshComponent& m = *prim.mesh;
+        top = y;
+        compSection("s_mesh", editor::ComponentKind::Mesh);
+        {
+            const splash::BitDepth depths[3] = {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8, splash::BitDepth::Bpp16};
+            const bool mixed = !all([&](const splash::Object& o) { return o.mesh->bitDepth == m.bitDepth; });
+            const int cur = (int)(std::find(std::begin(depths), std::end(depths), m.bitDepth) - std::begin(depths));
+            const int pick = pickRow("bpp", "lbpp", "Bit depth", "Colours the textures keep in VRAM. 4 bpp costs a quarter of 16 bpp.", cur,
+                                     mixed, bppLabel(m.bitDepth), {"4 bpp", "8 bpp", "16 bpp"});
+            if (pick >= 0) editAll([&](splash::Object& ob) { ob.mesh->bitDepth = depths[pick]; });
+        }
+        {
+            // Menu order follows the labels' enum, as with one object.
+            const splash::VertexColorMode modes[4] = {splash::VertexColorMode::Baked, splash::VertexColorMode::Flat,
+                                                      splash::VertexColorMode::Mesh, splash::VertexColorMode::Painted};
+            const bool mixed = !all([&](const splash::Object& o) { return o.mesh->vertexColors == m.vertexColors; });
+            const int cur = (int)(std::find(std::begin(modes), std::end(modes), m.vertexColors) - std::begin(modes));
+            const int pick = pickRow("lighting", "llight", "Lighting",
+                                     "How light reaches these meshes. Baked vertex lighting costs nothing at runtime. Painted uses the "
+                                     "colours painted with the Scene view's Paint tool (B).",
+                                     cur, mixed, lightingLabel(m.vertexColors), {"Baked vertex", "Flat", "Mesh colours", "Painted"});
+            // Painted starts each from what it shows now when it has no layer that fits.
+            if (pick >= 0 && modes[pick] == splash::VertexColorMode::Painted) editor::setPaintedModes(doc, paths);
+            else if (pick >= 0) editAll([&](splash::Object& ob) { ob.mesh->vertexColors = modes[pick]; });
+        }
+        if (all([](const splash::Object& o) { return o.mesh->vertexColors == splash::VertexColorMode::Flat; })) {
+            const std::array<float, 3> fc{m.flatColor[0] / 255.f, m.flatColor[1] / 255.f, m.flatColor[2] / 255.f};
+            const bool mixed = !all([&](const splash::Object& o) { return o.mesh->flatColor == m.flatColor; });
+            reportField("flatcolor", mixed ? "mixed" : colourHex(fc));
+            const ImRect fcRow = row("lflatcol", "Flat colour", "The colour every vertex of these meshes gets on the console.");
+            nameRect("obj.flatcolor", fcRow);
+            auto setFlat = [](const std::array<float, 3>& c) {
+                return [c](splash::Object& ob) {
+                    for (int k = 0; k < 3; k++) ob.mesh->flatColor[k] = uint8_t(std::lround(std::clamp(c[k], 0.f, 1.f) * 255));
+                };
+            };
+            const ColorFieldHit fcHit = colorField("flatcol", fcRow, fc, "obj.flatcolor", mixed);
+            if (fcHit.clicked) ImGui::OpenPopup("##mflatcolpick");
+            if (fcHit.pasted) editAll(setFlat({(*fcHit.pasted)[0], (*fcHit.pasted)[1], (*fcHit.pasted)[2]}));
+            ImGui::SetNextWindowPos(ImVec2(fcRow.Max.x, fcRow.Max.y + space::xs), ImGuiCond_Always, ImVec2(1, 0));
+            pushPopupStyle();
+            if (ImGui::BeginPopup("##mflatcolpick")) {
+                float c[3] = {fc[0], fc[1], fc[2]};
+                ImGui::SetNextItemWidth(220);
+                if (ImGui::ColorPicker3("##mflatcolwheel", c, ImGuiColorEditFlags_NoSidePreview | ImGuiColorEditFlags_DisplayHex |
+                                                                  ImGuiColorEditFlags_NoAlpha))
+                    editAll(setFlat({c[0], c[1], c[2]}), "mflatcolor");
+                nameRect("obj.flatcolorpick", ImRect(ImGui::GetItemRectMin(), ImGui::GetItemRectMax()));
+                if (ImGui::IsItemDeactivated()) doc.endMerge();
+                ImGui::EndPopup();
+            }
+            ImGui::PopStyleVar(4);
+            ImGui::PopStyleColor(2);
+        }
+        {
+            // Smoothed normals only feed baked vertex lighting: shaded, as with one object, unless all bake.
+            const bool baked = all([](const splash::Object& o) { return o.mesh->vertexColors == splash::VertexColorMode::Baked; });
+            const float smoothTop = y;
+            toggleAll("smooth", "Smooth normals",
+                      baked ? "Bakes the lighting as if the surfaces were smoothly curved, instead of shading each face flat."
+                            : "Only Baked vertex lighting uses it. Bakes the lighting as if the surfaces were smoothly curved.",
+                      [](const splash::Object& o) { return o.mesh->smoothNormals; },
+                      [](splash::Object& ob, bool v) { ob.mesh->smoothNormals = v; });
+            if (!baked) dl->AddRectFilled(ImVec2(x0 + space::sm, smoothTop), ImVec2(x1 - space::sm, y), rgb(0x1b1e24, 150));
+        }
+        {
+            const splash::DynamicLighting lights[4] = {splash::DynamicLighting::Auto, splash::DynamicLighting::On,
+                                                       splash::DynamicLighting::Off, splash::DynamicLighting::Smooth};
+            const char* names[4] = {"Auto", "On", "Off", "Smooth"};
+            const bool mixed = !all([&](const splash::Object& o) { return o.mesh->dynamicLighting == m.dynamicLighting; });
+            const int cur = (int)(std::find(std::begin(lights), std::end(lights), m.dynamicLighting) - std::begin(lights));
+            const int pick = pickRow("dynlight", "ldynlight", "Runtime lighting",
+                                     "Lighting by runtime lights on the console. Auto: lit by the runtime lights whose range reaches each mesh.",
+                                     cur, mixed, names[cur], {"Auto", "On", "Off", "Smooth"});
+            if (pick >= 0) editAll([&](splash::Object& ob) { ob.mesh->dynamicLighting = lights[pick]; });
+        }
+        {
+            const bool blob = m.shadow == splash::ShadowMode::Blob;
+            const bool mixed = !all([&](const splash::Object& o) { return o.mesh->shadow == m.shadow; });
+            const int pick = pickRow("shadow", "lshadow", "Shadow",
+                                     "Blob draws a soft dark disc on the floor under each object on the console. It shrinks and fades as "
+                                     "the object rises and is gone 2.5 m up. At most 32 per scene.",
+                                     blob ? 1 : 0, mixed, blob ? "Blob" : "Off", {"Off", "Blob"});
+            if (pick >= 0) {
+                // Switched to Blob with the size never set: each fitted to its own footprint, as with one object.
+                std::vector<float> sizes;
+                for (const splash::Object* o : objs)
+                    sizes.push_back(pick == 1 && o->mesh->shadow != splash::ShadowMode::Blob ? blobShadowSize(doc, *o)
+                                                                                             : o->mesh->shadowSize);
+                doc.editEach(paths, [&](const editor::ObjectPath& p, splash::Object& ob) {
+                    const size_t k = size_t(std::find(paths.begin(), paths.end(), p) - paths.begin());
+                    if (pick == 1 && ob.mesh->shadow != splash::ShadowMode::Blob && k < sizes.size()) ob.mesh->shadowSize = sizes[k];
+                    ob.mesh->shadow = pick == 1 ? splash::ShadowMode::Blob : splash::ShadowMode::Off;
+                });
+            }
+        }
+        if (all([](const splash::Object& o) { return o.mesh->shadow != splash::ShadowMode::Off; })) {
+            num("shadowsize", "Size", "Radius of each blob on the floor while its object stands on it.",
+                [](const splash::Object& o) { return o.mesh->shadowSize; }, "m", splash::shadow::kMinSize, splash::shadow::kMaxSize,
+                [](splash::Object& ob, float v) { ob.mesh->shadowSize = v; });
+            num("shadowdark", "Darkness", "How much the blobs darken the floor at their centre: 0 leaves it as it is, 100 turns it black.",
+                [](const splash::Object& o) { return o.mesh->shadowDarkness; }, "%", 0, 100,
+                [](splash::Object& ob, float v) { ob.mesh->shadowDarkness = v; });
+        }
+        sectionEnd(top);
+    }
+
     // Collider.
     if (has(editor::ComponentKind::Collider)) {
         top = y;
@@ -9622,6 +9774,23 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
         sectionEnd(top);
     }
 
+    // Script: one file for all of them, picked or dropped on the field.
+    if (has(editor::ComponentKind::Script)) {
+        const std::string& lua = prim.script->lua;
+        top = y;
+        compSection("s_script", editor::ComponentKind::Script);
+        const bool mixed = !all([&](const splash::Object& o) { return o.script->lua == lua; });
+        const bool found = all([&](const splash::Object& o) { return doc.fileExists(o.script->lua); });
+        reportField("lua", mixed ? "mixed" : lua.empty() ? "None" : lua);
+        const ImRect lr = row("llua", "File",
+                              "The script, blocks or Lua, that runs for each of these objects. Click to pick one for all of them, or drop one here.");
+        nameRect("obj.lua", lr);
+        if (slotField(st, static_cast<int>(AssetSlot::Lua), paths.back(), "lua", lr, icon::fileCode, found ? kind::script : color::warn,
+                      mixed ? "mixed" : lua.empty() ? "None" : fileName(lua).c_str(), nullptr, -1, paths))
+            pickAsset(AssetSlot::Lua, paths.back(), 0, paths);
+        sectionEnd(top);
+    }
+
     // Components with a few plain numbers and switches.
     if (has(editor::ComponentKind::Interactable)) {
         top = y;
@@ -9685,11 +9854,39 @@ static void multiInspector(State& st, ImDrawList* dl, ImRect r, float y, editor:
                   [](const splash::Object& o) { return o.followPath->faceAlong; }, [](splash::Object& ob, bool v) { ob.followPath->faceAlong = v; });
         sectionEnd(top);
     }
+    // Audio: the clip and how it is exported. Each keeps its own Name, what scripts play it by.
+    if (has(editor::ComponentKind::Audio)) {
+        const splash::AudioComponent& a = *prim.audio;
+        top = y;
+        compSection("s_audio", editor::ComponentKind::Audio);
+        const bool mixed = !all([&](const splash::Object& o) { return o.audio->clip == a.clip; });
+        const bool found = all([&](const splash::Object& o) { return doc.fileExists(o.audio->clip); });
+        reportField("clip", mixed ? "mixed" : a.clip.empty() ? "None" : a.clip);
+        const ImRect cr = row("lclip", "Clip",
+                              "An audio file (WAV, AIFF, MP3, Ogg Vorbis or FLAC), converted to SPU ADPCM at export. Click to pick one for "
+                              "all of them; each keeps its Name.");
+        nameRect("obj.clip", cr);
+        if (slotField(st, static_cast<int>(AssetSlot::Clip), paths.back(), "clip", cr, icon::music, found ? kind::audio : color::warn,
+                      mixed ? "mixed" : a.clip.empty() ? "None" : fileName(a.clip).c_str(), nullptr, -1, paths))
+            pickAsset(AssetSlot::Clip, paths.back(), 0, paths);
+        num("arate", "Sample rate", "The clips are resampled to this at export. Lower takes less sound RAM and sounds duller; 22050 is a good middle.",
+            [](const splash::Object& o) { return float(o.audio->sampleRate); }, "Hz", 4000, 44100,
+            [](splash::Object& ob, float v) { ob.audio->sampleRate = int(std::lround(v)); }, 0);
+        toggleAll("aloop", "Loop", "Plays again from the start when it ends, until stopped.", [](const splash::Object& o) { return o.audio->loop; },
+                  [](splash::Object& ob, bool v) { ob.audio->loop = v; });
+        num("avol", "Volume", "The clips' default volume, 0 to 128.", [](const splash::Object& o) { return float(o.audio->defaultVolume); },
+            nullptr, 0, 128, [](splash::Object& ob, float v) { ob.audio->defaultVolume = int(std::lround(v)); }, 0);
+        toggleAll("atrim", "Trim silence", "Cuts the quiet part at the start of each file, so it plays the moment it is triggered.",
+                  [](const splash::Object& o) { return o.audio->trimLeadingSilence; },
+                  [](splash::Object& ob, bool v) { ob.audio->trimLeadingSilence = v; });
+        sectionEnd(top);
+    }
 
     // Shared components edited one object at a time.
     {
         using K = editor::ComponentKind;
-        const K handled[] = {K::Collider, K::Light, K::Interactable, K::Portal, K::Agent, K::Path, K::FollowPath};
+        const K handled[] = {K::Mesh,  K::Collider, K::Light, K::Script,     K::Interactable,
+                             K::Portal, K::Agent,   K::Path,  K::FollowPath, K::Audio};
         std::string names;
         for (const editor::ComponentInfo& c : editor::components()) {
             if (std::find(std::begin(handled), std::end(handled), c.kind) != std::end(handled) || !has(c.kind)) continue;
@@ -10632,24 +10829,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             nameRect("obj.shadow", shRow);
             const int shPick = dropdownMenu("obj.shadow", shRow, nullptr, blob ? "Blob" : "Off", {"Off", "Blob"}, blob ? 1 : 0);
             if (shPick >= 0 && (shPick == 1) != blob) {
-                // Switched to Blob with the size never set: fit it to the
-                // object's footprint (splash::shadow::sizeForFootprint).
-                float size = m.shadowSize;
-                if (shPick == 1 && size == splash::MeshComponent{}.shadowSize && !m.mesh.empty())
-                    if (const std::optional<splash::Bounds>& lb = localBounds(doc, m.mesh))
-                        for (const splash::FlatObject& fo : splash::flatten(doc.scene())) {
-                            if (fo.object != o) continue;
-                            const splash::Vec3 lo = lb->min(), hi = lb->max();
-                            splash::Vec3 wmin, wmax;
-                            for (int c = 0; c < 8; ++c) {
-                                const splash::Vec3 w =
-                                    fo.localToWorld.point({c & 1 ? hi.x : lo.x, c & 2 ? hi.y : lo.y, c & 4 ? hi.z : lo.z});
-                                wmin = c == 0 ? w : splash::vmin(wmin, w);
-                                wmax = c == 0 ? w : splash::vmax(wmax, w);
-                            }
-                            size = splash::shadow::sizeForFootprint(wmax.x - wmin.x, wmax.z - wmin.z);
-                            break;
-                        }
+                const float size = shPick == 1 ? blobShadowSize(doc, *o) : m.shadowSize;
                 doc.edit(path, [shPick, size](splash::Object& ob) {
                     ob.mesh->shadow = shPick == 1 ? splash::ShadowMode::Blob : splash::ShadowMode::Off;
                     if (shPick == 1) ob.mesh->shadowSize = size;

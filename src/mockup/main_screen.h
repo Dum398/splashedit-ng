@@ -476,6 +476,7 @@ struct State {
         int slot;  // main_screen's AssetSlot, or -1 for the Model field
         std::vector<int> path;
         int index = -1;  // the material a Texture field sets, -1 when the slot has one
+        std::vector<std::vector<int>> many;  // the multi-object inspector's: every selected object
     };
     std::vector<AssetSlotTarget> assetSlots;
 };

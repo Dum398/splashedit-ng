@@ -234,6 +234,30 @@ bool setPaintedMode(Document& doc, const ObjectPath& path) {
     });
 }
 
+int setPaintedModes(Document& doc, const std::vector<ObjectPath>& paths) {
+    // Each layer worked out before the edit, as the one-object version does.
+    std::vector<std::pair<ObjectPath, std::vector<Rgb>>> layers;
+    for (const ObjectPath& p : paths) {
+        const splash::Object* o = doc.object(p);
+        if (!o || !o->mesh || o->mesh->vertexColors == splash::VertexColorMode::Painted) continue;
+        std::vector<Rgb> layer = o->mesh->paint;
+        const splash::Mesh* m = paintRefusal(doc, p).empty() ? paintMesh(doc, o->mesh->mesh) : nullptr;
+        if (m && layer.size() != m->positions.size()) layer = currentPaint(doc, p);
+        layers.emplace_back(p, std::move(layer));
+    }
+    if (layers.empty()) return 0;
+    std::vector<ObjectPath> go;
+    for (const auto& l : layers) go.push_back(l.first);
+    return doc.editEach(go, [&](const ObjectPath& p, splash::Object& ob) {
+        if (!ob.mesh) return;
+        for (const auto& [lp, layer] : layers)
+            if (lp == p) {
+                ob.mesh->vertexColors = splash::VertexColorMode::Painted;
+                ob.mesh->paint = layer;
+            }
+    });
+}
+
 bool clearPaint(Document& doc, const ObjectPath& path) {
     const splash::Object* o = doc.object(path);
     if (!o || !o->mesh || (o->mesh->paint.empty() && o->mesh->vertexColors != splash::VertexColorMode::Painted)) return false;

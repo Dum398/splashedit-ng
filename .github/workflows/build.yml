@@ -405,6 +405,9 @@ jobs:
       - name: Multi-object Mesh, Script and Audio fields
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/multicompcheck.py build/splashedit
+      - name: Scrubbing mixed multi-object fields, Move to Top Level on several
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/multiscrubcheck.py build/splashedit
       - name: Dragging a multi-selection in the Scene panel
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/multidragcheck.py build/splashedit

@@ -237,6 +237,18 @@ public:
     // move. Refused (nullopt) when `toParent` is the object itself or inside
     // it. Selects the object and returns its new path.
     std::optional<ObjectPath> moveObject(const ObjectPath& from, const ObjectPath& toParent, int index);
+    // The same over several objects (a dragged multi-selection, #263), as
+    // one undo step: topLevel(from) (an object inside another of them goes
+    // with it) end up side by side, in tree order, as children `index`.. of
+    // `toParent`, `index` counting its children as they are now. Each keeps
+    // where it is in the world. All or none: refused (nullopt, no change)
+    // when `toParent` is one of them or inside one, or when moveObject would
+    // refuse any of them. The objects that were selected stay selected (the
+    // primary primary) at their new paths, and undo restores the selection.
+    // Returns the moved objects' new paths in tree order; when they are
+    // already there, the paths as they are, with no change and no undo step.
+    std::optional<std::vector<ObjectPath>> moveObjects(const std::vector<ObjectPath>& from, const ObjectPath& toParent,
+                                                       int index);
     // Prefabs. An instance (Object::prefab set) shows its prefab's content,
     // which is read-only here: its children cannot be edited, renamed,
     // moved, deleted or given children, and on the instance itself only the

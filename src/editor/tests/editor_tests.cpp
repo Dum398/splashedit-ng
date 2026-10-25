@@ -7766,6 +7766,116 @@ void testMultiSelection() {
     CHECK(d.selectionCount() == 0);
 }
 
+// Dragging a multi-selection in the Scene tree (#263): every selected
+// top-level object moves, in tree order, as one undo step; all or none.
+void testMoveObjects() {
+    using P = editor::ObjectPath;
+    using Ps = std::vector<editor::ObjectPath>;
+    auto roots = [](const editor::Document& d) {
+        std::string out;
+        for (const splash::Object& o : d.scene().objects) {
+            out += o.name;
+            if (!o.children.empty()) {
+                out += "(";
+                for (const splash::Object& c : o.children) out += c.name;
+                out += ")";
+            }
+            out += " ";
+        }
+        return out;
+    };
+    auto fresh = [] {
+        splash::Scene s = sample();  // A, B (B1), C
+        s.objects.push_back(named("D", 5));
+        s.objects.push_back(named("E", 6));
+        return s;
+    };
+    editor::Document d;
+    d.reset(fresh());
+    const std::string start = roots(d);
+    CHECK(start == "A B(B1) C D E ");
+
+    // Down within the root: A and C to after D (index 4 counts them in place).
+    d.selectMany(P{2}, {{0}});  // A, C primary
+    size_t steps = d.historySize();
+    auto to = d.moveObjects(d.selectedPaths(), {}, 4);
+    CHECK(to && *to == Ps({{2}, {3}}));
+    CHECK(roots(d) == "B(B1) D A C E ");
+    CHECK(d.historySize() == steps + 1);
+    CHECK(d.selection() == P({3}) && d.moreSelected() == Ps({{2}}));  // C still primary
+    CHECK(d.undo());
+    CHECK(roots(d) == start);
+    CHECK(d.selection() == P({2}) && d.moreSelected() == Ps({{0}}));
+    CHECK(d.redo() && roots(d) == "B(B1) D A C E " && d.selection() == P({3}));
+    CHECK(d.undo());
+
+    // Up: D and E to the front, between them dropped on one of the set's own gaps.
+    d.selectMany(P{3}, {{4}});
+    to = d.moveObjects(d.selectedPaths(), {}, 0);
+    CHECK(to && *to == Ps({{0}, {1}}));
+    CHECK(roots(d) == "D E A B(B1) C ");
+    CHECK(d.selection() == P({0}) && d.moreSelected() == Ps({{1}}));
+    CHECK(d.undo() && roots(d) == start);
+    // An index inside the set (between A and C, the dragged ones) closes the gap.
+    d.selectMany(P{2}, {{0}});
+    to = d.moveObjects(d.selectedPaths(), {}, 2);
+    CHECK(to && *to == Ps({{1}, {2}}));
+    CHECK(roots(d) == "B(B1) A C D E ");
+    CHECK(d.undo() && roots(d) == start);
+
+    // Reparent: A, C and E into B, after B1, keeping where they are in the world.
+    d.selectMany(P{4}, {{0}, {2}});
+    to = d.moveObjects(d.selectedPaths(), {1}, 1);
+    CHECK(to && *to == Ps({{0, 1}, {0, 2}, {0, 3}}));
+    CHECK(roots(d) == "B(B1ACE) D ");
+    for (const splash::FlatObject& fo : splash::flatten(d.scene())) {
+        if (fo.object->name == "A") CHECK(near(fo.worldPosition.x, 1));
+        if (fo.object->name == "C") CHECK(near(fo.worldPosition.x, 4));
+        if (fo.object->name == "E") CHECK(near(fo.worldPosition.x, 6));
+    }
+    CHECK(d.object({0, 1})->transform.position.x == 1 - 2);  // local to B (at x 2)
+    CHECK(d.selection() == P({0, 3}) && d.moreSelected() == Ps({{0, 1}, {0, 2}}));
+    CHECK(d.undo() && roots(d) == start);
+    CHECK(d.object({0})->transform.position.x == 1);
+
+    // Mixed parents: B1 (inside B) and D out to the front of the root.
+    d.selectMany(P{1, 0}, {{3}});
+    to = d.moveObjects(d.selectedPaths(), {}, 0);
+    CHECK(to && *to == Ps({{0}, {1}}));
+    CHECK(roots(d) == "B1 D A B C E ");
+    CHECK(d.selection() == P({0}) && d.moreSelected() == Ps({{1}}));
+    CHECK(d.undo() && roots(d) == start);
+
+    // A selected child rides along with its selected parent and stays selected.
+    d.selectMany(P{1}, {{1, 0}, {4}});  // B1, E, B primary
+    to = d.moveObjects(d.selectedPaths(), {}, 0);
+    CHECK(to && *to == Ps({{0}, {1}}));
+    CHECK(roots(d) == "B(B1) E A C D ");
+    CHECK(d.selection() == P({0}) && d.moreSelected() == Ps({{0, 0}, {1}}));
+    CHECK(d.undo() && roots(d) == start);
+    CHECK(d.selection() == P({1}) && d.moreSelected() == Ps({{1, 0}, {4}}));
+
+    // Refused, with no change and no step: into one of them or inside one.
+    d.selectMany(P{1}, {{0}});
+    steps = d.historySize();
+    CHECK(!d.moveObjects(d.selectedPaths(), {1}, 0));
+    CHECK(!d.moveObjects(d.selectedPaths(), {1, 0}, 0));
+    CHECK(!d.moveObjects(d.selectedPaths(), {0}, 0));
+    CHECK(!d.moveObjects({{9}}, {}, 0));
+    CHECK(!d.moveObjects(d.selectedPaths(), {7}, 0));
+    CHECK(!d.moveObjects(d.selectedPaths(), {}, -1));
+    CHECK(roots(d) == start && d.historySize() == steps);
+    CHECK(d.selection() == P({1}) && d.moreSelected() == Ps({{0}}));
+
+    // Already in place (A and B dropped between them, before or after them): no step.
+    for (int i : {0, 1, 2}) {
+        to = d.moveObjects(d.selectedPaths(), {}, i);
+        CHECK(to && *to == Ps({{0}, {1}}));
+    }
+    CHECK(roots(d) == start && d.historySize() == steps);
+    CHECK(d.selection() == P({1}) && d.moreSelected() == Ps({{0}}));
+}
+
 // Delete, duplicate, copy, cut and paste over a multi-selection (#263): one undo step each.
 void testMultiObjectCommands() {
     editor::Document d;
@@ -13830,6 +13940,28 @@ bool anyHas(const std::vector<std::string>& v, const std::string& a, const std::
 
 }  // namespace prefabtest
 
+// Dragging a multi-selection that holds an instance's content (#263): the
+// whole set stays, and nothing goes into an instance; the instance itself moves.
+void testMoveObjectsInstance() {
+    using namespace prefabtest;
+    const fs::path project = makeProject("moveobjects");
+    splash::Scene s;
+    s.objects.push_back(named("A", 1));
+    s.objects.push_back(instance("I", "prefabs/stack.prefab", {2, 0, 0}));
+    s.objects.push_back(named("C", 4));
+    editor::Document d;
+    d.reset(s, project, "m");
+    CHECK(d.object({1, 0}) && d.object({1, 0})->name == "Top");
+    const size_t steps = d.historySize();
+    CHECK(!d.moveObjects({{0}, {1, 0}}, {}, 3));
+    CHECK(!d.moveObjects({{0}, {2}}, {1}, 0));
+    CHECK(d.historySize() == steps && d.object({0})->name == "A" && d.object({1, 0})->name == "Top");
+    auto to = d.moveObjects({{0}, {1}}, {}, 3);
+    CHECK(to && *to == std::vector<editor::ObjectPath>({{1}, {2}}));
+    CHECK(d.object({0})->name == "C" && d.object({1})->name == "A" && d.object({2})->name == "I");
+    CHECK(d.historySize() == steps + 1);
+}
+
 // The .prefab file round-trips with its unknown keys; a saved instance is
 // its link alone, whatever content it was showing, and keeps its own unknown keys.
 void testPrefabFiles() {
@@ -16805,6 +16937,8 @@ int main(int argc, char** argv) {
     testEditMany();
     testMultiSelection();
     testMultiObjectCommands();
+    testMoveObjects();
+    testMoveObjectsInstance();
     testTimelineSample();
     testTimelineEdit();
     testTimelinePreview();

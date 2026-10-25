@@ -1103,7 +1103,8 @@ static void treeDropTarget(TreeCtx& c, ImRect rr, const editor::ObjectPath& path
     const ImVec2 m = ImGui::GetIO().MousePos;
     if (!c.st.treeDragging || m.y < rr.Min.y || m.y >= rr.Max.y || m.x < c.panel.Min.x || m.x >= c.panel.Max.x) return;
     if (!c.list.Contains(m)) return;  // the row is scrolled out from under the pointer
-    if (isUnder(path, c.st.treeDragPath)) return;  // onto itself or inside it
+    for (const editor::ObjectPath& d : c.st.treeDragPaths)
+        if (isUnder(path, d)) return;  // onto one of the dragged or inside it
     if (c.doc.inInstance(path)) return;            // an instance's content comes from its prefab
     const float t = (m.y - rr.Min.y) / rr.GetHeight();
     const float indent = rr.Min.x + space::xs + static_cast<float>(path.size()) * 16.0f + 16;
@@ -1237,6 +1238,12 @@ static void treeObjects(TreeCtx& c, const std::vector<splash::Object>& objs, edi
         if (h.held && !readOnly && !c.st.treeDragging && !c.st.renaming && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 6)) {
             c.st.treeDragging = true;
             c.st.treeDragPath = path;
+            // A row of a multi-selection takes the whole selection along.
+            c.st.treeDragPaths = {path};
+            if (c.doc.isSelected(path)) {
+                std::vector<editor::ObjectPath> all = c.doc.topLevel(c.doc.selectedPaths());
+                if (all.size() > 1) c.st.treeDragPaths = std::move(all);
+            }
         }
         // F2: the label becomes a text field.
         if (c.st.renaming && c.st.renamePath == path) {
@@ -3628,7 +3635,7 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             ctx.dropMark = ctx.dropInto ? rr : ImRect(ImVec2(rr.Min.x + space::xs + 16, ctx.y - 1), ImVec2(rr.Max.x, ctx.y + 1));
         }
         // A drop that leaves the object where it is shows nothing.
-        if (ctx.hasDrop) {
+        if (ctx.hasDrop && st.treeDragPaths.size() <= 1) {
             const editor::ObjectPath& from = st.treeDragPath;
             const editor::ObjectPath fromParent(from.begin(), from.end() - 1);
             if (ctx.dropParent == fromParent && (ctx.dropIndex == from.back() || ctx.dropIndex == from.back() + 1)) ctx.hasDrop = false;
@@ -3675,23 +3682,30 @@ static void sceneTree(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             // The dragged object's name follows the pointer.
             ImDrawList* fg = ImGui::GetForegroundDrawList();
             const ImVec2 m = ImGui::GetIO().MousePos + ImVec2(14, 4);
-            ImVec2 ts = measure(fonts().regular, type::body, dragged->name.c_str());
+            std::string label = dragged->name;
+            if (st.treeDragPaths.size() > 1) label += " +" + std::to_string(st.treeDragPaths.size() - 1);
+            ImVec2 ts = measure(fonts().regular, type::body, label.c_str());
             ImRect tag(m, m + ts + ImVec2(space::md * 2, space::xs * 2));
             fg->AddRectFilled(tag.Min, tag.Max, color::raised, radius::field);
             fg->AddRect(tag.Min, tag.Max, ctx.hasDrop ? color::accent : color::borderStrong, radius::field);
-            text(fg, tag.Min + ImVec2(space::md, space::xs), fonts().regular, type::body, color::text, dragged->name.c_str());
+            text(fg, tag.Min + ImVec2(space::md, space::xs), fonts().regular, type::body, color::text, label.c_str());
         }
         if (!dragged || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
             st.treeDragging = false;
         } else if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
             st.treeDragging = false;
-            if (ctx.hasDrop)
-                if (std::optional<editor::ObjectPath> to = doc.moveObject(st.treeDragPath, ctx.dropParent, ctx.dropIndex))
-                    // Open the rows above it so it stays in sight.
-                    for (size_t n = 0; n < to->size(); ++n) {
-                        const editor::ObjectPath up(to->begin(), to->begin() + static_cast<std::ptrdiff_t>(n));
-                        if (!doc.expanded(up)) doc.toggleExpanded(up);
-                    }
+            std::vector<editor::ObjectPath> landed;
+            if (ctx.hasDrop && st.treeDragPaths.size() > 1) {
+                if (auto to = doc.moveObjects(st.treeDragPaths, ctx.dropParent, ctx.dropIndex)) landed = std::move(*to);
+            } else if (ctx.hasDrop) {
+                if (auto to = doc.moveObject(st.treeDragPath, ctx.dropParent, ctx.dropIndex)) landed.push_back(*to);
+            }
+            // Open the rows above them so they stay in sight.
+            for (const editor::ObjectPath& to : landed)
+                for (size_t n = 0; n < to.size(); ++n) {
+                    const editor::ObjectPath up(to.begin(), to.begin() + static_cast<std::ptrdiff_t>(n));
+                    if (!doc.expanded(up)) doc.toggleExpanded(up);
+                }
         }
     }
     treeMenu(st, doc);

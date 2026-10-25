@@ -1114,6 +1114,79 @@ std::optional<ObjectPath> Document::moveObject(const ObjectPath& from, const Obj
     return to;
 }
 
+namespace {
+
+// Where the object at `p` is after the object at `from` moved to `to`
+// (MoveCommand): it went along when it is that object or inside it.
+ObjectPath movedPath(const ObjectPath& p, const ObjectPath& from, const ObjectPath& to) {
+    if (p.size() >= from.size() && std::equal(from.begin(), from.end(), p.begin())) {
+        ObjectPath q = to;
+        q.insert(q.end(), p.begin() + static_cast<std::ptrdiff_t>(from.size()), p.end());
+        return q;
+    }
+    return *shifted(*shifted(p, from, -1), to, +1);
+}
+
+}  // namespace
+
+std::optional<std::vector<ObjectPath>> Document::moveObjects(const std::vector<ObjectPath>& from, const ObjectPath& toParent,
+                                                             int index) {
+    std::vector<ObjectPath> go = topLevel(from);
+    if (go.empty() || index < 0) return std::nullopt;
+    if (!toParent.empty() && !object(toParent)) return std::nullopt;
+    // What moveObject refuses, checked for all of them first: none move if one cannot.
+    if (prefabRootLevel(toParent)) return std::nullopt;
+    if (!toParent.empty() && (inInstance(toParent) || !object(toParent)->prefab.empty())) return std::nullopt;
+    for (const ObjectPath& p : go) {
+        if (inInstance(p) || prefabRootLevel(ObjectPath(p.begin(), p.end() - 1))) return std::nullopt;
+        if (toParent.size() >= p.size() && std::equal(p.begin(), p.end(), toParent.begin())) return std::nullopt;
+    }
+    const std::vector<splash::Object>& kids = toParent.empty() ? m_scene.objects : object(toParent)->children;
+    index = std::min(index, static_cast<int>(kids.size()));
+    // Already side by side under `toParent` where they would land: no change.
+    {
+        bool inPlace = true;
+        int before = 0;  // how many of them sit before `index`
+        for (size_t i = 0; i < go.size() && inPlace; ++i) {
+            const ObjectPath& p = go[i];
+            inPlace = ObjectPath(p.begin(), p.end() - 1) == toParent && p.back() == go[0].back() + static_cast<int>(i);
+            if (p.back() < index) ++before;
+        }
+        if (inPlace && go[0].back() == index - before) return go;
+    }
+    // They go in front of the first sibling at `index` that is not one of
+    // them (the anchor), or last when there is none. Every path in play is
+    // carried along as each one moves.
+    std::optional<ObjectPath> anchor;
+    for (int i = index; i < static_cast<int>(kids.size()); ++i) {
+        ObjectPath a = toParent;
+        a.push_back(i);
+        if (std::find(go.begin(), go.end(), a) == go.end()) {
+            anchor = a;
+            break;
+        }
+    }
+    ObjectPath parent = toParent;
+    std::optional<ObjectPath> primary = m_selection;
+    std::vector<ObjectPath> more = m_more;
+    beginBatch();
+    batchRestoreSelection();
+    for (size_t i = 0; i < go.size(); ++i) {
+        const ObjectPath at = go[i];
+        const int to = anchor ? anchor->back() : static_cast<int>(childrenMut(parent)->size());
+        const std::optional<ObjectPath> landed = moveObject(at, parent, to);
+        if (!landed) continue;  // already right there
+        for (ObjectPath& p : go) p = movedPath(p, at, *landed);
+        if (anchor) anchor = movedPath(*anchor, at, *landed);
+        parent = movedPath(parent, at, *landed);
+        if (primary) primary = movedPath(*primary, at, *landed);
+        for (ObjectPath& p : more) p = movedPath(p, at, *landed);
+    }
+    batchSetSelection(primary, more);
+    endBatch();
+    return go;
+}
+
 bool Document::undo() {
     if (!canUndo()) return false;
     m_mergeOpen = false;

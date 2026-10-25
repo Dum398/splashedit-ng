@@ -3728,9 +3728,11 @@ void testHandKeptLuaDefinitions() {
     for (const editor::lua::ApiSymbol& s : rows) {
         if (s.kind != ApiKind::Function) continue;
         ++functions;
-        const std::string cls = std::string("---@class ") + s.table + "\n";
+        // The line ends in \r\n where git checks the file out with CRLF (Windows).
+        const std::string cls = std::string("---@class ") + s.table;
         const std::string fn = std::string("function ") + s.table + "." + s.name + "(";
-        const bool ok = defs.find(cls) != std::string_view::npos && defs.find(fn) != std::string_view::npos;
+        const bool hasClass = defs.find(cls + "\n") != std::string_view::npos || defs.find(cls + "\r\n") != std::string_view::npos;
+        const bool ok = hasClass && defs.find(fn) != std::string_view::npos;
         if (!ok) std::fprintf(stderr, "  psxsplash.d.lua lacks %s.%s\n", s.table, s.name);
         CHECK(ok);
     }

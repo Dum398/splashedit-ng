@@ -15,6 +15,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 
 #include "audio.hh"
@@ -10827,18 +10828,19 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
             }
         }
         if (to4) {
-            // Every textured material: the sums the 4 bpp check compared.
-            int n = 0, cur = 0, at4 = 0, most = 0;
+            // The totals the 4 bpp check compared (Document::meshTextureBytes).
+            int most = 0;
+            std::set<std::string> textures;
             std::string one;
             for (const splash::Material& mat : m.materials) {
                 const editor::TextureInfo* t = mat.texture.empty() ? nullptr : doc.texture(mat.texture);
                 if (!t) continue;
-                n++;
+                textures.insert(mat.texture);
                 one = fileName(mat.texture);
-                cur += t->vramBytesAt(splash::materialDepth(m, mat));
-                at4 += t->vramBytes4;
                 most = std::max(most, t->colors15);
             }
+            const int n = int(textures.size());
+            const int cur = doc.meshTextureBytes(m), at4 = doc.meshTextureBytes(m, splash::BitDepth::Bpp4);
             std::string body = n == 1 ? one + " has " + std::to_string(most) + (most == 1 ? " colour" : " colours") + " and takes " +
                                             fmtKB(cur) + " of VRAM. At 4 bpp it keeps every colour and takes " + fmtKB(at4) + "."
                                       : "The " + std::to_string(n) + " textures have at most " + std::to_string(most) +

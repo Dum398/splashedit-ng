@@ -12537,6 +12537,35 @@ void testMaterials4bpp() {
     CHECK(d.hasWarning(*d.object({0})));
     d.edit({0}, [](splash::Object& ob) { ob.mesh->bitDepth = splash::BitDepth::Bpp4; });
     CHECK(!d.couldBe4bpp(*d.object({0})->mesh));
+
+    // meshTextureBytes: a texture used twice counts once, and a palette group
+    // takes one CLUT for all its members.
+    const editor::TextureInfo* two = d.texture("two.png");
+    const editor::TextureInfo* four = d.texture("four.png");
+    CHECK(two && four && two->clutBytes8 == 8 && four->clutBytes8 == 8 && four->clutBytes4 == 8);
+    CHECK(two->vramBytes8 > two->clutBytes8 && two->clutBytesAt(splash::BitDepth::Bpp16) == 0);
+    using BD = splash::BitDepth;
+    splash::MeshComponent g = *d.object({0})->mesh;
+    g.bitDepth = BD::Bpp8;
+    CHECK(d.meshTextureBytes(g) == two->vramBytes8 + four->vramBytes8);
+    for (splash::Material& mat : g.materials) mat.paletteGroup = "walls";
+    CHECK(d.meshTextureBytes(g) == two->vramBytes8 + four->vramBytes8 - 8);
+    CHECK(d.meshTextureBytes(g, BD::Bpp4) == two->vramBytes4 + four->vramBytes4 - 8);
+    CHECK(d.meshTextureBytes(g, BD::Bpp16) == two->vramBytes16 + four->vramBytes16);
+    g.materials[1].paletteGroup = "floor";
+    CHECK(d.meshTextureBytes(g) == two->vramBytes8 + four->vramBytes8);
+    g.materials[1].paletteGroup = "walls";
+    g.materials[1].bitDepth = BD::Bpp4;  // another depth: its own CLUT
+    CHECK(d.meshTextureBytes(g) == two->vramBytes8 + four->vramBytes4);
+    g.materials[1] = g.materials[0];
+    CHECK(d.meshTextureBytes(g) == two->vramBytes8);
+    g.materials.push_back({"gone.png", {1, 1, 1, 1}, {}});
+    CHECK(d.meshTextureBytes(g) == two->vramBytes8);
+    // Members of different palette sizes: the group's CLUT is the largest one.
+    const editor::TextureInfo* many = d.texture("many.png");
+    CHECK(many && many->clutBytes8 > two->clutBytes8);
+    g.materials[1].texture = "many.png";
+    CHECK(d.meshTextureBytes(g) == two->vramBytes8 + many->vramBytes8 - two->clutBytes8);
 }
 
 // hashSceneId matches Unity's HashSceneId: FNV-1a over the low byte of each

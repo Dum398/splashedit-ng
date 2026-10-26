@@ -16732,6 +16732,47 @@ void testMeterFixCarriers() {
     fs::remove_all(dir, ec);
 }
 
+// A texture depth fix on objects with per-material overrides (#229): only
+// the materials at the fix's depth move, an override that then equals the
+// object's depth is cleared, and an object at another depth keeps its own.
+void testMeterFixMaterialDepth() {
+    using splash::BitDepth;
+    splash::Scene s;
+    auto add = [&](BitDepth obj, std::vector<std::optional<BitDepth>> mats) {
+        splash::Object o = named("O");
+        splash::MeshComponent m;
+        m.bitDepth = obj;
+        for (const auto& d : mats) {
+            m.materials.push_back({"t.png", {1, 1, 1, 1}, {}});
+            m.materials.back().bitDepth = d;
+        }
+        o.mesh = m;
+        s.objects.push_back(o);
+    };
+    add(BitDepth::Bpp8, {std::nullopt, BitDepth::Bpp16, BitDepth::Bpp4});
+    add(BitDepth::Bpp16, {std::nullopt, BitDepth::Bpp8});
+    add(BitDepth::Bpp4, {BitDepth::Bpp8});
+    editor::MeterFix fix;
+    fix.from = BitDepth::Bpp8;
+    fix.to = BitDepth::Bpp4;
+    fix.objects = {{0}, {1}, {2}};
+    editor::applyFix(s, fix);
+    const splash::MeshComponent& a = *s.objects[0].mesh;
+    CHECK(a.bitDepth == BitDepth::Bpp4);
+    CHECK(!a.materials[0].bitDepth && a.materials[1].bitDepth == BitDepth::Bpp16 && !a.materials[2].bitDepth);
+    const splash::MeshComponent& b = *s.objects[1].mesh;
+    CHECK(b.bitDepth == BitDepth::Bpp16);
+    CHECK(!b.materials[0].bitDepth && b.materials[1].bitDepth == BitDepth::Bpp4);
+    const splash::MeshComponent& c = *s.objects[2].mesh;
+    CHECK(c.bitDepth == BitDepth::Bpp4 && !c.materials[0].bitDepth);
+    // Only fix.objects are touched.
+    s.objects.push_back(s.objects[1]);
+    s.objects[3].mesh->materials[0].bitDepth = BitDepth::Bpp8;
+    fix.objects = {{0}};
+    editor::applyFix(s, fix);
+    CHECK(s.objects[3].mesh->materials[0].bitDepth == BitDepth::Bpp8);
+}
+
 // The Triangles meter's simplify fix (#194): one click sets the model's
 // import settings' Triangles to what halves the mesh and imports it again;
 // undo puts every file the import wrote back byte for byte (the sidecar too)
@@ -17247,6 +17288,7 @@ int main(int argc, char** argv) {
     testStringsDoc();
     testMeterFixes();
     testMeterFixCarriers();
+    testMeterFixMaterialDepth();
     testMeterFixSimplify();
     testTvPreview();
     if (g_failures) {

@@ -3715,6 +3715,30 @@ void testExternalEditorSetup() {
     CHECK(!editor::lua::refreshLuaDefinitions(proj));  // current: left alone
 }
 
+// The hand-kept tables (Path, Strings) are in psxsplash.d.lua too: a row added
+// to path_api.inc or strings_api.inc without rerunning tools/gen_lua_api.py fails.
+void testHandKeptLuaDefinitions() {
+    using editor::lua::ApiKind;  // the rows say ApiKind::Function
+    static const editor::lua::ApiSymbol rows[] = {
+#include "editor/path_api.inc"
+#include "editor/strings_api.inc"
+    };
+    const std::string_view defs = editor::lua::luaDefinitions();
+    int functions = 0;
+    for (const editor::lua::ApiSymbol& s : rows) {
+        if (s.kind != ApiKind::Function) continue;
+        ++functions;
+        // The line ends in \r\n where git checks the file out with CRLF (Windows).
+        const std::string cls = std::string("---@class ") + s.table;
+        const std::string fn = std::string("function ") + s.table + "." + s.name + "(";
+        const bool hasClass = defs.find(cls + "\n") != std::string_view::npos || defs.find(cls + "\r\n") != std::string_view::npos;
+        const bool ok = hasClass && defs.find(fn) != std::string_view::npos;
+        if (!ok) std::fprintf(stderr, "  psxsplash.d.lua lacks %s.%s\n", s.table, s.name);
+        CHECK(ok);
+    }
+    CHECK(functions >= 12);  // Path's 7 and Strings' 5 when this was written
+}
+
 // The Interactable section's Event row: does the script define the callback,
 // and Add onInteract's edit of a Lua or block script.
 void testScriptDefinesCallback() {
@@ -17099,6 +17123,7 @@ int main(int argc, char** argv) {
     testAdoptAsset();
     testNewScript();
     testExternalEditorSetup();
+    testHandKeptLuaDefinitions();
     testNewBlocksScript();
     testScriptDefinesCallback();
     testBlockHelp();

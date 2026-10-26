@@ -1922,3 +1922,101 @@ function onTriggerExit(index) end
 ---@param self any
 ---@param dt any
 function onUpdate(self, dt) end
+
+---@class Path
+Path = {}
+
+--- Starts the path's followers; nothing while they run. Followers moved by animation start again
+--- from their start offset.
+---
+--- `Path.Start(path)`
+---@param path any
+---@return any
+function Path.Start(path) end
+
+--- Stops the path's followers where they are.
+---
+--- `Path.Stop(path)`
+---@param path any
+---@return any
+function Path.Stop(path) end
+
+--- Whether the path's followers (or that follower, or the camera's ride) are riding.
+---
+--- `Path.IsRunning(path|follower|Camera) -> boolean`
+---@param path any
+---@return any # boolean
+function Path.IsRunning(path) end
+
+--- How far along, in percent (0..100). Exact for agents and the camera; for followers moved by
+--- animation it is counted from the time since Start and can drift by up to a frame a lap. nil for
+--- an unknown path, or Camera when it rides none.
+---
+--- `Path.GetProgress(path|follower|Camera) -> number or nil`
+---@param path any
+---@return any # number or nil
+function Path.GetProgress(path) end
+
+--- Puts agent followers or the camera's ride that far along. Followers moved by animation cannot
+--- jump on the PS1: they carry on, and the first try logs a warning.
+---
+--- `Path.SetProgress(path|follower|Camera, percent)`
+---@param path any
+---@param percent any
+---@return any
+function Path.SetProgress(path, percent) end
+
+--- Takes the camera off the player and moves it along the path at the path's speed, looking along
+--- it unless faceAlong is false.
+---
+--- `Path.RideCamera(path [, faceAlong])`
+---@param path any
+---@param faceAlong? any
+---@return any
+function Path.RideCamera(path, faceAlong) end
+
+--- Gives the camera back to the player.
+---
+--- `Path.StopCamera()`
+---@return any
+function Path.StopCamera() end
+
+---@class Strings
+Strings = {}
+
+--- The key's text in the active language, the default language's when that is empty, the key itself
+--- when the scene does not carry it. Write the key as a string literal (or add its prefix to the
+--- scene's String prefixes) so the export carries it.
+---
+--- `Strings.Get(key) -> string`
+---@param key any
+---@return any # string
+function Strings.Get(key) end
+
+--- The id of the active language ("en").
+---
+--- `Strings.Language() -> string`
+---@return any # string
+function Strings.Language() end
+
+--- The language ids, the default first.
+---
+--- `Strings.Languages() -> {string, ...}`
+---@return any # {string, ...}
+function Strings.Languages() end
+
+--- Makes a language active, by id or 1-based index; re-applies the scene's keyed UI texts; it stays
+--- across scene loads (a Persist slot). false for an unknown language. Does not touch the memory
+--- card.
+---
+--- `Strings.SetLanguage(id|index) -> boolean`
+---@param id any
+---@return any # boolean
+function Strings.SetLanguage(id) end
+
+--- Saves the active language to the memory card in port 1 (one block; the game waits about 2 s).
+--- With Remember language on memory card on, the next boot starts in it.
+---
+--- `Strings.Save() -> boolean [, error]`
+---@return any # boolean [, error]
+function Strings.Save() end

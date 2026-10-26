@@ -41,6 +41,10 @@ struct Material {
     // Texture bit depth for this material; unset = the mesh component's.
     // Last and defaulted, so {texture, color, extra} initialisers stay as they are.
     std::optional<BitDepth> bitDepth = std::nullopt;
+    // Textures of materials with the same group, depth (4 or 8 bpp) and cutout
+    // share one palette, one CLUT in VRAM. Empty = its own palette; ignored at
+    // 16bpp. After bitDepth for the same reason.
+    std::string paletteGroup = {};
 };
 
 // Skinned mesh: a named clip set played by SkinnedAnim.Play. Requires a mesh
@@ -82,6 +86,10 @@ struct MeshComponent {
 
 // The bit depth a material's texture exports at: its own, else the component's.
 inline BitDepth materialDepth(const MeshComponent& m, const Material& mat) { return mat.bitDepth.value_or(m.bitDepth); }
+// The palette group a material's texture converts in: none at 16bpp.
+inline std::string materialPaletteGroup(const MeshComponent& m, const Material& mat) {
+    return materialDepth(m, mat) == BitDepth::Bpp16 ? std::string() : mat.paletteGroup;
+}
 
 struct ColliderComponent {
     ColliderKind kind = ColliderKind::None;

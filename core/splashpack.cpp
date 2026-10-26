@@ -13,6 +13,7 @@
 #include <optional>
 #include <set>
 #include <sstream>
+#include <tuple>
 
 #include "audio.hh"
 #include "binwriter.hh"
@@ -445,7 +446,8 @@ void buildTris(ExpObject& e, float gte, const std::vector<SceneLight>& lights, E
         int texIndex = -1;
         if (!mat.texture.empty())
             for (size_t i = 0; i < e.textures.size(); i++)
-                if (e.textures[i]->source == mat.texture && e.textures[i]->bitDepth == materialDepth(mc, mat)) {
+                if (e.textures[i]->source == mat.texture && e.textures[i]->bitDepth == materialDepth(mc, mat) &&
+                    e.textures[i]->paletteGroup == materialPaletteGroup(mc, mat)) {
                     texIndex = int(i);
                     break;
                 }
@@ -2059,6 +2061,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     }
 
     std::vector<ExpObject> exporters;
+    std::map<std::tuple<std::string, int, bool>, std::vector<uint16_t>> groupPalettes;  // (group, depth, cutout)
     for (const FlatObject& fo : flat) {
         // An object that is off, or under an off parent, is not in the pack at
         // all (Unity's FindObjectsByType skips it), so its components are not
@@ -2111,11 +2114,13 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         // PSXObjectExporter.CreatePSXTextures2D: one texture per textured
         // material, reusing the object's own copy for a repeated source at
         // the same depth (a material may override the component's depth).
+        // A material in a palette group converts onto the group's CLUT.
         std::map<std::string, PsxTexture*> cache;
         for (const Material& mat : e.mc->materials) {
             if (mat.texture.empty()) continue;
             const BitDepth depth = materialDepth(*e.mc, mat);
-            const std::string key = mat.texture + "#" + std::to_string(int(depth));
+            const std::string group = materialPaletteGroup(*e.mc, mat);
+            const std::string key = mat.texture + "#" + std::to_string(int(depth)) + (group.empty() ? "" : "#" + group);
             auto it = cache.find(key);
             if (it != cache.end()) {
                 e.textures.push_back(it->second);
@@ -2125,12 +2130,20 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
                 // Texels under half alpha become word 0, which the GPU
                 // skips; an image without any converts exactly as before.
                 const Image& img = imageFor(mat.texture);
-                textureStore.push_back(convertTexture(img, depth, hasCutoutTexels(img)));
+                const bool cutout = hasCutoutTexels(img);
+                if (group.empty()) {
+                    textureStore.push_back(convertTexture(img, depth, cutout));
+                } else {
+                    auto [g, fresh] = groupPalettes.try_emplace({group, int(depth), cutout});
+                    if (fresh) g->second = paletteGroup(scene, group, depth, cutout, imageFor).palette;
+                    textureStore.push_back(convertTexture(img, depth, cutout, g->second));
+                }
             } catch (const std::exception& ex) {
                 res.errors.push_back(ex.what());
                 continue;
             }
             textureStore.back().source = mat.texture;
+            textureStore.back().paletteGroup = group;
             cache[key] = &textureStore.back();
             e.textures.push_back(&textureStore.back());
         }
@@ -2381,11 +2394,12 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     // Remap each object's texture list to the packed (deduplicated) textures.
     std::map<std::string, PsxTexture*> packedBySource;
     for (Atlas& a : vram.atlases)
-        for (PsxTexture* t : a.textures) packedBySource[t->source + "#" + std::to_string(int(t->bitDepth))] = t;
+        for (PsxTexture* t : a.textures) packedBySource[t->source + "#" + std::to_string(int(t->bitDepth)) + "#" + t->paletteGroup] = t;
     for (ExpObject& e : exporters) {
         std::vector<int> remap(e.textures.size(), -1);
         for (size_t i = 0; i < e.textures.size(); i++) {
-            auto it = packedBySource.find(e.textures[i]->source + "#" + std::to_string(int(e.textures[i]->bitDepth)));
+            const PsxTexture* t = e.textures[i];
+            auto it = packedBySource.find(t->source + "#" + std::to_string(int(t->bitDepth)) + "#" + t->paletteGroup);
             if (it == packedBySource.end()) continue;
             auto f = std::find(e.finalTextures.begin(), e.finalTextures.end(), it->second);
             if (f == e.finalTextures.end()) {
@@ -2585,10 +2599,7 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         return it == luaFiles.end() ? int16_t(-1) : int16_t(it - luaFiles.begin());
     };
 
-    int clutCount = 0;
-    for (Atlas& a : vram.atlases)
-        for (PsxTexture* t : a.textures)
-            if (t->hasPalette) clutCount++;
+    const int clutCount = int(vram.cluts.size());
     int colliderCount = 0;
     for (ExpObject& e : exporters)
         if (e.obj->collider && e.obj->collider->kind == ColliderKind::Dynamic) colliderCount++;
@@ -3004,15 +3015,13 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         w.u16(uint16_t(a.positionX));
         w.u16(uint16_t(a.positionY));
     }
-    for (Atlas& a : vram.atlases)
-        for (PsxTexture* t : a.textures) {
-            if (!t->hasPalette) continue;
-            w.u32(0);
-            w.u16(t->clutPackingX);
-            w.u16(t->clutPackingY);
-            w.u16(uint16_t(t->palette.size()));
-            w.u16(0);
-        }
+    for (const PsxTexture* t : vram.cluts) {
+        w.u32(0);
+        w.u16(t->clutPackingX);
+        w.u16(t->clutPackingY);
+        w.u16(uint16_t(t->palette.size()));
+        w.u16(0);
+    }
 
     // ---- Lua data
     for (size_t i = 0; i < luaData.size(); i++) {
@@ -3388,16 +3397,14 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
         for (uint16_t px : a.pixels) v.u16(px);
         v.align4();
     }
-    for (Atlas& a : vram.atlases)
-        for (PsxTexture* t : a.textures) {
-            if (!t->hasPalette) continue;
-            v.u16(t->clutPackingX);
-            v.u16(t->clutPackingY);
-            v.u16(uint16_t(t->palette.size()));
-            v.u16(0);
-            for (uint16_t c : t->palette) v.u16(c);
-            v.align4();
-        }
+    for (const PsxTexture* t : vram.cluts) {
+        v.u16(t->clutPackingX);
+        v.u16(t->clutPackingY);
+        v.u16(uint16_t(t->palette.size()));
+        v.u16(0);
+        for (uint16_t c : t->palette) v.u16(c);
+        v.align4();
+    }
     // Fog masks: entry 0 transparent, every other entry white with STP set.
     for (auto [id, length] : {std::pair{vram.fogMaskClut4, 16}, std::pair{vram.fogMaskClut8, 256}}) {
         if (id < 0) continue;
@@ -3444,13 +3451,12 @@ static ExportResult exportSplashpackBaked(const Scene& scene, const fs::path& ro
     st.framebufferBytes = size_t(vs.resolutionX) * size_t(vs.resolutionY) * 2 * (vs.dualBuffering ? 2 : 1);
     for (const Atlas& a : vram.atlases) {
         st.atlasBytes += size_t(a.width) * Atlas::kHeight * 2;
-        for (const PsxTexture* t : a.textures) {
-            if (t->hasPalette) st.clutBytes += t->palette.size() * 2;
+        for (const PsxTexture* t : a.textures)
             st.textures.push_back({t->source, int(t->bitDepth), t->cutout, t->width, t->height, a.positionX + t->packingX,
                                    a.positionY + t->packingY, t->clutPackingX * 16, t->clutPackingY,
                                    t->hasPalette ? int(t->palette.size()) : 0});
-        }
     }
+    for (const PsxTexture* t : vram.cluts) st.clutBytes += t->palette.size() * 2;
     for (const FontSheet& f : fontSheets) st.fontBytes += f.packed4bpp().size();
     st.spuEnd = kSpuStart;
     for (const std::vector<uint8_t>& d : audioData) st.spuEnd = ((st.spuEnd + 15) & ~size_t(15)) + ((d.size() + 15) & ~size_t(15));
@@ -3564,10 +3570,7 @@ ExportResult exportLoaderPack(const Scene& scene, const fs::path& root, const fs
             if (!e.empty()) res.errors.push_back("loading screen: " + e);
         }
     if (!res.ok()) return res;
-    std::vector<const PsxTexture*> cluts;
-    for (const Atlas& a : vram.atlases)
-        for (const PsxTexture* t : a.textures)
-            if (t->hasPalette) cluts.push_back(t);
+    const std::vector<const PsxTexture*>& cluts = vram.cluts;
     if (vram.atlases.size() > 255 || cluts.size() > 255 || sheets.size() > 255) {
         res.errors.push_back("loading screen '" + lc + "': too many textures");
         return res;

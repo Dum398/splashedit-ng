@@ -153,43 +153,36 @@ private:
     std::vector<Entry> sorted_;
 };
 
-struct Quantized {
-    std::vector<int> indices;  // [y * w + x], y bottom-up; -1 = transparent
-    std::vector<uint16_t> palette;
+// The texels of one image a palette is built over.
+struct QuantInput {
+    const Image* img;
+    const std::vector<bool>* use;
 };
 
-// Palette for the texels in `use`, at most k entries, then every used texel
-// mapped onto it.
+// Palette for the texels in `use` of every input together, at most k entries
+// (quantMap then maps each image onto it).
 //
-// When the source already fits in k colours once each is rounded to 15 bits,
-// the palette is those colours and every texel gets its own, no dithering.
-// Otherwise a k-means in OKLab, weighted by the square root of how many
-// texels carry each colour, picks the palette (deterministic farthest-point seeding, iterated
-// until the assignment is stable), the result is rounded to 15 bits, and the
-// texels are error-diffused onto the rounded palette in serpentine order.
-Quantized quantize(const Image& img, const std::vector<bool>& use, int k) {
-    int w = img.width, h = img.height;
-    size_t n = size_t(w) * h;
-    Quantized q;
-    q.indices.assign(n, -1);
+// When the sources already fit in k colours once each is rounded to 15 bits,
+// the palette is those colours in first-appearance order. Otherwise a k-means
+// in OKLab, weighted by the square root of how many texels carry each colour,
+// picks the palette (deterministic farthest-point seeding, iterated until the
+// assignment is stable) and the result is rounded to 15 bits.
+std::vector<uint16_t> quantPalette(const std::vector<QuantInput>& in, int k) {
+    size_t n = 0;
+    for (const QuantInput& q : in) n += q.img->pixels.size();
+    std::vector<uint16_t> palette;
 
     // Exact case: distinct 15-bit colours in first-appearance order.
-    std::vector<int> exact(0x10000, -1);  // word -> palette slot
+    std::vector<bool> seen(0x10000);
     std::vector<uint16_t> exactOrder;
-    std::vector<uint16_t> words(n);
-    for (size_t i = 0; i < n; i++) {
-        if (!use[i]) continue;
-        const auto& p = img.pixels[i];
-        uint16_t word = words[i] = opaqueWord(p.r, p.g, p.b);
-        if (exact[word] < 0) exact[word] = int(exactOrder.size()), exactOrder.push_back(word);
-    }
-    if (exactOrder.empty()) return q;
-    if (int(exactOrder.size()) <= k) {
-        q.palette = exactOrder;
-        for (size_t i = 0; i < n; i++)
-            if (use[i]) q.indices[i] = exact[words[i]];
-        return q;
-    }
+    for (const QuantInput& q : in)
+        for (size_t i = 0; i < q.img->pixels.size(); i++) {
+            if (!(*q.use)[i]) continue;
+            const auto& p = q.img->pixels[i];
+            uint16_t word = opaqueWord(p.r, p.g, p.b);
+            if (!seen[word]) seen[word] = true, exactOrder.push_back(word);
+        }
+    if (int(exactOrder.size()) <= k) return exactOrder;
 
     // Weighted distinct source colours, in OKLab.
     struct Point {
@@ -214,19 +207,20 @@ Quantized quantize(const Image& img, const std::vector<bool>& use, int k) {
             std::memcpy(&u, &f, 4);
             return u;
         };
-        for (size_t i = 0; i < n; i++) {
-            if (!use[i]) continue;
-            const auto& p = img.pixels[i];
-            uint32_t r = bits(p.r), g = bits(p.g), b = bits(p.b);
-            size_t at = (r * 0x9E3779B1u ^ g * 0x85EBCA77u ^ b * 0xC2B2AE3Du) & (cap - 1);
-            while (T[at].point >= 0 && !(T[at].r == r && T[at].g == g && T[at].b == b)) at = (at + 1) & (cap - 1);
-            if (T[at].point < 0) {
-                T[at] = {r, g, b, int(pts.size())};
-                pts.push_back({oklab(p.r, p.g, p.b), 1.f});
-            } else {
-                pts[size_t(T[at].point)].weight += 1.f;
+        for (const QuantInput& q : in)
+            for (size_t i = 0; i < q.img->pixels.size(); i++) {
+                if (!(*q.use)[i]) continue;
+                const auto& p = q.img->pixels[i];
+                uint32_t r = bits(p.r), g = bits(p.g), b = bits(p.b);
+                size_t at = (r * 0x9E3779B1u ^ g * 0x85EBCA77u ^ b * 0xC2B2AE3Du) & (cap - 1);
+                while (T[at].point >= 0 && !(T[at].r == r && T[at].g == g && T[at].b == b)) at = (at + 1) & (cap - 1);
+                if (T[at].point < 0) {
+                    T[at] = {r, g, b, int(pts.size())};
+                    pts.push_back({oklab(p.r, p.g, p.b), 1.f});
+                } else {
+                    pts[size_t(T[at].point)].weight += 1.f;
+                }
             }
-        }
     }
     // Square-root weights: by raw texel count a large flat background takes
     // most of a 16-entry palette and a small saturated detail (a face, a logo)
@@ -366,8 +360,8 @@ Quantized quantize(const Image& img, const std::vector<bool>& use, int k) {
     // goes to the colour the rounded palette serves worst.
     std::vector<Lab> palLab;
     auto addWord = [&](uint16_t word) {
-        if (std::find(q.palette.begin(), q.palette.end(), word) != q.palette.end()) return false;
-        q.palette.push_back(word);
+        if (std::find(palette.begin(), palette.end(), word) != palette.end()) return false;
+        palette.push_back(word);
         palLab.push_back(wordLab(word));
         return true;
     };
@@ -380,7 +374,7 @@ Quantized quantize(const Image& img, const std::vector<bool>& use, int k) {
     // words are added (a min, so the same whatever order it is taken in).
     std::vector<float> palDist;
     size_t palDone = 0;
-    while (int(q.palette.size()) < k) {
+    while (int(palette.size()) < k) {
         if (palDist.empty()) {
             NearestSearch search(palLab);
             palDist.resize(pts.size());
@@ -403,8 +397,33 @@ Quantized quantize(const Image& img, const std::vector<bool>& use, int k) {
         oklabToSrgb(pts[worst].c, r, g, b);
         if (!addWord(opaqueWord(r, g, b))) break;  // nothing left that rounds to a new word
     }
+    return palette;
+}
+
+// Every texel in `use` mapped onto `palette` ([y * w + x], y bottom-up; -1 =
+// not used). When the palette holds each texel's own 15-bit colour (the exact
+// case of quantPalette) every texel gets it, no dithering; otherwise the
+// texels are error-diffused onto the palette in serpentine order.
+std::vector<int> quantMap(const Image& img, const std::vector<bool>& use, const std::vector<uint16_t>& palette) {
+    int w = img.width, h = img.height;
+    size_t n = size_t(w) * h;
+    std::vector<int> indices(n, -1);
+    std::vector<int> exact(0x10000, -1);  // word -> palette slot
+    for (size_t j = 0; j < palette.size(); j++)
+        if (exact[palette[j]] < 0) exact[palette[j]] = int(j);
+    bool allExact = true;
+    for (size_t i = 0; i < n && allExact; i++) {
+        if (!use[i]) continue;
+        const auto& p = img.pixels[i];
+        indices[i] = exact[opaqueWord(p.r, p.g, p.b)];
+        allExact = indices[i] >= 0;
+    }
+    if (allExact) return indices;
+    indices.assign(n, -1);
 
     // Error diffusion onto the rounded palette.
+    std::vector<Lab> palLab;
+    for (uint16_t word : palette) palLab.push_back(wordLab(word));
     NearestSearch palSearch(palLab);
     std::vector<Lab> lab(n);
     for (size_t i = 0; i < n; i++)
@@ -417,7 +436,7 @@ Quantized quantize(const Image& img, const std::vector<bool>& use, int k) {
             if (!use[i]) continue;
             float bd;
             int best = palSearch.find(lab[i], bd);
-            q.indices[i] = best;
+            indices[i] = best;
             Lab err = (lab[i] - palLab[size_t(best)]) * kDitherStrength;
             int fwd = rtl ? -1 : 1;
             auto spread = [&](int dx, int dy, float f) {
@@ -432,7 +451,7 @@ Quantized quantize(const Image& img, const std::vector<bool>& use, int k) {
             spread(fwd, 1, 1.f / 16.f);
         }
     }
-    return q;
+    return indices;
 }
 
 }  // namespace
@@ -469,6 +488,14 @@ void savePng(const Image& img, const std::filesystem::path& file) {
         throw std::runtime_error("cannot write " + file.string());
 }
 
+// The texels a texture draws: all, or with cutout those at or above the
+// cutout alpha threshold.
+static std::vector<bool> cutoutUse(const Image& img, bool cutout) {
+    std::vector<bool> use(img.pixels.size());
+    for (size_t i = 0; i < use.size(); i++) use[i] = !(cutout && img.pixels[i].a < kCutoutAlpha);
+    return use;
+}
+
 bool hasCutoutTexels(const Image& img) {
     for (const Image::Px& p : img.pixels)
         if (p.a < kCutoutAlpha) return true;
@@ -495,24 +522,50 @@ PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout) {
         return t;
     }
 
+    return convertTexture(img, depth, cutout, buildPalette({&img}, depth, cutout));
+}
+
+std::vector<uint16_t> buildPalette(const std::vector<const Image*>& images, BitDepth depth, bool cutout) {
+    std::vector<std::vector<bool>> uses(images.size());
+    std::vector<QuantInput> in;
+    for (size_t m = 0; m < images.size(); m++) {
+        uses[m] = cutoutUse(*images[m], cutout);
+        in.push_back({images[m], &uses[m]});
+    }
     // With cutout, palette entry 0 is the transparent word and the opaque
     // texels share the rest.
     int maxColors = depth == BitDepth::Bpp4 ? 16 : 256;
-    std::vector<bool> use(img.pixels.size());
-    for (size_t i = 0; i < use.size(); i++) use[i] = opaque(img.pixels[i]);
-    Quantized q = quantize(img, use, cutout ? maxColors - 1 : maxColors);
-    int base = cutout ? 1 : 0;
-    t.hasPalette = true;
-    if (cutout) t.palette.push_back(0);
-    t.palette.insert(t.palette.end(), q.palette.begin(), q.palette.end());
+    std::vector<uint16_t> colours = quantPalette(in, cutout ? maxColors - 1 : maxColors);
+    std::vector<uint16_t> palette;
+    if (cutout) palette.push_back(0);
+    palette.insert(palette.end(), colours.begin(), colours.end());
     // Keep the CLUT a whole number of 4-word units, as the 2.4 writer did
     // (it appended 1..4 entries, even to an already aligned palette).
-    t.palette.resize((t.palette.size() + 3) / 4 * 4, 0);
+    palette.resize((palette.size() + 3) / 4 * 4, 0);
+    return palette;
+}
+
+PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout, const std::vector<uint16_t>& palette) {
+    PsxTexture t;
+    t.bitDepth = depth;
+    t.cutout = cutout;
+    t.width = img.width;
+    t.height = img.height;
+    t.quantizedWidth = depth == BitDepth::Bpp4 ? img.width / 4 : img.width / 2;
+    int base = cutout ? 1 : 0;
+    t.hasPalette = true;
+    t.palette = palette;
+    // The colours past the transparent entry, without the padding (word 0,
+    // which no opaque colour is).
+    size_t end = palette.size();
+    while (end > size_t(base) && palette[end - 1] == 0) end--;
+    std::vector<uint16_t> colours(palette.begin() + std::min(size_t(base), end), palette.begin() + end);
+    const std::vector<int> indices = quantMap(img, cutoutUse(img, cutout), colours);
 
     t.imageData.assign(size_t(t.quantizedWidth) * t.height, 0);
     for (int y = 0; y < t.height; y++) {
         int row = t.height - y - 1;
-        const int* idx = &q.indices[size_t(y) * t.width];
+        const int* idx = &indices[size_t(y) * t.width];
         auto at = [&](int x) { return idx[x] < 0 ? 0 : idx[x] + base; };
         for (int g = 0; g < t.quantizedWidth; g++) {
             uint16_t packed;
@@ -528,6 +581,36 @@ PsxTexture convertTexture(const Image& img, BitDepth depth, bool cutout) {
         }
     }
     return t;
+}
+
+std::vector<std::string> paletteGroupMembers(const Scene& scene, const std::string& name, BitDepth depth, bool cutout,
+                                             const std::function<std::optional<bool>(const std::string&)>& cutoutOf) {
+    std::vector<std::string> members;
+    if (name.empty() || depth == BitDepth::Bpp16) return members;
+    for (const FlatObject& fo : flatten(scene)) {
+        if (!fo.activeInHierarchy || !fo.object->mesh) continue;
+        for (const Material& mat : fo.object->mesh->materials) {
+            if (mat.texture.empty() || mat.paletteGroup != name || materialDepth(*fo.object->mesh, mat) != depth) continue;
+            if (std::find(members.begin(), members.end(), mat.texture) != members.end()) continue;
+            if (cutoutOf(mat.texture) == cutout) members.push_back(mat.texture);
+        }
+    }
+    return members;
+}
+
+PaletteGroup paletteGroup(const Scene& scene, const std::string& name, BitDepth depth, bool cutout, const ImageSource& image) {
+    PaletteGroup g;
+    g.members = paletteGroupMembers(scene, name, depth, cutout, [&](const std::string& p) -> std::optional<bool> {
+        try {
+            return hasCutoutTexels(image(p));
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    });
+    std::vector<const Image*> images;
+    for (const std::string& p : g.members) images.push_back(&image(p));
+    if (!images.empty()) g.palette = buildPalette(images, depth, cutout);
+    return g;
 }
 
 Image decodeTexture(const PsxTexture& t) {

@@ -52,7 +52,9 @@ TexturePreview makeTexturePreview(const splash::Image& img, const TexturePreview
     }
     try {
         // The export path: the same call the splashpack writer makes.
-        splash::PsxTexture t = splash::convertTexture(img, key.depth, key.cutout);
+        const bool shared = !key.palette.empty() && key.depth != splash::BitDepth::Bpp16;
+        splash::PsxTexture t = shared ? splash::convertTexture(img, key.depth, key.cutout, key.palette)
+                                      : splash::convertTexture(img, key.depth, key.cutout);
         splash::Image out = splash::decodeTexture(t);
         splash::TextureError e = splash::measureTexture(img, t);
         p.deltaE = e.deltaE;

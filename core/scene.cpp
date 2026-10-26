@@ -125,6 +125,7 @@ json writeMaterial(const Material& mat) {
     mj["texture"] = mat.texture.empty() ? json(nullptr) : json(mat.texture);
     mj["color"] = json::array({mat.color[0], mat.color[1], mat.color[2], mat.color[3]});
     if (mat.bitDepth) mj["bitDepth"] = int(*mat.bitDepth);
+    if (!mat.paletteGroup.empty()) mj["paletteGroup"] = mat.paletteGroup;
     putExtras(mj, mat.extra);
     return mj;
 }
@@ -326,6 +327,7 @@ Object readObject(const json& j) {
                     if (mbd != 4 && mbd != 8 && mbd != 16) fail("material bitDepth must be 4, 8 or 16");
                     mat.bitDepth = BitDepth(mbd);
                 }
+                if (mj.contains("paletteGroup")) mat.paletteGroup = mj["paletteGroup"].get<std::string>();
                 mat.extra = extrasOf(mj, writeMaterial(mat));
                 m.materials.push_back(mat);
             }
@@ -1165,7 +1167,8 @@ int uvTextureSlot(const MeshComponent& mc, size_t mat) {
         const Material& t = mc.materials[i];
         if (t.texture.empty()) continue;
         auto it = std::find_if(seen.begin(), seen.end(), [&](const Material* s) {
-            return s->texture == t.texture && materialDepth(mc, *s) == materialDepth(mc, t);
+            return s->texture == t.texture && materialDepth(mc, *s) == materialDepth(mc, t) &&
+                   materialPaletteGroup(mc, *s) == materialPaletteGroup(mc, t);
         });
         if (i == mat) return int(it - seen.begin());
         if (it == seen.end()) seen.push_back(&t);

@@ -6524,6 +6524,55 @@ static std::string fmtShort(float v, int decimals = 2) {
     return s;
 }
 
+// A material's palette group as the export builds it, for the mesh inspector:
+// the members (splash::paletteGroupMembers, cutout from the texture info) and
+// their shared CLUT (splash::paletteGroup, the exporter's), built once per
+// member set.
+struct PalGroupInfo {
+    std::vector<std::string> members;
+    std::vector<uint16_t> palette;  // empty when the members cannot be loaded
+    int colours = 0;                // palette entries past the transparent one, without the padding
+    int elsewhere = 0;              // textures in the same named group at another depth or cutout
+};
+static PalGroupInfo palGroupInfo(const editor::Document& doc, const std::string& group, splash::BitDepth depth, bool cutout) {
+    auto cutoutOf = [&](const std::string& p) -> std::optional<bool> {
+        const editor::TextureInfo* t = doc.texture(p);
+        if (!t || t->status != editor::AssetStatus::Ok) return std::nullopt;
+        return t->holes;
+    };
+    PalGroupInfo g;
+    g.members = splash::paletteGroupMembers(doc.scene(), group, depth, cutout, cutoutOf);
+    for (splash::BitDepth d : {splash::BitDepth::Bpp4, splash::BitDepth::Bpp8})
+        for (bool c : {false, true})
+            if (d != depth || c != cutout) g.elsewhere += int(splash::paletteGroupMembers(doc.scene(), group, d, c, cutoutOf).size());
+    std::string key = group + "#" + std::to_string(int(depth)) + (cutout ? "#cutout" : "");
+    for (const std::string& m : g.members) {
+        const editor::TextureInfo* t = doc.texture(m);
+        key += "\n" + m + " " + std::to_string(t->width) + "x" + std::to_string(t->height) + " " + std::to_string(t->colors15);
+    }
+    static std::map<std::string, std::vector<uint16_t>> built;
+    auto it = built.find(key);
+    if (it == built.end()) {
+        std::map<std::string, splash::Image> images;
+        auto image = [&](const std::string& p) -> const splash::Image& {
+            auto at = images.find(p);
+            if (at == images.end()) at = images.emplace(p, splash::loadImage(doc.resolve(p))).first;
+            return at->second;
+        };
+        std::vector<uint16_t> pal;
+        try {
+            pal = splash::paletteGroup(doc.scene(), group, depth, cutout, image).palette;
+        } catch (const std::exception&) {
+        }
+        it = built.emplace(key, std::move(pal)).first;
+    }
+    g.palette = it->second;
+    size_t end = g.palette.size();
+    while (end > size_t(cutout) && g.palette[end - 1] == 0) end--;
+    g.colours = int(end) - int(cutout && end > 0);
+    return g;
+}
+
 static std::string fmtKB(int bytes) { return fmtShort(static_cast<float>(bytes) / 1024.0f) + " KB"; }
 
 // Unity's Euler order (Z, then X, then Y), in degrees within -180..180.
@@ -10683,6 +10732,41 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                         colourHex({c4[0], c4[1], c4[2]});
         }
         materialLines = matLines;
+        // A textured material's palette group (obj.palgroup.<i>), at 4 and 8
+        // bpp only, and under it the group's size. Prints "palgroup: <i>
+        // <group> members <others> colours <n>" when that changes. Material
+        // 0's shared CLUT also feeds the texture preview.
+        std::vector<uint16_t> sharedPal0;
+        auto palGroup = [&](size_t i) {
+            const splash::Material& mat = m.materials[i];
+            const splash::BitDepth depth = splash::materialDepth(m, mat);
+            if (depth == splash::BitDepth::Bpp16) return;
+            const std::string is = std::to_string(i);
+            const ImRect gRow = row(("lpalgroup." + is).c_str(), "Palette group",
+                                    "Textures with the same group name share one palette (one CLUT in VRAM), built from all "
+                                    "of them. Empty: this texture has its own.");
+            nameRect("obj.palgroup." + is, gRow);
+            std::string typed;
+            if (textField(("palgroup." + is).c_str(), gRow, mat.paletteGroup, &typed, "None", 32))
+                doc.edit(path, [&](splash::Object& ob) {
+                    if (ob.mesh && i < ob.mesh->materials.size()) ob.mesh->materials[i].paletteGroup = typed;
+                });
+            if (mat.paletteGroup.empty()) return;
+            const editor::TextureInfo* t = doc.texture(mat.texture);
+            const PalGroupInfo g = palGroupInfo(doc, mat.paletteGroup, depth, t && t->holes);
+            const int others = std::max(0, int(g.members.size()) - 1);
+            if (i == 0) sharedPal0 = g.palette;
+            std::string cap = "Shared with " + std::to_string(others) + (others == 1 ? " texture, " : " textures, ") +
+                              std::to_string(g.colours) + (g.colours == 1 ? " colour" : " colours");
+            if (g.elsewhere > 0)
+                cap += "; " + std::to_string(g.elsewhere) + " at another depth or cutout get their own";
+            const ImVec2 at(x0 + space::sm + lw, y + space::xxs);
+            text(dl, at, f.regular, type::caption, color::textDim, cap.c_str());
+            nameRect("obj.palgroupinfo." + is, ImRect(at, at + measure(f.regular, type::caption, cap.c_str())));
+            y += 16 + space::xs;
+            scriptLine(("palgroup." + o->name + "." + is).c_str(), "palgroup: " + is + " " + mat.paletteGroup + " members " +
+                                                                   std::to_string(others) + " colours " + std::to_string(g.colours));
+        };
         if (nMat <= 1) {
             const ImRect texRow = row("ltex", "Texture", "Image painted on the model. Click to pick an image. Converted to PS1 colours on export.");
             nameRect("obj.texture", texRow);
@@ -10691,6 +10775,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                 fileCard("fixtex", texSt, texPath, ti ? ti->error : std::string()))
                 pickAsset(AssetSlot::Texture, path, 0);
             if (nMat == 1 && texPath.empty()) matColour(0);
+            if (nMat == 1 && !texPath.empty()) palGroup(0);
         } else {
             std::string cap = std::to_string(nMat) + " materials, " + std::to_string(textured) + " textured";
             if (meshSt == editor::AssetStatus::Ok && nMat > size_t(mi->submeshes)) {
@@ -10737,6 +10822,7 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
                             if (!ob.mesh || i >= ob.mesh->materials.size()) return;
                             ob.mesh->materials[i].bitDepth = dPick == 0 ? std::nullopt : std::optional<splash::BitDepth>(depths[dPick - 1]);
                         });
+                    palGroup(i);
                 }
             }
         }
@@ -10769,7 +10855,8 @@ static void inspector(State& st, ImDrawList* dl, ImRect r, editor::Document& doc
         if (nMat <= 1 && !folded && texSt == editor::AssetStatus::Ok && !texPath.empty()) {
             const bool holes = ti && ti->holes;
             const splash::BitDepth depth0 = splash::materialDepth(m, m.materials[0]);
-            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, depth0, holes) + space::sm;
+            y += texturePreview(st.texPreview, dl, x0 + space::sm, x1 - space::sm, y, doc, texPath, depth0, holes, sharedPal0) +
+                 space::sm;
             if (holes) {
                 // Word-wrapped to the inspector's width.
                 const char* const msg = "Texels under half alpha are see-through on the console. At 4 and 8 bpp this costs one palette colour.";

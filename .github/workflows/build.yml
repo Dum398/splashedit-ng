@@ -366,6 +366,9 @@ jobs:
       - name: Inspector per-material bit depth
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/matdepthcheck.py build/splashedit
+      - name: Inspector palette group and its shared CLUT
+        if: runner.os == 'Linux'
+        run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/palgroupcheck.py build/splashedit
       - name: Inspector UV offset material and its export flags
         if: runner.os == 'Linux'
         run: LIBGL_ALWAYS_SOFTWARE=1 xvfb-run -a -s "-screen 0 1600x960x24" python3 tests/uvoffsetcheck.py build/splashedit build/cli/splashpack-cli

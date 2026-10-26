@@ -62,8 +62,12 @@ TextureInfo analyseTexture(const fs::path& file) {
         }
         info.colors15 = static_cast<int>(colors.size());
         info.holes = splash::hasCutoutTexels(img);
-        info.vramBytes4 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp4, info.holes));
-        info.vramBytes8 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp8, info.holes));
+        const splash::PsxTexture t4 = splash::convertTexture(img, splash::BitDepth::Bpp4, info.holes);
+        const splash::PsxTexture t8 = splash::convertTexture(img, splash::BitDepth::Bpp8, info.holes);
+        info.vramBytes4 = vramBytes(t4);
+        info.vramBytes8 = vramBytes(t8);
+        info.clutBytes4 = static_cast<int>(t4.palette.size() * sizeof(uint16_t));
+        info.clutBytes8 = static_cast<int>(t8.palette.size() * sizeof(uint16_t));
         info.vramBytes16 = vramBytes(splash::convertTexture(img, splash::BitDepth::Bpp16, info.holes));
         info.status = AssetStatus::Ok;
     } catch (const std::exception& e) {
@@ -1321,16 +1325,39 @@ bool Document::fileExists(const std::string& projectPath) const {
 bool Document::couldBe4bpp(const splash::MeshComponent& m) const {
     // Every textured material must fit 16 colours, and the mesh's textures
     // together must take less VRAM at 4 bpp than at their current depths.
-    int textured = 0, now = 0, at4 = 0;
+    int textured = 0;
     for (const splash::Material& mat : m.materials) {
         if (mat.texture.empty()) continue;
         const TextureInfo* t = texture(mat.texture);
         if (!t || t->status != AssetStatus::Ok || t->colors15 > 16) return false;
         textured++;
-        now += t->vramBytesAt(splash::materialDepth(m, mat));
-        at4 += t->vramBytes4;
     }
-    return textured > 0 && at4 < now;
+    return textured > 0 && meshTextureBytes(m, splash::BitDepth::Bpp4) < meshTextureBytes(m);
+}
+
+int Document::meshTextureBytes(const splash::MeshComponent& m, std::optional<splash::BitDepth> depth) const {
+    // A group's shared CLUT holds the union of its members' colours, so it is
+    // at least as large as the largest member's own: that size stands in for it.
+    std::set<std::string> images;
+    std::map<std::string, int> groupClut;
+    int bytes = 0;
+    for (const splash::Material& mat : m.materials) {
+        const TextureInfo* t = mat.texture.empty() ? nullptr : texture(mat.texture);
+        if (!t || t->status != AssetStatus::Ok) continue;
+        const splash::BitDepth d = depth ? *depth : splash::materialDepth(m, mat);
+        const std::string at = "#" + std::to_string(int(d));
+        if (!images.insert(mat.texture + at).second) continue;
+        const int clut = t->clutBytesAt(d);
+        bytes += t->vramBytesAt(d) - clut;
+        if (mat.paletteGroup.empty() || d == splash::BitDepth::Bpp16) {
+            bytes += clut;
+        } else {
+            int& g = groupClut[mat.paletteGroup + at + (t->holes ? "#cutout" : "")];
+            g = std::max(g, clut);
+        }
+    }
+    for (const auto& [key, clut] : groupClut) bytes += clut;
+    return bytes;
 }
 
 bool Document::missingMeshColors(const splash::MeshComponent& m) const {

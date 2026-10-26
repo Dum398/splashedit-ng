@@ -53,6 +53,11 @@ struct TextureInfo {
     int vramBytesAt(splash::BitDepth d) const {
         return d == splash::BitDepth::Bpp4 ? vramBytes4 : d == splash::BitDepth::Bpp8 ? vramBytes8 : vramBytes16;
     }
+    // The CLUT's part of vramBytes4 and vramBytes8 (none at 16 bpp).
+    int clutBytes4 = 0, clutBytes8 = 0;
+    int clutBytesAt(splash::BitDepth d) const {
+        return d == splash::BitDepth::Bpp4 ? clutBytes4 : d == splash::BitDepth::Bpp8 ? clutBytes8 : 0;
+    }
     // Some texel is under half alpha: a mesh exports it see-through (cutout).
     bool holes = false;
     std::string error;
@@ -363,6 +368,11 @@ public:
     // to 8 or 16 bpp, every textured material's texture reads and has at most
     // 16 distinct 15-bit colours, and together they take less VRAM at 4 bpp.
     bool couldBe4bpp(const splash::MeshComponent& m) const;
+    // VRAM the mesh's readable textures take at their depths (all at `depth`
+    // when given), image + CLUT, placed the way the export packs them: each
+    // texture once per depth, and one CLUT per palette group (group, depth,
+    // cutout) rather than one per member.
+    int meshTextureBytes(const splash::MeshComponent& m, std::optional<splash::BitDepth> depth = std::nullopt) const;
     // Set to Mesh colours, but the mesh has none, so it exports flat grey.
     bool missingMeshColors(const splash::MeshComponent& m) const;
     // Set to Painted, but the painted layer has not one colour per vertex of

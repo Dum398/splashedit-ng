@@ -84,6 +84,7 @@
 #include "splashpack.hh"
 #include "shadow.hh"
 #include "texture.hh"
+#include "vrampacker.hh"
 #include "unity_import.hh"
 #include "worldstream.hh"
 #include "gpu_raster.hh"
@@ -16773,6 +16774,162 @@ void testMeterFixMaterialDepth() {
     CHECK(s.objects[3].mesh->materials[0].bitDepth == BitDepth::Bpp8);
 }
 
+// Palette groups (#215): textures in one group (same name, depth and cutout)
+// convert onto one palette built from all of them and share one CLUT; the
+// export writes that CLUT once and every member's triangles carry it.
+void testPaletteGroup() {
+    namespace fs = std::filesystem;
+    using splash::BitDepth;
+    using roomtest::rd16;
+    using roomtest::rd32;
+    std::error_code ec;
+    const fs::path root = g_outDir / "palgroup";
+    fs::remove_all(root, ec);
+    fs::create_directories(root / "textures", ec);
+    fs::create_directories(root / "meshes", ec);
+    auto image = [](auto px) {
+        splash::Image img;
+        img.width = img.height = 64;
+        img.pixels.resize(64 * 64);
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++) img.pixels[size_t(y) * 64 + x] = px(x / 63.f, y / 63.f);
+        return img;
+    };
+    // Disjoint colour sets (A has no blue, B has blue >= 0.3), each over 256
+    // 15-bit colours, so the joint palette is a real k-means and not the
+    // union of exact colours.
+    splash::savePng(image([](float u, float v) { return splash::Image::Px{u, v * 0.5f, 0, 1}; }), root / "textures/a.png");
+    splash::savePng(image([](float u, float v) { return splash::Image::Px{0, 0.5f + v * 0.5f, 0.3f + u * 0.7f, 1}; }),
+                    root / "textures/b.png");
+    splash::savePng(image([](float u, float v) { return splash::Image::Px{v, u, 1 - u, 1}; }), root / "textures/c.png");
+    // As the exporter reads them (8-bit channels).
+    const splash::Image imgA = splash::loadImage(root / "textures/a.png"), imgB = splash::loadImage(root / "textures/b.png"),
+                        imgC = splash::loadImage(root / "textures/c.png");
+    splash::Mesh quad;
+    quad.positions = {{-1, 0, -1}, {-1, 0, 1}, {1, 0, 1}, {1, 0, -1}};
+    quad.normals.assign(4, {0, 1, 0});
+    quad.uv = {{0, 0}, {0, 1}, {1, 1}, {1, 0}};
+    quad.submeshes = {{0, 1, 2}, {0, 2, 3}};
+    splash::saveMesh(quad, root / "meshes/quad.mesh");
+    // A quad per object; with two materials each triangle gets its own.
+    auto object = [](const char* name, std::vector<splash::Material> mats, BitDepth d, float x) {
+        splash::Object o = named(name);
+        o.transform.position = {x, 0, 4};
+        splash::MeshComponent mc;
+        mc.mesh = "meshes/quad.mesh";
+        mc.bitDepth = d;
+        mc.materials = std::move(mats);
+        o.mesh = mc;
+        return o;
+    };
+    auto mat = [](const char* tex, const char* group) {
+        splash::Material m{tex, {1, 1, 1, 1}, {}};
+        m.paletteGroup = group;
+        return m;
+    };
+    auto grouped = [&](const char* group) {
+        splash::Scene s;
+        s.objects.push_back(object("A", {mat("textures/a.png", group)}, BitDepth::Bpp8, -2));
+        s.objects.push_back(object("B", {mat("textures/b.png", group)}, BitDepth::Bpp8, 2));
+        return s;
+    };
+    struct Out {
+        bool ok = false;
+        size_t cluts = 0, vramCluts = 0, clutBytes = 0;
+        std::vector<std::vector<uint32_t>> clutWords;  // per object, per triangle: clutY << 6 | clutX
+    };
+    auto exportScene = [&](const splash::Scene& s, const char* name) {
+        Out o;
+        const fs::path out = root / (std::string(name) + ".splashpack");
+        splash::ExportResult r = splash::exportSplashpack(s, root, out);
+        o.ok = r.ok();
+        if (!o.ok) return o;
+        const std::string b = fileBytes(out), v = fileBytes(fs::path(out).replace_extension(".vram"));
+        o.cluts = rd16(b, 10);
+        o.vramCluts = rd16(v, 4);
+        o.clutBytes = r.stats.clutBytes;
+        // The header is 156 bytes, 160 from v28 (a shadow table).
+        const size_t header = rd16(b, 2) >= 28 ? 160 : 156, nlua = rd16(b, 4), ngo = rd16(b, 6);
+        for (size_t i = 0; i < ngo; i++) {
+            const size_t at = header + 8 * nlua + 92 * i, mesh = uint32_t(rd32(b, at));
+            std::vector<uint32_t> words;
+            for (size_t t = 0; t < rd16(b, at + 52); t++)
+                words.push_back(uint32_t(rd16(b, mesh + 52 * t + 48)) << 6 | rd16(b, mesh + 52 * t + 46));
+            o.clutWords.push_back(words);
+        }
+        return o;
+    };
+
+    // The core: one palette over both, equal on both textures, one CLUT.
+    auto load = [&](const std::string& p) -> const splash::Image& {
+        return p == "textures/a.png" ? imgA : p == "textures/b.png" ? imgB : imgC;
+    };
+    const splash::Scene g = grouped("walls");
+    const splash::PaletteGroup pg = splash::paletteGroup(g, "walls", BitDepth::Bpp8, false, load);
+    CHECK(pg.members == std::vector<std::string>({"textures/a.png", "textures/b.png"}) && pg.palette.size() == 256);
+    CHECK(splash::paletteGroup(g, "walls", BitDepth::Bpp4, false, load).members.empty());
+    splash::PsxTexture ta = splash::convertTexture(imgA, BitDepth::Bpp8, false, pg.palette);
+    splash::PsxTexture tb = splash::convertTexture(imgB, BitDepth::Bpp8, false, pg.palette);
+    ta.source = "textures/a.png", tb.source = "textures/b.png";
+    ta.paletteGroup = tb.paletteGroup = "walls";
+    CHECK(ta.palette == tb.palette && ta.palette == pg.palette);
+    {
+        std::vector<splash::PsxTexture*> all{&ta, &tb};
+        std::vector<std::string> errors;
+        const splash::VramLayout layout = splash::packVram(all, splash::VramSettings{}, errors);
+        CHECK(errors.empty() && layout.cluts.size() == 1);
+        CHECK(ta.clutPackingX == tb.clutPackingX && ta.clutPackingY == tb.clutPackingY);
+    }
+    // Joint palette quality. Alone, A converts to mean deltaE 1.04 and B to
+    // 0.87; on the 256 entries they share (each is about 1000 15-bit colours,
+    // none in common) they measure 1.33 and 1.35. Bound 1.6: the measured
+    // worst plus under 20 %, and still under the 1.72 testQuantizer's
+    // 256 x 256 gradient gets with a palette of its own.
+    const double dA = splash::measureTexture(imgA, ta).deltaE, dB = splash::measureTexture(imgB, tb).deltaE;
+    CHECK(dA < 1.6 && dB < 1.6);
+
+    // The export: one CLUT, written once, and every triangle of both objects
+    // on it.
+    Out shared = exportScene(g, "grouped");
+    CHECK(shared.ok && shared.cluts == 1 && shared.vramCluts == 1 && shared.clutBytes == pg.palette.size() * 2);
+    CHECK(shared.clutWords.size() == 2 && shared.clutWords[0].size() == 2 && shared.clutWords[1].size() == 2);
+    std::set<uint32_t> words;
+    for (const auto& o : shared.clutWords) words.insert(o.begin(), o.end());
+    CHECK(words.size() == 1);
+    // Ungrouped, the same scene: a CLUT each.
+    Out own = exportScene(grouped(""), "ungrouped");
+    const size_t ownBytes = (splash::convertTexture(imgA, BitDepth::Bpp8).palette.size() +
+                             splash::convertTexture(imgB, BitDepth::Bpp8).palette.size()) * 2;
+    CHECK(own.ok && own.cluts == 2 && own.vramCluts == 2 && own.clutBytes == ownBytes);
+    // One image ungrouped and in the group on one object: two textures, the
+    // grouped triangle on the group's CLUT with B's.
+    splash::Scene both = grouped("walls");
+    both.objects[0].mesh->materials = {mat("textures/a.png", ""), mat("textures/a.png", "walls")};
+    Out mixed = exportScene(both, "mixed");
+    CHECK(mixed.ok && mixed.cluts == 2 && mixed.clutWords.size() == 2 && mixed.clutWords[0].size() == 2);
+    if (mixed.ok && mixed.clutWords.size() == 2 && mixed.clutWords[0].size() == 2)
+        CHECK(mixed.clutWords[0][1] == mixed.clutWords[1][0] && mixed.clutWords[0][0] != mixed.clutWords[0][1]);
+    // A 4 bpp texture in the same named group gets a palette of its own.
+    splash::Scene deep = grouped("walls");
+    deep.objects.push_back(object("C", {mat("textures/c.png", "walls")}, BitDepth::Bpp4, 6));
+    CHECK(splash::paletteGroup(deep, "walls", BitDepth::Bpp4, false, load).members == std::vector<std::string>({"textures/c.png"}));
+    Out two = exportScene(deep, "depths");
+    CHECK(two.ok && two.cluts == 2 && two.clutBytes == (pg.palette.size() + 16) * 2 && two.clutWords.size() == 3);
+    if (two.ok && two.clutWords.size() == 3) CHECK(two.clutWords[2][0] != two.clutWords[0][0]);
+
+    // Scene file: the group round-trips, and an ungrouped material has no key.
+    splash::Scene saved = grouped("walls");
+    saved.objects[1].mesh->materials[0].paletteGroup.clear();
+    splash::saveScene(saved, root / "palgroup.scene");
+    const std::string text = fileBytes(root / "palgroup.scene");
+    size_t keys = 0;
+    for (size_t at = text.find("\"paletteGroup\""); at != std::string::npos; at = text.find("\"paletteGroup\"", at + 1)) keys++;
+    CHECK(keys == 1);
+    const splash::Scene back = splash::loadScene(root / "palgroup.scene");
+    CHECK(back.objects.size() == 2 && back.objects[0].mesh->materials[0].paletteGroup == "walls" &&
+          back.objects[1].mesh->materials[0].paletteGroup.empty());
+}
+
 // The Triangles meter's simplify fix (#194): one click sets the model's
 // import settings' Triangles to what halves the mesh and imports it again;
 // undo puts every file the import wrote back byte for byte (the sidecar too)
@@ -17289,6 +17446,7 @@ int main(int argc, char** argv) {
     testMeterFixes();
     testMeterFixCarriers();
     testMeterFixMaterialDepth();
+    testPaletteGroup();
     testMeterFixSimplify();
     testTvPreview();
     if (g_failures) {

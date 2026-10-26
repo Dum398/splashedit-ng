@@ -57,7 +57,7 @@ VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::v
     reserved.push_back({960, 0, 64, kVramH});
 
     std::vector<Atlas> atlases;
-    using Key = std::tuple<std::string, int, bool>;
+    using Key = std::tuple<std::string, int, bool, std::string>;
     std::map<Key, PsxTexture*> unique;
     std::vector<std::pair<PsxTexture*, PsxTexture*>> duplicates;
 
@@ -72,7 +72,7 @@ VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::v
         int aw = atlasWidthFor(depth);
         atlases.push_back({depth, 0, 0, aw, {}, {}});
         for (PsxTexture* t : group) {
-            Key k{t->source, int(t->bitDepth), t->cutout};
+            Key k{t->source, int(t->bitDepth), t->cutout, t->paletteGroup};
             auto it = unique.find(k);
             if (it != unique.end()) {
                 duplicates.push_back({t, it->second});
@@ -127,9 +127,18 @@ VramLayout packVram(std::vector<PsxTexture*>& all, const VramSettings& s, std::v
             out.atlases.push_back(a);
         }
 
+    std::map<std::vector<uint16_t>, const PsxTexture*> clutOf;  // palette -> the texture that placed it
     for (Atlas& a : out.atlases)
         for (PsxTexture* t : a.textures) {
-            if (!t->hasPalette || t->palette.empty()) continue;
+            if (!t->hasPalette) continue;
+            auto [same, fresh] = clutOf.emplace(t->palette, t);
+            if (!fresh) {
+                t->clutPackingX = same->second->clutPackingX;
+                t->clutPackingY = same->second->clutPackingY;
+                continue;
+            }
+            out.cluts.push_back(t);
+            if (t->palette.empty()) continue;
             bool placed = false;
             for (int x = 0; x < kVramW && !placed; x += 16)
                 for (int y = 0; y < kVramH; y++) {

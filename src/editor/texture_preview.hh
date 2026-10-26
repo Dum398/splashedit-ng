@@ -24,7 +24,12 @@ struct TexturePreviewKey {
     std::filesystem::path file;  // absolute (resolved) image file
     splash::BitDepth depth = splash::BitDepth::Bpp8;
     bool cutout = false;  // UI images: texels under half alpha are transparent
-    bool operator==(const TexturePreviewKey& o) const { return file == o.file && depth == o.depth && cutout == o.cutout; }
+    // The palette group's shared CLUT (splash::paletteGroup) to convert onto
+    // at 4 or 8 bpp; empty = the texture's own palette.
+    std::vector<uint16_t> palette = {};
+    bool operator==(const TexturePreviewKey& o) const {
+        return file == o.file && depth == o.depth && cutout == o.cutout && palette == o.palette;
+    }
     bool operator!=(const TexturePreviewKey& o) const { return !(*this == o); }
 };
 
@@ -37,7 +42,7 @@ struct TexturePreview {
     std::vector<uint8_t> ps1;
     int sourceColors = 0;  // distinct 15-bit colours among the drawn source texels
     int ps1Colors = 0;     // distinct colours in the PS1 image (drawn texels)
-    int paletteSize = 0;   // CLUT entries the export writes (with padding); 0 at 16 bpp
+    int paletteSize = 0;   // CLUT entries the export writes (with padding; the shared CLUT's in a group); 0 at 16 bpp
     int paletteUsed = 0;   // CLUT entries the texels reference; 0 at 16 bpp
     double deltaE = 0;     // mean OKLab distance x100 per drawn texel (splash::measureTexture)
     double deltaEBlur = 0;

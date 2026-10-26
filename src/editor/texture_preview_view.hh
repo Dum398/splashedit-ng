@@ -40,6 +40,7 @@ struct TexturePreviewView {
 // whole strip to one pane; holding the mouse there shows the source, to A/B
 // the dithering. Returns the height used.
 float texturePreview(TexturePreviewView& tp, ImDrawList* dl, float x0, float x1, float y, editor::Document& doc,
-                     const std::string& texPath, splash::BitDepth depth, bool cutout);
+                     const std::string& texPath, splash::BitDepth depth, bool cutout,
+                     const std::vector<uint16_t>& sharedPalette = {});
 
 }  // namespace ui

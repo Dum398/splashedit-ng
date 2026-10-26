@@ -57,10 +57,10 @@ TexturePreviewView::~TexturePreviewView() {
 }
 
 float texturePreview(TexturePreviewView& tp, ImDrawList* dl, float x0, float x1, float y, editor::Document& doc,
-                     const std::string& texPath, splash::BitDepth depth, bool cutout) {
+                     const std::string& texPath, splash::BitDepth depth, bool cutout, const std::vector<uint16_t>& sharedPalette) {
     Fonts& f = fonts();
     const float top = y;
-    editor::TexturePreviewKey key{doc.resolve(texPath), depth, cutout};
+    editor::TexturePreviewKey key{doc.resolve(texPath), depth, cutout, sharedPalette};
     tp.previewer.request(key);
     std::shared_ptr<const editor::TexturePreview> p = tp.previewer.latest();
     tp.shown.clear();
